@@ -60,13 +60,55 @@ at a time.
 
 ---
 
+## What nxdk provides, and what it does not
+
+Checked in `deps/nxdk`, because the plan should not assume anything that is
+not there.
+
+**There is no OpenGL.** None, at any version, in any wrapper. `pbkit` is raw
+NV2A register access — `lib/pbkit/nv_regs.h` and `nv_objects.h` are register
+and object definitions, not a graphics API. Upstream's `3rdparty/gl4es`
+translates GL to GLES and there is no GLES here either. `ref/gl` has no path
+to this hardware, and `ref/nv2a` is written against the hardware directly.
+
+**But nxdk vendors SDL2**, as a first-class submodule alongside `SDL2_image`
+and `SDL_ttf`, with working samples for video, `sdl_gamecontroller`, images
+and TrueType text. It also provides `hal` (video, audio, Xbox APIs), `usb`,
+`net` (lwIP, with an httpd sample), `xaudio`, `libjpeg`, `libpng` and `zlib`.
+
+That matters because **the engine already has a complete SDL2 platform
+backend**: `engine/platform/sdl2/` is 2,980 lines across `host_sdl2.c`,
+`vid_sdl2.c`, `in_sdl2.c`, `joy_sdl2.c`, `s_sdl2.c`, `sensor_sdl2.c` and
+`sys_sdl2.c`. If nxdk's SDL2 port is functional, most of `engine/platform/
+xbox/` does not need writing — video surface, events, controller and **audio**
+come from code that already exists and is already maintained.
+
+The honest caveats, none of them settled:
+
+- **SDL2 video on Xbox is a software framebuffer, not a GL context.** That is
+  exactly what X5 needs and useless to X9. `ref/nv2a` must own the video mode
+  through pbkit, and SDL owning it too is a known-awkward combination. Plan
+  for pbkit to take video over, while SDL keeps input and audio.
+- **SDL2 costs memory and binary size** on a 64 MB budget. Measure before
+  committing to it as permanent.
+- **Its completeness here is unverified.** The submodules are not initialised.
+  Verifying it is an early, cheap task with a large payoff either way.
+
+If SDL2 audio works, **X8 may largely disappear** — `s_sdl2.c` already exists,
+and the audio abstraction described there becomes a nice-to-have for upstream
+rather than a prerequisite for us.
+
+---
+
 ## X0 — Toolchain and a log channel
 
 **[from PS3]** The log channel ships with the toolchain, not after it.
 
 - nxdk in the waf build: root `wscript`, toolchain
   `clang -target i386-pc-win32 -march=pentium3 -fuse-ld=nxdk-link`.
-- `engine/platform/xbox/` from `platform/psvita` as the template.
+- **First, establish whether `engine/platform/sdl2/` works on nxdk's SDL2.**
+  If it does, `engine/platform/xbox/` is a thin set of overrides rather than a
+  new backend. If it does not, fall back to `platform/psvita` as the template.
 - **A working log channel before anything else** — nxdk's debug channel, then
   network logging, so failures on hardware are readable.
 - XBE packaging with `cxbe`.
@@ -151,7 +193,8 @@ It will be slow. That is fine; it is a reference, not a shipping path.
 
 ## X6 — Input and menu
 
-- Gamepad through nxdk's USB stack.
+- Gamepad: SDL2's game controller layer if X0 proved it works, otherwise
+  nxdk's USB stack directly.
 - `3rdparty/mainui` compiled in. **[from PS3]** Their goal 7 had the Half-Life
   menu visible before input worked, which confirms the menu is cheap and makes
   a good early validation checkpoint.
@@ -171,9 +214,16 @@ load failure and continues, and single-player Half-Life does not use VGUI.
 
 ## X8 — Audio
 
-NVAPU backend with ADPCM. Requires extracting a backend interface from
-`engine/client/sound/`'s 6,284 lines — the only major subsystem upstream did
-not abstract. **Candidate to send upstream.**
+**Scope depends on X0.** If nxdk's SDL2 audio works, `engine/platform/sdl2/
+s_sdl2.c` already exists and this phase is configuration rather than
+construction.
+
+If it does not, the fallback is an NVAPU backend with ADPCM, which requires
+extracting a backend interface from `engine/client/sound/`'s 6,284 lines — the
+only major subsystem upstream did not abstract, and a **candidate to send
+upstream** since it helps every console port.
+
+Settle which of the two this is during X0, not here.
 
 **Exit:** positional sound and sentences.
 
