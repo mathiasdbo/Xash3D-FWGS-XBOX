@@ -53,8 +53,9 @@ Get the tree compiling with nxdk before changing a line of logic.
   Shift should be treated as out of scope for the first playable build.
 - `vgui_support` to a null stub. `engine/client/vgui/vgui.c:345` already
   reports the load failure and continues, so it is not fatal. Single-player
-  HL1 barely uses it; it only becomes real work again if multiplayer is
-  wanted.
+  HL1 does not use it at all, and neither does the command console — see
+  `ui-architecture.md`. VGUI1 proper arrives by adopting `FWGS/freevgui`
+  once there is something to draw it with.
 
 **Exit:** an XBE that boots in xemu with `ref/null` and reaches the engine
 console.
@@ -204,6 +205,12 @@ peak memory documented.
 
 - **Ironwail** (see Assumptions). Its own phase after F7, if PC remains a
   product.
-- **Real VGUI.** Null stub in F0. Only becomes work again if multiplayer is
-  wanted.
+- **VGUI1 widgets.** Null stub in F0; adopt `FWGS/freevgui` when multiplayer
+  UI is wanted. Only the Surface backend is ours to write — see
+  `ui-architecture.md`.
+- **VGUI2.** Its own phase, after Half-Life runs on real hardware. It unlocks
+  Counter-Strike, Day of Defeat and Blue Shift; it moves the first playable
+  build no closer. Upstream's route is closed to us: its own support is
+  documented as drawing nothing, and it depends on proprietary 32-bit desktop
+  libraries including CEF.
 - **Multiplayer on console.**
