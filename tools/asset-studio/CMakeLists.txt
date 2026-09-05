@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
-project(FerrumAssetStudio LANGUAGES CXX)
+project(AssetStudio LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(FerrumAssetStudio
+add_executable(AssetStudio
     src/main.cpp
     src/formats/BspParser.cpp
     src/formats/PakManager.cpp

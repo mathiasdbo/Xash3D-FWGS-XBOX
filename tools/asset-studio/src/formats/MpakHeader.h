@@ -17,7 +17,7 @@ namespace formats {
     // MPAKv6 fixed-size header, written verbatim (2048-byte padded) at the start of
     // every .mpak archive. Both PakManager (BSP maps / global asset packs) and
     // UiPacker (menu backgrounds) serialize this same struct so the Rust reader
-    // (ferrum-vfs/src/mpak.rs) only has to know one layout.
+    // (filesystem/mpak.c, not written yet) only has to know one layout.
     //
     // IMPORTANT: this format has no offset table - byte layout order IS the format,
     // and the Rust reader hardcodes these offsets. New fields may only be appended
@@ -41,7 +41,7 @@ namespace formats {
     //    content exists in retail HL1 BSPs - so a per-face vector copy would
     //    just duplicate this lump's own data field-for-field).
     //  A v5 reader has always hard-rejected anything but `version == 5`
-    //  (`ferrum-vfs/src/mpak.rs`), so - same as every version bump before this
+    //  (`filesystem/mpak.c`, not written yet), so - same as every version bump before this
     //  one - there is no partial-compatibility burden: every existing archive
     //  needs a full rebake regardless, which is also why removing a field
     //  outright (rather than leaving a permanently-zero husk) is safe here.

@@ -141,13 +141,13 @@ void packModelManifest(const std::string& manifestPath, std::set<std::string>& u
 //   would distort e.g. 640hud7.spr (256x128) into a square bin and
 //   destroy every pixel-exact rect hud.txt's x/y/w/h columns describe.
 //   These sheets are decoded and uploaded as their own standalone
-//   textures at load time instead (ferrum-render's load_rgba_texture,
-//   Series D) - addAsset's raw-bytes-through path is the right fit.
+//   textures at load time instead - addAsset's raw-bytes-through path is
+//   the right fit. (Consumer TBD: the engine-side reader has not been
+//   written yet, see docs/r3d/fork-plan.md F1.)
 // - the "hud/" prefix, not "sprites/": this same build already packs a
 //   PATCHED "sprites/crosshairs.spr" for 3D world-space rendering (see
-//   uniqueAssets' hardcoded global-asset list below), and ferrum-engine's
-//   main.rs feeds every ".spr"-suffixed asset-dict name to that patched-
-//   format parser. A raw retail sheet packed under the same name would
+//   uniqueAssets' hardcoded global-asset list below), and the engine feeds
+//   every ".spr"-suffixed asset-dict name to that patched-format parser. A raw retail sheet packed under the same name would
 //   collide and be silently misinterpreted as patched data. "hud/" keeps
 //   the two asset families disjoint by construction.
 void packSprites(const std::string& manifestPath, formats::VfsIndexer& vfs, formats::PakManager& pak) {
@@ -192,7 +192,7 @@ void packSprites(const std::string& manifestPath, formats::VfsIndexer& vfs, form
 
 int main(int argc, char *argv[]) {
     std::cout << "===============================================\n";
-    std::cout << "  Ferrum56 Asset Studio - Retail VFS Compiler  \n";
+    std::cout << "  Resonance3D Asset Studio - Retail VFS Compiler\n";
     std::cout << "===============================================\n";
 
     std::string gameDir = ".";

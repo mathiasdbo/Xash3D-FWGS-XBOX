@@ -1,7 +1,7 @@
-# Reglas del proyecto — Ferrum56 (fork de Xash3D-FWGS)
+# Reglas del proyecto — Resonance3D (fork de Xash3D-FWGS)
 
-Este repositorio **es** Xash3D-FWGS. Ver `docs/ferrum/README.md` para el
-contexto y `docs/ferrum/fork-plan.md` para el plan.
+Este repositorio **es** Xash3D-FWGS. Ver `docs/r3d/README.md` para el
+contexto y `docs/r3d/fork-plan.md` para el plan.
 
 ## La regla central: minimizar la divergencia
 
@@ -10,7 +10,7 @@ Esto invierte la regla que gobernaba el proyecto Rust anterior. Allá había que
 referencia, y el trabajo es no separarnos de ella más de lo estrictamente
 necesario.
 
-- **Toda desviación de upstream se anota en `docs/ferrum/divergences.md` el
+- **Toda desviación de upstream se anota en `docs/r3d/divergences.md` el
   mismo día que se escribe.** No al cerrar la fase, no en el PR: el mismo día.
   Un fork sin registro de divergencias se vuelve inmanejable en el tercer
   merge y se abandona.
@@ -20,7 +20,7 @@ necesario.
   guardas (prohibido salvo bug real de upstream, y en ese caso el parche va
   upstream primero).
 - **No mover ni renombrar nada del árbol de upstream.** Lo nuestro vive en
-  `tools/` y `docs/ferrum/`. `scripts/` y `Documentation/` ya existen en
+  `tools/` y `docs/r3d/`. `scripts/` y `Documentation/` ya existen en
   upstream: no poner nada nuestro ahí.
 - **Antes de escribir una abstracción, buscar si upstream ya la tiene.** Ya
   están hechos: el renderer polimórfico (`ref_api.h`), el enlazado estático
@@ -74,7 +74,7 @@ necesario.
 - Micro-commits: cada paso pequeño y validado se commitea y se empuja.
 - Revisión de sub-agentes especialistas antes de cerrar una fase, eligiendo
   los que el cambio toca. Nunca pedir permiso primero.
-- Actualizar `CHANGELOG.md` y `docs/ferrum/divergences.md`, y abrir PR. No
+- Actualizar `CHANGELOG.md` y `docs/r3d/divergences.md`, y abrir PR. No
   avanzar a la fase siguiente hasta que esté mergeado.
 - Tras mergear, `git fetch upstream` y evaluar si toca sincronizar.
 

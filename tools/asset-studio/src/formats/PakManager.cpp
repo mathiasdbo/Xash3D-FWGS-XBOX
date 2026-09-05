@@ -294,7 +294,7 @@ namespace formats {
 
         // MPAKv4+ additions - appended last, mirroring header field order. The Rust
         // reader has no offset table, so this write order must never change without
-        // also updating ferrum-vfs/src/mpak.rs in lockstep.
+        // also updating filesystem/mpak.c in lockstep (not written yet).
         if (header.lenEntities > 0) writePadded(mEntitiesData.data(), mEntitiesData.size());
         if (header.lenLightmapAtlas > 0) writePadded(mLightmapAtlasData.data(), mLightmapAtlasData.size());
 

@@ -375,12 +375,12 @@ GEMINI.md
 .codeium/
 .github/copilot-instructions.md
 
-# --- Ferrum56 fork ---
+# --- Resonance3D ---
 tools/asset-studio/build/
 tools/asset-studio/*.wad
 tools/asset-studio/*.bsp
 *.mpak
-ferrum56-build-test/
+build-test/
 
 # Reglas nuestras que upstream ignora globalmente (AGENTS.md linea 367,
 # CMakeLists.txt linea 68, build-* linea 312). Sin estas negaciones los

@@ -1,3 +1,18 @@
+# =============================================================================
+# HEREDADO DE FERRUM56 (Rust). NO FUNCIONA TAL CUAL.
+#
+# La mitad de horneado sigue siendo valida y es por lo que se conserva: sabe
+# invocar el baker con los argumentos correctos para los ~125 mapas, el
+# global.mpak y los manifiestos.
+#
+# La mitad de compilacion esta muerta: invoca `cargo build -p ferrum-engine` y
+# copia ferrum-engine.exe, y ese motor ya no existe. Hay que reescribirla
+# contra el build de waf de Resonance3D. Referencias a "ferrum" mas abajo
+# marcan exactamente lo que falta portar.
+#
+# Ver docs/r3d/fork-plan.md (F0) y docs/r3d/migration.md.
+# =============================================================================
+
 <#
 .SYNOPSIS
     Builds Ferrum56 and bakes the complete retail Half-Life asset set into a

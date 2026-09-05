@@ -69,7 +69,7 @@ Este árbol local ya está configurado: `upstream` apunta a FWGS con push
 deshabilitado, y la rama `main` sale de `c7768c48`. Falta solo el `origin`:
 
 ```bash
-cd G:/Proyectos/Ferrum56/ferrum56-engine
+cd G:/Proyectos/Ferrum56/resonance3d
 git remote add origin git@github.com:<usuario>/<repo-privado>.git
 git push -u origin main
 git push origin upstream-master        # la base intacta, para diffear contra ella
