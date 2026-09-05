@@ -55,10 +55,44 @@ necesario.
 - Constantes y flags: buscarlos en `common/const.h` o en la fuente. Nunca
   adivinarlos.
 
+## Leer los ports hermanos antes de inventar
+
+Ningún problema de este port es nuevo. Antes de derivar una solución, leer la
+que ya funciona:
+
+- **`engine/platform/psvita/`, `nswitch/`, `dos/`** — los backends de consola
+  que ya están en este árbol. Son la plantilla de `engine/platform/xbox/`.
+- **`ref/soft/`** — la prueba de que `ref_interface_s` aguanta un backend que
+  no es GL. Cuando algo de la interfaz parezca imposible fuera de OpenGL,
+  mirar cómo lo resolvió el rasterizador por software.
+- **[xashPS3](https://github.com/Mayo1970/xash3d-fwgs)** — port hermano del
+  mismo motor a PS3, con un registro de portado exhaustivo. Ya se comió los
+  problemas de enlazado estático (colisiones de símbolos, el global `FI`,
+  deduplicación de vtables), los supuestos del toolchain y las trampas de
+  endianness. Consultarlo antes de depurar cualquiera de esas familias.
+
+Citar en el commit qué se leyó y por qué la solución de acá difiere, si
+difiere.
+
+## No adivinar
+
+- **Confirmar cada supuesto** leyendo el código o observando el hardware.
+  Nunca por memoria y nunca por analogía.
+- **Ante un fallo, aislar, no reescribir.** Producir el caso de prueba mínimo
+  que lo reproduce. Reescribir una implementación entera cuando algo falla
+  destruye la información de qué estaba mal.
+- **Tras dos intentos fallidos, parar y escalar con datos** — salida de `nm`,
+  `objdump`, un volcado, una traza. No con una hipótesis nueva.
+- Cuando una hipótesis se demuestra falsa, dejarlo escrito. Saber qué NO era
+  vale tanto como saber qué era.
+
 ## Verificación
 
 - Compilar y arrancar antes de dar nada por terminado. No avanzar con el árbol
   roto.
+- **xemu no es validación.** Sirve para iterar rápido, pero el timing del DMA,
+  el canal serial y el comportamiento real de la memoria unificada no se
+  emulan fielmente. Una fase no se cierra hasta que corre en una Xbox real.
 - El build de PC es la red de seguridad: **toda fase tiene que dejar PC
   funcionando**. Si PC se rompe, se perdió el único punto de comparación
   contra el comportamiento correcto.

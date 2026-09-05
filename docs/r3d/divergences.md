@@ -33,6 +33,7 @@ Preferencia de forma, de menos a más costoso de mantener:
 
 | # | Qué | Por qué | Forma | Riesgo de merge | Salida |
 |---|-----|---------|-------|-----------------|--------|
+| 2 | `README.md` — reemplazado | El repositorio tiene identidad y nombre propios; el README de la raíz es lo primero que ve cualquiera que llegue. Incluye la sección de créditos y la nota de licencia, que son obligatorias en un trabajo derivado GPL | Reemplazo completo | Bajo — conflicto seguro en cada merge, pero siempre trivial: se descarta el lado de upstream | Ninguna, es permanente. El original se lee con `git show upstream-master:README.md` |
 | 1 | `.gitignore` — bloque añadido al final | El `.gitignore` de upstream ignora globalmente `AGENTS.md` (:367), `CMakeLists.txt` (:68) y `build-*` (:312), lo que dejaba fuera del control de versiones, en silencio, tres archivos nuestros | Añadido al final del archivo, con negaciones explícitas | Bajo — upstream edita este archivo de vez en cuando, pero el conflicto sería trivial y siempre al final | Ninguna, es permanente |
 
 ## Divergencias previstas

@@ -1,147 +1,95 @@
-> [!CAUTION]
-> **Only download Xash3D FWGS from official sources.** Third-party builds, "modded launchers", "optimized" repacks and random mirrors are frequently bundled with malware, miners, spyware and credential stealers. We cannot vouch for anything we did not build. Get official binaries only from the [releases page](https://github.com/FWGS/xash3d-fwgs/releases/tag/continuous).
+# Resonance3D
 
-# Xash3D FWGS Engine <img align="right" width="128" height="128" src="https://github.com/FWGS/xash3d-fwgs/raw/master/game_launch/icon-xash-material.png" alt="Xash3D FWGS icon" />
-[![GitHub Actions Status](https://github.com/FWGS/xash3d-fwgs/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/FWGS/xash3d-fwgs/actions/workflows/c-cpp.yml) [![FreeBSD Build Status](https://img.shields.io/cirrus/github/FWGS/xash3d-fwgs?label=freebsd%20build)](https://cirrus-ci.com/github/FWGS/xash3d-fwgs) \
-[![Discord Server](https://img.shields.io/discord/355697768582610945?logo=Discord&label=International%20Discord%20chat)](http://xash.su/discord/) [![Russian speakers Telegram Chat](https://img.shields.io/badge/Russian_speakers_Telegram_chat-gray?logo=Telegram)](https://t.me/flyingwithgauss) \
-[![Download Daily Build](https://img.shields.io/badge/downloads-testing-orange)](https://github.com/FWGS/xash3d-fwgs/releases/tag/continuous)
+An Original Xbox (2001) port of **Xash3D-FWGS**, a GoldSrc-compatible engine,
+built against the open-source **nxdk** homebrew SDK — with a modern Vulkan
+renderer kept alongside it on PC.
 
-Xash3D ([pronounced](https://ipa-reader.com/?text=ks%C9%91%CA%82) `[ksɑʂ]`) FWGS is a game engine, aimed to provide compatibility with Half-Life Engine and extend it, as well as to give game developers well known workflow.
+Two things make this port different from a straight recompile:
 
-Xash3D FWGS is a heavily modified fork of an original [Xash3D Engine](https://www.moddb.com/engines/xash3d-engine) by Unkle Mike.
+- **A 64 MB budget shared with the GPU.** The memory ceiling is enforced
+  offline, by the asset baker, not discovered at runtime. A map that doesn't
+  fit breaks the build, not the console.
+- **An offline asset pipeline.** Maps, textures and sounds are compiled ahead
+  of time into `.mpak` archives with per-map texture atlases, DXT compression
+  and packed lightmaps, so the engine never parses a WAD on the console.
 
-## Donate
-[![Donate to FWGS button](https://img.shields.io/badge/Donate_to_FWGS-%3C3-magenta)](Documentation/donate.md) \
-If you like Xash3D FWGS, consider supporting individual engine maintainers. By supporting us, you help to continue developing this game engine further. The sponsorship links are available in [documentation](Documentation/donate.md).
+**Status: early.** The tree is upstream Xash3D-FWGS plus the baker. Nothing is
+ported yet. See [`docs/r3d/fork-plan.md`](docs/r3d/fork-plan.md) for the
+phased plan and [`docs/r3d/divergences.md`](docs/r3d/divergences.md) for every
+deliberate deviation from upstream.
 
-## Fork features
-* Steam Half-Life (HLSDK 2.5) support.
-* Crossplatform and modern compilers support: supports Windows, Linux, BSD & Android on x86 & ARM and [many more](Documentation/ports.md).
-* Better multiplayer: multiple master servers, headless dedicated server, voice chat, [GoldSrc protocol support](Documentation/goldsrc-protocol-support.md) and IPv6 support.
-* Multiple renderers support: OpenGL, GLESv1, GLESv2 and Software.
-* Advanced virtual filesystem: `.pk3` and `.pk3dir` support, compatibility with GoldSrc FS module, fast case-insensitivity emulation for crossplatform.
-* Mobility API: better game integration on mobile devices (vibration, touch controls).
-* Different input methods: touch and gamepad in addition to mouse & keyboard.
-* TrueType font rendering, as a part of mainui_cpp.
-* External VGUI support module.
-* PNG & KTX2 image format support.
-* Ogg Vorbis (`.ogg`) & Ogg Opus (`.opus`) audio formats support.
-* [A set of small improvements](Documentation/), without broken compatibility.
+## Targets
 
-## Installation & Running
-0) Get Xash3D FWGS binaries: you can use [testing](https://github.com/FWGS/xash3d-fwgs/releases/tag/continuous) build or you can compile engine from source code.
-1) Copy engine binaries to some directory.
-2) Copy `valve` directory from [Half-Life](https://store.steampowered.com/app/70/HalfLife/) to directory with engine binaries.
-If your CPU is NOT x86 compatible or you're running 64-bit version of the engine, you may want to compile [Half-Life SDK](https://github.com/FWGS/hlsdk-portable).
-This repository contains our fork of HLSDK and restored source code for Half-Life expansions and some mods.
-You still needed to copy `valve` directory as all game resources located there.
-3) Run the main executable (`xash3d.exe` or AppImage).
+| Target | Renderer | Status |
+|---|---|---|
+| Original Xbox (NV2A) | `ref/nv2a` — pushbuffer, register combiners, VP20 | Not started |
+| PC | `ref/vulkan` | Not started |
+| PC | `ref/gl` (upstream) | Works — kept as the reference build |
 
-For additional info, run Xash3D with `-help` command line key.
+`ref/gl` stays alive until Vulkan matches it. It is the only thing that tells
+us what correct looks like.
 
-### Android
-0) Install the APK file.
-1) Copy `valve` directory to a folder named `xash` in the Internal storage.
-2) Run games from within the app.
+## Building
 
-## Reporting issues
-* Issues are accepted in both English and Russian.
-* They are only accepted if you run legally acquired product (e.g. Half-Life in Steam).
+Nothing Xbox-specific builds yet. For the PC reference build, follow
+upstream's instructions — the build system is unchanged
+(`./waf configure -T release && ./waf build`).
 
-## Contributing code
-* Check the CONTRIBUTING.md file.
+The Xbox target will use upstream's existing static-linking support
+(`scripts/waifulib/xshlib.py`, `--static-linking`), since nxdk has no dynamic
+library loading:
 
-## Build instructions
-We are using Waf build system. If you have some Waf-related questions, I recommend you to read [Waf Book](https://waf.io/book/).
+```
+./waf configure --xbox --static-linking=filesystem_stdio,ref_nv2a,menu,server,client
+```
 
-**NOTE: NEVER USE GitHub's ZIP ARCHIVES. GitHub doesn't include external dependencies we're using!**
+The asset baker is a separate CMake project in
+[`tools/asset-studio/`](tools/asset-studio/) and builds for the host, not the
+console.
 
-### Prerequisites
-If your CPU is x86 compatible and you're on Windows or Linux, we are building 32-bit code by default. This was done to maintain compatibility with Steam releases of Half-Life and based on it's engine games.
-Even if Xash3D FWGS does support targetting 64-bit, you can't load games without recompiling them from source code!
+## Credits
 
-If your CPU is NOT x86 compatible or you decided build 64-bit version of engine, you may want to compile [Half-Life SDK](https://github.com/FWGS/hlsdk-portable).
-This repository contains our fork of HLSDK and restored source code for Half-Life expansions and some mods.
+This project is a derivative work. It exists because of:
 
-#### Windows (Visual Studio)
-* Install Visual Studio.
-* Install latest [Python](https://python.org) **OR** run `cinst python.install` if you have Chocolatey.
-* Install latest [Git](https://git-scm.com/download/win) **OR** run `cinst git.install` if you have Chocolatey.
-* Download [SDL2](https://libsdl.org/download-2.0.php) development package for Visual Studio.
-* Clone this repository: `git clone --recursive https://github.com/FWGS/xash3d-fwgs`.
-* Make sure you have at least 12GB of free space to store all build-time dependencies: ~10GB for Visual Studio, 300 MB for Git, 100 MB for Python and other.
+- **[Xash3D-FWGS](https://github.com/FWGS/xash3d-fwgs)** and its
+  contributors — the engine this port is built on.
+- **Uncle Mike** — original author of Xash3D, whose copyright headers are
+  throughout this tree.
+- **Valve** — Half-Life and the original GoldSrc engine and SDK.
+- **[XboxDev / nxdk](https://github.com/XboxDev/nxdk)** — the open-source
+  homebrew SDK this port is built against, including pbkit, the NV2A
+  pushbuffer library.
+- **[FWGS/library-suffix](https://github.com/FWGS/library-suffix)** —
+  platform detection used by the build system.
 
-#### GNU/Linux
-##### Debian/Ubuntu
-* Only for 32-bit engine on 64-bit x86 operating system:
-  * Enable i386 on your system: `$ sudo dpkg --add-architecture i386`.
-  * Install `aptitude` ([why?](https://github.com/FWGS/xash3d-fwgs/issues/1828#issuecomment-2415131759)):  `$ sudo apt update && sudo apt upgrade && sudo apt install aptitude`
-  * Install development tools: `$ sudo aptitude --without-recommends install git build-essential gcc-multilib g++-multilib libsdl2-dev:i386 libfreetype-dev:i386 libopus-dev:i386 libbz2-dev:i386 libvorbis-dev:i386 libopusfile-dev:i386 libogg-dev:i386`.
-  * Set PKG_CONFIG_PATH environment variable to point at 32-bit libraries: `$ export PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig`.
+### Upstream and reference projects
 
-* For 64-bit engine on 64-bit x86 and other non-x86 systems:
-  * Install development tools: `$ sudo apt install git build-essential python libsdl2-dev libfreetype6-dev libopus-dev libbz2-dev libvorbis-dev libopusfile-dev libogg-dev`.
+Read-only references. None of them are responsible for this port.
 
-* Clone this repostory: `$ git clone --recursive https://github.com/FWGS/xash3d-fwgs`.
+| Project | Role |
+|---|---|
+| [FWGS/xash3d-fwgs](https://github.com/FWGS/xash3d-fwgs) | The engine. This tree starts from it |
+| [FWGS/mainui_cpp](https://github.com/FWGS/mainui_cpp) | The menu, vendored under `3rdparty/mainui` |
+| [XboxDev/nxdk](https://github.com/XboxDev/nxdk) | Xbox toolchain, libc, pbkit |
+| [xemu](https://github.com/xemu-project/xemu) | Xbox emulator used for development |
+| [Mayo1970/xash3d-fwgs](https://github.com/Mayo1970/xash3d-fwgs) | xashPS3, a sibling console port of the same engine. Its porting log is the best available map of this territory |
 
-##### RedHat/Fedora
-* Only for 32-bit engine on 64-bit x86 operating system:
-  * Install development tools: `$ sudo dnf install git gcc gcc-c++ glibc-devel.i686 SDL3-devel.i686 sdl2-compat-devel.i686 opus-devel.i686 freetype-devel.i686 bzip2-devel.i686 libvorbis-devel.i686 opusfile-devel.i686 libogg-devel.i686`.
-  * Set PKG_CONFIG_PATH environment variable to point at 32-bit libraries: `$ export PKG_CONFIG_PATH=/usr/lib/pkgconfig`.
+Upstream's own README is preserved in the history and can be read with
+`git show upstream-master:README.md`.
 
-* For 64-bit engine on 64-bit x86 and other non-x86 systems:
-  * Install development tools: `$ sudo dnf install git gcc gcc-c++ SDL3-devel sdl2-compat-devel opus-devel freetype-devel bzip2-devel libvorbis-devel opusfile-devel libogg-devel`.
+## AI disclosure
 
-* Clone this repostory: `$ git clone --recursive https://github.com/FWGS/xash3d-fwgs`.
+Significant portions of this port — platform bring-up, build-system
+integration, renderer/audio/input backends, the asset pipeline, and bug fixes
+across the engine — were developed with the assistance of Claude (Anthropic),
+used as a coding tool under human direction and review.
 
-#### Android (Windows/Linux/macOS)
-* Install [Android Studio](https://developer.android.com/studio) (or the command line tools).
-* Install [Python](https://python.org) (at least 2.7, latest is better).
-* Install [Git](https://git-scm.com/download/win).
-* Install [Ninja](https://ninja-build.org/).
-* Install [CMake](https://cmake.org/) (for some dependencies).
+## License
 
-* Clone this repostory: `$ git clone --recursive https://github.com/FWGS/xash3d-fwgs`.
+Xash3D-FWGS is licensed **GPL-3.0-or-later**, and so is this port. See the
+copyright headers throughout the source, e.g. `engine/common/host.c`.
 
-#### iOS/iPadOS
-* Install Xcode from the appstore.
-* Install [Homebrew package manager](https://brew.sh).
-
-* Install build dependencies by running: `brew install python`.
-
-* Clone the SDL2 repo `$ git clone --recursive https://github.com/libsdl-org/SDL.git -b SDL2` and compile the iOS framework by navigating to SDL/Xcode/SDL and opening the Xcode project.
-
-* Clone this repository: `$ git clone --recursive https://github.com/FWGS/xash3d-fwgs`.
-
-### Building
-#### Windows (Visual Studio)
-0) Open command line.
-1) Navigate to `xash3d-fwgs` directory.
-2) (optional) Examine which build options are available: `waf --help`.
-3) Configure build: `waf configure --sdl2=c:/path/to/SDL2`.
-4) Compile: `waf build`.
-5) Install: `waf install --destdir=c:/path/to/any/output/directory`.
-
-#### Linux
-If compiling 32-bit on amd64, make sure `PKG_CONFIG_PATH` from the previous step is set correctly, prior to running configure.
-
-0) (optional) Examine which build options are available: `./waf --help`.
-1) Configure build: `./waf configure` (you need to pass `-8` to compile 64-bit engine on 64-bit x86 processor).
-2) Compile: `./waf build`.
-3) Install: `./waf install --destdir=/path/to/any/output/directory`.
-
-#### Android (Windows/Linux/macOS)
-To build you should clone [SDL](https://github.com/libsdl-org/SDL) from `SDL2` branch and [HLSDK-portable](https://github.com/FWGS/hlsdk-portable) `mobile-hacks` branch repositories to 3rdparty folder, after that you should be able to open the project in Android Studio from `android` directory or manually call Gradle to build the APK.
-
-#### iOS/iPadOS (MacOS only)
-0) (optional) Examine which build options are available: `./waf --help`.
-1) Configure build: `./waf configure --ios --enable-bundled-deps --sdl2 (path/to/SDL2.framework)`, set `--ios-simulator` instead of `--ios` if you want to build for simulator.
-2) Compile `./waf build`.
-3) Navigate to `build` and copy your compiled SDL2.framework there, then add your game dylibs to `build/ios/libs/(gamedir)/(dlls/cl_dlls)`(You can also run `scripts/ios/buildhlsdk.sh` instead to automatically create an ipa with hlsdk dylibs)
-4) Run `scripts/ios/createipa.sh` to create an installable ipa
-
-### Running tests
-
-Tests are enabled with `--enable-tests` passed to `./waf configure` and can be run with `./waf --alltests`.
-
-This builds both standalone unit tests and a separate engine test binary (`xash3d_tests`) that embeds engine-level tests. The engine test binary requires no game assets.
+This repository contains **no Valve assets**. Running the game requires your
+own legally obtained copy of Half-Life. The asset baker reads that
+installation and produces `.mpak` archives locally; those archives are not
+redistributable.
