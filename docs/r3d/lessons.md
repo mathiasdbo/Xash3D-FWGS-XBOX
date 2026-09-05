@@ -55,6 +55,23 @@ compute shaders, indirect multi-draw, bindless textures and persistent
 mapping, none of which exist on the NV2A or the RSX. Check the *hardware
 feature*, not the *engine lineage*, before planning work around a technique.
 
+### NEVER assess a body of work from its headline feature list
+
+Ironwail's README leads with compute shaders, indirect multi-draw, bindless
+textures and persistent mapping. None of those exist on the NV2A, and the
+conclusion drawn was that none of Ironwail transfers to the console targets.
+
+That was wrong, and it would have cost most of the available performance.
+Those four are the *marketing* of the project, not the bulk of it. The bulk is
+sign-bit frustum rejection, radix-sorted batching, zero-allocation ring
+buffers, distance-sorted transparency, PVS caching and threaded I/O — all of
+which port unchanged.
+
+**Read the work, not the summary of the work.** A feature list is written to
+impress; it is a bad basis for a portability judgement. And when a mechanism
+does not transfer, ask what *destination* it was moving work to, and whether
+another destination is available — here, bake time was, and nobody had looked.
+
 ### ALWAYS re-check a target spec against the current compiler before trusting it
 
 The previous project's Xbox target JSON accumulated six fields that modern

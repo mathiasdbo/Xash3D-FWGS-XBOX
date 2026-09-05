@@ -29,17 +29,24 @@ OpenGL 4.3 and lands fully at 4.4.
 
 The NV2A is fixed-function T&L plus VP20 vertex programs and register
 combiners. The RSX is a G70 derivative: shaders, but no compute and no
-indirect draw. **Zero of Ironwail's headline techniques port to either.**
+indirect draw. **Those four techniques do not port to either.**
 
-What does transfer is the *principle* — do less CPU work per frame, batch
-aggressively, sort by state, never allocate in the frame loop — plus its
-CPU-side work. That is worth having and it is not the same claim. Any plan
-that says "apply Ironwail everywhere" will be discovered to be false in
-month four, and the discovery will be expensive.
+They are not all of Ironwail, and an earlier version of this section said they
+were. Most of Ironwail is CPU-side work — sign-bit frustum rejection, radix-
+sorted batching, zero-allocation ring buffers, distance-sorted transparency,
+PVS caching, threaded I/O — and all of it transfers. Roughly half of what the
+four GPU techniques buy is recoverable by moving the same work to **bake
+time** instead of to the GPU, which is a destination Ironwail does not have and
+we do.
 
-**Resolution:** Ironwail's GPU-driven techniques belong to E6 (Vulkan) alone.
-Its principles belong to E11, expressed per target. The two are tracked
-separately and never conflated.
+`optimization-transfer.md` is the full analysis. Read it before planning
+performance work; this section is only the part that constrains the epic
+boundaries.
+
+**Resolution:** Ironwail's four GPU-driven techniques belong to E6 (Vulkan)
+alone. Its CPU-side work belongs to every target. Its bake-time equivalents
+belong to E2 and E3. The three are tracked separately and never conflated
+under one label.
 
 ### Path tracing and a 2001 fixed-function console cannot share a draw-level abstraction
 
