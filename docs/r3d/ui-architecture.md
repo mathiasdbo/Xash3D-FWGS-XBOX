@@ -368,7 +368,128 @@ None of it touches game code, and none of it touches freevgui's widget
 classes. It sits between the input backend and the panel tree, which is why it
 can be built and tested before either `ref/nv2a` or freevgui is finished.
 
-## 8. Open questions
+## 8. Aspect ratio
+
+### Two quantities, not one
+
+**Render resolution** is how many pixels there are. **Display aspect ratio** is
+the shape the viewer sees. On a PC they are the same thing, because pixels are
+square. On the Original Xbox they are not, and everything below follows from
+that.
+
+Xbox widescreen is **anamorphic**: the framebuffer stays 640×480 and the
+television stretches it horizontally. You get *wider pixels*, not *more*
+pixels. Component output at 480p/720p is the other case — real extra pixels
+with square pixels — and the two must not be conflated.
+
+### The bug this creates
+
+`V_AdjustFov` (`engine/client/cl_view.c:252`) opens with:
+
+```c
+if( width * 3 == 4 * height || width * 4 == height * 5 )
+{
+    // 4:3 or 5:4 ratio
+    return;
+}
+```
+
+It derives the aspect ratio from *pixel dimensions*. On anamorphic Xbox
+widescreen the buffer is 640×480, so that test is **true**, the function
+returns early, and no adjustment is applied — precisely in the case that needs
+it most.
+
+The result on a 16:9 television: a 4:3 field of view stretched horizontally.
+Everything looks fat, and the player sees *less* of the world than they would
+on a 4:3 set. It is invisible in development on a monitor.
+
+**Fix:** feed the function a display aspect, not pixel dimensions.
+
+```
+display_aspect = (width * pixel_aspect_ratio) / height
+```
+
+with `pixel_aspect_ratio` coming from the platform — on Xbox, from the
+dashboard's widescreen flag, which nxdk exposes, rather than from a setting
+the player has to find.
+
+Note also that an exact-equality test is the wrong shape for a continuous
+quantity. 16:10 (1680×1050, 1920×1200) is neither 4:3 nor 16:9 and falls
+through to a branch written for 16:9. **Do not enumerate ratios.** Handle a
+continuum, and compare with an epsilon where a comparison is unavoidable.
+
+### FOV policy: Hor+
+
+The `lock_x == false` branch of `V_AdjustFov` computes `fov_y` at the 640×480
+baseline and then widens `fov_x` (`cl_view.c:268-272`). That is Hor+: a
+widescreen player sees *more* to the sides, not a vertically cropped image.
+It is the correct policy for a game whose content was authored at 4:3.
+
+The policy is already right. Only its input is wrong.
+
+### Layout: three layers, three answers
+
+**`mainui` is already correct** and is the model to copy
+(`3rdparty/mainui/BaseMenu.cpp:1041-1052`):
+
+```cpp
+// Sizes are based on screen height
+uiStatic.scaleX = uiStatic.scaleY = ScreenHeight / 768.0f;
+...
+uiStatic.width = ScreenWidth / uiStatic.scaleX;
+```
+
+Uniform scale — `scaleX == scaleY`, so nothing is ever distorted — anchored to
+**height**, with the virtual width growing to fill whatever is left. Fit to
+height, extend horizontally. It even has a guard for narrower-than-4:3 screens
+that falls back to width-anchoring.
+
+**The HUD anchors, it does not stretch.** `hud_scale` and
+`hud_scale_minimal_width` (default 640) already exist
+(`engine/client/cl_main.c:67-68`). Health and ammo belong in the corners of
+the display; on a wider screen they move outward, they do not grow.
+
+**VGUI panels stay 4:3 and centre.** The scoreboard, MOTD and team menus were
+laid out for 4:3 and their schemes assume those proportions. Stretching them
+gives stretched text; centring them at their authored aspect looks deliberate
+and keeps every metric correct. Pillarbox the *panel*, not the screen.
+
+### The hook that already exists
+
+`ref_api.h:532` declares
+
+```c
+qboolean (*R_SetDisplayTransform)( ref_screen_rotation_t rotate, int x, int y,
+                                   float scale_x, float scale_y );
+```
+
+with **separate** `scale_x` and `scale_y`. That is the existing seam for
+non-square pixels; `ref/nv2a` implements it rather than inventing a parallel
+mechanism.
+
+### Interaction with title-safe area
+
+Safe area is a fraction of the **display**, so it is applied after the aspect
+correction, not before. A 90 % safe area on an anamorphic 16:9 signal is not
+90 % of the 640-pixel buffer on both axes. Getting the order wrong produces a
+UI that is correctly shaped and wrongly inset, which is harder to spot than an
+obviously broken one.
+
+### Test matrix
+
+Every one of these must be checked; the second row is the one that is broken
+today.
+
+| Mode | Buffer | Pixel aspect | Display aspect |
+|---|---|---|---|
+| Xbox 4:3 NTSC | 640×480 | 1.00 | 1.333 |
+| **Xbox 16:9 anamorphic** | **640×480** | **1.333** | **1.777** |
+| Xbox 480p 16:9 (component) | 720×480 | ~1.21 | 1.777 |
+| PC 4:3 | 1024×768 | 1.00 | 1.333 |
+| PC 16:10 | 1680×1050 | 1.00 | 1.600 |
+| PC 16:9 | 1920×1080 | 1.00 | 1.777 |
+
+## 9. Open questions
 
 **Memory.** VGUI's `Dar` is a growing dynamic array and the panel tree
 allocates freely. Under the F2 budget this needs a cap and a pool, and the

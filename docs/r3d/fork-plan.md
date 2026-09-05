@@ -162,6 +162,12 @@ The genuinely console-specific work. It fits where `ref/soft` fits;
   fixed-function T&L. This is not a port, it is a visual-design decision that
   has to be made looking at the screen. It is the phase carrying the real
   variance in the whole plan.
+- **Aspect ratio.** `R_SetDisplayTransform` (`ref_api.h:532`) takes separate
+  `scale_x`/`scale_y`; implement it, and feed the engine a display aspect
+  rather than pixel dimensions. `V_AdjustFov` (`cl_view.c:252`) currently
+  returns early on 640×480 because it reads that as 4:3 — which is exactly
+  wrong for anamorphic Xbox widescreen, where the buffer stays 640×480 and the
+  television stretches it. See `ui-architecture.md` §8.
 - Fix `swizzleNV2A` applied to DXT blocks (`TextureOpt.cpp:110-132`): on Xbox
   `D3DFMT_DXT1` is linear by block rows; the Morton swizzle applies to
   uncompressed surfaces. A latent bug, reachable only through the Xbox path.
