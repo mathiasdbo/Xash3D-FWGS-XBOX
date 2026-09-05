@@ -374,3 +374,17 @@ GEMINI.md
 .continue/
 .codeium/
 .github/copilot-instructions.md
+
+# --- Ferrum56 fork ---
+tools/asset-studio/build/
+tools/asset-studio/*.wad
+tools/asset-studio/*.bsp
+*.mpak
+ferrum56-build-test/
+
+# Reglas nuestras que upstream ignora globalmente (AGENTS.md linea 367,
+# CMakeLists.txt linea 68, build-* linea 312). Sin estas negaciones los
+# archivos del fork quedan fuera del control de versiones en silencio.
+!AGENTS.md
+!tools/asset-studio/CMakeLists.txt
+!tools/asset-studio/build-test-package.ps1

@@ -1,0 +1,5 @@
+common/wpn_hudon.wav
+common/wpn_hudoff.wav
+common/wpn_moveselect.wav
+common/wpn_select.wav
+common/wpn_denyselect.wav

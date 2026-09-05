@@ -1,0 +1,33 @@
+# Dialog banner names present in xash3d-fwgs/3rdparty/extras/xash-extras/
+# gfx/shell/head_<name>.tga - one per line, "head_" prefix and ".tga"
+# extension added by UiPacker::packMenuAssets. 12 further WON-era banners
+# (play, playrec, readme, record, room, rooms, specgames, filter,
+# createroom, gore, keyboard, single) are NOT present on disk - every
+# screen that would use one is either a non-functional shell (no P12
+# networking / no savegame system) or WON-online-only, so they are
+# deliberately not listed here rather than pointing at files that don't
+# exist. See docs/plans (WON menu UI plan) for the per-screen breakdown.
+advanced
+advoptions
+audio
+config
+controls
+creategame
+custom
+customize
+gameopts
+gamepad
+gyro
+inetgames
+lan
+load
+multi
+newgame
+save
+saveload
+touch
+touch_buttons
+touch_options
+video
+vidmodes
+vidoptions

@@ -1,0 +1,696 @@
+#include "BspParser.h"
+#include "WadParser.h"
+#include <fstream>
+#include <iostream>
+#include <cmath>
+#include <unordered_map>
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+
+namespace formats {
+
+#pragma pack(push, 1)
+    struct dmiptexlump_t {
+        int32_t nummiptex;
+        int32_t dataofs[1];
+    };
+#pragma pack(pop)
+
+    // GoldSrc BSP30 texinfo flag: sky or liquid, no lightmap. See xash3d-fwgs
+    // common/bspfile.h TEX_SPECIAL.
+    constexpr uint32_t TEX_SPECIAL = 1u;
+
+    namespace {
+        constexpr uint32_t LM_PAGE_SIZE = 1024;   // luxels per atlas page (matches BLOCK_SIZE_MAX)
+        constexpr uint32_t LM_SAMPLE_SIZE = 16;   // GoldSrc's fixed lightmap luxel granularity
+        constexpr uint32_t LM_MAX_LUXELS = 64;    // reject pathological face extents
+        // Faces with no real lightmap (sky/liquid/fullbright/anomalous) sample the
+        // white end of the ramp strip below instead of getting their own allocation.
+        // Width covers the 256-value gradient plus a small white guard band; height
+        // is a few rows so a sampled point can be centered away from row edges.
+        constexpr uint32_t LM_RAMP_GRADIENT_WIDTH = 256; // one luxel per 0..255 grayscale value
+        constexpr uint32_t LM_RAMP_WHITE_WIDTH = 4;       // pure-white guard band after the gradient
+        constexpr uint32_t LM_RESERVED_MARGIN = LM_RAMP_GRADIENT_WIDTH + LM_RAMP_WHITE_WIDTH; // 260
+        constexpr uint32_t LM_RAMP_HEIGHT = 4;
+
+        struct LightmapPage {
+            std::vector<uint8_t> rgba;
+            uint32_t cursorX = 0;
+            uint32_t cursorY = 0;
+            uint32_t rowHeight = 0;
+            uint32_t usedHeight = 0; // highest Y written to, for atlas height trimming
+
+            LightmapPage() : rgba(static_cast<size_t>(LM_PAGE_SIZE) * LM_PAGE_SIZE * 4, 255) {}
+        };
+
+        struct LightmapAllocation {
+            uint32_t page = 0;
+            uint32_t blockX = 0; // origin of the (smax+2) x (tmax+2) BORDERED block
+            uint32_t blockY = 0;
+        };
+
+        // Shelf-packs bordered lightmap blocks into 1024x1024-luxel RGBA8 pages,
+        // mirroring the row-cursor packing already used for Xbox texture atlases in
+        // PakManager::addTexture. Each block gets a 1-luxel replicated border so
+        // bilinear sampling never bleeds across faces (see B4's sampler notes).
+        class LightmapAtlasPacker {
+        public:
+            LightmapAtlasPacker() {
+                mPages.emplace_back();
+
+                // Bake a luminance ramp strip into page 0's top-left corner: a
+                // 0..255 grayscale gradient (one texel per value) followed by a
+                // white guard band. This does double duty:
+                //  - It replaces the old flat white reserved corner as the
+                //    no-lightmap-data fallback sample point (in the white band).
+                //  - Per-vertex studio-model lighting (later phases) can encode an
+                //    illumination value by sampling into the gradient instead of
+                //    needing a shader change - the existing x2 overbright multiply
+                //    stays correct because the gradient's own values already carry
+                //    the intended brightness (e.g. a flat-shaded model samples
+                //    x=96 for its ~192/510 GoldSrc ambient-only illumination).
+                // The page starts fully white (LightmapPage's ctor), so only the
+                // gradient portion (not the white band after it) needs writing.
+                for (uint32_t y = 0; y < LM_RAMP_HEIGHT; ++y) {
+                    for (uint32_t x = 0; x < LM_RAMP_GRADIENT_WIDTH; ++x) {
+                        uint8_t value = static_cast<uint8_t>(x);
+                        size_t off = (static_cast<size_t>(y) * LM_PAGE_SIZE + x) * 4;
+                        mPages[0].rgba[off + 0] = value;
+                        mPages[0].rgba[off + 1] = value;
+                        mPages[0].rgba[off + 2] = value;
+                        mPages[0].rgba[off + 3] = 255;
+                    }
+                }
+
+                // Reserve the ramp's full footprint (gradient + white band) so the
+                // shelf packer never allocates a real lightmap block over it.
+                mPages[0].cursorX = LM_RESERVED_MARGIN;
+                mPages[0].rowHeight = LM_RAMP_HEIGHT;
+                mPages[0].usedHeight = LM_RAMP_HEIGHT;
+            }
+
+            LightmapAllocation allocate(uint32_t smax, uint32_t tmax) {
+                uint32_t paddedW = smax + 2;
+                uint32_t paddedH = tmax + 2;
+
+                if (mPages.back().cursorX + paddedW > LM_PAGE_SIZE) {
+                    mPages.back().cursorY += mPages.back().rowHeight;
+                    mPages.back().cursorX = 0;
+                    mPages.back().rowHeight = 0;
+                }
+                if (mPages.back().cursorY + paddedH > LM_PAGE_SIZE) {
+                    mPages.emplace_back();
+                }
+
+                LightmapPage& page = mPages.back();
+                LightmapAllocation alloc{static_cast<uint32_t>(mPages.size() - 1), page.cursorX, page.cursorY};
+
+                page.cursorX += paddedW;
+                if (paddedH > page.rowHeight) page.rowHeight = paddedH;
+                uint32_t bottom = page.cursorY + page.rowHeight;
+                if (bottom > page.usedHeight) page.usedHeight = bottom;
+
+                return alloc;
+            }
+
+            // Writes an smax x tmax RGB24 block into the page at alloc's bordered
+            // origin, then replicates a 1-luxel border around it.
+            void writeBlock(const LightmapAllocation& alloc, uint32_t smax, uint32_t tmax, const uint8_t* rgb24) {
+                LightmapPage& page = mPages[alloc.page];
+                uint32_t destX = alloc.blockX + 1;
+                uint32_t destY = alloc.blockY + 1;
+
+                for (uint32_t y = 0; y < tmax; ++y) {
+                    for (uint32_t x = 0; x < smax; ++x) {
+                        size_t destOffset = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + (destX + x)) * 4;
+                        const uint8_t* src = &rgb24[(y * smax + x) * 3];
+                        page.rgba[destOffset + 0] = src[0];
+                        page.rgba[destOffset + 1] = src[1];
+                        page.rgba[destOffset + 2] = src[2];
+                        page.rgba[destOffset + 3] = 255;
+                    }
+                }
+
+                // Replicate left/right edges, then top/bottom (incl. corners).
+                for (uint32_t y = 0; y < tmax; ++y) {
+                    size_t rowLeft = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + (destX - 1)) * 4;
+                    size_t rowLeftSrc = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + destX) * 4;
+                    std::memcpy(&page.rgba[rowLeft], &page.rgba[rowLeftSrc], 4);
+
+                    size_t rowRight = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + (destX + smax)) * 4;
+                    size_t rowRightSrc = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + (destX + smax - 1)) * 4;
+                    std::memcpy(&page.rgba[rowRight], &page.rgba[rowRightSrc], 4);
+                }
+                for (uint32_t x = 0; x < smax + 2; ++x) {
+                    size_t top = (static_cast<size_t>(alloc.blockY) * LM_PAGE_SIZE + alloc.blockX + x) * 4;
+                    size_t topSrc = (static_cast<size_t>(destY) * LM_PAGE_SIZE + alloc.blockX + x) * 4;
+                    std::memcpy(&page.rgba[top], &page.rgba[topSrc], 4);
+
+                    size_t bottom = (static_cast<size_t>(destY + tmax) * LM_PAGE_SIZE + alloc.blockX + x) * 4;
+                    size_t bottomSrc = (static_cast<size_t>(destY + tmax - 1) * LM_PAGE_SIZE + alloc.blockX + x) * 4;
+                    std::memcpy(&page.rgba[bottom], &page.rgba[bottomSrc], 4);
+                }
+            }
+
+            uint32_t pageCount() const { return static_cast<uint32_t>(mPages.size()); }
+
+            // Flattens all pages into one layer-major RGBA8 buffer.
+            //
+            // outHeight is ALWAYS the full LM_PAGE_SIZE, never trimmed to a
+            // page's actually-used extent. Every per-vertex `lv` this class's
+            // caller bakes is `(... ) / LM_PAGE_SIZE` - a fixed divisor,
+            // computed per-face before any page's final used height is even
+            // known (allocate() only grows page.usedHeight, doesn't finalize
+            // it until baking is done). If this function ever hands back a
+            // shorter height, the caller uploads a texture of that shorter
+            // height, and the GPU's normalized-UV sampling rescales every
+            // `lv` by (thatHeight / LM_PAGE_SIZE) - a uniform per-face
+            // vertical compression that lands most faces on a WRONG row
+            // (typically a different face's data entirely, or the reserved
+            // margin), independent of anything about that specific face.
+            // This isn't a hypothetical: an earlier version of this function
+            // trimmed to `usedHeight` to save upload bandwidth, and it
+            // silently scrambled the lightmap on every map whose used height
+            // wasn't exactly 1024 (i.e. every real map) - confirmed by
+            // comparing against retail engine screenshots of the same room.
+            // Fixing the mismatch correctly (rescaling `lv` post-hoc, or a
+            // two-pass bake that defers `lv` until the true final height is
+            // known) is real future memory-bandwidth work, not a quick
+            // patch - tracked as a P14+ optimization, not attempted here.
+            std::vector<uint8_t> flatten(uint32_t& outHeight) const {
+                outHeight = LM_PAGE_SIZE;
+
+                std::vector<uint8_t> out;
+                out.reserve(static_cast<size_t>(mPages.size()) * outHeight * LM_PAGE_SIZE * 4);
+                for (const auto& p : mPages) {
+                    out.insert(out.end(), p.rgba.begin(), p.rgba.end());
+                }
+                return out;
+            }
+
+        private:
+            std::vector<LightmapPage> mPages;
+        };
+
+        // Mirrors the real per-face classification, Mod_LoadSurfaces
+        // (mod_bmodel.c:3309-3378, canonical Xash3D-FWGS clone) - name-prefix
+        // checks against the face's OWN texture name, not texinfo bits, for
+        // every flag except SURF_DRAWTILED. The reference sets these via
+        // independent (not else-if) conditions, but every real texture name
+        // matches at most one of these prefixes ("{scroll"/"{"/"scroll"/
+        // "sky"/"*"/"!" don't overlap except where "{scroll" also implies
+        // "{"), so collapsing them into one if/else-if chain here - testing
+        // the more specific "{scroll" before the bare "{"/"scroll" it's a
+        // prefix of - produces byte-identical results without duplicating
+        // the reference's control-flow shape.
+        //
+        // Two real branches are deliberately not ported: the non-Quake-compat
+        // "water"/"laser" name fallback and the texinfo TEX_SCROLL bit
+        // (mod_bmodel.c:3363-3364) are both Xash-only extensions - no
+        // original GoldSrc compiler emits TEX_SCROLL, and retail HL1 content
+        // never needs the name fallback since it always uses "scroll"-prefixed
+        // names. A simplification, not an oversight: if this project ever
+        // bakes non-retail/Xash-authored maps, revisit both.
+        uint32_t classifySurfaceFlags(const std::string& nameLower, bool planeback, bool texinfoSpecial) {
+            uint32_t flags = 0;
+            if (planeback) flags |= formats::SURF_PLANEBACK;
+            if (texinfoSpecial) flags |= formats::SURF_DRAWTILED;
+
+            if (nameLower.rfind("{scroll", 0) == 0) {
+                flags |= formats::SURF_CONVEYOR | formats::SURF_TRANSPARENT;
+            } else if (!nameLower.empty() && nameLower[0] == '{') {
+                flags |= formats::SURF_TRANSPARENT;
+            } else if (nameLower.rfind("scroll", 0) == 0) {
+                flags |= formats::SURF_CONVEYOR;
+            } else if (nameLower.rfind("sky", 0) == 0) {
+                flags |= formats::SURF_DRAWSKY;
+            } else if (!nameLower.empty() && (nameLower[0] == '*' || nameLower[0] == '!')) {
+                flags |= formats::SURF_DRAWTURB;
+            }
+            return flags;
+        }
+    } // namespace
+
+    bool BspParser::load(const std::string& filePath) {
+        std::ifstream file(filePath, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "Failed to open BSP file: " << filePath << "\n";
+            return false;
+        }
+
+        file.read(reinterpret_cast<char*>(&mHeader.version), sizeof(uint32_t));
+        if (mHeader.version != 30) {
+            std::cerr << "Unsupported BSP version: " << mHeader.version << ". Only BSP30 is currently supported.\n";
+            return false;
+        }
+
+        for (int i = 0; i < BSP_LUMPS; ++i) {
+            file.read(reinterpret_cast<char*>(&mHeader.lumps[i].offset), sizeof(uint32_t));
+            file.read(reinterpret_cast<char*>(&mHeader.lumps[i].length), sizeof(uint32_t));
+        }
+
+        mLumpsData.resize(BSP_LUMPS);
+        for (int i = 0; i < BSP_LUMPS; ++i) {
+            file.seekg(mHeader.lumps[i].offset, std::ios::beg);
+            mLumpsData[i].resize(mHeader.lumps[i].length);
+            file.read(reinterpret_cast<char*>(mLumpsData[i].data()), mHeader.lumps[i].length);
+        }
+
+        return true;
+    }
+
+    const std::vector<uint8_t>& BspParser::getLumpData(BspLumpType type) const {
+        return mLumpsData[static_cast<int>(type)];
+    }
+
+    void BspParser::exportToPak(PakManager& pak, const VfsIndexer& vfs) const {
+        const auto& entityData = getLumpData(LUMP_ENTITIES);
+        std::vector<std::string> priorityWadNames;
+
+        if (!entityData.empty()) {
+            std::string_view entityStr(reinterpret_cast<const char*>(entityData.data()), entityData.size());
+            size_t wadKeyPos = entityStr.find("\"wad\"");
+            if (wadKeyPos != std::string_view::npos) {
+                size_t valStart = entityStr.find('"', wadKeyPos + 5);
+                if (valStart != std::string_view::npos) {
+                    size_t valEnd = entityStr.find('"', valStart + 1);
+                    if (valEnd != std::string_view::npos) {
+                        std::string_view wadVal = entityStr.substr(valStart + 1, valEnd - valStart - 1);
+                        size_t pos = 0;
+                        while ((pos = wadVal.find(';')) != std::string_view::npos) {
+                            std::string_view item = wadVal.substr(0, pos);
+                            wadVal.remove_prefix(pos + 1);
+                            
+                            while (!item.empty() && std::isspace(item.front())) item.remove_prefix(1);
+                            while (!wadVal.empty() && std::isspace(wadVal.front())) wadVal.remove_prefix(1);
+                            
+                            if (!item.empty()) {
+                                std::filesystem::path p(item);
+                                std::string fname = p.filename().string();
+                                if (!fname.empty()) priorityWadNames.push_back(fname);
+                            }
+                        }
+                        if (!wadVal.empty()) {
+                            std::filesystem::path p(wadVal);
+                            std::string fname = p.filename().string();
+                            if (!fname.empty()) priorityWadNames.push_back(fname);
+                        }
+                    }
+                }
+            }
+        }
+
+        std::cout << "Worldspawn WAD Metadata parsed (" << priorityWadNames.size() << " requested WADs):\n";
+        for (const auto& w : priorityWadNames) {
+            std::cout << " - " << w << "\n";
+        }
+
+        std::unordered_map<std::string, const WadLump*> externalWadTextures;
+        std::vector<WadParser> loadedWads;
+        std::unordered_map<std::string, bool> loadedWadPaths;
+
+        for (const auto& wadName : priorityWadNames) {
+            std::string fullPath = vfs.findFileByName(wadName);
+            if (!fullPath.empty() && loadedWadPaths.find(fullPath) == loadedWadPaths.end()) {
+                WadParser wad;
+                if (wad.load(fullPath)) {
+                    std::cout << "VFS Loaded Priority WAD: " << fullPath << "\n";
+                    loadedWads.push_back(std::move(wad));
+                    loadedWadPaths[fullPath] = true;
+                }
+            }
+        }
+
+        for (const auto& entry : vfs.getEntries()) {
+            std::filesystem::path p(entry.fileName);
+            std::string ext = p.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
+
+            if (ext == ".wad" && loadedWadPaths.find(entry.fullPath) == loadedWadPaths.end()) {
+                WadParser wad;
+                if (wad.load(entry.fullPath)) {
+                    std::cout << "VFS Loaded Auxiliary WAD: " << entry.relativePath << "\n";
+                    loadedWads.push_back(std::move(wad));
+                    loadedWadPaths[entry.fullPath] = true;
+                }
+            }
+        }
+
+        for (const auto& wad : loadedWads) {
+            for (const auto& lump : wad.getLumps()) {
+                char cleanName[17] = {0};
+                std::memcpy(cleanName, lump.name, 16);
+                std::string nameLower(cleanName);
+                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), [](unsigned char c){ return std::tolower(c); });
+                externalWadTextures[nameLower] = &lump;
+            }
+        }
+        std::cout << "Total unique WAD texture lumps registered: " << externalWadTextures.size() << "\n";
+
+        const auto& faceData = getLumpData(LUMP_FACES);
+        const auto& vertexData = getLumpData(LUMP_VERTICES);
+        const auto& edgeData = getLumpData(LUMP_EDGES);
+        const auto& surfedgeData = getLumpData(LUMP_SURFEDGES);
+        const auto& texinfoData = getLumpData(LUMP_TEXINFO);
+        const auto& texData = getLumpData(LUMP_TEXTURES);
+
+        const dface_t* faces = reinterpret_cast<const dface_t*>(faceData.data());
+        size_t numFaces = faceData.size() / sizeof(dface_t);
+
+        const dvertex_t* vertices = reinterpret_cast<const dvertex_t*>(vertexData.data());
+        const dedge_t* edges = reinterpret_cast<const dedge_t*>(edgeData.data());
+        const int32_t* surfedges = reinterpret_cast<const int32_t*>(surfedgeData.data());
+        const dtexinfo_t* texinfos = reinterpret_cast<const dtexinfo_t*>(texinfoData.data());
+        size_t numTexinfos = texinfoData.size() / sizeof(dtexinfo_t);
+
+        std::vector<TextureLocation> texLocations;
+        // A distinct, unmistakable placeholder for any texture that fails to
+        // resolve (WAD lookup miss, embedded decode failure, or no data
+        // offset at all) - lazily baked at most once. Without this, a failed
+        // lookup left `texLocations[i]` at its default-constructed
+        // TextureLocation{} (array_index=0, layer=0), silently ALIASING
+        // whatever real texture happened to be baked first into atlas slot
+        // 0 - every face referencing a failed texture then rendered with
+        // that unrelated texture instead, which is indistinguishable from a
+        // real (if wrong-looking) texture and gives no signal that
+        // anything failed. Bright magenta/black checkerboard, the
+        // conventional "missing texture" pattern used by most modern
+        // engines (Source, Unity, Unreal) specifically so it's never
+        // mistaken for real level art.
+        bool haveMissingTexturePlaceholder = false;
+        TextureLocation missingTexturePlaceholder{};
+        auto missingTextureLocation = [&]() -> TextureLocation {
+            if (!haveMissingTexturePlaceholder) {
+                constexpr int kSize = 16;
+                std::vector<uint8_t> rgba(static_cast<size_t>(kSize) * kSize * 4);
+                for (int y = 0; y < kSize; ++y) {
+                    for (int x = 0; x < kSize; ++x) {
+                        bool magenta = ((x / 4) + (y / 4)) % 2 == 0;
+                        uint8_t* px = &rgba[(static_cast<size_t>(y) * kSize + x) * 4];
+                        px[0] = magenta ? 255 : 0;
+                        px[1] = 0;
+                        px[2] = magenta ? 255 : 0;
+                        px[3] = 255;
+                    }
+                }
+                missingTexturePlaceholder = pak.addTexture(kSize, kSize, rgba.data());
+                haveMissingTexturePlaceholder = true;
+            }
+            return missingTexturePlaceholder;
+        };
+
+        // Lower-cased texture name per miptex index, kept alongside texLocations
+        // for the face loop's SURF_* classification below (Mod_LoadSurfaces,
+        // mod_bmodel.c:3309-3378, classifies by name prefix - "sky", water-like,
+        // "scroll", "{" - not by any bit already on texinfo). Left empty for an
+        // unresolved miptex (no embedded header to read a name from); an empty
+        // name matches none of the prefix checks, which is the correct "ordinary
+        // opaque surface" default for a texture that failed to resolve anyway.
+        std::vector<std::string> mipNamesLower;
+
+        if (!texData.empty()) {
+            const dmiptexlump_t* mipData = reinterpret_cast<const dmiptexlump_t*>(texData.data());
+            texLocations.resize(mipData->nummiptex);
+            mipNamesLower.resize(mipData->nummiptex);
+
+            uint32_t matchedWadCount = 0;
+            uint32_t matchedEmbeddedCount = 0;
+            uint32_t unresolvedCount = 0;
+
+            for (int32_t i = 0; i < mipData->nummiptex; ++i) {
+                int32_t offset = mipData->dataofs[i];
+                if (offset < 0 || static_cast<size_t>(offset) >= texData.size()) {
+                    // No embedded miptex_t header to read a name from at all
+                    // (a purely-external WAD reference some compilers emit) -
+                    // there's no name here to look a WAD entry up by, so this
+                    // can only ever be the missing-texture placeholder, not a
+                    // silent slot-0 alias.
+                    texLocations[i] = missingTextureLocation();
+                    ++unresolvedCount;
+                    continue;
+                }
+
+                const miptex_t* mipHeader = reinterpret_cast<const miptex_t*>(texData.data() + offset);
+                char cleanBspName[17] = {0};
+                std::memcpy(cleanBspName, mipHeader->name, 16);
+                std::string texNameLower(cleanBspName);
+                std::transform(texNameLower.begin(), texNameLower.end(), texNameLower.begin(), [](unsigned char c){ return std::tolower(c); });
+                mipNamesLower[i] = texNameLower;
+
+                DecodedTexture tex;
+                bool decoded = false;
+
+                // 1. ALWAYS check external WAD files FIRST by texture name!
+                auto it = externalWadTextures.find(texNameLower);
+                if (it != externalWadTextures.end()) {
+                    decoded = WadParser::decodeMiptex(it->second->data.data(), it->second->data.size(), tex);
+                    if (decoded) matchedWadCount++;
+                }
+
+                // 2. If not found in external WADs, decode embedded BSP miptex payload
+                if (!decoded) {
+                    decoded = WadParser::decodeMiptex(texData.data() + offset, texData.size() - offset, tex);
+                    if (decoded) matchedEmbeddedCount++;
+                }
+
+                if (decoded) {
+                    // `masked` must match decodeMiptex's own isTransparentTex
+                    // check (WadParser.cpp:91 - name starts with '{') so
+                    // TextureOpt::compressToDXT's punch-through path actually
+                    // preserves the alpha channel decodeMiptex already
+                    // computed (WadParser.cpp:98). Without it, DXT1
+                    // compression silently drops alpha and the raw palette
+                    // RGB at index 255 survives into the baked texture
+                    // instead of being cut out. The real engine doesn't
+                    // special-case any particular color there either - it
+                    // just zeroes whatever sits at index 255 unconditionally
+                    // (`Image_SetPalette`, `img_utils.c:306-310`) - artists
+                    // conventionally paint that palette slot bright blue so
+                    // it's recognizable in an editor, which is exactly the
+                    // color that leaks through uncut: every grate, fence,
+                    // ladder and vent rendered with a visible blue cutout.
+                    bool masked = !texNameLower.empty() && texNameLower[0] == '{';
+                    texLocations[i] = pak.addTexture(tex.width, tex.height, tex.rgba.data(), masked);
+                } else {
+                    std::cerr << "BspParser: texture \"" << cleanBspName << "\" failed to resolve (not in any WAD, embedded decode failed) - using the missing-texture placeholder\n";
+                    texLocations[i] = missingTextureLocation();
+                    ++unresolvedCount;
+                }
+            }
+
+            std::cout << "Texture Resolution Summary: " << matchedWadCount << " from WADs, " << matchedEmbeddedCount << " embedded/procedural, " << unresolvedCount << " unresolved (placeholder).\n";
+        }
+
+        uint32_t currentIndexCount = 0;
+
+        const auto& lightingData = getLumpData(LUMP_LIGHTING);
+        LightmapAtlasPacker lmPacker;
+        // Centered in the white guard band that follows the gradient (not the
+        // gradient itself), so a face with no real lightmap data always samples
+        // pure white regardless of any future change to the gradient's own values.
+        const float kFallbackLu = (static_cast<float>(LM_RAMP_GRADIENT_WIDTH) + LM_RAMP_WHITE_WIDTH * 0.5f) / static_cast<float>(LM_PAGE_SIZE);
+        const float kFallbackLv = (LM_RAMP_HEIGHT * 0.5f) / static_cast<float>(LM_PAGE_SIZE);
+        uint32_t lmBaked = 0, lmSkipped = 0, lmRejected = 0;
+
+        for (size_t i = 0; i < numFaces; ++i) {
+            uint32_t startIndex = currentIndexCount;
+            const dface_t& face = faces[i];
+            const dtexinfo_t& texinfo = (face.texinfo >= 0 && static_cast<size_t>(face.texinfo) < numTexinfos) ? texinfos[face.texinfo] : dtexinfo_t{};
+
+            TextureLocation loc{};
+            if (face.texinfo >= 0 && static_cast<size_t>(face.texinfo) < numTexinfos) {
+                uint32_t mipIdx = texinfo.miptex;
+                if (mipIdx < texLocations.size()) {
+                    loc = texLocations[mipIdx];
+                }
+            }
+
+            // --- Lightmap extents pre-pass (GoldSrc BSP30 / xash3d-fwgs
+            // Mod_CalcSurfaceExtents semantics) ---
+            // texturemins/extents are computed from the SAME rawU/rawV dot products
+            // the per-vertex loop below uses for diffuse UVs, over float mins/maxs.
+            //
+            // NOTE: only lightstyle 0 (face.styles[0]) is baked. GoldSrc faces can
+            // carry up to 4 styles (styles[1..3]) for flickering/animated lights,
+            // each its own smax*tmax*3-byte block immediately following this one in
+            // LUMP_LIGHTING - this baker only reads the first and drops the rest, so
+            // animated lightstyle faces bake as their base (non-flickering) light
+            // level. Reasonable for a static baked atlas; revisit if per-style
+            // dynamic relighting is ever wanted.
+            bool hasLightmap = face.numedges > 0
+                && face.lightofs >= 0
+                && face.styles[0] != 255
+                && (texinfo.flags & TEX_SPECIAL) == 0;
+
+            float mins[2] = { 999999.0f, 999999.0f };
+            float maxs[2] = { -999999.0f, -999999.0f };
+            if (hasLightmap) {
+                for (int16_t j = 0; j < face.numedges; ++j) {
+                    int32_t surfedge = surfedges[face.firstedge + j];
+                    uint16_t vertexIndex = (surfedge >= 0) ? edges[surfedge].v[0] : edges[-surfedge].v[1];
+                    const dvertex_t& v = vertices[vertexIndex];
+
+                    float s = v.point[0] * texinfo.vecs[0][0] + v.point[1] * texinfo.vecs[0][1] + v.point[2] * texinfo.vecs[0][2] + texinfo.vecs[0][3];
+                    float t = v.point[0] * texinfo.vecs[1][0] + v.point[1] * texinfo.vecs[1][1] + v.point[2] * texinfo.vecs[1][2] + texinfo.vecs[1][3];
+                    mins[0] = std::min(mins[0], s); maxs[0] = std::max(maxs[0], s);
+                    mins[1] = std::min(mins[1], t); maxs[1] = std::max(maxs[1], t);
+                }
+            }
+
+            int32_t texturemins[2] = {0, 0};
+            uint32_t smax = 0, tmax = 0;
+            if (hasLightmap) {
+                int32_t bmins[2], bmaxs[2];
+                for (int k = 0; k < 2; ++k) {
+                    bmins[k] = static_cast<int32_t>(std::floor(mins[k] / LM_SAMPLE_SIZE));
+                    bmaxs[k] = static_cast<int32_t>(std::ceil(maxs[k] / LM_SAMPLE_SIZE));
+                    texturemins[k] = bmins[k] * static_cast<int32_t>(LM_SAMPLE_SIZE);
+                }
+                smax = static_cast<uint32_t>((bmaxs[0] - bmins[0])) + 1;
+                tmax = static_cast<uint32_t>((bmaxs[1] - bmins[1])) + 1;
+
+                if (smax > LM_MAX_LUXELS || tmax > LM_MAX_LUXELS) {
+                    std::cerr << "Lightmap: face " << i << " extents " << smax << "x" << tmax
+                              << " exceed " << LM_MAX_LUXELS << " luxels - using white fallback\n";
+                    hasLightmap = false;
+                    lmRejected++;
+                } else {
+                    size_t required = static_cast<size_t>(face.lightofs) + static_cast<size_t>(smax) * tmax * 3;
+                    if (required > lightingData.size()) {
+                        std::cerr << "Lightmap: face " << i << " lightofs " << face.lightofs
+                                  << " + " << (smax * tmax * 3) << " bytes exceeds LUMP_LIGHTING size "
+                                  << lightingData.size() << " - using white fallback\n";
+                        hasLightmap = false;
+                        lmRejected++;
+                    }
+                }
+            } else {
+                lmSkipped++;
+            }
+
+            LightmapAllocation lmAlloc; // defaults to {page 0, 0, 0} - the reserved white corner
+            if (hasLightmap) {
+                lmAlloc = lmPacker.allocate(smax, tmax);
+                lmPacker.writeBlock(lmAlloc, smax, tmax, &lightingData[face.lightofs]);
+                lmBaked++;
+            }
+
+            // Per-face metadata the reference computes at load time and keeps
+            // on msurface_t (see MpakHeader.h's MpakFaceInfo doc comment) -
+            // this baker computed the equivalent transiently above and
+            // discarded it every time until now.
+            MpakFaceInfo faceInfo{};
+            faceInfo.planenum = face.planenum;
+            faceInfo.texinfo = (face.texinfo >= 0 && static_cast<size_t>(face.texinfo) < numTexinfos) ? face.texinfo : -1;
+            std::memcpy(faceInfo.styles, face.styles, 4);
+            faceInfo.flags = classifySurfaceFlags(
+                (face.texinfo >= 0 && static_cast<size_t>(face.texinfo) < numTexinfos && texinfo.miptex < mipNamesLower.size())
+                    ? mipNamesLower[texinfo.miptex] : std::string{},
+                face.side != 0,
+                (texinfo.flags & TEX_SPECIAL) != 0);
+            if (hasLightmap) {
+                faceInfo.lightmapmins[0] = texturemins[0];
+                faceInfo.lightmapmins[1] = texturemins[1];
+                faceInfo.extents[0] = static_cast<int32_t>((smax - 1) * LM_SAMPLE_SIZE);
+                faceInfo.extents[1] = static_cast<int32_t>((tmax - 1) * LM_SAMPLE_SIZE);
+                faceInfo.lightmapPage = lmAlloc.page;
+                faceInfo.lightmapBlockX = lmAlloc.blockX;
+                faceInfo.lightmapBlockY = lmAlloc.blockY;
+            }
+
+            std::vector<uint16_t> polyIndices;
+
+            for (int16_t j = 0; j < face.numedges; ++j) {
+                int32_t surfedge = surfedges[face.firstedge + j];
+                uint16_t vertexIndex;
+
+                if (surfedge >= 0) {
+                    vertexIndex = edges[surfedge].v[0];
+                } else {
+                    vertexIndex = edges[-surfedge].v[1];
+                }
+
+                const dvertex_t& v = vertices[vertexIndex];
+
+                float rawU = v.point[0] * texinfo.vecs[0][0] + v.point[1] * texinfo.vecs[0][1] + v.point[2] * texinfo.vecs[0][2] + texinfo.vecs[0][3];
+                float rawV = v.point[0] * texinfo.vecs[1][0] + v.point[1] * texinfo.vecs[1][1] + v.point[2] * texinfo.vecs[1][2] + texinfo.vecs[1][3];
+
+                // Value-initialize (not default-initialize): the trailing _pad/_pad2
+                // fields participate in VertexHasher's memcmp-based dedup, so leaving
+                // them as indeterminate stack garbage would silently defeat dedup.
+                Vertex outVert{};
+                // Native GoldSrc units end-to-end: LUMP_PLANES/CLIPNODES/MODELS (hull
+                // collision, PVS) and entity origins from LUMP_ENTITIES are already
+                // unscaled, and every pm_shared constant (speed 320, stepsize 18,
+                // jump 45, gravity 800) is defined in these units. Scaling only the
+                // render vertices (as this used to do) put geometry and collision in
+                // different coordinate spaces.
+                outVert.x = v.point[0];
+                outVert.y = v.point[1];
+                outVert.z = v.point[2];
+
+                outVert.u = rawU / static_cast<float>(loc.width > 0 ? loc.width : 64);
+                outVert.v = rawV / static_cast<float>(loc.height > 0 ? loc.height : 64);
+
+                outVert.rect[0] = loc.rect[0];
+                outVert.rect[1] = loc.rect[1];
+                outVert.rect[2] = loc.rect[2];
+                outVert.rect[3] = loc.rect[3];
+
+                if (hasLightmap) {
+                    // (blockX, blockY) is the origin of the BORDERED (smax+2)x(tmax+2)
+                    // block, so +1 lands on the first data luxel; the +0.5 centers the
+                    // sample in that luxel. Bilinear then reaches at most 0.5 texel
+                    // into the replicated border - never across into a neighboring face.
+                    float lu = (static_cast<float>(lmAlloc.blockX) + 1.0f + (rawU - texturemins[0]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / static_cast<float>(LM_PAGE_SIZE);
+                    float lv = (static_cast<float>(lmAlloc.blockY) + 1.0f + (rawV - texturemins[1]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / static_cast<float>(LM_PAGE_SIZE);
+                    outVert.lu = lu;
+                    outVert.lv = lv;
+                    outVert.lightmap_layer = lmAlloc.page;
+                } else {
+                    outVert.lu = kFallbackLu;
+                    outVert.lv = kFallbackLv;
+                    outVert.lightmap_layer = 0;
+                }
+
+                outVert.texture_layer = loc.layer;
+                outVert.array_index = loc.array_index;
+
+                uint16_t idx = pak.addVertex(outVert);
+                polyIndices.push_back(idx);
+            }
+
+            uint32_t addedIndices = 0;
+            for (size_t j = 2; j < polyIndices.size(); ++j) {
+                pak.addIndex(polyIndices[0]);
+                pak.addIndex(polyIndices[j - 1]);
+                pak.addIndex(polyIndices[j]);
+                addedIndices += 3;
+            }
+
+            pak.addFaceDrawCmd(startIndex, addedIndices);
+            pak.addFaceInfo(faceInfo);
+            currentIndexCount += addedIndices;
+        }
+
+        std::cout << "Lightmap Atlas: " << lmBaked << " faces baked, " << lmSkipped
+                  << " skipped (sky/liquid/fullbright), " << lmRejected << " rejected (anomalous), "
+                  << lmPacker.pageCount() << " page(s)\n";
+
+        pak.setVisibilityData(getLumpData(LUMP_VISIBILITY));
+        pak.setNodesData(getLumpData(LUMP_NODES));
+        pak.setLeavesData(getLumpData(LUMP_LEAVES));
+        pak.setMarksurfacesData(getLumpData(LUMP_MARKSURFACES));
+        pak.setPlanesData(getLumpData(LUMP_PLANES));
+        pak.setClipnodesData(getLumpData(LUMP_CLIPNODES));
+        pak.setModelsData(getLumpData(LUMP_MODELS));
+        pak.setEntitiesData(getLumpData(LUMP_ENTITIES));
+        pak.setTexinfoData(getLumpData(LUMP_TEXINFO));
+
+        uint32_t atlasHeight = 0;
+        std::vector<uint8_t> atlasRgba = lmPacker.flatten(atlasHeight);
+        pak.setLightmapAtlas(LM_PAGE_SIZE, atlasHeight, lmPacker.pageCount(), 0, std::move(atlasRgba));
+    }
+
+} // namespace formats
