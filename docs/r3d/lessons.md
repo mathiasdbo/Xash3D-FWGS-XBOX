@@ -55,6 +55,39 @@ compute shaders, indirect multi-draw, bindless textures and persistent
 mapping, none of which exist on the NV2A or the RSX. Check the *hardware
 feature*, not the *engine lineage*, before planning work around a technique.
 
+### NEVER call something the top risk without reading the conditional around it
+
+`xshlib.py:47-50` sets `-melf_i386`, so this project recorded "the static
+linking machinery is ELF-specific and cannot work on PE/COFF" as its single
+highest risk, in two planning documents, for a week.
+
+The flag is appended only `if '-m32' in self.env.LINKFLAGS`, and an nxdk build
+never passes `-m32`. The line was read; the two lines above it were not.
+
+The real problems turned out to be different and smaller: `objcopy` is absent
+from nxdk, `llvm-objcopy` rejects `-G` on COFF while `--redefine-sym` works,
+and `lld -flavor link -r` cannot do partial links. Three known fallbacks
+exist. The risk was real but it was mis-diagnosed, and a mis-diagnosed risk
+sends work in the wrong direction with full confidence.
+
+**Read the enclosing conditional before quoting a line as evidence.** The
+higher the stakes of a claim, the more of the surrounding code has to be read
+before making it — and a claim that reorders a project's plan is the highest
+stakes there is.
+
+### NEVER trust a duplicate-symbol count from a synthetic reproduction
+
+An investigation reported "115 duplicate symbols from `public/miniz.c`". The
+number came from linking the *same object twice*. In the real build,
+`public/wscript:147` produces a static library and lld resolves archive
+members lazily, so three modules pulling the same code produce zero
+duplicates.
+
+A synthetic reproduction proves a mechanism can happen. It says nothing about
+whether it does happen, or how often. **Measure on the real build before
+sizing a problem** — and if the real build does not compile yet, the honest
+answer is "unmeasured", not a number from a stand-in.
+
 ### NEVER assess a body of work from its headline feature list
 
 Ironwail's README leads with compute shaders, indirect multi-draw, bindless

@@ -130,12 +130,13 @@ blocking unknown.
 nxdk in the waf build, `engine/platform/xbox/` from the `psvita` template,
 static single-image linking, the game SDK compiled in, XBE packaging.
 
-**Known risk, highest in the project:** `scripts/waifulib/xshlib.py` merges
-modules with `ld -r` and filters symbols with `objcopy -G`, and its
-`LD_RELOCATABLE_FLAGS` sets `-melf_i386`. That is ELF and GNU ld. nxdk emits
-PE/COFF and links with `lld -flavor link`. xashPS3 uses this machinery
-unmodified because PPC/ELF suits it; we cannot. Prove a symbol-collision
-strategy in week one, not month two.
+**Known risk, and the reason this document gave was wrong until 2026-09-05.**
+The `-melf_i386` in `xshlib.py:49` is appended only `if '-m32' in LINKFLAGS`,
+and nxdk never passes it. What actually breaks: `objcopy` is absent from nxdk,
+`llvm-objcopy` rejects `-G` on COFF (`--redefine-sym` is the one that works),
+and `lld -flavor link -r` cannot do partial links. Downgraded from "may not
+work at all" to "three known fallbacks", but the measurement that closes it
+has never been run. See `x0-probe-results.md` §4.
 
 **Exit:** an XBE that boots in xemu with `ref/null` and reaches the engine
 console.

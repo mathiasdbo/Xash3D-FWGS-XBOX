@@ -48,9 +48,14 @@ at a time.
 **Harder:**
 
 - **The linker.** Their static linking worked because PPC/ELF suits
-  `scripts/waifulib/xshlib.py`, which merges with `ld -r`, filters with
-  `objcopy -G` and sets `-melf_i386`. nxdk emits PE/COFF and links with
-  `lld -flavor link`. Their goal 2 was a solved problem; ours is not.
+  `scripts/waifulib/xshlib.py`. Ours does not — though **not for the reason
+  this document gave until 2026-09-05**, see `x0-probe-results.md` §4. The
+  `-melf_i386` in `xshlib.py:49` is appended only `if '-m32' in LINKFLAGS`,
+  and nxdk never passes `-m32`, so `ld -r` would run with *no emulation flag
+  at all*, which is a subtler failure than an ELF/COFF mismatch. What
+  genuinely breaks: `objcopy` does not exist in nxdk, `llvm-objcopy` rejects
+  `-G` on COFF, and `lld -flavor link -r` cannot do partial links. Their goal
+  2 was solved; ours is open with three known fallbacks.
 - **The GPU.** They wired `ref_gl` to the RSX, a G70 derivative with real
   shaders. The NV2A is fixed-function T&L plus VP20 and register combiners.
   There is no `ref_gl` path for us — X9 is a new backend, not an adaptation.
@@ -85,10 +90,12 @@ come from code that already exists and is already maintained.
 
 The honest caveats, none of them settled:
 
-- **SDL2 video on Xbox is a software framebuffer, not a GL context.** That is
-  exactly what X5 needs and useless to X9. `ref/nv2a` must own the video mode
-  through pbkit, and SDL owning it too is a known-awkward combination. Plan
-  for pbkit to take video over, while SDL keeps input and audio.
+- **SDL2 video on Xbox is a software framebuffer, not a GL context**, and X5
+  does not use it either — see X5. Coexistence with pbkit is **not** an open
+  question: the application owns the mode, arbitration is `PCRTC_START` via
+  `pb_show_front_screen()` / `pb_show_debug_screen()`, and it ships as an
+  upstream sample. Initialise SDL without `SDL_INIT_VIDEO` and call
+  `pb_show_front_screen()` after every `pb_init()`.
 - **SDL2 costs memory and binary size** on a 64 MB budget. Measure before
   committing to it as permanent.
 - **Its completeness here is unverified.** The submodules are not initialised.
@@ -106,26 +113,69 @@ rather than a prerequisite for us.
 
 - nxdk in the waf build: root `wscript`, toolchain
   `clang -target i386-pc-win32 -march=pentium3 -fuse-ld=nxdk-link`.
-- **First, establish whether `engine/platform/sdl2/` works on nxdk's SDL2.**
-  If it does, `engine/platform/xbox/` is a thin set of overrides rather than a
-  new backend. If it does not, fall back to `platform/psvita` as the template.
+- **Answered per subsystem** — `x0-probe-results.md` §1. What remains is an
+  enumerated list, not an investigation:
+  - Clone `3rdparty/library_suffix` and add an Xbox case to `build.h`.
+    **Until this exists nothing in the tree compiles at all**:
+    `common/defaults.h:20` includes it and every `XASH_*` macro comes from it.
+    It is a third-party submodule, so plan for a fork.
+  - Plumb `-DXBOX` into every engine TU; add a `sys/types.h` shim; patch the
+    five hint constants; pick a `DEST_OS` that is not `win32`; add
+    `VIDEO_XBOX`/`INPUT_XBOX` to `common/backends.h:18-23` and a branch to
+    `common/defaults.h:32-53`; drop `SDL_INIT_VIDEO` from `sys_sdl2.c:130`.
+  - `public/miniz.c` does not compile for nxdk — `<sys/stat.h>`, `errno_t`,
+    `localtime_s`, and `_MSC_VER` steering it into the Win32 branch.
+  - **Build nxdk on the dev host.** Nothing under `deps/nxdk/lib` is built.
 - **A working log channel before anything else** — nxdk's debug channel, then
   network logging, so failures on hardware are readable.
 - XBE packaging with `cxbe`.
 
 **Exit:** an XBE that boots in xemu, prints, and exits cleanly.
 
+## X0.5 — Root directory detection
+
+**A blocker that was not in this plan.** `SDL_GetBasePath` returns NULL on
+nxdk and `getcwd` does not exist, so `filesystem_engine.c` cannot determine
+the root directory and the engine `Sys_Error`s before X2 begins. A small
+patch, but a hard gate, and it lived nowhere until now.
+See `x0-probe-results.md` §1.5.
+
+**Exit:** the engine finds its game directory on Xbox.
+
 ## X1 — Static linking proven
 
-**The highest risk in the project. Prove it in week one.**
+**Still the gate, no longer the top risk.** Downgraded from "this may not
+work at all" to "three known fallbacks, one needing no new tools" — but the
+measurement that would close it has never been run.
 
-`xshlib.py` exists to stop symbol collisions between engine, filesystem,
-renderer, menu and game code — the `FI` global, duplicated vtables, repeated
-helpers. Its mechanism is ELF-specific.
+Static linking is **mandatory**, not preferred: nxdk's `LoadLibraryExA`
+unconditionally returns NULL (`deps/nxdk/lib/winapi/libloaderapi.c:16-23`) and
+`SDL_LOADSO_DISABLED 1`. There is no dynamic path for anything.
 
-Establish, in order: whether `lld-link` resolves the collisions on its own;
-whether a COFF equivalent of `objcopy -G` exists; and failing both, per-module
-symbol renaming via `#define`, which is ugly and deterministic.
+**Measure before choosing.** Compile `engine/`, `filesystem/` and `ref/soft/`
+with the real `nxdk-cc` line, archive `public` with `llvm-lib`, link with the
+exact `nxdk-link` flags plus `-errorlimit:0`, **no `ld -r`, no objcopy**, and
+count the genuine duplicates. Nobody has done this; every figure so far came
+from synthetic modules or from linking one object twice.
+
+- A handful of real conflicts → `llvm-objcopy --redefine-sym`, the one symbol
+  option that works on COFF, and `xshlib.py` is bypassed on Xbox entirely.
+- A large structural list → GNU `ld -r -m i386pe` run **twice** (one pass
+  folds duplicate COMDATs but leaves a dangling undefined that binds silently
+  to the engine at final link, exit 0, no diagnostic), then `objcopy` with
+  `.data` included in `--set-section-flags`, then the missing `_` prefix at
+  `xshlib.py:36`.
+
+One genuine conflict is already known: `fs_globals_t FI;`
+(`filesystem/filesystem.c:30`) against `fs_globals_t *FI;`
+(`filesystem_engine.c:41`) — struct versus pointer, same name.
+
+Also required here: **`exports.txt` does not exist for `ref_soft`, `menu`,
+`server` or `client`** — only `filesystem/` and `ref/gl/` have one, and
+`xshlib.py:86` reads it unconditionally, so `--static-linking=ref_soft` fails
+today even on Linux. And note `XASH_STATIC_LIBS` implies
+`XASH_ALLOW_SAVERESTORE_OFFSETS`, which makes the **save format depend on link
+layout**.
 
 Settle here which HL SDK base compiles under nxdk. **[from PS3]** Their goal
 10 used `FWGS/hlsdk-portable`, not the `halflife-updated` family pinned in
@@ -179,8 +229,15 @@ sitting.
 
 **[from PS3]** The change their roadmap forced in this plan.
 
-Wire the existing software rasteriser to the Xbox framebuffer. No NV2A
-knowledge needed beyond X4's mode-set and blit.
+**Do not route this through SDL's window surface.** Write
+`engine/platform/xbox/vid_xbox.c` — roughly 250 lines, modelled on
+`vid_fbdev.c` — against `hal/video` at 16 bpp. That deletes the 1.2 MB shadow
+surface, the per-frame `SDL_ConvertPixels`, and ~350 KiB of SDL software-2D
+code from the image. Add double buffering, `XVideoWaitForVBlank`, and
+`VID_Info_f`, which exists only in the `sdl2`/`sdl3` backends.
+
+The render-resolution lever is `R_SaveVideoMode(640,480,320,240,…)`, not
+`vid_scale`.
 
 This puts a **complete and correct** image on screen — world, entities,
 lightmaps, HUD — validating the filesystem, PVS, BSP loading, entity handling
@@ -193,8 +250,15 @@ It will be slow. That is fine; it is a reference, not a shipping path.
 
 ## X6 — Input and menu
 
-- Gamepad: SDL2's game controller layer if X0 proved it works, otherwise
-  nxdk's USB stack directly.
+- **Gamepad is free.** SDL's controller layer works on nxdk through its own
+  OHCI/XID stack, with a `"default,Original Xbox Controller,…"` mapping
+  compiled in for every GUID, so no `gamecontrollerdb.txt` needs shipping.
+  Rumble works.
+- **Keyboard and mouse do not exist, and are not needed.** `XBOX_PumpEvents`
+  is an empty function and `in_sdl2.c` compiles inert. Nothing crashes; it
+  simply produces nothing.
+- Sequence the menu half **after** X1 picks a mechanism — `3rdparty/mainui` is
+  C++ and multi-TU, which is exactly where the `ld -r` hazard bites.
 - `3rdparty/mainui` compiled in. **[from PS3]** Their goal 7 had the Half-Life
   menu visible before input worked, which confirms the menu is cheap and makes
   a good early validation checkpoint.
@@ -214,16 +278,20 @@ load failure and continues, and single-player Half-Life does not use VGUI.
 
 ## X8 — Audio
 
-**Scope depends on X0.** If nxdk's SDL2 audio works, `engine/platform/sdl2/
-s_sdl2.c` already exists and this phase is configuration rather than
-construction.
+**Largely resolved.** `s_sdl2.c` works on nxdk's Xbox audio driver
+(`XAudioInit(16, 2, …)`, `XAudioProvideSamples`, `XAudioPlay`). Two one-line
+fixes and it is done:
 
-If it does not, the fallback is an NVAPU backend with ADPCM, which requires
-extracting a backend interface from `engine/client/sound/`'s 6,284 lines — the
-only major subsystem upstream did not abstract, and a **candidate to send
-upstream** since it helps every console port.
+- `SOUND_DMA_SPEED` is a compile-time `#define` of 44100
+  (`engine/client/sound.h:27,29`) with no cvar escape, and the Xbox driver
+  hard-forces 48000. That makes an `SDL_AudioStream` resample
+  **unconditional** on a 733 MHz CPU. Set 48000 for this build, or pass
+  `SDL_AUDIO_ALLOW_FREQUENCY_CHANGE`.
+- Voice capture cannot work — `HasCaptureSupport = 0`. Compile out
+  `VoiceCapture_Init`.
 
-Settle which of the two this is during X0, not here.
+The NVAPU/ADPCM backend and the `engine/client/sound/` abstraction come off
+the Xbox critical path entirely. Keep them as an upstream nice-to-have.
 
 **Exit:** positional sound and sentences.
 
