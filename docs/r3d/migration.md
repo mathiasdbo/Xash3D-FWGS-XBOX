@@ -1,104 +1,94 @@
-# Migración desde Ferrum56 (Rust)
+# Migration from Ferrum56 (Rust)
 
-## Qué se archivó y por qué
+## What was archived, and why
 
-El proyecto anterior reimplementaba Xash3D-FWGS en Rust desde cero. Llegó a
-~35.000 líneas repartidas en siete crates, con 631 tests unitarios y unas
-8.800 líneas de comentarios citando `file:line` de la referencia. Estaba en el
-Track C/D de su plan de fidelidad, lejos todavía de la paridad de features.
+The previous project reimplemented Xash3D-FWGS in Rust from scratch. It
+reached ~35,000 lines across seven crates, with 631 unit tests and some 8,800
+lines of comments citing `file:line` in the reference. It was on Track C/D of
+its fidelity plan, still far from feature parity.
 
-La decisión de bifurcar no fue por el lenguaje. La disyuntiva real era
-**reimplementar** un motor contra **adaptar** uno. Partiendo del fork se llega
-a paridad el día uno, y los cuatro pedidos que motivaban la reescritura ya
-estaban resueltos en upstream:
+The decision to fork was not about the language. The real choice was
+**reimplementing** an engine versus **adapting** one. Starting from the fork
+reaches parity on day one, and four of the five capabilities that motivated
+the rewrite were already solved upstream:
 
-| Se necesitaba | Ya existía en upstream |
+| What was needed | Already in upstream |
 |---|---|
-| Renderer polimórfico | `ref_api.h` v17, 3 backends en producción |
-| Gestor de recursos en RAM | `zone.c`, pools con atribución `file:line` |
-| VFS extensible para `.mpak` | `searchpath_t`, vtable de 7 punteros |
-| Enlazado estático para consola | `XASH_STATIC_LIBS` + `--single-binary` |
-| Menú con gamepad | `3rdparty/mainui`, con `menus/Gamepad.cpp` |
-| Audio polimórfico | **No.** Es la única pieza que sigue siendo trabajo real |
+| Polymorphic renderer | `ref_api.h` v17, 3 shipping backends |
+| RAM resource manager | `zone.c`, pools with `file:line` attribution |
+| VFS extensible for `.mpak` | `searchpath_t`, a 7-pointer vtable |
+| Static linking for console | `XASH_STATIC_LIBS` + `--single-binary` |
+| Menu with gamepad support | `3rdparty/mainui`, with `menus/Gamepad.cpp` |
+| Polymorphic audio | **No.** The one piece that is still real work |
 
-El argumento más fuerte para no reescribir eran esos 631 tests y las
-citas a la referencia. Se cae solo: existen para probar que el Rust coincide
-con Xash3D. Si *sos* Xash3D, es cierto por construcción. Ese aparato era el
-coste de no ser la referencia, y bifurcarla lo lleva a cero.
+The strongest argument against rewriting was those 631 tests and the
+reference citations. It collapses on its own: they exist to prove the Rust
+matches Xash3D. If you *are* Xash3D, that is true by construction. That
+apparatus was the cost of not being the reference, and forking it takes that
+cost to zero.
 
-## Qué se conservó
+## What was kept
 
-`tools/asset-studio/` — 8.544 líneas de C++/CMake. Es la contribución
-genuinamente original del proyecto anterior: el baker offline que produce
-`.mpak` con atlas por mapa, compresión DXT, empaquetado de lightmaps y
-alineación a sector de 2048 bytes.
+`tools/asset-studio/` — 8,544 lines of C++/CMake. It is the previous
+project's genuinely original contribution: the offline baker that produces
+`.mpak` archives with per-map atlases, DXT compression, packed lightmaps and
+2048-byte sector alignment.
 
-Queda mejor servido acá que allá: `searchpath_t::pfnLoadFile` es por recurso,
-no por archivo, lo que resuelve de raíz el problema del `global.mpak` de
-62,9 MB que se cargaba entero (99,1 % de ese archivo es `lenAssetData`).
+It is better served here than there: `searchpath_t::pfnLoadFile` works per
+resource, not per archive, which solves at the root the 62.9 MB `global.mpak`
+problem where the whole file was loaded (99.1 % of it is `lenAssetData`).
 
-Se copiaron también los manifiestos (`manifests/`) y
-`build-test-package.ps1`. **No** se copiaron los `.wad` ni el `.bsp` de
-prueba que había sueltos en el directorio del baker: son assets retail, no
-estaban trackeados en el repo anterior, y no son nuestros para redistribuir.
+The manifests (`manifests/`) and `build-test-package.ps1` came across too.
+The `.wad` files and the test `.bsp` that sat loose in the baker's directory
+did **not**: they are retail assets, they were untracked in the previous repo,
+and they are not ours to redistribute.
 
-## Qué NO se trajo
+## What was not brought over
 
-Los siete crates de Rust (`ferrum-core`, `ferrum-math`, `ferrum-vfs`,
-`ferrum-render`, `ferrum-pal`, `ferrum-engine`, `vgui-rs`). Todo eso es una
-reimplementación parcial de código que ya existe y funciona en este árbol.
+The seven Rust crates (`ferrum-core`, `ferrum-math`, `ferrum-vfs`,
+`ferrum-render`, `ferrum-pal`, `ferrum-engine`, `vgui-rs`). All of it is a
+partial reimplementation of code that already exists and works in this tree.
 
-Vale la pena conservar el repo anterior en modo lectura por dos cosas
-concretas que ya resolvió y que van a hacer falta:
+The previous repository is worth keeping read-only for two concrete things it
+already solved and that will be needed:
 
-- **Enlazado estático del HL SDK con el toolchain de nxdk**, incluida una ruta
-  de spawn de entidades sin export table.
-- **El análisis de la NV2A**: encoding de pushbuffer, register combiners y
-  VP20, con tests.
+- **Static linking of the HL SDK with the nxdk toolchain**, including an
+  entity-spawn path that needs no export table.
+- **The NV2A analysis**: pushbuffer encoding, register combiners and VP20,
+  with tests.
 
-Son referencias, no código a portar.
+They are references, not code to port.
 
-## Pasos pendientes (requieren tus credenciales)
+## Pending steps
 
-### 1. Crear el repo privado y empujar
+### 1. Submodules
 
-Un fork de un repo público en GitHub **siempre es público** y no se puede
-pasar a privado. La forma correcta es un mirror desacoplado.
-
-Este árbol local ya está configurado: `upstream` apunta a FWGS con push
-deshabilitado, y la rama `main` sale de `c7768c48`. Falta solo el `origin`:
-
-```bash
-cd G:/Proyectos/Ferrum56/resonance3d
-git remote add origin git@github.com:<usuario>/<repo-privado>.git
-git push -u origin main
-git push origin upstream-master        # la base intacta, para diffear contra ella
-```
-
-`upstream-master` se conserva a propósito: es la única forma barata de
-responder "¿qué cambiamos nosotros?" con un solo `git diff`.
-
-### 2. Submódulos
-
-No se inicializaron todavía (son cientos de MB). Antes de compilar:
+Not initialised yet (hundreds of MB). Before building:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-`3rdparty/mainui` es el que importa para el menú.
+`3rdparty/mainui` is the one that matters for the menu.
 
-### 3. Archivar el repo anterior
+### 2. Archive the previous repository
 
-En GitHub: Settings → Archive this repository. Deja el repo en solo lectura
-sin borrar nada, y es reversible.
+On GitHub: Settings → Archive this repository. It leaves the repo read-only
+without deleting anything, and it is reversible.
 
-Antes de archivar conviene dejar un puntero en su `README.md` hacia este
-repo, porque un repo archivado no se puede editar después.
+Leave a pointer to this repo in its `README.md` first — an archived repository
+cannot be edited afterwards.
 
-### 4. Licencia
+### 3. Licence
 
-Xash3D-FWGS es **GPL-3.0-or-later** (confirmado en las cabeceras de
-`engine/common/host.c`). Desarrollar en privado no genera ninguna obligación:
-la GPL se dispara al **distribuir binarios**, y solo hacia quien los recibe.
-El momento a tener en cuenta es al repartir un XBE o un ISO, no antes.
+Xash3D-FWGS is **GPL-3.0-or-later** (confirmed in the copyright headers of
+`engine/common/host.c`). Developing privately creates no obligation: the GPL
+triggers on **distributing binaries**, and only towards the recipients. The
+moment to plan for is handing out an XBE or an ISO, not before.
+
+## A note on the `upstream-master` branch
+
+It is kept on purpose. It is the cheap way to answer "what did we change?"
+with a single `git diff upstream-master main`, and the place upstream's
+original `README.md` remains readable after ours replaced it
+(`git show upstream-master:README.md`).

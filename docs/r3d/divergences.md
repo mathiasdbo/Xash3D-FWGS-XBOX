@@ -1,76 +1,77 @@
-# Registro de divergencias con upstream
+# Divergence ledger
 
-Toda desviación deliberada del árbol de Xash3D-FWGS se anota acá **el mismo
-día que se escribe**. Sin esto, el tercer merge con upstream es una
-arqueología de por qué tal línea está distinta, y el fork se abandona.
+Every deliberate deviation from the Xash3D-FWGS tree is recorded here **the
+same day it is written**. Without this, the third merge with upstream turns
+into archaeology over why a given line differs, and the fork gets abandoned.
 
-Base del fork: `c7768c48` (2026-08-08).
+Fork base: `c7768c48` (2026-08-08).
 
-## Formato
+## Format
 
-Una entrada por divergencia, con:
+One entry per divergence, with:
 
-- **Qué**: archivo(s) y función(es) tocadas.
-- **Por qué**: la razón concreta, en una frase.
-- **Forma**: `#ifdef` / archivo nuevo / reemplazo / recorte.
-- **Riesgo de merge**: alto si toca código que upstream modifica seguido.
-- **Salida**: qué haría falta para eliminar la divergencia (a veces "ninguna,
-  es permanente").
+- **What**: the file(s) and function(s) touched.
+- **Why**: the concrete reason, in one sentence.
+- **Form**: `#ifdef` / new file / replacement / removal.
+- **Merge risk**: high if it touches code upstream changes often.
+- **Exit**: what it would take to remove the divergence (sometimes "none, it
+  is permanent").
 
-Preferencia de forma, de menos a más costoso de mantener:
+Preferred forms, from cheapest to most expensive to maintain:
 
-1. **Archivo nuevo en un directorio nuestro** — coste de merge cero.
-2. **Archivo nuevo dentro de un directorio de upstream** (p. ej. un
-   `filesystem/mpak.c` junto a `pak.c`) — coste casi cero, solo el `wscript`.
-3. **`#ifdef XASH_XBOX` alrededor de código de upstream** — coste bajo, pero
-   ensucia diffs.
-4. **Reescritura de una función de upstream** — coste alto. Requiere
-   justificación explícita acá.
-5. **Cambio de comportamiento sin `#ifdef`** — prohibido salvo que sea un bug
-   real de upstream, en cuyo caso se manda el parche upstream primero.
+1. **New file in one of our directories** — zero merge cost.
+2. **New file inside an upstream directory** (e.g. a `filesystem/mpak.c` next
+   to `pak.c`) — near-zero cost, just the `wscript`.
+3. **`#ifdef XASH_XBOX` around upstream code** — low cost, but it pollutes
+   diffs.
+4. **Rewriting an upstream function** — high cost. Requires explicit
+   justification here.
+5. **Changing behaviour with no `#ifdef`** — forbidden unless it is a genuine
+   upstream bug, in which case the patch goes upstream first.
 
-## Divergencias activas
+## Active divergences
 
-| # | Qué | Por qué | Forma | Riesgo de merge | Salida |
-|---|-----|---------|-------|-----------------|--------|
-| 2 | `README.md` — reemplazado | El repositorio tiene identidad y nombre propios; el README de la raíz es lo primero que ve cualquiera que llegue. Incluye la sección de créditos y la nota de licencia, que son obligatorias en un trabajo derivado GPL | Reemplazo completo | Bajo — conflicto seguro en cada merge, pero siempre trivial: se descarta el lado de upstream | Ninguna, es permanente. El original se lee con `git show upstream-master:README.md` |
-| 1 | `.gitignore` — bloque añadido al final | El `.gitignore` de upstream ignora globalmente `AGENTS.md` (:367), `CMakeLists.txt` (:68) y `build-*` (:312), lo que dejaba fuera del control de versiones, en silencio, tres archivos nuestros | Añadido al final del archivo, con negaciones explícitas | Bajo — upstream edita este archivo de vez en cuando, pero el conflicto sería trivial y siempre al final | Ninguna, es permanente |
+| # | What | Why | Form | Merge risk | Exit |
+|---|------|-----|------|------------|------|
+| 2 | `README.md` — replaced | The repository has its own name and identity; the root README is the first thing anyone arriving sees. It carries the credits section and the licence notice, both mandatory in a GPL derivative work | Full replacement | Low — guaranteed conflict on every merge, but always trivial: discard upstream's side | None, it is permanent. The original reads with `git show upstream-master:README.md` |
+| 1 | `.gitignore` — block appended | Upstream's `.gitignore` globally ignores `AGENTS.md` (:367), `CMakeLists.txt` (:68) and `build-*` (:312), which silently kept three of our files out of version control | Appended at the end of the file, with explicit negations | Low — upstream edits this file occasionally, but the conflict would be trivial and always at the end | None, it is permanent |
 
-## Divergencias previstas
+## Anticipated divergences
 
-Lo que el plan ya sabe que va a divergir, para que no sorprenda. Se mueven a
-la tabla de arriba cuando se escriben.
+What the plan already knows will diverge, so it comes as no surprise. They
+move to the table above once written.
 
-| Área | Forma prevista | Riesgo | Nota |
+| Area | Expected form | Risk | Note |
 |---|---|---|---|
-| `filesystem/mpak.c` | Archivo nuevo + entrada en `filesystem/wscript` | Bajo | `searchpath_t` ya es una vtable de 7 punteros; se implementa igual que `pak.c` |
-| `mod_bmodel.c`: mitad de render | Reescritura de 6 funciones bajo `#ifdef` | **Alto** | `Mod_LoadVertexes`, `Mod_LoadEdges`, `Mod_LoadSurfEdges`, `Mod_LoadSurfaces`, `Mod_LoadTextures`, `Mod_LoadLighting`. Las 9 funciones estructurales (`Mod_LoadPlanes/Nodes/Leafs/Clipnodes/MarkSurfaces/Visibility/Submodels/Entities/TexInfo`) quedan intactas porque el `.mpak` guarda esos lumps crudos |
-| `ref/nv2a/` | Backend nuevo | Ninguno | Encaja donde encaja `ref/soft`. `ref_interface_s` no se toca |
-| Techo de memoria sobre `zone.c` | `#ifdef` + funciones nuevas | Medio | `zone.c` ya tiene pools nombrados con atribución `file:line`; falta el límite |
-| Audio polimórfico | Refactor de `engine/client/sound/` | **Alto** | Es la única de las piezas grandes que upstream no abstrajo. Candidato a mandar upstream |
-| Recortes para Xbox (demos, HTTP, voz, red) | `#ifdef` / flags de build | Bajo | Preferir flags de `wscript` existentes antes que `#ifdef` nuevos |
+| `filesystem/mpak.c` | New file + entry in `filesystem/wscript` | Low | `searchpath_t` is already a 7-pointer vtable; implement it the way `pak.c` does |
+| `mod_bmodel.c`: the render half | Rewrite of 6 functions under `#ifdef` | **High** | `Mod_LoadVertexes`, `Mod_LoadEdges`, `Mod_LoadSurfEdges`, `Mod_LoadSurfaces`, `Mod_LoadTextures`, `Mod_LoadLighting`. The 9 structural functions (`Mod_LoadPlanes/Nodes/Leafs/Clipnodes/MarkSurfaces/Visibility/Submodels/Entities/TexInfo`) stay untouched because the `.mpak` stores those lumps raw |
+| `ref/nv2a/` | New backend | None | It fits where `ref/soft` fits. `ref_interface_s` is not touched |
+| Memory ceiling over `zone.c` | `#ifdef` + new functions | Medium | `zone.c` already has named pools with `file:line` attribution; the cap is what's missing |
+| Polymorphic audio | Refactor of `engine/client/sound/` | **High** | The only one of the big pieces upstream did not abstract. Candidate to send upstream |
+| Xbox trims (demos, HTTP, voice, networking) | `#ifdef` / build flags | Low | Prefer existing `wscript` flags over new `#ifdef`s |
 
-## Cosas que NO son divergencias (y no hay que tocar)
+## Things that are NOT divergences (and must not be touched)
 
-Verificado en el árbol. Registrado acá para que nadie "arregle" lo que ya
-funciona:
+Verified in the tree. Recorded here so nobody "fixes" what already works:
 
-- **El renderer ya es polimórfico.** `engine/ref_api.h`, `REF_API_VERSION 17`,
-  `ref_interface_s` con ~59 punteros, y tres backends en producción:
-  `ref/gl`, `ref/soft` (17.422 líneas — la prueba de que la interfaz aguanta
-  un backend radicalmente distinto), `ref/null`.
-- **El enlazado estático ya es un modo de build de primera clase.**
-  `XASH_STATIC_LIBS` en `common/defaults.h:102-105` activa `XASH_LIB
-  LIB_STATIC` y `XASH_INTERNAL_GAMELIBS`, que ya está contemplado en
-  `ref_common.c:620`, `filesystem_engine.c:218`, `cl_gameui.c:1013`,
-  `host.c:905` y `lib_common.c:133,153`. Existe además `--single-binary` en
+- **The renderer is already polymorphic.** `engine/ref_api.h`,
+  `REF_API_VERSION 17`, `ref_interface_s` with ~59 pointers, and three
+  shipping backends: `ref/gl`, `ref/soft` (17,422 lines — the proof that the
+  interface tolerates a radically different backend), `ref/null`.
+- **Static linking is already a first-class build mode.** `XASH_STATIC_LIBS`
+  in `common/defaults.h:102-105` turns on `XASH_LIB LIB_STATIC` and
+  `XASH_INTERNAL_GAMELIBS`, which is already handled in `ref_common.c:620`,
+  `filesystem_engine.c:218`, `cl_gameui.c:1013`, `host.c:905` and
+  `lib_common.c:133,153`. The option itself is defined in
+  `scripts/waifulib/xshlib.py:20` and reaches the engine via
+  `engine/wscript:155`. There is also `--single-binary` at
   `engine/wscript:53`.
-- **La capa de plataforma ya existe**, con 16 backends, entre ellos `psvita`,
-  `nswitch` y `dos`. Un `engine/platform/xbox/` es un backend más.
-- **El menú no hay que reescribirlo.** `3rdparty/mainui` incluye
-  `menus/Gamepad.cpp` y `menus/Gyro.cpp`, y es lo que se usa en los ports de
-  consola. Reproduce el menú WON clásico.
-- **Los pools de memoria ya existen.** `zone.c` (726 líneas):
-  `Mem_AllocPool`/`Mem_FreePool`/`Mem_PrintStats`/`Mem_Check`, con
-  atribución `__FILE__:__LINE__` y pools separados (`mempool`, `imagepool`,
+- **The platform layer already exists**, with 16 backends, among them
+  `psvita`, `nswitch` and `dos`. An `engine/platform/xbox/` is just one more.
+- **The menu does not need rewriting.** `3rdparty/mainui` includes
+  `menus/Gamepad.cpp` and `menus/Gyro.cpp`, and it is what the console ports
+  use. It reproduces the classic WON menu.
+- **The memory pools already exist.** `zone.c` (726 lines):
+  `Mem_AllocPool`/`Mem_FreePool`/`Mem_PrintStats`/`Mem_Check`, with
+  `__FILE__:__LINE__` attribution and separate pools (`mempool`, `imagepool`,
   `soundpool`).

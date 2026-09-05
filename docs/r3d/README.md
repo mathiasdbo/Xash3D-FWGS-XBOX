@@ -1,64 +1,70 @@
-# Resonance3D — fork de Xash3D-FWGS
+# Resonance3D — fork of Xash3D-FWGS
 
-Este repositorio **es** Xash3D-FWGS, con un conjunto acotado de cambios para
-llevarlo a la Xbox Original (2001) sin perder el build de PC.
+This repository **is** Xash3D-FWGS, with a bounded set of changes to bring it
+to the Original Xbox (2001) without losing the PC build.
 
-Base del fork: `c7768c48` (upstream/master, 2026-08-08).
+Fork base: `c7768c48` (upstream/master, 2026-08-08).
 
-## Por qué existe
+## Why it exists
 
-El objetivo es una Xbox Original corriendo Half-Life con paridad de features.
-El proyecto anterior (`ferrum56/`, Rust) reimplementaba el motor desde cero:
-llegó a ~35.000 líneas y seguía lejos de la paridad. Este fork parte del motor
-completo (~221.000 líneas) y le añade lo que la consola necesita.
+The goal is an Original Xbox running Half-Life at feature parity. The previous
+project (`ferrum56/`, Rust) reimplemented the engine from scratch: it reached
+~35,000 lines and was still far from parity. This fork starts from the
+complete engine (~221,000 lines) and adds what the console needs.
 
-Lo que se conserva del proyecto anterior es lo único que era genuinamente
-original: el baker offline, ahora en `tools/asset-studio/`.
+What survives from the previous project is the one part that was genuinely
+original: the offline baker, now in `tools/asset-studio/`.
 
-Ver `migration.md` para el detalle de qué se archivó y por qué.
+See `migration.md` for what was archived and why.
 
-## Estructura
+## Structure
 
 ```
-<raíz>              ← árbol de upstream, sin mover nada
+<root>              ← upstream tree, nothing moved
   engine/  ref/  filesystem/  public/  common/  3rdparty/  wscript  ...
 
-tools/asset-studio/ ← NUESTRO. Baker offline C++/CMake que produce .mpak
-docs/r3d/        ← NUESTRO. Plan, registro de divergencias, migración
+tools/asset-studio/ ← OURS. Offline C++/CMake baker that produces .mpak
+docs/r3d/           ← OURS. Plan, divergence ledger, migration notes
 ```
 
-El árbol de upstream se mantiene **en su sitio exacto**. Todo lo nuestro vive
-en directorios que upstream no usa (`tools/`, `docs/r3d/`), de modo que
-`git merge upstream/master` nunca conflictúe por layout. Esto no es
-cosmético: es lo que decide si el fork se puede mantener al día o no.
+The upstream tree stays **exactly where it is**. Everything of ours lives in
+directories upstream does not use (`tools/`, `docs/r3d/`), so that
+`git merge upstream/master` never conflicts over layout. This is not
+cosmetic: it is what decides whether the fork can be kept current at all.
 
-> `scripts/` y `Documentation/` YA EXISTEN en upstream. No poner nada nuestro
-> ahí.
+> `scripts/` and `Documentation/` ALREADY EXIST upstream. Put nothing of ours
+> there.
 
 ## Remotes
 
 ```
+origin    git@github.com:mathiasdbo/Resonance3D.git
 upstream  https://github.com/FWGS/xash3d-fwgs.git   (fetch)
-upstream  no-push                                    (push deshabilitado a propósito)
-origin    <repo privado, pendiente>
+upstream  no-push                                    (push disabled on purpose)
 ```
 
-Traer cambios de upstream:
+`origin` is a detached mirror, not a GitHub fork: a fork of a public
+repository is always public and cannot be made private afterwards. The cost is
+that pull requests cannot be opened against upstream from here; the benefit is
+that the repository can stay private. Upstream history is intact, so
+`git log`, `git blame` and cherry-picks all still work.
+
+Pulling upstream changes:
 
 ```bash
 git fetch upstream
-git merge upstream/master        # resolver contra docs/r3d/divergences.md
+git merge upstream/master        # resolve against docs/r3d/divergences.md
 ```
 
-## Reglas del fork
+## Fork rules
 
-Están en `/AGENTS.md`, en la raíz. La regla central invierte lo que decía el
-proyecto Rust: antes había que **replicar** la referencia, ahora **somos** la
-referencia, y lo que hay que hacer es **minimizar y documentar cada
-divergencia**. Toda desviación de upstream va al registro
-(`divergences.md`) el mismo día que se escribe, no después.
+They live in `/AGENTS.md`, at the root. The central rule inverts what the Rust
+project said: there the job was to **replicate** the reference, here we **are**
+the reference, and the job is to **minimise and document every divergence**.
+Any deviation from upstream goes into the ledger (`divergences.md`) the same
+day it is written, not afterwards.
 
-## Estado
+## Status
 
-Nada portado todavía. El árbol es upstream limpio más el baker. El plan por
-fases está en `fork-plan.md`.
+Nothing ported yet. The tree is clean upstream plus the baker. The phased plan
+is in `fork-plan.md`.
