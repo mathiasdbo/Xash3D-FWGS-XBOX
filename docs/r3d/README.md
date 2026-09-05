@@ -23,9 +23,24 @@ See `migration.md` for what was archived and why.
 <root>              ← upstream tree, nothing moved
   engine/  ref/  filesystem/  public/  common/  3rdparty/  wscript  ...
 
+deps/               ← OURS. Pinned SDK submodules (see below)
 tools/asset-studio/ ← OURS. Offline C++/CMake baker that produces .mpak
 docs/r3d/           ← OURS. Plan, divergence ledger, migration notes
 ```
+
+### `deps/` — pinned SDKs
+
+| Path | Repository | Role |
+|---|---|---|
+| `deps/hlsdk` | `mathiasdbo/halflife-updated-xash3d` | Half-Life game code. Carried over from Ferrum56 at the same commit |
+| `deps/hlsdk-opfor` | `mathiasdbo/halflife-op4-updated` | Opposing Force |
+| `deps/hlsdk-bshift` | `mathiasdbo/halflife-bs-updated` | Blue Shift — see the caveat in `fork-plan.md` F0 |
+| `deps/nxdk` | `XboxDev/nxdk` | Xbox toolchain, libc, pbkit. **Upstream, not a fork** — fork it only when a patch is actually needed, then change the URL here |
+
+Xash3D-FWGS normally loads game code as DLLs at runtime, so on PC these are
+only needed to build those DLLs. On Xbox there is no dynamic loading, so the
+game code is compiled into the single static image and these submodules become
+part of the build.
 
 The upstream tree stays **exactly where it is**. Everything of ours lives in
 directories upstream does not use (`tools/`, `docs/r3d/`), so that

@@ -46,3 +46,15 @@
 [submodule "3rdparty/mbedtls/mbedtls"]
 	path = 3rdparty/mbedtls/mbedtls
 	url = https://github.com/FWGS/mbedtls-releases.git
+[submodule "deps/hlsdk"]
+	path = deps/hlsdk
+	url = git@github.com:mathiasdbo/halflife-updated-xash3d.git
+[submodule "deps/hlsdk-opfor"]
+	path = deps/hlsdk-opfor
+	url = https://github.com/mathiasdbo/halflife-op4-updated.git
+[submodule "deps/hlsdk-bshift"]
+	path = deps/hlsdk-bshift
+	url = https://github.com/mathiasdbo/halflife-bs-updated.git
+[submodule "deps/nxdk"]
+	path = deps/nxdk
+	url = https://github.com/XboxDev/nxdk.git

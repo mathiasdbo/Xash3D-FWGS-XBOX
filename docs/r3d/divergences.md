@@ -33,6 +33,7 @@ Preferred forms, from cheapest to most expensive to maintain:
 
 | # | What | Why | Form | Merge risk | Exit |
 |---|------|-----|------|------------|------|
+| 3 | `.gitmodules` — four entries appended, under a new `deps/` directory | The game SDKs and the Xbox toolchain have to be pinned, not assumed present on the machine. `deps/` does not exist upstream, so only the `.gitmodules` file itself is shared | Appended entries, new directory | Low — upstream adds submodules occasionally; the conflict is additive and always resolvable by keeping both sides | None, it is permanent |
 | 2 | `README.md` — replaced | The repository has its own name and identity; the root README is the first thing anyone arriving sees. It carries the credits section and the licence notice, both mandatory in a GPL derivative work | Full replacement | Low — guaranteed conflict on every merge, but always trivial: discard upstream's side | None, it is permanent. The original reads with `git show upstream-master:README.md` |
 | 1 | `.gitignore` — block appended | Upstream's `.gitignore` globally ignores `AGENTS.md` (:367), `CMakeLists.txt` (:68) and `build-*` (:312), which silently kept three of our files out of version control | Appended at the end of the file, with explicit negations | Low — upstream edits this file occasionally, but the conflict would be trivial and always at the end | None, it is permanent |
 

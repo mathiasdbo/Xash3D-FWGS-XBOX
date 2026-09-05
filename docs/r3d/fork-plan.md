@@ -32,8 +32,25 @@ Get the tree compiling with nxdk before changing a line of logic.
   work here**: the mode already exists and is already handled in
   `ref_common.c`, `filesystem_engine.c`, `cl_gameui.c`, `host.c` and
   `lib_common.c`. The option is defined in `scripts/waifulib/xshlib.py:20`.
-- Link the HL SDK statically (the previous project already solved this with
-  the nxdk toolchain and a path that needs no export table).
+- Link the HL SDK statically from `deps/hlsdk` (the previous project already
+  solved this with the nxdk toolchain and a path that needs no export table).
+
+  **Open question, decide before writing the build glue.** The pinned SDKs are
+  forks of the `halflife-updated` family, carried over from Ferrum56, where
+  they were compiled as a Windows DLL and called over FFI. Upstream's README
+  points at [`FWGS/hlsdk-portable`](https://github.com/FWGS/hlsdk-portable)
+  for every non-desktop target, and it is what the Android, iOS and sibling
+  console ports build against — meaning it is the one already known to compile
+  as a static library for `XASH_INTERNAL_GAMELIBS`. Establish which base
+  actually builds under nxdk before committing to either; the answer decides
+  whether the forks carry over or get rebased onto hlsdk-portable.
+
+  **Blue Shift is a known problem.**
+  `Documentation/not-supported-mod-list-and-reasons-why.md:7` states plainly
+  that Blue Shift does not work with the retail SDK because it uses vgui2,
+  which xash3d does not support, and points at `hlsdk-portable`'s `bshift`
+  branch for recreated source. Combined with the null-vgui stub below, Blue
+  Shift should be treated as out of scope for the first playable build.
 - `vgui_support` to a null stub. `engine/client/vgui/vgui.c:345` already
   reports the load failure and continues, so it is not fatal. Single-player
   HL1 barely uses it; it only becomes real work again if multiplayer is
