@@ -388,3 +388,6 @@ build-test/
 !AGENTS.md
 !tools/asset-studio/CMakeLists.txt
 !tools/asset-studio/build-test-package.ps1
+!.claude/
+!.claude/agents/
+!.claude/agents/*.md
