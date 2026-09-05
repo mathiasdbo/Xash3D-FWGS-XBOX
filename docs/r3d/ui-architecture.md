@@ -209,18 +209,166 @@ Shift is not blocked by the SDK, it is blocked by VGUI2. Same wall.
 | Surface backend | **Ours** | The real work, and it is small |
 | Fonts | Delegate to `cl_font.c` | Glue + a scheme mapping table |
 | Scheme font table | **Ours**, baked in `tools/asset-studio` | Data, not code |
-| Gamepad input | **Ours**, modelled on `3rdparty/mainui/menus/Gamepad.cpp` | See §7 |
+| Gamepad navigation | **Ours**, derived from geometry — see §7 | ~150 lines + glue |
+| On-screen keyboard | **Ours**, as a `mainui` window | The only new UI |
 | Game menu | `3rdparty/mainui`, already gamepad-capable | None |
 | VGUI2 | **Ours**, on the same core | A phase of its own |
 
-## 7. Open questions
+## 7. Console navigation
 
-**Input.** VGUI is mouse-driven and the Xbox has no mouse. The choice is a
-virtual cursor driven by the analog stick, or D-pad focus navigation through
-the widget tree, or both. `mainui` already solved this for the menu
-(`menus/Gamepad.cpp`); read it before deciding. Focus navigation is better on
-a TV but needs every panel to declare a sensible tab order, which HL's
-multiplayer panels were never written to do.
+This is the part that decides whether the result feels like a console game or
+a ported desktop program.
+
+### Why neither existing model works
+
+VGUI is mouse-driven: panels receive `cursorMoved`, `mousePressed` and
+`mouseReleased` at screen coordinates. The Xbox has no mouse.
+
+VGUI does ship a focus system, and it is not enough.
+`deps/hlsdk/utils/vgui/include/VGUI_FocusNavGroup.h` is the whole of it:
+
+```cpp
+class VGUIAPI FocusNavGroup {
+protected:
+    virtual void addPanel( Panel *panel );
+    virtual void requestFocusPrev();
+    virtual void requestFocusNext();
+    Dar<Panel*> _panelDar;
+    int         _currentIndex;
+};
+```
+
+A flat array and an index. Prev and next, in **insertion order** — the order
+panels happened to be constructed in, which has no relationship to where they
+sit on screen.
+
+`mainui` is the same shape: a single `m_iCursor` walked forward and backward,
+skipping anything not focusable (`controls/BaseWindow.cpp:53`, rejecting
+`QMF_GRAYED|QMF_INACTIVE|QMF_MOUSEONLY`). It feels right in the menu **only
+because mainui's screens are authored as vertical lists**, so linear order and
+visual order coincide by construction.
+
+Half-Life's panels are not lists. The scoreboard is a table, the team menu is
+a grid of buttons beside a description pane, the spectator panel is a bar of
+controls. Walking them in construction order would send focus jumping around
+the screen. And these panels cannot be rewritten to declare a sensible order:
+there are 7,842 lines of them, they are game code, and every mod ships its
+own.
+
+So the navigation model has to be **derived, not declared**.
+
+### Layer 1 — Directional focus from geometry
+
+Compute the navigation graph from the widgets' rectangles at the moment focus
+moves. No author-declared order, no panel changes.
+
+For a focus move in direction `d` from the focused widget's rect `F`, over
+every focusable widget `W`:
+
+1. Reject `W` unless it lies in the half-plane of `d` relative to `F`'s centre,
+   allowing a small overlap tolerance so widgets that are barely offset still
+   count.
+2. Score it: `primary = distance along d`, `secondary = perpendicular offset
+   between the two rects' projections`, then `score = primary + k * secondary`.
+3. Take the lowest score.
+
+`k` is the alignment bias. Around 2–4 makes focus prefer the widget directly
+in line over a nearer one off to the side, which is what feels correct in
+practice. It is one tunable and it should be a cvar until it is settled on a
+TV.
+
+Edges: if nothing lies in that direction, stay put rather than wrapping —
+wrapping on a 2D layout is disorienting. Wrapping within an explicit list
+container is fine and should be a per-container flag.
+
+Scrolling: if the chosen widget is clipped by an ancestor `ScrollPanel`,
+scroll it into view before giving it focus, otherwise focus lands somewhere
+invisible. `mainui`'s `Scissor.cpp` is the precedent for the clip test.
+
+This is the standard directional-focus model used by television UIs. It is
+maybe 150 lines, it is testable in isolation with a list of rectangles and an
+expected focus order, and it needs to know nothing about VGUI.
+
+### Layer 2 — What can take focus
+
+A widget is focusable if it is visible, enabled, has a non-zero rect, and
+accepts input. Concretely, from the 35 headers in §3: `Button`, `TextEntry`,
+`ScrollBar`, `Slider`, `CheckButton`, and the row widgets inside
+`TablePanel`. Not focusable: `Label`, `ImagePanel`, `TextImage`,
+`MenuSeparator`, decorative `Frame` chrome.
+
+Borrow `mainui`'s escape hatch: an explicit per-widget opt-out, equivalent to
+`QMF_MOUSEONLY`, for the cases the predicate gets wrong. There will be some.
+
+### Layer 3 — Synthesise mouse events at the focus
+
+This is the piece that makes the whole design cheap, and it is worth stating
+plainly: **the gamepad does not get a new input path into the widgets.** It
+moves focus, and then fabricates ordinary VGUI mouse events at the focused
+widget's centre.
+
+| Input | Action |
+|---|---|
+| D-pad, left stick | Directional focus move (Layer 1) |
+| A | `mousePressed(MOUSE_LEFT)` + `mouseReleased` at the focus rect's centre |
+| B | Back: close the top `Frame`, or pop the panel stack |
+| Left/right shoulder | Cycle top-level panels and tabs |
+| Right stick | Free virtual cursor, absolute |
+| Left stick click | Toggle virtual-cursor mode |
+| Start | Toggle the panel itself (scoreboard, etc.) |
+
+Every existing Half-Life panel then works **unmodified**, because from its
+side nothing changed: it received a click at a coordinate inside itself, which
+is exactly what it was written to handle.
+
+The right-stick virtual cursor is not a fallback for a broken design, it is
+the answer to the cases directional focus genuinely cannot express — dragging
+a `Slider` thumb, or a panel whose hit regions are not widgets at all. Keep it,
+and keep it out of the way.
+
+### Text entry
+
+`TextEntry` needs a keyboard the console does not have. The hook already
+exists: `vgui_api.h:184` declares
+
+```c
+void (*EnableTextInput)( qboolean enable, qboolean force );
+```
+
+The engine already calls it when a text field takes focus. On Xbox that opens
+an on-screen keyboard of ours, which is the **only genuinely new UI** this
+design requires. Build it as a `mainui` window rather than a VGUI panel: it
+has to serve the console command line and the menu too, both of which are
+outside VGUI.
+
+### Television specifics
+
+- **Title-safe area.** Assume 90 % and lay out inside it. Half-Life's panels
+  are sized for a monitor and will clip on a CRT otherwise.
+- **Focus must be unmistakable.** A colour change is not enough at three
+  metres; draw a highlight border or a scale/glow on the focused rect. This is
+  the single biggest perceived-quality difference between a console UI and a
+  ported desktop one.
+- **Minimum legible text.** At 640×480 on a CRT, retail's smaller scheme fonts
+  will be unreadable. This interacts with the scheme font table in §4 — the
+  bake is where a minimum size gets enforced, not the renderer.
+
+### What we build
+
+| Piece | Where | Size |
+|---|---|---|
+| Directional focus solver | Ours, standalone and unit-testable | ~150 lines |
+| Focusability predicate | Ours, over freevgui's widget types | Small |
+| Gamepad → mouse synthesis | Ours, in the Surface/input backend | Small |
+| Scroll-into-view | Ours, using freevgui's clip rects | Small |
+| On-screen keyboard | Ours, as a `mainui` window | The real work |
+| Focus highlight | Ours, in the Surface backend | Small |
+
+None of it touches game code, and none of it touches freevgui's widget
+classes. It sits between the input backend and the panel tree, which is why it
+can be built and tested before either `ref/nv2a` or freevgui is finished.
+
+## 8. Open questions
 
 **Memory.** VGUI's `Dar` is a growing dynamic array and the panel tree
 allocates freely. Under the F2 budget this needs a cap and a pool, and the
