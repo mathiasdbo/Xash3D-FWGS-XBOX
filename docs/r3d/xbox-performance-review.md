@@ -79,6 +79,18 @@ are `qsort`ed by `R_TransEntityCompare` (`gl_rmain.c:522`). Material batching
 of the world exists. What Ironwail adds is a global sort key across entity
 types and a sort that does not allocate — worthwhile, incremental.
 
+**Qualified 2026-09-06, on a second look:** that VBO path is **off by
+default** — `CVAR_DEFINE( r_vbo, "gl_vbo", "0", …, "draw world using VBO
+(known to be glitchy)" )` at `gl_opengl.c:34`. The default path is the
+texture-chain walk with `pglBegin` per polygon (46 `pglBegin` sites across
+`ref/gl`) and a **second pass** for lightmaps; the single-pass multitexture
+with `GL_RGB_SCALE_ARB 2` (`:2436`, `:2487`) lives inside the VBO path only.
+So "the reference already batches" is true of code upstream itself does not
+trust, and the honest count is four items already present plus one present
+but disabled. The conclusion for the NV2A is unchanged and slightly stronger:
+batching is mandatory, upstream's own attempt is not a base to port, and the
+baked per-cluster, per-material lists are the right shape.
+
 The genuinely NV2A-specific cost the document does not name: **on pbkit, every
 draw call and every state change is the CPU writing DWORDs into write-combined
 memory.** There is no driver batching anything. Fewest submissions wins, which
@@ -173,7 +185,7 @@ already contain, with the phase that owns each:
 | Item | Status in the tree | Owner |
 |---|---|---|
 | Sign-bit frustum culling | **Present** (`gl_frustum.c:119`) | — |
-| World batching by material | **Present** (`R_GenerateVBO`) | — |
+| World batching by material | **Present but off by default** — `r_vbo` defaults to `"0"`, "known to be glitchy" (`gl_opengl.c:34`) | Baker stage; do not port `R_DrawVBO` |
 | Translucent entity sort | **Present** (`gl_rmain.c:522`) | — |
 | Per-vertex studio lighting | **Present**, 4 lights (`gl_studio.c:25`) | X9 raises to 8 |
 | Lightmap-space dlights | **Present**, CPU + sub-upload | X9: linear vs swizzled — measure |
@@ -192,9 +204,10 @@ already contain, with the phase that owns each:
 | SSE intrinsics | Absent; no SIMD anywhere in the tree | After a hardware profile names a loop |
 | Under-culling vs `R_CullSurface` backface | Reference culls per face (`gl_cull.c:83-111`) | X11, measure both |
 
-Nine of eighteen are baker work. The plan has no baker phase. Five of the
-eighteen were already in the tree before this project started, which is
-the cost of reading Ironwail's feature list instead of `ref/gl`.
+Nine of eighteen are baker work. The plan has no baker phase. Four of the
+eighteen were already in the tree before this project started, and a fifth
+(world batching) is present but disabled as glitchy — which is the cost of
+reading Ironwail's feature list instead of `ref/gl`.
 
 ---
 
