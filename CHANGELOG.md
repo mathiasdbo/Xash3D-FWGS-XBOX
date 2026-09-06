@@ -25,13 +25,77 @@ in xemu and prints. That is not met yet — see "Still open" below.
   Implements `open`/`read`/`write`/`lseek`/`close`/`fsync`/`ftruncate`,
   `stat`/`fstat`/`mkdir`/`unlink`/`rmdir`/`access`, and
   `opendir`/`readdir`/`closedir`, over `CreateFileA` and friends.
-- **`filesystem/` compiles for Xbox** — 12 of 12 translation units.
-- **`tools/xbox-env.sh`** and **`tools/xbox-cc.sh`** — the build recipe and a
-  single-file compile harness.
+- **`compat/xbox/xbox_win32_ext.c`** — the Win32 surface nxdk omits but the
+  engine calls: `GetModuleFileNameA/W` off `XeImageFileName`, a real UTF-8
+  `MultiByteToWideChar`/`WideCharToMultiByte` pair (surrogate pairs, U+FFFD on
+  malformed input, `NULL` destination for sizing), `utime`, `GetUserNameA/W`,
+  `GetModuleHandleA/ExA/ExW`, and `localtime_s`/`gmtime_s` in MSVC's argument
+  order rather than C11's.
+- **184 of 218 translation units compile for Xbox.** Reproduce with
+  `MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-sweep.sh engine filesystem
+  public common compat`.
+
+  The 34 failures, classified by tracing `engine/wscript:173-194` rather than
+  by reading directory names:
+
+  | Group | Count | Selected by the build? |
+  |---|---|---|
+  | Networking — `cl_steam.c`, `net_chan.c`, `net_ws.c`, `xrcon.c`, `common/http/`×2 | 6 | Yes. Parked deliberately, both routes priced |
+  | `platform/posix/` — `sys_posix.c`, `con_posix.c` | 2 | Yes, unless `wscript:181`'s denylist is widened. See below |
+  | `platform/{android,apple,dos,irix,linux,nswitch,psvita,sdl1,sdl3,win32}` and `misc/{kmalloc,sbrk}.c` | 26 | No, under any configuration this target would choose |
+
+  An earlier revision of this entry said "29 are platform backends for targets
+  that are not Xbox" and put `platform/misc/lib_static.c` among them. That was
+  wrong, and wrong in the way that matters — see **Fixed**.
+- **`tools/xbox-env.sh`**, **`tools/xbox-cc.sh`**, **`tools/xbox-sweep.sh`** and
+  **`tools/gen-library-tables.sh`** — the build recipe, a single-file compile
+  harness, a whole-directory sweep that judges by the compiler's exit status,
+  and the generator for the one build artifact waf would otherwise produce.
+- **`.claude/workflows/pr-review.js`** — five review lenses (posix, xbox,
+  upstream, build, perf) selected from the diff, each finding then put to three
+  adversarial refuters that default to rejecting it. Required on every PR; see
+  `AGENTS.md`.
 - **`.gitattributes`** extended so our text files normalise to LF.
 
 ### Fixed
 
+- **Four undefined symbols the engine needs to load the game at all.**
+  `-DXASH_STATIC_LIBS=1` sends `common/defaults.h:102-105` down the
+  `LIB_STATIC` branch, which makes `platform/win32/lib_win.c` compile to an
+  empty object and leaves `platform/misc/lib_static.c` as the only definition
+  of `COM_LoadLibrary`, `COM_FreeLibrary`, `COM_GetProcAddress` and
+  `COM_FunctionFromName`. That file could not compile: it includes
+  `generated_library_tables.h`, which waf writes at
+  `scripts/waifulib/xshlib.py:112` and the Xbox build bypasses waf entirely.
+  `tools/gen-library-tables.sh` now generates it into `.sweep/gen/` rather than
+  into the tree, so it cannot go stale against the library list — which is
+  empty today and gets `client` and `server` in X2/X3.
+
+  The X1 link probe could not have caught this, because `lib_static.o` was not
+  in the object set it linked.
+- **`stat()` cost five kernel transitions per probe where one does.** It called
+  `GetFileAttributesA`, then opened the file with `CreateFileA` +
+  `GetFileInformationByHandle` + `CloseHandle` just for size and mtime.
+  `GetFileAttributesExA` returns attributes, size and all three timestamps from
+  a single `NtQueryFullAttributesFile` (`deps/nxdk/lib/winapi/filemanip.c:37`).
+  This is the hot path: `FS_FindFile_DIR` (`filesystem/dir.c:396`) probes every
+  plain searchpath on every file lookup.
+- **`tools/xbox-sweep.sh` deleted the cause of its own failures.** It kept only
+  lines matching `error:`, so a broken toolchain — `set -u` on an unset
+  `NXDK_DIR`, or clang off `PATH` — reported `FAIL <file>   0 errors` for every
+  file, an empty summary, a zero-byte log and exit 0. Indistinguishable from a
+  real sweep. Unexplained failures now go to `.sweep/unexplained.txt` verbatim,
+  are counted separately, and a sweep with no successes and no diagnostics
+  exits 2. Third time this tool has reported a false result.
+- **`.claude/workflows/pr-review.js` reported outages as clean reviews.** A null
+  scope step collapsed lens selection to the one lens whose predicate is
+  `() => true`, under a log line shaped like a normal run; and `parallel()`
+  resolving dead refuters to `null` made "no refuter answered" arithmetically
+  identical to "every refuter refuted it". Scope now returns a schema-validated
+  path list and throws when empty, skipped lenses are logged by name, findings
+  with fewer than two answering refuters come back as `UNVERIFIED` instead of
+  being dropped, and a run where nothing could be verified throws rather than
+  returning `confirmed: []`.
 - `filesystem/sys.c` calls `lseek` and `dup` without including `<unistd.h>`,
   relying on it arriving transitively. Correct everywhere, not just here —
   divergence #7, and a candidate to send upstream.
@@ -42,6 +106,27 @@ in xemu and prints. That is not met yet — see "Still open" below.
   `#if XASH_WIN32 && !XASH_XBOX`. They use the MSVC wide-char CRT, which nxdk
   does not have, and each already had a POSIX `#else` branch. Divergence #6.
 
+- `engine/common/system.c`: `Sys_WaitForQuit` pumped a message queue that does
+  not exist and would have hung; `Sys_CanRestart` joins iOS in returning false,
+  because nxdk has no `exec` and `XReboot()` returns to the dashboard rather
+  than relaunching the title. Divergence #7b.
+- `engine/client/identification.c`: five blocks widened. The machine
+  fingerprint is built from the Windows registry; the file-based path the
+  non-Windows targets already use is correct here. Divergence #8.
+- `engine/platform/sdl2/vid_sdl2.c`: four blocks widened. Window icons need an
+  `HWND`, and nxdk's SDL has no window manager. Divergence #9.
+
+### Measured
+
+- **X1's duplicate-symbol risk, retired at ten symbols.** Linking all 157
+  non-networking objects with the real `nxdk-link` flags produces ten
+  collisions, every one of them the same boundary: `filesystem/filesystem.c`
+  defines the FS API and `engine/common/filesystem_engine.c` re-exports the
+  same names as wrappers. Ten names is `llvm-objcopy --redefine-sym` territory,
+  and `xshlib.py` is bypassed entirely on Xbox. A first run said 21 — eleven of
+  those were `_main`, from unit-test programs that have no business in an
+  engine link. Recorded because the larger number is the sort that gets quoted.
+
 ### Still open in X0
 
 - `engine/platform/xbox/`, and whether `engine/platform/sdl2/` can host it.
@@ -49,5 +134,11 @@ in xemu and prints. That is not met yet — see "Still open" below.
   ordering, because a console has no stdout and silent failure is expensive.
 - `DEST_OS`, `VIDEO_XBOX`/`INPUT_XBOX` in `common/backends.h`, the
   `common/defaults.h` branch.
-- `public/miniz.c`, which does not compile for nxdk.
+- Root-directory detection: `SDL_GetBasePath` returns `NULL` on nxdk and there
+  is no `getcwd`, so the engine has no way to find `valve/` yet.
+- Networking — six translation units, parked after pricing both routes.
+  Upstream's `XASH_NO_NETWORK` stub is not self-contained (it declares the
+  socket structs opaquely, and `net_ws.c` uses them by value), and the lwIP
+  route needs a `lwipopts.h` plus an `arch/cc.h` port layer for code X3
+  deletes. Completing upstream's stub and sending it back is the right fix.
 - XBE packaging from this tree rather than from an nxdk sample.

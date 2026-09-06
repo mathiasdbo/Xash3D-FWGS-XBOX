@@ -136,6 +136,37 @@ rather than a prerequisite for us.
   network logging, so failures on hardware are readable.
 - XBE packaging with `cxbe`.
 
+
+### Networking is parked, deliberately
+
+Six files — `net_ws.c`, `net_chan.c`, `xrcon.c`, `cl_steam.c`, the two
+`http/` files — do not compile, and are being left that way.
+
+Both routes were priced:
+
+**`XASH_NO_NETWORK=1`** selects `engine/platform/stub/net_stub.h`
+(`net_ws_private.h:17`), which is upstream's own no-network mode and the
+direction X3 takes anyway. It is not self-contained: the stub declares the
+socket structures opaquely, while `net_ws.c` uses `sockaddr_in6`,
+`sockaddr_storage` and `in6_addr` **by value**. On Linux the real headers
+are present regardless of the flag, so upstream never hits this. On a
+platform with no BSD headers at all, it does not build.
+
+**Routing through nxdk's lwIP** would give the real types — it vendors lwIP
+with a `compat/posix` layer carrying exactly those structs. But nxdk ships
+no `lwipopts.h` and no `arch/cc.h`; its `lib/net/Makefile` compiles the
+sources and leaves the port layer to the application. Writing one is
+perhaps a hundred lines, and it would be written for code X3 deletes.
+
+So: parked, not forgotten. Two things worth doing later, in this order:
+
+1. **Complete upstream's stub** so `XASH_NO_NETWORK` is self-contained.
+   That is a small, generic patch that helps any platform without BSD
+   headers, and it is the kind of thing FWGS would plausibly take. It also
+   makes X3's trim trivial instead of surgical.
+2. Only if the console build ever wants real networking, write the lwIP
+   port layer.
+
 **Exit:** an XBE that boots in xemu, prints, and exits cleanly.
 
 ## X0.5 — Root directory detection
@@ -146,9 +177,97 @@ the root directory and the engine `Sys_Error`s before X2 begins. A small
 patch, but a hard gate, and it lived nowhere until now.
 See `x0-probe-results.md` §1.5.
 
-**Exit:** the engine finds its game directory on Xbox.
+### The exit above is NOT sufficient. Found in review, 2026-09-06.
+
+Finding the root directory is half of it. `FS_InitStdio` then mounts
+everything through **relative** paths, and nxdk has no current directory to
+resolve them against:
+
+- `FS_SetCurrentDirectory` is one of the ten `!XASH_XBOX` widenings in
+  divergence #6, so Xbox falls into `filesystem/sys.c:511`, which prints
+  "not implemented, ignoring..." and **returns true**. `compat/xbox`'s
+  `chdir()` — which fails honestly with `ENOSYS` — is never reached. The one
+  place in the ledger where "compat/xbox supplies what that branch needs" is
+  false.
+- `FS_InitStdio` then uses the literal `"./"`: `FS_ValidateDirectories` at
+  `searchpath.c:623`, `FS_AddGameDirectory` at `:649`, `listdirectory` at
+  `:677`.
+- `FS_AddGameHierarchy` builds every real searchpath relatively too —
+  `"valve/"` (`:378`), `_downloaded` (`:374`), `_hd` (`:386`), `_addon`
+  (`:392`), `_lv` (`:398`), the language dir (`:404`), `custom` (`:410`).
+  `fs_rootdir` is consumed at `dll.c:78,83`, `gameinfo.c:487` and
+  `searchpath.c:507,851,952`, and **never to prefix a searchpath**.
+
+Every nxdk path API resolves against `ObDosDevicesDirectory()` with no CWD in
+the stack: `CreateFileA` (`fileio.c:32`), `GetFileAttributesA`
+(`filemanip.c:26`), `FindFirstFileA` (`findfile.c:74`). So `opendir("./")`
+builds `".\*"`, nxdk splits it into dirPath `".\"` + mask `"*"`
+(`findfile.c:51-63`) and `NtOpenFile`s `"."` as a DOS device name, which it is
+not. `STATUS_OBJECT_NAME_NOT_FOUND`.
+
+The consequence is worse than "no pak0.pak": `FS_ParseGameInfo` never reads
+`valve/gameinfo.txt`, `FI.numgames` stays 0, and the engine has no game to
+run. Handing it an absolute `rootdir` does not fix it, because the searchpaths
+built from that point on are relative regardless.
+
+**Two ways out, and the choice belongs to this phase:**
+
+1. **Resolve a process-wide CWD inside `r3d_native_path`.** One place, no
+   upstream edit, and `compat/xbox/xbox_posix_io.c:615-617` currently argues
+   against it ("fail rather than pretending to succeed"). That argument was
+   written about `chdir` as an API, not about path resolution, and it is worth
+   revisiting: an emulated CWD is a lie only if something can observe the
+   difference, and on a platform with exactly one process nothing can.
+2. **Make `filesystem/` prefix searchpaths with `fs_rootdir`.** Correct
+   everywhere, larger diff, and it touches a file upstream changes often.
+
+Route 1 is smaller and reversible; route 2 is the one that could go upstream.
+Neither is written yet.
+
+**Exit:** the engine finds its game directory on Xbox **and mounts it** —
+`FI.numgames > 0` and `pak0.pak` opens.
 
 ## X1 — Static linking proven
+
+### MEASURED, 2026-09-06: ten duplicate symbols
+
+The measurement this phase existed to demand has been run. 157 objects —
+every non-networking, non-test translation unit in `engine/`,
+`filesystem/`, `public/`, `common/` and `compat/` — linked with the exact
+`nxdk-link` flags plus `-errorlimit:0`, **no `ld -r`, no objcopy**:
+
+```
+_FI              _FS_LoadFile       __Mem_Alloc
+_FS_Close        _FS_LoadGameInfo   __Mem_Free
+_FS_FindLibrary  _FS_Open
+_FS_LoadDirectFile  _FS_Search
+```
+
+**Ten.** All of them one boundary: the filesystem module defines the FS API,
+and `engine/common/filesystem_engine.c` re-exports the same names as thin
+wrappers. `_FI` is the known struct-versus-pointer collision
+(`filesystem/filesystem.c:30` against `filesystem_engine.c:41`), and the
+`_Mem_*` pair is `zone.c` against the filesystem's own allocator.
+
+A first run reported 21. Eleven of those were `_main`, from
+`filesystem/tests/` and `public/tests/` — unit-test programs that have no
+business in an engine link at all. Worth recording because it is the sort of
+number that gets quoted: the real figure is ten, and the difference was a
+glob, not a problem.
+
+**This is design-stage option 1 + 4, the cheapest branch.** Ten names is
+`llvm-objcopy --redefine-sym` territory — the one symbol option that works
+on COFF — or ten `#define`s. `xshlib.py` is bypassed entirely on Xbox: no
+`ld -r`, no `objcopy -G`, no GNU binutils in the toolchain, none of the
+COMDAT-folding hazard the earlier probe found. The largest risk this project
+recorded is retired, and it was retired by measuring rather than by
+building the machinery to survive it.
+
+**Not yet known:** the link reported zero undefined symbols, which cannot be
+true — no SDL library, no game module and no nxdk libraries were on the
+command line. lld almost certainly stopped at the duplicates. The undefined
+picture is a separate measurement, and it belongs to the real link, not this
+probe.
 
 **Still the gate, no longer the top risk.** Downgraded from "this may not
 work at all" to "three known fallbacks, one needing no new tools" — but the

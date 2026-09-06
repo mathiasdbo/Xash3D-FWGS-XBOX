@@ -37,6 +37,23 @@ anything else here changes.
 
 static HANDLE r3d_fds[R3D_MAX_FDS];
 
+/* A borrowed slot holds a handle this layer did not open and must not close.
+ * Only fileno() creates one: pdclib owns that handle and closes it in fclose,
+ * so calling CloseHandle here as well would close a live file out from under
+ * the FILE* - and the descriptor is then reused, so the second close would hit
+ * an unrelated object.
+ *
+ * r3d_borrowed_file records WHICH stream a borrowed slot came from, and is the
+ * other half of fileno's lookup key. Keying on the handle alone would be a
+ * cache over a value the kernel recycles: pdclib closes the handle in fclose
+ * without telling us, the slot survives with a dangling value, and the next
+ * CreateFileA can be handed that exact number - at which point a fileno() for
+ * an unrelated stream would match the stale slot. Requiring the FILE* to match
+ * too closes that: the slot is returned only when it still describes this
+ * stream's current handle, which is the invariant write() actually needs. */
+static char   r3d_borrowed[R3D_MAX_FDS];
+static FILE  *r3d_borrowed_file[R3D_MAX_FDS];
+
 #define FD_VALID( fd ) \
 	(( fd ) >= R3D_FIRST_FD && ( fd ) < R3D_MAX_FDS && r3d_fds[( fd )] != NULL )
 
@@ -103,10 +120,12 @@ static int r3d_errno_from_win32( DWORD err )
 
 /*
 ====================
-r3d_alloc_fd
+r3d_take_fd / r3d_alloc_fd
+
+Two variants, differing only in who owns the handle when the table is full.
 ====================
 */
-static int r3d_alloc_fd( HANDLE h )
+static int r3d_take_fd( HANDLE h )
 {
 	int fd;
 
@@ -119,9 +138,21 @@ static int r3d_alloc_fd( HANDLE h )
 		}
 	}
 
-	CloseHandle( h );
 	errno = EMFILE;
 	return -1;
+}
+
+/* Owning variant: on exhaustion the handle has no other owner, so it is closed
+ * rather than leaked. fileno() must NOT use this - the handle it registers
+ * belongs to a live FILE. */
+static int r3d_alloc_fd( HANDLE h )
+{
+	int fd = r3d_take_fd( h );
+
+	if( fd < 0 )
+		CloseHandle( h );
+
+	return fd;
 }
 
 /*
@@ -274,7 +305,13 @@ int close( int fd )
 {
 	if( !FD_VALID( fd )) { errno = EBADF; return -1; }
 
-	CloseHandle( r3d_fds[fd] );
+	/* A borrowed handle belongs to pdclib's FILE. Release the slot, leave the
+	 * handle alone; fclose will close it. */
+	if( !r3d_borrowed[fd] )
+		CloseHandle( r3d_fds[fd] );
+
+	r3d_borrowed[fd] = 0;
+	r3d_borrowed_file[fd] = NULL;
 	r3d_fds[fd] = NULL;
 	return 0;
 }
@@ -335,9 +372,7 @@ int stat( const char *path, struct stat *st )
 {
 	char   native[MAX_PATH];
 	size_t len;
-	DWORD  attr;
-	HANDLE h;
-	BY_HANDLE_FILE_INFORMATION info;
+	WIN32_FILE_ATTRIBUTE_DATA fad;
 
 	if( !st || !r3d_native_path( path, native, sizeof( native )))
 	{
@@ -354,15 +389,24 @@ int stat( const char *path, struct stat *st )
 	while( len > 1 && native[len - 1] == '\\' && native[len - 2] != ':' )
 		native[--len] = '\0';
 
-	/* GetFileAttributesA, not FindFirstFileA. The find API treats the last
-	 * path component as a wildcard PATTERN rather than a name, and nxdk's
-	 * implementation of that handling is its own hazard
-	 * (deps/nxdk/lib/winapi/findfile.c:51-72). It also costs an NtOpenFile on
-	 * the parent plus a directory enumeration per probe, on the hot path of
-	 * every file lookup - this is a plain attribute query. */
-	attr = GetFileAttributesA( native );
-
-	if( attr == INVALID_FILE_ATTRIBUTES )
+	/* GetFileAttributesExA answers all of it in ONE kernel call:
+	 * NtQueryFullAttributesFile returns attributes, size and all three
+	 * timestamps together (deps/nxdk/lib/winapi/filemanip.c:37-68).
+	 *
+	 * This function used to open the file to get size and mtime -
+	 * GetFileAttributesA, then CreateFileA + GetFileInformationByHandle +
+	 * CloseHandle, five kernel transitions where one does. That is the hot path
+	 * and not by a little: FS_FindFile_DIR (filesystem/dir.c:396) probes every
+	 * plain searchpath on every file lookup, and loading a map does that once
+	 * per searchpath per referenced file, on a 733 MHz CPU behind an IDE bus.
+	 * The old comment right above rejected FindFirstFileA for costing "an
+	 * NtOpenFile on the parent plus a directory enumeration per probe" and then
+	 * did something more expensive than what it rejected.
+	 *
+	 * Not FindFirstFileA, still: it treats the last path component as a
+	 * wildcard PATTERN rather than a name, and nxdk's handling of that is its
+	 * own hazard (deps/nxdk/lib/winapi/findfile.c:51-72). */
+	if( !GetFileAttributesExA( native, GetFileExInfoStandard, &fad ))
 	{
 		errno = r3d_errno_from_win32( GetLastError());
 		return -1;
@@ -371,35 +415,20 @@ int stat( const char *path, struct stat *st )
 	memset( st, 0, sizeof( *st ));
 	st->st_nlink = 1;
 
-	if( attr & FILE_ATTRIBUTE_DIRECTORY )
+	if( fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
 	{
-		/* A directory has no size or meaningful timestamps here, and opening
-		 * one to ask would need FILE_FLAG_BACKUP_SEMANTICS. Callers only test
-		 * S_ISDIR on this path (FS_SysFolderExists, sys.c:294-306). */
+		/* Callers only test S_ISDIR on this path (FS_SysFolderExists,
+		 * sys.c:294-306); a size for a directory would be meaningless. */
 		st->st_mode = S_IFDIR | S_IRWXU;
 		return 0;
 	}
 
-	st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
+	st->st_mode  = S_IFREG | S_IRUSR | S_IWUSR;
+	st->st_size  = ( off_t )fad.nFileSizeLow;
+	st->st_mtime = r3d_filetime_to_time_t( &fad.ftLastWriteTime );
+	st->st_atime = st->st_mtime;
+	st->st_ctime = st->st_mtime;
 
-	/* Size and mtime need the file itself. If it cannot be opened - in use,
-	 * say - report what is known rather than failing a call that already
-	 * proved the file exists. */
-	h = CreateFileA( native, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
-
-	if( h == INVALID_HANDLE_VALUE )
-		return 0;
-
-	if( GetFileInformationByHandle( h, &info ))
-	{
-		st->st_size  = ( off_t )info.nFileSizeLow;
-		st->st_mtime = r3d_filetime_to_time_t( &info.ftLastWriteTime );
-		st->st_atime = st->st_mtime;
-		st->st_ctime = st->st_mtime;
-	}
-
-	CloseHandle( h );
 	return 0;
 }
 
@@ -749,3 +778,109 @@ int _mkdir( const char *path )                   { return mkdir( path, 0777 ); }
 int _rmdir( const char *path )                   { return rmdir( path ); }
 int _access( const char *path, int mode )        { return access( path, mode ); }
 int _dup( int fd )                               { return dup( fd ); }
+
+
+/*
+====================
+fileno
+
+pdclib keeps the OS handle in its FILE, at `handle`
+(deps/nxdk/lib/pdclib/include/pdclib/_PDCLIB_int.h:297), but exposes no fileno.
+
+An earlier version of this returned that handle raw, with a comment claiming
+the only caller "passes it straight to isatty-style checks and never to read()
+or close()". Both halves were false. There is no isatty anywhere in engine/,
+and engine/common/sys_con.c:126 stores the result in s_ld.logfileno and then
+passes it to write() at :251 and :257 - resolved through compat/xbox/io.h to
+the write() above, which treats its argument as an index into r3d_fds.
+
+An NT handle is not a descriptor index. Small handles land inside [3, 64) and
+would have written console output into whatever unrelated file occupied that
+slot; larger ones fail FD_VALID and the log body vanishes silently, because
+both call sites discard the error. Only the header and footer, which go through
+pdclib's FILE, would have appeared.
+
+It was latent rather than live - nxdk's crt0 passes argc = 0
+(deps/nxdk/lib/pdclib/platform/xbox/crt0.c:42-43), so Sys_CheckParm can never
+match -log - but a console port wants argument injection, and PSVita already
+has exactly that at engine/common/launcher.c:39-43. The trap would have sprung
+the day someone added the Xbox branch.
+
+So this registers the handle properly and returns a real descriptor. The slot
+is marked BORROWED: pdclib owns that handle and will close it in fclose, so
+close() must release the slot without touching the handle. See r3d_borrowed.
+
+Known bound, not a bug to fix here: the caller does not balance this. Sys_CloseLog
+(sys_con.c:166) calls fclose and drops the FILE*, but never close()s the
+descriptor, so the slot stays occupied with a handle pdclib has closed. It is
+bounded by the number of log opens - one, in practice - and it is unreachable,
+because sys_con.c:338 gates every write on s_ld.logfile being non-NULL. The
+stale value cannot be mistaken for a live one either: fileno's lookup key
+includes the FILE*, so a recycled handle number alone will not match it.
+
+This is the second time in this file that a confidently justified comment
+described a caller that does not exist. See docs/r3d/lessons.md.
+====================
+*/
+int fileno( FILE *stream )
+{
+	HANDLE h;
+	int    fd;
+
+	if( !stream ) { errno = EBADF; return -1; }
+
+	h = ( HANDLE )stream->handle;
+
+	/* Already registered for THIS stream, and still describing its current
+	 * handle? Then hand back the same descriptor rather than consuming a slot
+	 * per call. Both halves of the key are needed - see r3d_borrowed_file. */
+	for( fd = R3D_FIRST_FD; fd < R3D_MAX_FDS; fd++ )
+	{
+		if( r3d_borrowed[fd] && r3d_borrowed_file[fd] == stream && r3d_fds[fd] == h )
+			return fd;
+	}
+
+	/* r3d_take_fd, not r3d_alloc_fd: on exhaustion the owning variant closes
+	 * the handle, and this one belongs to pdclib's FILE. */
+	fd = r3d_take_fd( h );
+
+	if( fd >= 0 )
+	{
+		r3d_borrowed[fd] = 1;
+		r3d_borrowed_file[fd] = stream;
+	}
+
+	return fd;
+}
+
+
+/*
+====================
+_fseeki64 / _ftelli64
+
+MSVC's 64-bit stdio offsets. 3rdparty/vorbis reaches for them under _WIN32,
+which is true here.
+
+**These are 32-bit underneath.** pdclib's fseek and ftell take and return long,
+which is 32 bits on this target, so files above 2 GB cannot be addressed. That
+is not a limitation worth engineering around: the Xbox's media is a DVD or a
+hard disc partition far below that, and FATX caps a single file at 4 GB anyway.
+Recorded so nobody later assumes the 64 in the name is real.
+====================
+*/
+int _fseeki64( FILE *stream, long long offset, int origin )
+{
+	if( offset > 0x7FFFFFFFLL || offset < -0x80000000LL )
+	{
+		errno = EINVAL;
+		return -1;
+	}
+
+	return fseek( stream, ( long )offset, origin );
+}
+
+long long _ftelli64( FILE *stream )
+{
+	long pos = ftell( stream );
+	return ( pos < 0 ) ? -1LL : ( long long )pos;
+}

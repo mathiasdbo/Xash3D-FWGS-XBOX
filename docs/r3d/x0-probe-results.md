@@ -218,3 +218,67 @@ IRQ contention is a non-issue for this shape: pbkit takes IRQ 3 (`pbkit.c:46`), 
 **6. Does the C++ multi-TU hijack actually bite `3rdparty/mainui`?** *Blocks X6 only, and only if the binutils route is chosen.* Two reviewers reproduced it on synthetic modules; `3rdparty/mainui` is an uninitialized submodule here so it has never been tried on real code. **Experiment:** after item 1 decides the mechanism, if it is `ld -r` + `objcopy -G`, clone mainui, run the pipeline, and assert with `llvm-nm` that no symbol appears as both `U` and a lowercase local before linking.
 
 **Not worth chasing yet:** exact peak RSS on hardware (derivable to ±10% from the allocation sites); XBE header overhead (measured at a flat 8-12 KB, irrelevant against 64 MB); the `SDL_DISABLE_JOYSTICK_INIT_DELAY` 500 ms boot cost (`SDL_xboxjoystick.c:192-200`) — a boot-time annoyance, not a design question; the SDL event-queue high-water mark (`SDL_MAX_QUEUED_EVENTS 65535`, `SDL_events.c:37`), which only matters if the engine stops pumping, and it does not.
+---
+
+## 7. MEASURED, 2026-09-06: what `DEST_OS` actually costs, on both branches
+
+`DEST_OS` was on the X0 checklist as a value to pick. It is not a value to
+pick, it is a fork with a measured price on each side, and both sides cost
+something. `engine/wscript:173-194` selects platform sources like this:
+
+```python
+source += bld.path.ant_glob('platform/%s/*.c' % bld.env.DEST_OS)   # :173
+if bld.env.DEST_OS not in ['win32', 'dos']:
+    source += bld.path.ant_glob('platform/posix/*.c')               # :181
+if bld.get_define('XASH_STATIC_LIBS'):
+    source += ['platform/misc/lib_static.c']                        # :194
+```
+
+**`DEST_OS = win32`** pulls in `platform/win32/*.c`, all three of which fail:
+
+| File | Needs | In nxdk |
+|---|---|---|
+| `sys_win.c` | `shellapi.h` (`ShellExecute`) | No |
+| `crash_win.c` | `dbghelp.h`, unconditionally — `:19` hardcodes `#define DBGHELP 1` and `:27` includes it with no `XASH_CRASHHANDLER` guard | No |
+| `con_win.c` | `SetConsoleTextAttribute`, `FOREGROUND_*`, `ShowWindow`, `SW_SHOW`/`SW_HIDE` | No |
+
+**`DEST_OS = xbox`** skips those, but `:181`'s condition is a denylist rather
+than an allowlist, so it pulls in `platform/posix/*.c` instead — and both of
+those fail too: `sys_posix.c` on `execvp`, `sigaction` and `pid_t`,
+`con_posix.c` on `sys/select.h`.
+
+**So `DEST_OS = xbox` plus one word.** Widening `:181` to
+`['win32', 'dos', 'xbox']` is a single-token edit in an upstream file, in the
+same idiom as the guards already in the ledger, and it is the smaller of the
+two costs — three broken files against two, and the win32 ones would have to be
+`#ifdef`'d individually rather than excluded wholesale. It also matches what
+the file already does for every other console: PSVita and NSwitch are in
+`DEST_OS` and get their own directories.
+
+### The one that was actually claimed, and broken
+
+`platform/misc/lib_static.c` is not a platform backend for some other target,
+which is what an earlier revision of the CHANGELOG called it. `:194` selects it
+on `XASH_STATIC_LIBS`, which `tools/xbox-cc.sh` defines, and
+`common/defaults.h:102-105` then sets `XASH_LIB = LIB_STATIC` — which makes
+`platform/win32/lib_win.c` compile to an **empty object**, since its guard is
+`XASH_LIB == LIB_WIN32`.
+
+That leaves `lib_static.c` as the only definition of `COM_LoadLibrary`,
+`COM_FreeLibrary`, `COM_GetProcAddress` and `COM_FunctionFromName` — and it
+could not compile, because `:27` includes `generated_library_tables.h`, which
+waf writes at `scripts/waifulib/xshlib.py:112` and the Xbox build bypasses waf
+entirely.
+
+**Four undefined symbols the engine needs to load the game at all, invisible to
+the X1 link probe**, because `lib_static.o` was not in the object set it linked.
+`tools/gen-library-tables.sh` now generates the header the way xshlib.py does,
+into `.sweep/gen/` rather than into the tree, so it cannot go stale against a
+library list that is empty today and gets `client` and `server` in X2/X3.
+
+**The lesson is about the classification, not the file.** Bucketing 29 failures
+as "backends for other platforms" was done by reading directory names. One of
+them was selected by a flag this build passes itself, in a file two directories
+away from where that flag is written down. Directory names are not a build
+description; `engine/wscript` is, and until this target has one, every claim
+about what it "compiles" has to be traced through that file by hand.

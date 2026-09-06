@@ -46,9 +46,10 @@ int     access( const char *path, int mode );
 int     chdir( const char *path );
 char   *getcwd( char *buf, size_t size );
 
-/* Always fails. nxdk exposes no DuplicateHandle. The single caller is behind
- * XASH_REDUCE_FD, which this build does not enable; if that changes, reopen
- * the file by name rather than duplicating the descriptor. */
+/* Implemented over NtDuplicateObject. An earlier comment here claimed the only
+ * caller sat behind XASH_REDUCE_FD and that this build did not enable it; both
+ * halves were false, and the resulting ENOSYS stub made every file inside
+ * pak0.pak unreadable. See xbox_posix_io.c's dup() and docs/r3d/lessons.md. */
 int     dup( int fd );
 
 #define F_OK 0

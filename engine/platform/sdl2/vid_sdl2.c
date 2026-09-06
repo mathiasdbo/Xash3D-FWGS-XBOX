@@ -305,7 +305,7 @@ static void R_FreeVideoModes( void )
 	vidmodes = NULL;
 }
 
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 static qboolean WIN_SetWindowIcon( HICON ico )
 {
 	SDL_SysWMinfo wminfo;
@@ -472,7 +472,7 @@ static void VID_SetWindowIcon( SDL_Window *hWnd )
 	}
 
 	// ICO support only for Win32
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	const char *disk_iconpath = FS_GetDiskPath( GI->iconpath, true );
 
 	if( disk_iconpath )
@@ -513,7 +513,7 @@ static qboolean VID_GetDisplayBounds( int display_index, SDL_Window *hWnd, SDL_R
 	}
 	else
 	{
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 		wrc.left = GetSystemMetrics( SM_CYSIZEFRAME );
 		wrc.right = wrc.bottom = wrc.left;
 		wrc.top = GetSystemMetrics( SM_CYSMCAPTION ) + wrc.left;
@@ -905,7 +905,7 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 	{
 		// EGL doesn't mean we want GLES context
 		// so force it only on Windows, where GL is usually created via WGL
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 		SDL_SetHint( SDL_HINT_OPENGL_ES_DRIVER, "1" );
 #endif // XASH_WIN32
 

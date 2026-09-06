@@ -147,6 +147,111 @@ configuration nothing runs is a configuration that is already broken.
 **Corollary:** add a target to CI the moment it compiles, even while the
 binary does nothing useful.
 
+### A comment asserting a code path is unreachable is a CLAIM — verify it
+
+`compat/xbox/xbox_posix_io.c` stubbed `dup()` to return `ENOSYS`, with a
+comment explaining that its only caller sat behind `XASH_REDUCE_FD`, which
+this build does not enable.
+
+The comment inverted the guard. `filesystem/sys.c:71-73` defines `HAVE_DUP`
+for every platform except PSVita and NSwitch, so Xbox gets it, and it is the
+`XASH_REDUCE_FD` branch that *avoids* `dup()` — and that is set only for
+DOS4GW and PSP (`common/defaults.h:44,49`).
+
+`FS_OpenHandle` calls `dup()` on every open of a file inside a PAK, and
+retail Half-Life keeps all of its content in `pak0.pak`. Nothing in the game
+would have loaded, and it would have presented as an asset problem rather
+than a one-line stub. Three independent reviewers found it; the compiler
+could not.
+
+**The comment is what made it dangerous.** An unexplained stub invites
+scrutiny. A confidently justified one closes the question — for the reader
+and, worse, for the author revisiting it later.
+
+So: before writing "the only caller is X", "this cannot happen", or "this
+build does not enable that", **go and read the guard**. Cite it by
+`file:line` so the next reader can check it in one jump. A claim in a
+comment carries the same weight as code and gets none of the verification.
+
+**Corollary:** stubs that fail are not automatically safe. `chdir` and
+`getcwd` in that same file also fail — those were correct, because the
+platform genuinely lacks the concept. `dup` was wrong because the platform
+*does* have the primitive (`NtDuplicateObject`) and the caller *is* live.
+"Fails honestly" is only honest when the failure is truly unavoidable.
+
+**Written once, then repeated two commits later, in the same file.**
+`fileno()` returned pdclib's raw Win32 `HANDLE` as if it were a descriptor,
+under a comment stating that `sys_con.c` "passes it straight to isatty-style
+checks and never to `read()` or `close()`". Both halves were false: there is
+no `isatty` anywhere in `engine/`, and `sys_con.c:126` stores the value and
+then `:251` and `:257` hand it to `write()`. It was latent only because
+nxdk's crt0 passes `argc=0`, so the console path never opens.
+
+That the lesson was already written and still did not fire is the part worth
+recording. Writing the rule down is not the control; the control is a
+mechanical one — **when a comment names a caller, grep for that caller before
+the comment is committed.** The review workflow caught it, which is the
+argument for running `pr-review` on every PR rather than only on the ones
+that feel risky.
+
+### NEVER classify build inputs by directory name
+
+Thirty-five files failed the Xbox compile sweep. I bucketed them by reading
+paths: six networking, twenty-nine "platform backends for targets that are not
+Xbox", and published "every file this target claims compiles, except
+networking" in a PR.
+
+One of the twenty-nine was `engine/platform/misc/lib_static.c`, and this build
+selects it. `engine/wscript:194` adds it whenever `XASH_STATIC_LIBS` is
+defined, which `tools/xbox-cc.sh:89` defines itself, and
+`common/defaults.h:102-105` then sets `XASH_LIB = LIB_STATIC` — which turns
+`platform/win32/lib_win.c` into an empty object and leaves `lib_static.c` as
+the sole definition of `COM_LoadLibrary`, `COM_FreeLibrary`,
+`COM_GetProcAddress` and `COM_FunctionFromName`. It could not compile. Four
+undefined symbols, in the path that loads the game at all.
+
+The X1 link probe could not have found it either: `lib_static.o` was not in
+the object set, precisely because the sweep had classified it as somebody
+else's platform.
+
+**A directory name is not a build description.** `engine/wscript` is, and
+until this target has one of its own, every claim about what it "compiles"
+has to be traced through that file by hand — `ant_glob` by `DEST_OS`, the
+`not in ['win32', 'dos']` denylist, and the two `get_define` branches. Three
+of those four selectors point somewhere other than the directory being
+judged.
+
+**Corollary, and the reason this rates its own entry:** the false claim was
+already published. Measurements get quoted, and a wrong one propagates faster
+than the correction. Before a number goes in a PR, state the command that
+reproduces it — and then check that the command's scope is the same scope the
+sentence claims.
+
+### A measuring tool that cannot report its own failure will eventually lie
+
+`tools/xbox-sweep.sh` has now reported a false result three times:
+
+1. It judged success by `grep -c 'error:'` and reported "182 ok, 0 failing"
+   for a directory whose first file emits twenty errors.
+2. Its shebang picked Git Bash, where `/mingw64/bin` does not resolve, and it
+   reported "216 failing, 0 errors each".
+3. Fixed for both of those, it still **discarded the compiler's output** for
+   any failure with no `error:` line. A broken toolchain — `set -u` on an
+   unset `NXDK_DIR`, clang off `PATH` — printed `FAIL <file>   0 errors` for
+   every file, an empty frequency table, a zero-byte log, and exit 0.
+
+Each fix was correct and each left the same hole: **the tool could still fail
+in a way that looked like a result.** That is the property to design for, not
+the specific bug. Ask of every measuring tool: *if this were broken right now,
+would its output differ from a real one?* If the answer is no, the tool is not
+finished no matter how many bugs it has stopped having.
+
+The same defect was live in `.claude/workflows/pr-review.js` at the same time,
+in two places — a null scope step silently narrowing five lenses to the one
+whose predicate is `() => true`, and dead refuters making "nobody answered"
+arithmetically identical to "everybody refuted it". The review workflow found
+it in itself. That is the argument for pointing the reviewer at the reviewer.
+
 ### ALWAYS edit existing files as bytes, never through text mode
 
 Files created on this host land as **CRLF**. Python's text mode reads
