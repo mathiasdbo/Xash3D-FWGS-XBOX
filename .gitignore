@@ -391,5 +391,7 @@ build-test/
 !.claude/
 !.claude/agents/
 !.claude/agents/*.md
+!.claude/workflows/
+!.claude/workflows/*.js
 *.stackdump
 .sweep/

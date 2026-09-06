@@ -116,6 +116,37 @@ them: a badly written rule is worse than none, because it gets followed.
 
 Delete rules that stop being true. A stale rule costs more than a missing one.
 
+## Review on every PR
+
+**Run `pr-review` before opening a PR, and again after any commit that
+responds to it.** It is a committed workflow (`.claude/workflows/`), not an
+ad-hoc decision, so every change gets the same scrutiny and the reviewers
+carry the same standing context instead of rediscovering it.
+
+```
+Workflow({ name: 'pr-review' })                      # main..HEAD
+Workflow({ name: 'pr-review', args: { base: 'main', head: 'my-branch' } })
+```
+
+It reads the diff, picks the lenses that apply, and puts every finding to
+**three adversarial refuters** who default to rejecting it. Only findings
+that survive a majority are reported. That ratio matters: on the first run
+it was 35 raised, 10 confirmed — acting on all 35 would have meant 25
+unnecessary changes to code that was correct.
+
+Post the confirmed findings to the PR, then fix or justify each one. A
+finding you disagree with gets a written reason, not silence.
+
+**It has already earned its place.** The first run found a stub whose
+justifying comment inverted the guard it cited, which would have made every
+file inside `pak0.pak` unreadable — the whole of retail Half-Life's content.
+Three independent lenses found it; the compiler could not, and neither did
+the author.
+
+Add a lens to `.claude/workflows/pr-review.js` when a class of defect gets
+through. The lens prompts carry the specific traps this project has already
+hit, which is what makes them find things a generic review does not.
+
 ## Specialist review
 
 Named specialists live in `.claude/agents/`. Pick the ones a change actually
