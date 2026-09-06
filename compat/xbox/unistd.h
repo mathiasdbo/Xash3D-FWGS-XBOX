@@ -30,6 +30,11 @@ int     close( int fd );
 int     fsync( int fd );
 int     ftruncate( int fd, off_t length );
 
+/* pdclib defines these, but without '/' to '\' conversion, so ours must
+ * be the ones that link. See xbox_posix_io.c. */
+int     remove( const char *path );
+int     rename( const char *from, const char *to );
+
 int     unlink( const char *path );
 int     rmdir( const char *path );
 int     access( const char *path, int mode );

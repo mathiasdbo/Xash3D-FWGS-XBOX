@@ -72,6 +72,37 @@ static const char *r3d_native_path( const char *path, char *out, size_t out_size
 
 /*
 ====================
+r3d_errno_from_win32
+
+Callers test errno, so collapsing every failure to one value defeats them.
+FS_SysOpen in particular suppresses its diagnostic when errno is ENOENT, so
+mapping a sharing violation or a full volume to ENOENT made every open failure
+on this platform silent - which is how the first version of this file behaved.
+====================
+*/
+static int r3d_errno_from_win32( DWORD err )
+{
+	switch( err )
+	{
+	case ERROR_FILE_NOT_FOUND:
+	case ERROR_PATH_NOT_FOUND:
+	case ERROR_INVALID_DRIVE:      return ENOENT;
+	case ERROR_ACCESS_DENIED:      return EACCES;
+	case ERROR_SHARING_VIOLATION:  return EBUSY;
+	case ERROR_FILE_EXISTS:
+	case ERROR_ALREADY_EXISTS:     return EEXIST;
+	case ERROR_DISK_FULL:          return ENOSPC;
+	case ERROR_WRITE_PROTECT:      return EROFS;
+	case ERROR_TOO_MANY_OPEN_FILES: return EMFILE;
+	case ERROR_INVALID_NAME:
+	case ERROR_INVALID_PARAMETER:  return EINVAL;
+	case ERROR_DIR_NOT_EMPTY:      return ENOTEMPTY;
+	default:                       return EIO;
+	}
+}
+
+/*
+====================
 r3d_alloc_fd
 ====================
 */
@@ -154,7 +185,7 @@ int open( const char *path, int flags, ... )
 
 	if( h == INVALID_HANDLE_VALUE )
 	{
-		errno = ENOENT;
+		errno = r3d_errno_from_win32( GetLastError());
 		return -1;
 	}
 
@@ -302,9 +333,11 @@ stat
 */
 int stat( const char *path, struct stat *st )
 {
-	char             native[MAX_PATH];
-	WIN32_FIND_DATAA fd;
-	HANDLE           find;
+	char   native[MAX_PATH];
+	size_t len;
+	DWORD  attr;
+	HANDLE h;
+	BY_HANDLE_FILE_INFORMATION info;
 
 	if( !st || !r3d_native_path( path, native, sizeof( native )))
 	{
@@ -312,27 +345,61 @@ int stat( const char *path, struct stat *st )
 		return -1;
 	}
 
-	/* FindFirstFileA answers attributes, size and timestamps in one call,
-	 * where GetFileAttributesA would only give the first. */
-	find = FindFirstFileA( native, &fd );
+	/* POSIX stat("dir/") succeeds, and filesystem/ relies on it: every
+	 * searchpath FS_AddGameHierarchy builds carries a trailing separator
+	 * (searchpath.c:364-409), and COM_PathSlashFix guarantees one. Strip it,
+	 * but never past a drive root ("D:\") which must keep its separator. */
+	len = strlen( native );
 
-	if( find == INVALID_HANDLE_VALUE )
+	while( len > 1 && native[len - 1] == '\\' && native[len - 2] != ':' )
+		native[--len] = '\0';
+
+	/* GetFileAttributesA, not FindFirstFileA. The find API treats the last
+	 * path component as a wildcard PATTERN rather than a name, and nxdk's
+	 * implementation of that handling is its own hazard
+	 * (deps/nxdk/lib/winapi/findfile.c:51-72). It also costs an NtOpenFile on
+	 * the parent plus a directory enumeration per probe, on the hot path of
+	 * every file lookup - this is a plain attribute query. */
+	attr = GetFileAttributesA( native );
+
+	if( attr == INVALID_FILE_ATTRIBUTES )
 	{
-		errno = ENOENT;
+		errno = r3d_errno_from_win32( GetLastError());
 		return -1;
 	}
 
-	FindClose( find );
-
 	memset( st, 0, sizeof( *st ));
-	st->st_mode  = ( fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
-		? ( S_IFDIR | S_IRWXU ) : ( S_IFREG | S_IRUSR | S_IWUSR );
-	st->st_size  = ( off_t )fd.nFileSizeLow;
-	st->st_mtime = r3d_filetime_to_time_t( &fd.ftLastWriteTime );
-	st->st_atime = st->st_mtime;
-	st->st_ctime = st->st_mtime;
 	st->st_nlink = 1;
 
+	if( attr & FILE_ATTRIBUTE_DIRECTORY )
+	{
+		/* A directory has no size or meaningful timestamps here, and opening
+		 * one to ask would need FILE_FLAG_BACKUP_SEMANTICS. Callers only test
+		 * S_ISDIR on this path (FS_SysFolderExists, sys.c:294-306). */
+		st->st_mode = S_IFDIR | S_IRWXU;
+		return 0;
+	}
+
+	st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
+
+	/* Size and mtime need the file itself. If it cannot be opened - in use,
+	 * say - report what is known rather than failing a call that already
+	 * proved the file exists. */
+	h = CreateFileA( native, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+
+	if( h == INVALID_HANDLE_VALUE )
+		return 0;
+
+	if( GetFileInformationByHandle( h, &info ))
+	{
+		st->st_size  = ( off_t )info.nFileSizeLow;
+		st->st_mtime = r3d_filetime_to_time_t( &info.ftLastWriteTime );
+		st->st_atime = st->st_mtime;
+		st->st_ctime = st->st_mtime;
+	}
+
+	CloseHandle( h );
 	return 0;
 }
 
@@ -384,11 +451,58 @@ int mkdir( const char *path, mode_t mode )
 
 	if( !CreateDirectoryA( native, NULL ))
 	{
-		errno = EEXIST;
+		errno = r3d_errno_from_win32( GetLastError());
 		return -1;
 	}
 
 	return 0;
+}
+
+/*
+====================
+remove / rename
+
+filesystem/io.c's FS_Delete and FS_Rename call these, and pdclib's versions
+hand the path straight to DeleteFileA and MoveFileA with no '/' to '\'
+conversion - so they would silently fail on every path the engine builds.
+Defined here so ours are linked instead.
+====================
+*/
+int remove( const char *path )
+{
+	char  native[MAX_PATH];
+	DWORD attr;
+
+	if( !r3d_native_path( path, native, sizeof( native )))
+	{
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	/* POSIX remove() removes directories too. */
+	attr = GetFileAttributesA( native );
+
+	if( attr != INVALID_FILE_ATTRIBUTES && ( attr & FILE_ATTRIBUTE_DIRECTORY ))
+		return RemoveDirectoryA( native )
+			? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
+
+	return DeleteFileA( native )
+		? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
+}
+
+int rename( const char *from, const char *to )
+{
+	char nfrom[MAX_PATH], nto[MAX_PATH];
+
+	if( !r3d_native_path( from, nfrom, sizeof( nfrom ))
+		|| !r3d_native_path( to, nto, sizeof( nto )))
+	{
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	return MoveFileA( nfrom, nto )
+		? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
 }
 
 /*
@@ -406,7 +520,8 @@ int unlink( const char *path )
 		return -1;
 	}
 
-	return DeleteFileA( native ) ? 0 : ( errno = ENOENT, -1 );
+	return DeleteFileA( native )
+		? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
 }
 
 /*
@@ -424,7 +539,8 @@ int rmdir( const char *path )
 		return -1;
 	}
 
-	return RemoveDirectoryA( native ) ? 0 : ( errno = ENOENT, -1 );
+	return RemoveDirectoryA( native )
+		? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
 }
 
 /*
@@ -450,7 +566,8 @@ int access( const char *path, int mode )
 	}
 
 	attr = GetFileAttributesA( native );
-	return ( attr == INVALID_FILE_ATTRIBUTES ) ? ( errno = ENOENT, -1 ) : 0;
+	return ( attr == INVALID_FILE_ATTRIBUTES )
+		? ( errno = r3d_errno_from_win32( GetLastError()), -1 ) : 0;
 }
 
 /*
@@ -485,15 +602,42 @@ char *getcwd( char *buf, size_t size )
 ====================
 dup
 
-nxdk exposes no DuplicateHandle. The only caller is behind XASH_REDUCE_FD,
-which this build does not enable; if that changes, reopen by name instead.
+On the live path, contrary to what an earlier version of this comment claimed.
+
+The mistake is worth recording: the comment said the only caller sat behind
+XASH_REDUCE_FD, which this build does not enable. That inverted the guard.
+filesystem/sys.c:71-73 defines HAVE_DUP for every platform except PSVita and
+NSwitch, so Xbox gets it, and it is the XASH_REDUCE_FD branch (sys.c:446-450)
+that avoids dup() - and XASH_REDUCE_FD is set only for DOS4GW and PSP
+(common/defaults.h:44,49).
+
+So FS_OpenHandle (sys.c:453) calls this on every open of a file inside a PAK,
+which is where retail Half-Life keeps all of its content. Returning -1 here
+meant nothing in pak0.pak could be read at all.
+
+nxdk exposes no DuplicateHandle, but the kernel call underneath it is
+available.
 ====================
 */
+/* nxdk declares NtDuplicateObject (xboxkrnl.h:2975) but defines none of the
+ * option constants. This is the standard NT value. */
+#ifndef DUPLICATE_SAME_ACCESS
+#define DUPLICATE_SAME_ACCESS 0x00000002
+#endif
+
 int dup( int fd )
 {
-	( void )fd;
-	errno = ENOSYS;
-	return -1;
+	HANDLE dst;
+
+	if( !FD_VALID( fd )) { errno = EBADF; return -1; }
+
+	if( !NT_SUCCESS( NtDuplicateObject( r3d_fds[fd], &dst, DUPLICATE_SAME_ACCESS )))
+	{
+		errno = EMFILE;
+		return -1;
+	}
+
+	return r3d_alloc_fd( dst );
 }
 
 /*
