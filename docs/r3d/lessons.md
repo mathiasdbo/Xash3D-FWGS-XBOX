@@ -55,6 +55,39 @@ compute shaders, indirect multi-draw, bindless textures and persistent
 mapping, none of which exist on the NV2A or the RSX. Check the *hardware
 feature*, not the *engine lineage*, before planning work around a technique.
 
+### ALWAYS look for the project's own environment script before hand-rolling one
+
+Four hypotheses, six failed builds and roughly an hour went into diagnosing why
+nxdk would not compile here — MSYS path conversion, libcxx header shadowing,
+empty `-I` arguments, Windows SDK auto-detection. All four were wrong.
+
+`deps/nxdk/bin/activate` had existed the whole time. It emits exactly the right
+`PATH` and `NXDK_DIR`, and the real problem was simply the wrong shell: nxdk
+wants MSYS2 MinGW-64, whose `/mingw64/bin` carries the clang it expects, and Git
+Bash has no such directory.
+
+**Before deriving an environment, look for one.** `activate`, `env.sh`,
+`*-config`, a CI workflow file, a sibling project that already builds the same
+thing. The cost of looking is a minute; the cost of not looking was every wrong
+hypothesis above, each of which was individually plausible and locally
+consistent with the evidence.
+
+**Corollary, and the sharper half:** every one of those hypotheses was
+*supported* by real command output. Plausible mechanisms that fit the symptom
+are cheap to generate and expensive to test. Prefer the check that would
+*eliminate a whole class* — "does an official recipe exist?" — over the check
+that confirms one mechanism.
+
+### NEVER run a mutating agent against a tree you are working in
+
+A workflow spawned to explore build recipes ran `make clean` in `deps/nxdk` and
+deleted nineteen freshly built libraries, while the main session was using
+them. No conflict was reported, because nothing detects it.
+
+Agents that only read are safe to run alongside anything. Agents that build,
+clean or edit need either an isolated worktree or exclusive use of the tree.
+Decide which before launching, not after.
+
 ### NEVER call something the top risk without reading the conditional around it
 
 `xshlib.py:47-50` sets `-melf_i386`, so this project recorded "the static
@@ -114,12 +147,30 @@ configuration nothing runs is a configuration that is already broken.
 **Corollary:** add a target to CI the moment it compiles, even while the
 binary does nothing useful.
 
-### NEVER let a tool rewrite a file's line endings
+### ALWAYS edit existing files as bytes, never through text mode
 
-Rewriting `.gitignore` through a text-processing script converted the whole
-file from CRLF to LF, turning a 14-line addition into a 766-line diff. On a
-fork, that hides the real change and poisons every future merge. Preserve the
-original bytes and append.
+Files created on this host land as **CRLF**. Python's text mode reads
+universal-newlines and writes `os.linesep`, so any read-modify-write in text
+mode silently flips a file's line endings — in either direction, depending on
+which side started as which.
+
+The cost is not cosmetic. A 14-line addition to `.gitignore` became a 766-line
+diff; a 24-line addition to `fork-plan.md` became 390. On a fork that hides the
+real change, poisons every future merge, and makes review useless.
+
+Passing `newline=""` on read or `newline="\n"` on write does not save you.
+Both were tried; the second is what caused the 390-line diff, by forcing LF
+onto a CRLF file. The same trap bites the *search* side: a pattern written with
+LF will not match a CRLF file, which fails silently as "anchor not found".
+
+**Open with `"rb"`, replace on `bytes`, write with `"wb"`.** Then check with
+`git diff --stat` before committing: if the changed-line count is anywhere near
+the file's length, the edit is wrong no matter how correct the content looks.
+
+This rule existed after the first occurrence and was violated twice more,
+because text mode is what comes to hand. It is a reflex problem, not a
+knowledge problem — which is why the check afterwards matters more than the
+intention beforehand.
 
 ### ALWAYS state which question an answer is answering when the scope has moved
 

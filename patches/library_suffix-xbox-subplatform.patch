@@ -1,0 +1,27 @@
+diff --git a/include/build.h b/include/build.h
+index 8eb7396..cae44b7 100644
+--- a/include/build.h
++++ b/include/build.h
+@@ -91,6 +91,7 @@ Then you can use another oneliner to query all variables:
+ #undef XASH_WASM
+ #undef XASH_WIN32
+ #undef XASH_X86
++#undef XASH_XBOX
+ 
+ //================================================================
+ //
+@@ -99,6 +100,14 @@ Then you can use another oneliner to query all variables:
+ //================================================================
+ #if defined _WIN32
+ 	#define XASH_WIN32 1
++	#if defined NXDK
++		// Original Xbox, built against the nxdk homebrew SDK. It targets
++		// i386-pc-win32, so _WIN32 is defined and the Win32 subset nxdk
++		// provides is real - but there is no registry, no dynamic loading
++		// and no getcwd. Hence a sub-platform rather than its own branch,
++		// mirroring how XASH_ANDROID nests inside XASH_LINUX below.
++		#define XASH_XBOX 1
++	#endif
+ #elif defined __WATCOMC__ && defined __DOS__
+ 	#define XASH_DOS4GW 1
+ #elif defined __psp__

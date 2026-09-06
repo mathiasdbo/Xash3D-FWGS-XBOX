@@ -391,3 +391,4 @@ build-test/
 !.claude/
 !.claude/agents/
 !.claude/agents/*.md
+*.stackdump

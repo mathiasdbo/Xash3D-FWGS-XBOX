@@ -125,7 +125,13 @@ rather than a prerequisite for us.
     `common/defaults.h:32-53`; drop `SDL_INIT_VIDEO` from `sys_sdl2.c:130`.
   - `public/miniz.c` does not compile for nxdk — `<sys/stat.h>`, `errno_t`,
     `localtime_s`, and `_MSC_VER` steering it into the Win32 branch.
-  - **Build nxdk on the dev host.** Nothing under `deps/nxdk/lib` is built.
+  - ~~**Build nxdk on the dev host.**~~ **Done 2026-09-05.** 19 libraries,
+    7.1 MB, including libSDL2 (1.5 MB), libpbkit, libpdclib, libnxdk_hal,
+    libSDL_ttf and libc++. Recipe in `tools/xbox-env.sh`; single-TU
+    compiles go through `tools/xbox-cc.sh`.
+  - ~~**Prove the toolchain reaches an XBE.**~~ **Done.** nxdk's `hello`
+    sample builds end to end — `nxdk-cc` → `nxdk-link` → `cxbe` →
+    `extract-xiso` — producing a 102,400-byte `default.xbe` and an ISO.
 - **A working log channel before anything else** — nxdk's debug channel, then
   network logging, so failures on hardware are readable.
 - XBE packaging with `cxbe`.
@@ -184,6 +190,23 @@ Settle here which HL SDK base compiles under nxdk. **[from PS3]** Their goal
 **Exit:** engine, filesystem, menu and a stub game module link into one XBE.
 
 ## X2 — Filesystem and headless boot
+
+**Bigger than it looked.** The `filesystem/` module rests on POSIX that
+nxdk does not have. Measured by compiling it: `fcntl.h` is included 8
+times across `filesystem/`, `sys/types.h` 7, `sys/stat.h` 7, `unistd.h` 5.
+Of those nxdk supplies only a `stat.h` declaring `stat`/`fstat`; its
+`unistd.h` is an empty licence stub. There is no `io.h` and no `_commit`,
+both of which `io.c` reaches for under `XASH_WIN32` — which is true for
+us, since `XASH_XBOX` is a sub-platform of it.
+
+**Strategy: a compat include directory, not `#ifdef`s.** Put `fcntl.h`,
+`sys/types.h`, `sys/stat.h` and `io.h` shims in a directory of ours, added
+to the Xbox include path only. Most forward to the flat headers nxdk
+already ships under `xboxrt/libc_extensions`; the rest supply `O_*`
+constants and a few underscore-prefixed CRT functions. That keeps this on
+the cheapest rung of the divergence ladder — new files in our own tree,
+zero edits to upstream — instead of dozens of guards through a module
+upstream actively maintains.
 
 - `filesystem/mpak.c` as a `searchpath_t` (7 pointers, modelled on `pak.c`),
   loading **per resource** through `pfnLoadFile`'s custom `pfnAlloc`/`pfnFree`.

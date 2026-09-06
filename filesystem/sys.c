@@ -25,7 +25,7 @@ GNU General Public License for more details.
 #include <time.h>
 #include <errno.h>
 
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	#include <direct.h>
 	#include <io.h>
 	#include "utflib.h"
@@ -33,6 +33,8 @@ GNU General Public License for more details.
 	#include <direct.h>
 #else
 	#include <dirent.h>
+	#include <unistd.h>	// lseek, dup - POSIX requires it and this file
+							// relied on it arriving transitively
 #endif
 
 #if HAVE_MEMFD_CREATE
@@ -147,7 +149,7 @@ MAYBE_UNUSED static void listlowercase( stringlist_t *list )
 
 void listdirectory( stringlist_t *list, const char *path, qboolean dirs_only )
 {
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	char pattern[4096];
 	Q_snprintf( pattern, sizeof( pattern ), "%s/*", path );
 
@@ -206,7 +208,7 @@ Converts input UTF-8 string to wide char string.
 */
 MAYBE_UNUSED static const wchar_t *FS_PathToWideChar( const char *path )
 {
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	static wchar_t pathBuffer[MAX_PATH];
 	MultiByteToWideChar( CP_UTF8, 0, path, -1, pathBuffer, MAX_PATH );
 	return pathBuffer;
@@ -230,7 +232,7 @@ void FS_CreatePath( char *path )
 			// create the directory
 			char save = *ofs;
 			*ofs = 0;
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 			_mkdir( path ); // use _wmkdir maybe?
 #else // !XASH_WIN32
 			mkdir( path, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH );
@@ -249,7 +251,7 @@ Internal function used to determine filetime
 */
 int FS_SysFileTime( const char *filename )
 {
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	struct _stat buf;
 	if( _wstat( FS_PathToWideChar( filename ), &buf ) < 0 )
 #else
@@ -270,7 +272,7 @@ Look for a file in the filesystem only
 */
 qboolean FS_SysFileExists( const char *path )
 {
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	struct _stat buf;
 	if( _wstat( FS_PathToWideChar( path ), &buf ) < 0 )
 #else // !XASH_WIN32
@@ -291,7 +293,7 @@ Look for a existing folder
 */
 qboolean FS_SysFolderExists( const char *path )
 {
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	struct _stat buf;
 	if( _wstat( FS_PathToWideChar( path ), &buf ) < 0 )
 #else
@@ -312,7 +314,7 @@ Check if filesystem entry exists at all, don't mind the type
 */
 qboolean FS_SysFileOrFolderExists( const char *path )
 {
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	struct _stat buf;
 	return _wstat( FS_PathToWideChar( path ), &buf ) >= 0;
 #else
@@ -392,7 +394,7 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
 
 	if( fd < 0 )
 	{
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 		fd = _wopen( FS_PathToWideChar( filepath ), mod | opt, 0666 );
 #else // !XASH_WIN32
 		fd = open( filepath, mod | opt, 0666 );
@@ -486,7 +488,7 @@ TODO: make this non-fatal
 */
 int FS_SetCurrentDirectory( const char *path )
 {
-#if XASH_WIN32
+#if XASH_WIN32 && !XASH_XBOX
 	if( !SetCurrentDirectoryW( FS_PathToWideChar( path )))
 	{
 		const DWORD fm_flags = FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK;
