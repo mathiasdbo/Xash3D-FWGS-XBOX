@@ -104,6 +104,7 @@ exec clang \
 	-nostdlib \
 	-fno-builtin \
 	-Wno-builtin-macro-redefined \
+	-include "$REPO/compat/xbox/xbox_prelude.h" \
 	-DNXDK \
 	-D__STDC__=1 \
 	-U__STDC_NO_THREADS__ \
