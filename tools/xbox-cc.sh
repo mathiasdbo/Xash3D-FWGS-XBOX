@@ -88,6 +88,9 @@ ENGINE_DEFINES=(
 	                              # unless this is set, and that config typedefs
 	                              # uintptr_t as unsigned int, colliding with
 	                              # pdclib. Selects SDL_config_xbox.h instead.
+	-DXASH_BUILD_COMMIT=\"xbox-bringup\"    # normally injected by waf from git;
+	-DXASH_BUILD_BRANCH=\"x0\"              # public/build_vcs.c reads all three
+	-DXASH_BUILD_COMMIT_DATE=\"0\"
 	-DXASH_SDL=2                  # nxdk ships XboxDev/nxdk-sdl, SDL 2.0.9 with
 	                              # native src/video/xbox, src/audio/xbox and
 	                              # src/joystick/xbox drivers. common/defaults.h:33

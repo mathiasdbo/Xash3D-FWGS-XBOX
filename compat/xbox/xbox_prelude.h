@@ -40,4 +40,61 @@ typedef int *LPBOOL;
 #define CP_UTF8  65001
 #endif
 
+/* Declarations for the functions compat/xbox implements. They are DEFINED in
+ * xbox_win32_ext.c, but nothing declares them: callers reach for them through
+ * <windows.h>, which comes from nxdk and does not have them. Without these the
+ * calls are implicit-declaration errors under C99 even though the symbols link
+ * perfectly well. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+unsigned long __stdcall GetModuleFileNameA( void *module, char *filename, unsigned long size );
+unsigned long __stdcall GetModuleFileNameW( void *module, LPWSTR filename, unsigned long size );
+
+int __stdcall MultiByteToWideChar( unsigned int page, unsigned long flags,
+	const char *src, int src_len, LPWSTR dst, int dst_len );
+int __stdcall WideCharToMultiByte( unsigned int page, unsigned long flags,
+	LPCWSTR src, int src_len, char *dst, int dst_len,
+	const char *def_char, LPBOOL used_def );
+
+#ifdef __cplusplus
+}
+#endif
+
+#ifndef GetModuleFileName
+#define GetModuleFileName GetModuleFileNameA
+#endif
+
+/* POINT. nxdk's winapi has RECT but not this; engine/client/dll_int/cl_game.c
+ * uses it for cursor coordinates. */
+#ifndef R3D_HAVE_POINT
+#define R3D_HAVE_POINT
+typedef struct tagPOINT { long x, y; } POINT, *PPOINT, *LPPOINT;
+#endif
+
+/* SDL hints the engine sets that postdate SDL 2.0.9, which is what
+ * XboxDev/nxdk-sdl is pinned to. SDL_SetHint with an unrecognised name is a
+ * no-op that returns SDL_FALSE, so defining the strings restores compilation
+ * without changing behaviour — the hints simply do nothing here, which is
+ * correct, since the features they configure do not exist in 2.0.9 either.
+ *
+ * If nxdk-sdl is ever rebased onto a newer SDL, delete these: SDL will define
+ * them itself and the #ifndef guards will keep it building either way. */
+#ifndef SDL_HINT_AUDIODRIVER
+#define SDL_HINT_AUDIODRIVER "SDL_AUDIODRIVER"
+#endif
+#ifndef SDL_HINT_WINDOWS_DPI_AWARENESS
+#define SDL_HINT_WINDOWS_DPI_AWARENESS "SDL_WINDOWS_DPI_AWARENESS"
+#endif
+#ifndef SDL_HINT_JOYSTICK_HIDAPI_PS5
+#define SDL_HINT_JOYSTICK_HIDAPI_PS5 "SDL_JOYSTICK_HIDAPI_PS5"
+#endif
+#ifndef SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE
+#define SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE "SDL_JOYSTICK_HIDAPI_PS5_RUMBLE"
+#endif
+#ifndef SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED
+#define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED "SDL_JOYSTICK_HIDAPI_SWITCH_HOME_LED"
+#endif
+
 #endif /* R3D_XBOX_PRELUDE_H */
