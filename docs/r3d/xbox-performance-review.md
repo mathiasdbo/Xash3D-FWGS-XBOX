@@ -187,12 +187,14 @@ already contain, with the phase that owns each:
 | DXT linear-by-block-row fix | **Bug present** (`TextureOpt.cpp:110-132`) | Baker stage |
 | Zero-allocation transient buffers (decals etc.) | `MAX_DECAL_SURFS 4096` static; allocation audit not done | X11 |
 | Threaded save / load I/O | Absent; nxdk threads work (probe §1.4) | X10/X11 |
-| `r_alphasort` for translucent brushes | Absent | X9 |
+| `r_alphasort` for translucent brushes | **Present.** `R_TransEntityCompare` (`gl_rmain.c:86-117`) already sorts translucent entities back to front by squared distance, with `kRenderTransAlpha` brushes forced last — the GoldSrc rule, not an omission. What Ironwail added over QuakeSpasm, GoldSrc always had | — |
 | VP20 water deform (`EmitWaterPolys`, `gl_rsurf.c:926`) | Absent; CPU sine warp | X9, low priority |
 | SSE intrinsics | Absent; no SIMD anywhere in the tree | After a hardware profile names a loop |
 | Under-culling vs `R_CullSurface` backface | Reference culls per face (`gl_cull.c:83-111`) | X11, measure both |
 
-Nine of eighteen are baker work. The plan has no baker phase.
+Nine of eighteen are baker work. The plan has no baker phase. Five of the
+eighteen were already in the tree before this project started, which is
+the cost of reading Ironwail's feature list instead of `ref/gl`.
 
 ---
 
