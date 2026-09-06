@@ -177,7 +177,55 @@ the root directory and the engine `Sys_Error`s before X2 begins. A small
 patch, but a hard gate, and it lived nowhere until now.
 See `x0-probe-results.md` §1.5.
 
-**Exit:** the engine finds its game directory on Xbox.
+### The exit above is NOT sufficient. Found in review, 2026-09-06.
+
+Finding the root directory is half of it. `FS_InitStdio` then mounts
+everything through **relative** paths, and nxdk has no current directory to
+resolve them against:
+
+- `FS_SetCurrentDirectory` is one of the ten `!XASH_XBOX` widenings in
+  divergence #6, so Xbox falls into `filesystem/sys.c:511`, which prints
+  "not implemented, ignoring..." and **returns true**. `compat/xbox`'s
+  `chdir()` — which fails honestly with `ENOSYS` — is never reached. The one
+  place in the ledger where "compat/xbox supplies what that branch needs" is
+  false.
+- `FS_InitStdio` then uses the literal `"./"`: `FS_ValidateDirectories` at
+  `searchpath.c:623`, `FS_AddGameDirectory` at `:649`, `listdirectory` at
+  `:677`.
+- `FS_AddGameHierarchy` builds every real searchpath relatively too —
+  `"valve/"` (`:378`), `_downloaded` (`:374`), `_hd` (`:386`), `_addon`
+  (`:392`), `_lv` (`:398`), the language dir (`:404`), `custom` (`:410`).
+  `fs_rootdir` is consumed at `dll.c:78,83`, `gameinfo.c:487` and
+  `searchpath.c:507,851,952`, and **never to prefix a searchpath**.
+
+Every nxdk path API resolves against `ObDosDevicesDirectory()` with no CWD in
+the stack: `CreateFileA` (`fileio.c:32`), `GetFileAttributesA`
+(`filemanip.c:26`), `FindFirstFileA` (`findfile.c:74`). So `opendir("./")`
+builds `".\*"`, nxdk splits it into dirPath `".\"` + mask `"*"`
+(`findfile.c:51-63`) and `NtOpenFile`s `"."` as a DOS device name, which it is
+not. `STATUS_OBJECT_NAME_NOT_FOUND`.
+
+The consequence is worse than "no pak0.pak": `FS_ParseGameInfo` never reads
+`valve/gameinfo.txt`, `FI.numgames` stays 0, and the engine has no game to
+run. Handing it an absolute `rootdir` does not fix it, because the searchpaths
+built from that point on are relative regardless.
+
+**Two ways out, and the choice belongs to this phase:**
+
+1. **Resolve a process-wide CWD inside `r3d_native_path`.** One place, no
+   upstream edit, and `compat/xbox/xbox_posix_io.c:615-617` currently argues
+   against it ("fail rather than pretending to succeed"). That argument was
+   written about `chdir` as an API, not about path resolution, and it is worth
+   revisiting: an emulated CWD is a lie only if something can observe the
+   difference, and on a platform with exactly one process nothing can.
+2. **Make `filesystem/` prefix searchpaths with `fs_rootdir`.** Correct
+   everywhere, larger diff, and it touches a file upstream changes often.
+
+Route 1 is smaller and reversible; route 2 is the one that could go upstream.
+Neither is written yet.
+
+**Exit:** the engine finds its game directory on Xbox **and mounts it** —
+`FI.numgames > 0` and `pak0.pak` opens.
 
 ## X1 — Static linking proven
 

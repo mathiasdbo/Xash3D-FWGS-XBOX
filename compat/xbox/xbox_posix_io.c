@@ -372,9 +372,7 @@ int stat( const char *path, struct stat *st )
 {
 	char   native[MAX_PATH];
 	size_t len;
-	DWORD  attr;
-	HANDLE h;
-	BY_HANDLE_FILE_INFORMATION info;
+	WIN32_FILE_ATTRIBUTE_DATA fad;
 
 	if( !st || !r3d_native_path( path, native, sizeof( native )))
 	{
@@ -391,15 +389,24 @@ int stat( const char *path, struct stat *st )
 	while( len > 1 && native[len - 1] == '\\' && native[len - 2] != ':' )
 		native[--len] = '\0';
 
-	/* GetFileAttributesA, not FindFirstFileA. The find API treats the last
-	 * path component as a wildcard PATTERN rather than a name, and nxdk's
-	 * implementation of that handling is its own hazard
-	 * (deps/nxdk/lib/winapi/findfile.c:51-72). It also costs an NtOpenFile on
-	 * the parent plus a directory enumeration per probe, on the hot path of
-	 * every file lookup - this is a plain attribute query. */
-	attr = GetFileAttributesA( native );
-
-	if( attr == INVALID_FILE_ATTRIBUTES )
+	/* GetFileAttributesExA answers all of it in ONE kernel call:
+	 * NtQueryFullAttributesFile returns attributes, size and all three
+	 * timestamps together (deps/nxdk/lib/winapi/filemanip.c:37-68).
+	 *
+	 * This function used to open the file to get size and mtime -
+	 * GetFileAttributesA, then CreateFileA + GetFileInformationByHandle +
+	 * CloseHandle, five kernel transitions where one does. That is the hot path
+	 * and not by a little: FS_FindFile_DIR (filesystem/dir.c:396) probes every
+	 * plain searchpath on every file lookup, and loading a map does that once
+	 * per searchpath per referenced file, on a 733 MHz CPU behind an IDE bus.
+	 * The old comment right above rejected FindFirstFileA for costing "an
+	 * NtOpenFile on the parent plus a directory enumeration per probe" and then
+	 * did something more expensive than what it rejected.
+	 *
+	 * Not FindFirstFileA, still: it treats the last path component as a
+	 * wildcard PATTERN rather than a name, and nxdk's handling of that is its
+	 * own hazard (deps/nxdk/lib/winapi/findfile.c:51-72). */
+	if( !GetFileAttributesExA( native, GetFileExInfoStandard, &fad ))
 	{
 		errno = r3d_errno_from_win32( GetLastError());
 		return -1;
@@ -408,35 +415,20 @@ int stat( const char *path, struct stat *st )
 	memset( st, 0, sizeof( *st ));
 	st->st_nlink = 1;
 
-	if( attr & FILE_ATTRIBUTE_DIRECTORY )
+	if( fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
 	{
-		/* A directory has no size or meaningful timestamps here, and opening
-		 * one to ask would need FILE_FLAG_BACKUP_SEMANTICS. Callers only test
-		 * S_ISDIR on this path (FS_SysFolderExists, sys.c:294-306). */
+		/* Callers only test S_ISDIR on this path (FS_SysFolderExists,
+		 * sys.c:294-306); a size for a directory would be meaningless. */
 		st->st_mode = S_IFDIR | S_IRWXU;
 		return 0;
 	}
 
-	st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
+	st->st_mode  = S_IFREG | S_IRUSR | S_IWUSR;
+	st->st_size  = ( off_t )fad.nFileSizeLow;
+	st->st_mtime = r3d_filetime_to_time_t( &fad.ftLastWriteTime );
+	st->st_atime = st->st_mtime;
+	st->st_ctime = st->st_mtime;
 
-	/* Size and mtime need the file itself. If it cannot be opened - in use,
-	 * say - report what is known rather than failing a call that already
-	 * proved the file exists. */
-	h = CreateFileA( native, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
-
-	if( h == INVALID_HANDLE_VALUE )
-		return 0;
-
-	if( GetFileInformationByHandle( h, &info ))
-	{
-		st->st_size  = ( off_t )info.nFileSizeLow;
-		st->st_mtime = r3d_filetime_to_time_t( &info.ftLastWriteTime );
-		st->st_atime = st->st_mtime;
-		st->st_ctime = st->st_mtime;
-	}
-
-	CloseHandle( h );
 	return 0;
 }
 

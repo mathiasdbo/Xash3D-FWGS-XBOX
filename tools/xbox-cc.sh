@@ -41,7 +41,17 @@ shift
 # exactly like a platform problem - a short include set made engine/common/
 # cvar.h report `unknown type name 'convar_t'`, which is neither a missing
 # header nor an nxdk gap, just common/cvardef.h not being reachable yet.
+# generated_library_tables.h is a BUILD ARTIFACT, not a source file: waf writes
+# it during the build (xshlib.py:112) and the Xbox path bypasses waf. Generate it
+# here so engine/platform/misc/lib_static.c compiles, and keep it out of the tree
+# so it cannot go stale against the real library list.
+GEN_DIR="$REPO/.sweep/gen"
+if [ ! -f "$GEN_DIR/generated_library_tables.h" ]; then
+	"$REPO/tools/gen-library-tables.sh" "$GEN_DIR" > /dev/null
+fi
+
 OUR_INCLUDES=(
+	-I "$GEN_DIR"
 	-I "$REPO/compat/xbox"
 	-I "$REPO/public"
 	-I "$REPO/common"

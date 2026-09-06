@@ -152,19 +152,55 @@ const VERDICT = {
   },
 }
 
+const FILELIST = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['files'],
+  properties: {
+    files: {
+      type: 'array',
+      description: 'Repo-relative paths, forward slashes, one per element. Never prose.',
+      items: { type: 'string' },
+    },
+  },
+}
+
 phase('Scope')
 
+// Schema, not prose. This step used to return free text that the lens
+// predicates regex'd over, so a null agent, an empty answer, a summarised list
+// ("18 files across compat/xbox, tools and docs") or a Windows-style
+// `tools\xbox-cc.sh` silently matched nothing — and `upstream.when = () => true`
+// kept exactly one lens alive under a log line that reads like a normal run.
 const scope = await agent(
-  `${PREAMBLE}\n\nList the files changed in \`git diff --name-only ${RANGE}\`, ` +
-  `then return them as one newline-separated list and nothing else. No commentary.`,
-  { label: 'scope:changed-files', phase: 'Scope' }
+  `${PREAMBLE}\n\nRun \`git diff --name-only ${RANGE}\` and return every path it ` +
+  `prints. Repo-relative, forward slashes, one per array element. Do not ` +
+  `summarise, group, or omit anything.`,
+  { label: 'scope:changed-files', phase: 'Scope', schema: FILELIST }
 )
 
-const diffText = String(scope || '')
+// Fail loudly. A review that silently narrows to one lens is worse than no
+// review, because the empty result is indistinguishable from a clean diff.
+if (!scope || !Array.isArray(scope.files) || scope.files.length === 0) {
+  throw new Error(
+    'pr-review: the scope step returned no file list, so lens selection cannot ' +
+    'run. Refusing to review a diff of unknown shape — re-run it. ' +
+    `(range: ${RANGE})`
+  )
+}
+
+const files = scope.files.map(f => String(f).replace(/\\/g, '/').trim()).filter(Boolean)
+const diffText = files.join('\n')
+
+log(`${files.length} files in ${RANGE}`)
+
 const active = Object.entries(LENSES).filter(([, l]) => l.when(diffText))
+const skipped = Object.keys(LENSES).filter(k => !active.some(([a]) => a === k))
 
 log(`${active.length} of ${Object.keys(LENSES).length} lenses apply to this change`)
 active.forEach(([k]) => log(`  lens: ${k}`))
+// Say what is NOT being looked at. Silently dropped coverage reads as coverage.
+skipped.forEach(k => log(`  SKIPPED lens: ${k} — no changed path matched its predicate`))
 
 phase('Review')
 
@@ -177,7 +213,11 @@ const raised = (await parallel(
 log(`${raised.length} findings raised`)
 
 if (raised.length === 0) {
-  return { lenses: active.map(([k]) => k), raised: 0, confirmed: [] }
+  return {
+    range: RANGE, files: files.length,
+    lenses: active.map(([k]) => k), lensesSkipped: skipped,
+    raised: 0, confirmed: [], unverified: [],
+  }
 }
 
 phase('Verify')
@@ -200,22 +240,54 @@ const verified = await pipeline(
   ))).then(votes => {
     const v = votes.filter(Boolean)
     const realCount = v.filter(x => x.real).length
-    return (v.length && realCount > v.length / 2)
-      ? { ...f, votes: `${realCount}/${v.length}`,
-          corrections: v.map(x => x.correction).filter(c => c && c.trim()) }
+    const corrections = v.map(x => x.correction).filter(c => c && c.trim())
+
+    // A refuter that never answered is not a refutation. Deciding on one vote
+    // turns majority-of-three into a coin flip, and deciding on zero reports an
+    // outage as "the reviewer was wrong" — which is how a real defect merges.
+    if (v.length < 2) {
+      return { ...f, verdict: 'UNVERIFIED', votes: `${realCount}/${v.length} of 3 answered`, corrections }
+    }
+
+    return realCount > v.length / 2
+      ? { ...f, verdict: 'CONFIRMED', votes: `${realCount}/${v.length}`, corrections }
       : null
   })
 )
 
-const confirmed = verified.filter(Boolean)
+const decided = verified.filter(Boolean)
+const confirmed = decided.filter(f => f.verdict === 'CONFIRMED')
+const unverified = decided.filter(f => f.verdict === 'UNVERIFIED')
+
 log(`${confirmed.length} of ${raised.length} survived refutation`)
+
+if (unverified.length) {
+  log(`${unverified.length} findings could NOT be verified — fewer than two refuters answered.`)
+  log('These are neither confirmed nor refuted. Re-run the review or judge them by hand.')
+  unverified.forEach(f => log(`  UNVERIFIED ${f.file}:${f.line} — ${f.summary}`))
+}
+
+// An outage that eats every vote leaves `confirmed: []`, which is byte-identical
+// to a clean review. Refuse to return that shape.
+if (raised.length && decided.length === unverified.length && unverified.length === raised.length) {
+  throw new Error(
+    `pr-review: not one of ${raised.length} findings got two answering refuters. ` +
+    'The Verify phase did not run — this is an outage, not a clean review. ' +
+    'Re-run it; do not read the empty result as approval.'
+  )
+}
+
+const bySeverity = (a, b) => {
+  const order = { critical: 0, high: 1, medium: 2, low: 3 }
+  return order[a.severity] - order[b.severity]
+}
 
 return {
   range: RANGE,
+  files: files.length,
   lenses: active.map(([k]) => k),
+  lensesSkipped: skipped,
   raised: raised.length,
-  confirmed: confirmed.sort((a, b) => {
-    const order = { critical: 0, high: 1, medium: 2, low: 3 }
-    return order[a.severity] - order[b.severity]
-  }),
+  confirmed: confirmed.sort(bySeverity),
+  unverified: unverified.sort(bySeverity),
 }

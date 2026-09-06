@@ -194,6 +194,64 @@ the comment is committed.** The review workflow caught it, which is the
 argument for running `pr-review` on every PR rather than only on the ones
 that feel risky.
 
+### NEVER classify build inputs by directory name
+
+Thirty-five files failed the Xbox compile sweep. I bucketed them by reading
+paths: six networking, twenty-nine "platform backends for targets that are not
+Xbox", and published "every file this target claims compiles, except
+networking" in a PR.
+
+One of the twenty-nine was `engine/platform/misc/lib_static.c`, and this build
+selects it. `engine/wscript:194` adds it whenever `XASH_STATIC_LIBS` is
+defined, which `tools/xbox-cc.sh:89` defines itself, and
+`common/defaults.h:102-105` then sets `XASH_LIB = LIB_STATIC` — which turns
+`platform/win32/lib_win.c` into an empty object and leaves `lib_static.c` as
+the sole definition of `COM_LoadLibrary`, `COM_FreeLibrary`,
+`COM_GetProcAddress` and `COM_FunctionFromName`. It could not compile. Four
+undefined symbols, in the path that loads the game at all.
+
+The X1 link probe could not have found it either: `lib_static.o` was not in
+the object set, precisely because the sweep had classified it as somebody
+else's platform.
+
+**A directory name is not a build description.** `engine/wscript` is, and
+until this target has one of its own, every claim about what it "compiles"
+has to be traced through that file by hand — `ant_glob` by `DEST_OS`, the
+`not in ['win32', 'dos']` denylist, and the two `get_define` branches. Three
+of those four selectors point somewhere other than the directory being
+judged.
+
+**Corollary, and the reason this rates its own entry:** the false claim was
+already published. Measurements get quoted, and a wrong one propagates faster
+than the correction. Before a number goes in a PR, state the command that
+reproduces it — and then check that the command's scope is the same scope the
+sentence claims.
+
+### A measuring tool that cannot report its own failure will eventually lie
+
+`tools/xbox-sweep.sh` has now reported a false result three times:
+
+1. It judged success by `grep -c 'error:'` and reported "182 ok, 0 failing"
+   for a directory whose first file emits twenty errors.
+2. Its shebang picked Git Bash, where `/mingw64/bin` does not resolve, and it
+   reported "216 failing, 0 errors each".
+3. Fixed for both of those, it still **discarded the compiler's output** for
+   any failure with no `error:` line. A broken toolchain — `set -u` on an
+   unset `NXDK_DIR`, clang off `PATH` — printed `FAIL <file>   0 errors` for
+   every file, an empty frequency table, a zero-byte log, and exit 0.
+
+Each fix was correct and each left the same hole: **the tool could still fail
+in a way that looked like a result.** That is the property to design for, not
+the specific bug. Ask of every measuring tool: *if this were broken right now,
+would its output differ from a real one?* If the answer is no, the tool is not
+finished no matter how many bugs it has stopped having.
+
+The same defect was live in `.claude/workflows/pr-review.js` at the same time,
+in two places — a null scope step silently narrowing five lenses to the one
+whose predicate is `() => true`, and dead refuters making "nobody answered"
+arithmetically identical to "everybody refuted it". The review workflow found
+it in itself. That is the argument for pointing the reviewer at the reviewer.
+
 ### ALWAYS edit existing files as bytes, never through text mode
 
 Files created on this host land as **CRLF**. Python's text mode reads
