@@ -147,6 +147,38 @@ configuration nothing runs is a configuration that is already broken.
 **Corollary:** add a target to CI the moment it compiles, even while the
 binary does nothing useful.
 
+### A comment asserting a code path is unreachable is a CLAIM — verify it
+
+`compat/xbox/xbox_posix_io.c` stubbed `dup()` to return `ENOSYS`, with a
+comment explaining that its only caller sat behind `XASH_REDUCE_FD`, which
+this build does not enable.
+
+The comment inverted the guard. `filesystem/sys.c:71-73` defines `HAVE_DUP`
+for every platform except PSVita and NSwitch, so Xbox gets it, and it is the
+`XASH_REDUCE_FD` branch that *avoids* `dup()` — and that is set only for
+DOS4GW and PSP (`common/defaults.h:44,49`).
+
+`FS_OpenHandle` calls `dup()` on every open of a file inside a PAK, and
+retail Half-Life keeps all of its content in `pak0.pak`. Nothing in the game
+would have loaded, and it would have presented as an asset problem rather
+than a one-line stub. Three independent reviewers found it; the compiler
+could not.
+
+**The comment is what made it dangerous.** An unexplained stub invites
+scrutiny. A confidently justified one closes the question — for the reader
+and, worse, for the author revisiting it later.
+
+So: before writing "the only caller is X", "this cannot happen", or "this
+build does not enable that", **go and read the guard**. Cite it by
+`file:line` so the next reader can check it in one jump. A claim in a
+comment carries the same weight as code and gets none of the verification.
+
+**Corollary:** stubs that fail are not automatically safe. `chdir` and
+`getcwd` in that same file also fail — those were correct, because the
+platform genuinely lacks the concept. `dup` was wrong because the platform
+*does* have the primitive (`NtDuplicateObject`) and the caller *is* live.
+"Fails honestly" is only honest when the failure is truly unavoidable.
+
 ### ALWAYS edit existing files as bytes, never through text mode
 
 Files created on this host land as **CRLF**. Python's text mode reads
