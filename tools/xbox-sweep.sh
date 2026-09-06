@@ -38,7 +38,11 @@ fail=0
 for d in "$@"; do
 	while IFS= read -r f; do
 		obj="$SCRATCH/$( echo "$f" | tr '/' '_' | sed 's/\.c$/.obj/' )"
-		out=$( OUT="$obj" "$REPO/tools/xbox-cc.sh" "$f" 2>&1 )
+		# -o as an argument, not via the OUT env var: xbox-cc.sh appends "$@"
+		# after its own -o and clang takes the last one, whereas the env var was
+		# not reaching the child and every object silently landed on the same
+		# default path, overwriting each other.
+		out=$( "$REPO/tools/xbox-cc.sh" "$f" -o "$obj" 2>&1 )
 		status=$?
 
 		if [ "$status" -eq 0 ]; then

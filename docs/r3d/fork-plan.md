@@ -181,6 +181,46 @@ See `x0-probe-results.md` §1.5.
 
 ## X1 — Static linking proven
 
+### MEASURED, 2026-09-06: ten duplicate symbols
+
+The measurement this phase existed to demand has been run. 157 objects —
+every non-networking, non-test translation unit in `engine/`,
+`filesystem/`, `public/`, `common/` and `compat/` — linked with the exact
+`nxdk-link` flags plus `-errorlimit:0`, **no `ld -r`, no objcopy**:
+
+```
+_FI              _FS_LoadFile       __Mem_Alloc
+_FS_Close        _FS_LoadGameInfo   __Mem_Free
+_FS_FindLibrary  _FS_Open
+_FS_LoadDirectFile  _FS_Search
+```
+
+**Ten.** All of them one boundary: the filesystem module defines the FS API,
+and `engine/common/filesystem_engine.c` re-exports the same names as thin
+wrappers. `_FI` is the known struct-versus-pointer collision
+(`filesystem/filesystem.c:30` against `filesystem_engine.c:41`), and the
+`_Mem_*` pair is `zone.c` against the filesystem's own allocator.
+
+A first run reported 21. Eleven of those were `_main`, from
+`filesystem/tests/` and `public/tests/` — unit-test programs that have no
+business in an engine link at all. Worth recording because it is the sort of
+number that gets quoted: the real figure is ten, and the difference was a
+glob, not a problem.
+
+**This is design-stage option 1 + 4, the cheapest branch.** Ten names is
+`llvm-objcopy --redefine-sym` territory — the one symbol option that works
+on COFF — or ten `#define`s. `xshlib.py` is bypassed entirely on Xbox: no
+`ld -r`, no `objcopy -G`, no GNU binutils in the toolchain, none of the
+COMDAT-folding hazard the earlier probe found. The largest risk this project
+recorded is retired, and it was retired by measuring rather than by
+building the machinery to survive it.
+
+**Not yet known:** the link reported zero undefined symbols, which cannot be
+true — no SDL library, no game module and no nxdk libraries were on the
+command line. lld almost certainly stopped at the duplicates. The undefined
+picture is a separate measurement, and it belongs to the real link, not this
+probe.
+
 **Still the gate, no longer the top risk.** Downgraded from "this may not
 work at all" to "three known fallbacks, one needing no new tools" — but the
 measurement that would close it has never been run.
