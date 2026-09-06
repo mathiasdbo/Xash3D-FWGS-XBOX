@@ -27,14 +27,25 @@ SRC="${1:?usage: xbox-cc.sh <file.c> [extra args]}"
 shift
 
 # Ours first. compat/xbox must precede nxdk's own directories.
+#
+# Mirrors what engine/wscript:163-167 hands each module: '.', 'common',
+# 'common/imagelib' exported by engine_includes, plus 'server', 'client',
+# 'client/vgui', 'common/soundlib' and 'platform'. Getting this wrong looks
+# exactly like a platform problem - a short include set made engine/common/
+# cvar.h report `unknown type name 'convar_t'`, which is neither a missing
+# header nor an nxdk gap, just common/cvardef.h not being reachable yet.
 OUR_INCLUDES=(
 	-I "$REPO/compat/xbox"
 	-I "$REPO/public"
 	-I "$REPO/common"
 	-I "$REPO/engine"
 	-I "$REPO/engine/common"
+	-I "$REPO/engine/common/imagelib"
+	-I "$REPO/engine/common/soundlib"
 	-I "$REPO/engine/server"
 	-I "$REPO/engine/client"
+	-I "$REPO/engine/client/vgui"
+	-I "$REPO/engine/platform"
 	-I "$REPO/filesystem"
 	-I "$REPO/pm_shared"
 	-I "$REPO/3rdparty/library_suffix/include"
@@ -50,6 +61,28 @@ NXDK_INCLUDES=(
 	-I "$NXDK_DIR/lib/xboxrt/vcruntime"
 )
 
+# What engine/wscript defines for engine translation units. Without these the
+# failures look like platform problems and are not: common/cvardef.h:96 hides
+# `convar_t` behind `#if REF_DLL || ENGINE_DLL`, so a missing -DENGINE_DLL
+# reports as `unknown type name 'convar_t'` in engine/common/cvar.h, twenty
+# errors deep in a file that has nothing wrong with it.
+#
+# XASH_STATIC_LIBS is on because the Xbox has no dynamic loading at all
+# (deps/nxdk/lib/winapi/libloaderapi.c:16-23 returns NULL unconditionally).
+# Note it also implies XASH_INTERNAL_GAMELIBS and XASH_ALLOW_SAVERESTORE_OFFSETS
+# via common/defaults.h:102-105 — see docs/r3d/x0-probe-results.md.
+ENGINE_DEFINES=(
+	-DENGINE_DLL=1                # engine/wscript:135
+	-DXASH_STATIC_LIBS=1          # engine/wscript:155, and mandatory here
+	-DXASH_NO_LIBDL=1             # engine/wscript:127
+	-DXASH_CRASHHANDLER=0         # engine/wscript:83
+	-DXASH_SDL=2                  # nxdk ships XboxDev/nxdk-sdl, SDL 2.0.9 with
+	                              # native src/video/xbox, src/audio/xbox and
+	                              # src/joystick/xbox drivers. common/defaults.h:33
+	                              # then selects VIDEO_SDL / INPUT_SDL / SOUND_SDL,
+	                              # which is why no new backend enum is needed.
+)
+
 OUT="${OUT:-/tmp/$(basename "${SRC%.c}").obj}"
 
 exec clang \
@@ -62,6 +95,7 @@ exec clang \
 	-DNXDK \
 	-D__STDC__=1 \
 	-U__STDC_NO_THREADS__ \
+	"${ENGINE_DEFINES[@]}" \
 	"${OUR_INCLUDES[@]}" \
 	"${NXDK_INCLUDES[@]}" \
 	-c "$SRC" -o "$OUT" "$@"
