@@ -97,6 +97,16 @@ typedef struct tagPOINT { long x, y; } POINT, *PPOINT, *LPPOINT;
 #define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED "SDL_JOYSTICK_HIDAPI_SWITCH_HOME_LED"
 #endif
 
+/* errno_t. MSVC's Annex K spelling; pdclib is plain C99 and has no such
+ * typedef. public/miniz.c uses it on its time path, which stays enabled
+ * because filesystem_internal.h gets <time.h> transitively through miniz.h -
+ * setting MINIZ_NO_TIME to avoid this broke three filesystem/ files that had
+ * been relying on that. */
+#ifndef R3D_HAVE_ERRNO_T
+#define R3D_HAVE_ERRNO_T
+typedef int errno_t;
+#endif
+
 /* socklen_t. A POSIX type that arrives from <sys/socket.h> everywhere else;
  * nxdk has no sockets headers at all. engine/platform/stub/net_stub.h assumes
  * it exists - it defines WSAsize_t but not this - so the no-network build
@@ -104,6 +114,52 @@ typedef struct tagPOINT { long x, y; } POINT, *PPOINT, *LPPOINT;
 #ifndef R3D_HAVE_SOCKLEN_T
 #define R3D_HAVE_SOCKLEN_T
 typedef int socklen_t;
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int __stdcall GetUserNameA( char *buffer, unsigned long *size );
+int __stdcall GetUserNameW( LPWSTR buffer, unsigned long *size );
+int __stdcall GetCursorPos( LPPOINT point );
+int __stdcall SetCursorPos( int x, int y );
+
+unsigned short *_wfullpath( unsigned short *abs, const unsigned short *rel, unsigned int max );
+
+struct _PDCLIB_file_t;
+int   fileno( struct _PDCLIB_file_t *stream );
+
+struct tm;
+errno_t localtime_s( struct tm *result, const long *timer );
+errno_t gmtime_s( struct tm *result, const long *timer );
+
+void *__stdcall GetModuleHandleA( const char *name );
+int   __stdcall GetModuleHandleExA( unsigned long flags, const char *name, void **module );
+int   __stdcall GetModuleHandleExW( unsigned long flags, LPCWSTR name, void **module );
+char *getcwd( char *buf, unsigned int size );
+
+#ifdef __cplusplus
+}
+#endif
+
+#ifndef GetUserName
+#define GetUserName GetUserNameA
+#endif
+
+#ifndef GetModuleHandle
+#define GetModuleHandle GetModuleHandleA
+#endif
+#ifndef GetModuleHandleEx
+#define GetModuleHandleEx GetModuleHandleExA
+#endif
+
+/* GetModuleHandleEx flags. Meaningless with one module - nothing here
+ * reference-counts or pins - but callers pass them. */
+#ifndef GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+#define GET_MODULE_HANDLE_EX_FLAG_PIN                0x00000001
+#define GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 0x00000002
+#define GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS       0x00000004
 #endif
 
 #endif /* R3D_XBOX_PRELUDE_H */

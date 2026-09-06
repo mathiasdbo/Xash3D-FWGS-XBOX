@@ -333,7 +333,10 @@ wait for 'Esc' key will be hit
 */
 static void Sys_WaitForQuit( void )
 {
-#if XASH_WIN32
+// Not on Xbox: there is no message queue, so this loop would spin forever
+// waiting for a WM_QUIT that cannot arrive. An empty body is correct - the
+// console has no 'wait for the user to close the window' concept.
+#if XASH_WIN32 && !XASH_XBOX
 	MSG	msg;
 	msg.message = 0;
 
@@ -530,7 +533,9 @@ qboolean Sys_CanRestart( void )
 {
 #if XASH_NSWITCH || XASH_PSVITA
 	return true;
-#elif XASH_IOS
+#elif XASH_IOS || XASH_XBOX
+	// No exec on Xbox. nxdk can XReboot() the console, but that relaunches
+	// the dashboard rather than this title, so it is not a restart.
 	return false;
 #else
 	int exelen = wai_getExecutablePath( NULL, 0, NULL );
@@ -617,7 +622,11 @@ qboolean Sys_NewInstance( const char *gamedir, const char *finalmsg )
 
 	Host_ShutdownWithReason( finalmsg );
 
-#if XASH_PSVITA
+#if XASH_XBOX
+	// Unreachable: Sys_CanRestart returns false above. Guarded so execv,
+	// which nxdk does not have, is not compiled.
+	( void )newargs;
+#elif XASH_PSVITA
 	// under normal circumstances it's always going to be the same path
 	exe = strdup( "app0:/eboot.bin" );
 	sceAppMgrLoadExec( exe, newargs, NULL );

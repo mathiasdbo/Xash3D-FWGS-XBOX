@@ -749,3 +749,24 @@ int _mkdir( const char *path )                   { return mkdir( path, 0777 ); }
 int _rmdir( const char *path )                   { return rmdir( path ); }
 int _access( const char *path, int mode )        { return access( path, mode ); }
 int _dup( int fd )                               { return dup( fd ); }
+
+
+/*
+====================
+fileno
+
+pdclib keeps the OS handle in its FILE, at `handle`
+(deps/nxdk/lib/pdclib/include/pdclib/_PDCLIB_int.h:297), but exposes no fileno.
+
+The value returned is that handle, NOT an index into this file's descriptor
+table - the two numbering schemes are unrelated. The only caller,
+engine/common/sys_con.c, passes it straight to isatty-style checks and never
+to read() or close(), which is the only reason this is safe. If that changes,
+this needs to register the handle in the table and return a real descriptor.
+====================
+*/
+int fileno( FILE *stream )
+{
+	if( !stream ) { errno = EBADF; return -1; }
+	return ( int )stream->handle;
+}

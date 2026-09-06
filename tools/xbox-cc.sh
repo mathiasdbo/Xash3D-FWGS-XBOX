@@ -96,6 +96,12 @@ ENGINE_DEFINES=(
 	                              # direction X3 takes, but the stub is not
 	                              # self-contained on a platform with no BSD
 	                              # headers - see docs/r3d/fork-plan.md X0.
+	-DMINIZ_NO_STDIO=1            # miniz's own supported flag. Nothing in the
+	                              # inflate path, via img_png.c and
+	                              # filesystem_internal.h - so dropping stdio
+	                              # removes the MSVC 64-bit CRT surface
+	                              # (_ftelli64, _fseeki64, _wstat64, errno_t)
+	                              # rather than shimming it.
 	-DXASH_SDL=2                  # nxdk ships XboxDev/nxdk-sdl, SDL 2.0.9 with
 	                              # native src/video/xbox, src/audio/xbox and
 	                              # src/joystick/xbox drivers. common/defaults.h:33

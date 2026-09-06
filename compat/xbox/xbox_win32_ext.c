@@ -21,6 +21,7 @@ rather than returning a plausible lie.
 #include <stdio.h>
 #include <errno.h>
 #include <sys/utime.h>
+#include <time.h>
 
 /*
 ====================
@@ -311,4 +312,182 @@ int utime( const char *path, const struct utimbuf *times )
 int _utime( const char *path, const struct utimbuf *times )
 {
 	return utime( path, times );
+}
+
+
+/*
+====================
+GetUserNameA / GetUserNameW
+
+The Xbox has no user accounts in the Win32 sense. The engine uses this only to
+seed a default player name, so a fixed answer is correct rather than a
+placeholder — there is no better one to discover.
+====================
+*/
+static const char *R3D_USER_NAME = "Player";
+
+BOOL WINAPI GetUserNameA( LPSTR buffer, LPDWORD size )
+{
+	DWORD need = ( DWORD )strlen( R3D_USER_NAME ) + 1;
+
+	if( !size ) { SetLastError( ERROR_INVALID_PARAMETER ); return FALSE; }
+
+	if( !buffer || *size < need )
+	{
+		*size = need;
+		SetLastError( ERROR_INSUFFICIENT_BUFFER );
+		return FALSE;
+	}
+
+	memcpy( buffer, R3D_USER_NAME, need );
+	*size = need;
+	return TRUE;
+}
+
+BOOL WINAPI GetUserNameW( LPWSTR buffer, LPDWORD size )
+{
+	DWORD need = ( DWORD )strlen( R3D_USER_NAME ) + 1, i;
+
+	if( !size ) { SetLastError( ERROR_INVALID_PARAMETER ); return FALSE; }
+
+	if( !buffer || *size < need )
+	{
+		*size = need;
+		SetLastError( ERROR_INSUFFICIENT_BUFFER );
+		return FALSE;
+	}
+
+	for( i = 0; i < need; i++ )
+		buffer[i] = ( WCHAR )( unsigned char )R3D_USER_NAME[i];
+
+	*size = need;
+	return TRUE;
+}
+
+/*
+====================
+GetCursorPos / SetCursorPos
+
+There is no pointer. Reporting failure rather than (0,0) matters: a caller
+that believes the cursor is at the origin will act on it, where one that sees
+the call fail can fall back to gamepad navigation. See docs/r3d/ui-architecture.md.
+====================
+*/
+BOOL WINAPI GetCursorPos( LPPOINT point )
+{
+	( void )point;
+	SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+	return FALSE;
+}
+
+BOOL WINAPI SetCursorPos( int x, int y )
+{
+	( void )x; ( void )y;
+	SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+	return FALSE;
+}
+
+/*
+====================
+_wfullpath
+
+Canonicalises a path to absolute form. Everything the engine passes here is
+already absolute — nxdk resolves paths against a drive letter and there is no
+working directory to be relative to — so this copies rather than resolving,
+and says so instead of pretending to normalise "..".
+====================
+*/
+WCHAR *_wfullpath( WCHAR *abs, const WCHAR *rel, size_t max )
+{
+	size_t i;
+
+	if( !rel ) return NULL;
+
+	if( !abs )
+	{
+		SetLastError( ERROR_INVALID_PARAMETER );
+		return NULL;   /* the allocating form is not supported */
+	}
+
+	for( i = 0; i + 1 < max && rel[i]; i++ )
+		abs[i] = rel[i];
+
+	if( rel[i] ) return NULL;   /* did not fit */
+
+	abs[i] = 0;
+	return abs;
+}
+
+
+/*
+====================
+GetModuleHandleA / GetModuleHandleExA
+
+Exactly one XBE is mapped, so "the module containing this address" and "the
+module named X" have the same unambiguous answer. Returning a fixed non-NULL
+token is correct rather than a placeholder: every caller here only passes the
+result back to GetModuleFileName, which ignores it for the same reason.
+====================
+*/
+#define R3D_ONLY_MODULE (( HMODULE )0x00010000 )   /* the XBE base address */
+
+HMODULE WINAPI GetModuleHandleA( LPCSTR name )
+{
+	( void )name;
+	return R3D_ONLY_MODULE;
+}
+
+BOOL WINAPI GetModuleHandleExA( DWORD flags, LPCSTR name, HMODULE *module )
+{
+	( void )flags; ( void )name;
+	if( !module ) { SetLastError( ERROR_INVALID_PARAMETER ); return FALSE; }
+	*module = R3D_ONLY_MODULE;
+	return TRUE;
+}
+
+BOOL WINAPI GetModuleHandleExW( DWORD flags, LPCWSTR name, HMODULE *module )
+{
+	( void )flags; ( void )name;
+	if( !module ) { SetLastError( ERROR_INVALID_PARAMETER ); return FALSE; }
+	*module = R3D_ONLY_MODULE;
+	return TRUE;
+}
+
+
+/*
+====================
+localtime_s / gmtime_s
+
+MSVC's Annex K bounds-checked time functions. pdclib is plain C99 and has the
+unchecked forms only.
+
+Argument ORDER differs between MSVC and C11 Annex K, and they disagree about
+the return value. These follow MSVC, because that is what public/miniz.c was
+written against and MSVC is what _WIN32 implies to it.
+====================
+*/
+errno_t localtime_s( struct tm *result, const time_t *timer )
+{
+	struct tm *r;
+
+	if( !result || !timer ) return EINVAL;
+
+	r = localtime( timer );
+	if( !r ) return EINVAL;
+
+	*result = *r;
+	return 0;
+}
+
+errno_t gmtime_s( struct tm *result, const time_t *timer )
+{
+	struct tm *r;
+
+	if( !result || !timer ) return EINVAL;
+
+	r = gmtime( timer );
+	if( !r ) return EINVAL;
+
+	*result = *r;
+	return 0;
 }
