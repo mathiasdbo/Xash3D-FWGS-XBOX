@@ -136,6 +136,37 @@ rather than a prerequisite for us.
   network logging, so failures on hardware are readable.
 - XBE packaging with `cxbe`.
 
+
+### Networking is parked, deliberately
+
+Six files — `net_ws.c`, `net_chan.c`, `xrcon.c`, `cl_steam.c`, the two
+`http/` files — do not compile, and are being left that way.
+
+Both routes were priced:
+
+**`XASH_NO_NETWORK=1`** selects `engine/platform/stub/net_stub.h`
+(`net_ws_private.h:17`), which is upstream's own no-network mode and the
+direction X3 takes anyway. It is not self-contained: the stub declares the
+socket structures opaquely, while `net_ws.c` uses `sockaddr_in6`,
+`sockaddr_storage` and `in6_addr` **by value**. On Linux the real headers
+are present regardless of the flag, so upstream never hits this. On a
+platform with no BSD headers at all, it does not build.
+
+**Routing through nxdk's lwIP** would give the real types — it vendors lwIP
+with a `compat/posix` layer carrying exactly those structs. But nxdk ships
+no `lwipopts.h` and no `arch/cc.h`; its `lib/net/Makefile` compiles the
+sources and leaves the port layer to the application. Writing one is
+perhaps a hundred lines, and it would be written for code X3 deletes.
+
+So: parked, not forgotten. Two things worth doing later, in this order:
+
+1. **Complete upstream's stub** so `XASH_NO_NETWORK` is self-contained.
+   That is a small, generic patch that helps any platform without BSD
+   headers, and it is the kind of thing FWGS would plausibly take. It also
+   makes X3's trim trivial instead of surgical.
+2. Only if the console build ever wants real networking, write the lwIP
+   port layer.
+
 **Exit:** an XBE that boots in xemu, prints, and exits cleanly.
 
 ## X0.5 — Root directory detection

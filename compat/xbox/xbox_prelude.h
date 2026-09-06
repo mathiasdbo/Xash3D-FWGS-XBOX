@@ -97,4 +97,13 @@ typedef struct tagPOINT { long x, y; } POINT, *PPOINT, *LPPOINT;
 #define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED "SDL_JOYSTICK_HIDAPI_SWITCH_HOME_LED"
 #endif
 
+/* socklen_t. A POSIX type that arrives from <sys/socket.h> everywhere else;
+ * nxdk has no sockets headers at all. engine/platform/stub/net_stub.h assumes
+ * it exists - it defines WSAsize_t but not this - so the no-network build
+ * needs it even though nothing will ever call a socket function. */
+#ifndef R3D_HAVE_SOCKLEN_T
+#define R3D_HAVE_SOCKLEN_T
+typedef int socklen_t;
+#endif
+
 #endif /* R3D_XBOX_PRELUDE_H */

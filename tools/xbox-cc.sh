@@ -91,6 +91,11 @@ ENGINE_DEFINES=(
 	-DXASH_BUILD_COMMIT=\"xbox-bringup\"    # normally injected by waf from git;
 	-DXASH_BUILD_BRANCH=\"x0\"              # public/build_vcs.c reads all three
 	-DXASH_BUILD_COMMIT_DATE=\"0\"
+	-DXASH_NO_NETWORK=1           # net_ws_private.h:17 selects the stub. It is
+	                              # upstream's own no-network mode and the
+	                              # direction X3 takes, but the stub is not
+	                              # self-contained on a platform with no BSD
+	                              # headers - see docs/r3d/fork-plan.md X0.
 	-DXASH_SDL=2                  # nxdk ships XboxDev/nxdk-sdl, SDL 2.0.9 with
 	                              # native src/video/xbox, src/audio/xbox and
 	                              # src/joystick/xbox drivers. common/defaults.h:33
