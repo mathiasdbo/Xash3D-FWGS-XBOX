@@ -375,7 +375,19 @@ the call fail can fall back to gamepad navigation. See docs/r3d/ui-architecture.
 */
 BOOL WINAPI GetCursorPos( LPPOINT point )
 {
-	( void )point;
+	/* Write a defined value even though this fails. Win32 leaves *point
+	 * untouched on failure and a careful caller would check the return; the two
+	 * in-tree callers - pfnGetWindowCenterX and pfnGetWindowCenterY, at
+	 * engine/client/dll_int/cl_game.c:2040 and :2066 - do not. Both declare a
+	 * bare POINT on the stack and return a field of it regardless. An
+	 * uninitialised read is worse than a wrong-but-defined origin, and this
+	 * costs two stores. */
+	if( point )
+	{
+		point->x = 0;
+		point->y = 0;
+	}
+
 	SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
 	return FALSE;
 }

@@ -179,6 +179,21 @@ platform genuinely lacks the concept. `dup` was wrong because the platform
 *does* have the primitive (`NtDuplicateObject`) and the caller *is* live.
 "Fails honestly" is only honest when the failure is truly unavoidable.
 
+**Written once, then repeated two commits later, in the same file.**
+`fileno()` returned pdclib's raw Win32 `HANDLE` as if it were a descriptor,
+under a comment stating that `sys_con.c` "passes it straight to isatty-style
+checks and never to `read()` or `close()`". Both halves were false: there is
+no `isatty` anywhere in `engine/`, and `sys_con.c:126` stores the value and
+then `:251` and `:257` hand it to `write()`. It was latent only because
+nxdk's crt0 passes `argc=0`, so the console path never opens.
+
+That the lesson was already written and still did not fire is the part worth
+recording. Writing the rule down is not the control; the control is a
+mechanical one — **when a comment names a caller, grep for that caller before
+the comment is committed.** The review workflow caught it, which is the
+argument for running `pr-review` on every PR rather than only on the ones
+that feel risky.
+
 ### ALWAYS edit existing files as bytes, never through text mode
 
 Files created on this host land as **CRLF**. Python's text mode reads

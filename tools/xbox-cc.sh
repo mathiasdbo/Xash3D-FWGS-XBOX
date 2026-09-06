@@ -102,11 +102,19 @@ ENGINE_DEFINES=(
 	                              # self-contained on a platform with no BSD
 	                              # headers - see docs/r3d/fork-plan.md X0.
 	-DMINIZ_NO_STDIO=1            # miniz's own supported flag. Nothing in the
-	                              # inflate path, via img_png.c and
+	                              # engine uses its file API - only the
+	                              # in-memory inflate path, via img_png.c and
 	                              # filesystem_internal.h - so dropping stdio
-	                              # removes the MSVC 64-bit CRT surface
-	                              # (_ftelli64, _fseeki64, _wstat64, errno_t)
-	                              # rather than shimming it.
+	                              # removes _wstat64 and the archive-writing
+	                              # CRT surface.
+	                              #
+	                              # It does NOT remove errno_t. miniz's TIME
+	                              # path stays on, because MINIZ_NO_TIME broke
+	                              # three filesystem/ files that were getting
+	                              # <time.h> transitively through miniz.h. So
+	                              # errno_t and localtime_s are still shimmed.
+	                              # _ftelli64/_fseeki64 are shimmed too, but
+	                              # for vorbis, not for miniz.
 	-DXASH_SDL=2                  # nxdk ships XboxDev/nxdk-sdl, SDL 2.0.9 with
 	                              # native src/video/xbox, src/audio/xbox and
 	                              # src/joystick/xbox drivers. common/defaults.h:33
