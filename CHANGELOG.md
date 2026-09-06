@@ -5,6 +5,36 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — the plan, after checking it against the code
+
+`docs/r3d/xbox-performance-review.md` read `optimization-transfer.md` and the
+X-phases against `ref/gl`, the baker and nxdk. Of its eighteen real items,
+four were already in the tree, one is present but disabled, and nine are baker
+work with no owning phase. What changed as a result:
+
+- **XB — Baker output for the NV2A**, a new phase between X5 and X9. Two
+  censuses first (lightstyles per face, bones per mesh), then the format:
+  vertex layout, per-cluster per-material lists, RGB565 pages with a stated
+  lightstyle policy, bone partitioning against the 192-register VP20 palette,
+  the DXT block-row fix, post-T&L index order. Exit: PC `ref/gl` renders from
+  the baked render-half.
+- **X0 gains the ruler.** Per-subsystem `rdtsc` counters and a frame-time line
+  ship with the log channel, not in X11.
+- **X5 and X9 exit with a number** — software frame time on `c1a3` and
+  `crossfire` as the baseline, hardware frame time against it.
+- **X9 loses "the real variance."** The reference has no per-pixel lights;
+  what remains is raising per-vertex lights from four to eight and measuring
+  linear against swizzled lightmap updates. Memoised bone setup joins X9 as
+  new work — the reference is eager.
+- **D8** in `design-stage.md`: the two censuses, as a design question that
+  gates XB.
+- **`reference-renderer-specialist`** added, with a matching `reference` lens
+  in `pr-review`. Its only job is to check "the reference does X" against
+  `ref/gl` and cite the line. Three of the four false claims the review found
+  were of that shape, and no existing specialist owned the question.
+- `console-performance-specialist` no longer claims the reference memoises
+  bone setup. It does not.
+
 ### Added — X0 part 1: toolchain bring-up and the POSIX compatibility layer
 
 **Not all of X0.** Its exit criterion is an XBE built from this tree that boots

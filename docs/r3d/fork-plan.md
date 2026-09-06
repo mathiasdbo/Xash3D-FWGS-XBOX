@@ -134,6 +134,10 @@ rather than a prerequisite for us.
     `extract-xiso` — producing a 102,400-byte `default.xbe` and an ISO.
 - **A working log channel before anything else** — nxdk's debug channel, then
   network logging, so failures on hardware are readable.
+- **A ruler in the same channel.** Per-subsystem `rdtsc` counters and a
+  frame-time line, here rather than in X11. Numbers are logs. Every claim in
+  `optimization-transfer.md` is a hypothesis until a phase that draws prints
+  one, and until 2026-09-06 this plan had the instrument scheduled last.
 - XBE packaging with `cxbe`.
 
 
@@ -388,7 +392,10 @@ against a known-good picture instead of guessing.
 
 It will be slow. That is fine; it is a reference, not a shipping path.
 
-**Exit:** a recognisable Half-Life map on screen, rendered in software.
+**Exit:** a recognisable Half-Life map on screen, rendered in software — and
+its frame time on `c1a3` and `crossfire` at 640×480 and 320×240, from the X0
+counters. This is the baseline X9 has to beat; without it, "the hardware path
+is faster" is an opinion.
 
 ## X6 — Input and menu
 
@@ -437,19 +444,74 @@ the Xbox critical path entirely. Keep them as an upstream nice-to-have.
 
 **Exit:** positional sound and sentences.
 
+## XB — Baker output for the NV2A
+
+Between X5 and X9, and runnable alongside X6–X8: it touches only
+`tools/asset-studio` and the PC build. Nine of the eighteen real items in
+`xbox-performance-review.md` §3 are baker work, and until this phase existed
+none of them had an owner.
+
+**Two censuses first, because they decide the rest.** Both are one-minute
+scripts over the retail assets, and both answer questions the plan had been
+carrying as opinions:
+
+- **Lightstyles.** How many faces per map carry `styles[1..3] != 255`. The
+  baker bakes style 0 only (`BspParser.cpp:514-523`), so "RGB565 pages, no
+  runtime conversion" currently means no light in the game switches or
+  flickers on Xbox. The number picks between per-style pages combined at
+  runtime, a baked *on* state with binary switching, or an accepted loss —
+  and the choice is written down here, not arrived at.
+- **Bones.** Which retail models reference more bones per mesh than a VP20
+  palette holds — 192 constants (`deps/nxdk/tools/vp20compiler/config.h:11`),
+  three per bone, roughly 50 after the view-projection and light constants,
+  against `MAXSTUDIOBONES 128`. Every model over the line needs partitioning
+  by bone subset; the code must exist for the ones that do.
+
+Then the format, decided once:
+
+- **Vertex layout** the NV2A reads natively: FLOAT, normalised SHORT,
+  D3DCOLOR. No integer attributes. `base_vertex`-chunked u16 indices — the
+  decision the Rust port already made, carried over rather than re-derived.
+- **Draw lists per cluster, per material**, so runtime submission is a walk in
+  baked order. Per leaf alone explodes the draw count, and on pbkit every
+  submission is CPU time writing pushbuffer words into write-combined memory.
+- **Lightmap pages in RGB565**, with whatever the census decided.
+- **Bone partitioning** for the models the census named.
+- **DXT laid out linear by block row.** `swizzleNV2A`
+  (`TextureOpt.cpp:110-132`) applies a Morton order to DXT blocks, which is
+  wrong for `D3DFMT_DXT1` on this hardware. Verified against a known-good
+  surface, not reasoned about.
+- **Post-T&L cache ordering** of indices. Free offline, invisible to the
+  engine.
+
+**Exit:** `ref/gl` on PC renders a map from the baked render-half,
+pixel-compared against the loose-folder path. The console path runs first on
+the machine with a debugger — the D4 principle — and X9 becomes a renderer
+job instead of a renderer-plus-format job.
+
 ## X9 — `ref/nv2a`
 
 The hardware renderer, replacing X5's software path against a picture already
-known to be correct.
+known to be correct, consuming the format XB decided.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised
   SHORT only.
 - Register combiners for `diffuse × lightmap × 2` and native alpha test.
-- Matrix-palette skinning in VP20.
-- **Dynamic lighting redesign**: N per-pixel lights to 8 per-vertex in
-  fixed-function T&L. A visual-design decision made looking at a screen, not a
-  port. The real variance in this plan.
+- Matrix-palette skinning in VP20, within the 192-register palette, on meshes
+  XB has already partitioned.
+- **Memoised bone setup.** The reference is eager every frame
+  (`R_StudioSetupBones`, `gl_studio.c:815`); this is new work, and it is the
+  half of the skinning cost VP20 does not take.
+- **Dynamic lighting — two small items, not a redesign.** The reference has no
+  per-pixel lights (`xbox-performance-review.md` §1.3): studio models are
+  per-vertex with `MAX_LOCALLIGHTS 4`, so raise to the eight the T&L unit
+  gives; world dlights are lightmap-space sub-uploads, so measure linear
+  (`LU_IMAGE_R5G6B5`) against swizzled pages and pick by number. The "real
+  variance" this plan used to name here lives in XB's lightstyle policy.
+- `r_alphasort`'s job is already done by `R_TransEntityCompare`
+  (`gl_rmain.c:86`); keep that order when the entity list becomes a baked
+  walk.
 - Fix `swizzleNV2A` on DXT blocks (`TextureOpt.cpp:110-132`): Xbox
   `D3DFMT_DXT1` is linear by block rows; the Morton swizzle is for
   uncompressed surfaces.
@@ -459,7 +521,8 @@ known to be correct.
   wrong for anamorphic widescreen. See `ui-architecture.md` §8.
 
 **Exit:** a map drawn on the NV2A, compared frame by frame against X5's
-software output and the PC capture.
+software output and the PC capture — and a hardware frame time on `c1a3` and
+`crossfire` against X5's baseline.
 
 ## X10 — First playable
 
@@ -474,14 +537,17 @@ level transitions.
 several of its findings were transcription bugs and undersized buffers rather
 than algorithmic problems. Expect the same shape.
 
-- `rdtsc` counters per subsystem in the platform backend.
+- The counters come from X0 and the baseline from X5. This phase is what
+  remains after X9, not the first time anyone measures.
 - Measure on `c1a3` and `crossfire`, not `c0a0` — one of the emptiest maps.
-- The Rust port's lessons: no allocation in the frame loop; lazy memoised pose
-  computation rather than an eager per-entity sweep; no unconditional logging
-  on a serial-console platform.
-- Ironwail's *principles* — less CPU work per frame, batch, sort by state.
-  Its *techniques* do not apply: the NV2A has no compute, no indirect draw and
-  no bindless textures. See `epics.md` §0.
+- The Rust port's lessons: no allocation in the frame loop; no unconditional
+  logging on a serial-console platform. (Memoised bones moved to X9.)
+- The rows of `xbox-performance-review.md` §3 that no earlier phase owns:
+  the transient-buffer allocation audit; threaded save and load I/O, which
+  transfers because the hitch is I/O-bound, not because there is a second
+  core; `R_CullSurface` backface rejection against deliberate under-culling,
+  measured both ways rather than ported on the strength of the reference
+  doing it; and SSE intrinsics only for a loop a hardware profile has named.
 - Memory audit: per-map peak, fragmentation after repeated `changelevel`.
 
 **Exit:** a documented frame budget and peak memory figure on real hardware.

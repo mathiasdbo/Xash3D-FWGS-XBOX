@@ -217,9 +217,14 @@ matrix-palette skinning in VP20. `deps/nxdk/tools/` ships `fp20compiler` and
 `vp20compiler`, so combiners and vertex programs are compiled from text, not
 hand-assembled.
 
-**The real variance:** dynamic lighting must be redesigned from N per-pixel
-lights to 8 per-vertex in fixed-function T&L. That is a visual-design decision
-made looking at a screen, not a port.
+**The variance is in the baker, not the lights.** An earlier version of this
+paragraph called dynamic lighting "the real variance" — N per-pixel lights to
+8 per-vertex. The reference has no per-pixel lights: its studio lighting is
+already per-vertex and its world dlights are lightmap sub-uploads
+(`xbox-performance-review.md` §1.3). The decision that actually changes what
+the player sees is the lightstyle policy, and it belongs to `fork-plan.md`
+XB — the baker phase between X5 and X9 that owns nine of the eighteen real
+performance items and, until 2026-09-06, did not exist.
 
 **Exit:** a map drawn in xemu with lightmaps, animated entities and sprites,
 compared frame by frame against the PC capture.
@@ -285,10 +290,13 @@ abstraction proves itself.
 
 Continuous, per target.
 
-Ironwail's *principles* everywhere, its *techniques* only on E6. Plus the
-concrete lessons from the Rust port: no allocation in the frame loop; lazy,
-memoised pose computation rather than an eager per-entity sweep; no
-unconditional logging on a serial-console platform.
+Ironwail's *principles* everywhere, its *techniques* only on E6. The item
+list is `xbox-performance-review.md` §3 — eighteen rows, four already in the
+tree, one present but disabled, nine of them baker work — and each row names
+its phase. Plus the concrete lessons from the Rust port: no allocation in the
+frame loop; no unconditional logging on a serial-console platform; memoised
+bone setup, which is new work rather than a restoration, since the reference
+is eager.
 
 Measurement is per target and on real hardware. xemu does not emulate DMA
 timing or the serial channel faithfully.

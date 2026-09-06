@@ -116,6 +116,24 @@ never allocate in the loop. Its *techniques* do not: no compute shaders, no
 indirect draw, no bindless textures on this hardware. Flag anyone conflating
 the two.`,
   },
+  reference: {
+    label: 'review:reference-claims',
+    when: d => /docs\/r3d\/|ref\/|\.claude\/agents\//.test(d),
+    prompt: `Audit every claim about what the reference renderer does.
+
+For each statement in the diff of the form "the reference does / does not /
+already / never X" — in a document, a plan, a code comment, or a specialist's
+standing prompt — find it in \`ref/gl\`, \`ref/soft\`, \`engine/client\` or
+\`engine/common/mod_bmodel.c\` and cite \`file:line\`, or name the function
+that would contain it and does not.
+
+Check the default, not the capability: \`r_vbo\` exists and defaults to off
+(\`gl_opengl.c:34\`). Check the mechanism, not the name: the bone "cache" at
+\`gl_studio.c:72\` is not a per-frame memo, and world dlights are lightmap
+sub-uploads, not per-pixel lights. Five of eighteen "ports from Ironwail" in
+this project were already in the tree and one ran the other way; every one was
+a claim of this shape. A claim without a line is a finding.`,
+  },
 }
 
 const FINDING = {
