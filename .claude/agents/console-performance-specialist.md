@@ -17,8 +17,13 @@ planning work that cannot be done.
 Concrete failures inherited from the previous project, worth checking for by
 name:
 
-- Eager per-entity pose computation where the reference memoises lazily,
-  costing roughly 13 % of a frame budget on a nearly empty map.
+- Eager per-entity pose computation, costing roughly 13 % of a frame budget on
+  a nearly empty map. **The reference is eager too** — `R_StudioSetupBones`
+  (`ref/gl/gl_studio.c:815`) recomputes every bone every frame, and the
+  `cached_bonestransform` array there is the parent-attachment cache for
+  `R_StudioMergeBones`, not a per-frame memo. An earlier version of this line
+  said the reference memoises lazily; it does not. Memoisation is a proposed
+  improvement, and it should be reviewed as new work, not as a restoration.
 - Allocations in the frame loop: vector returns, string lookups, hashing where
   an index would do.
 - Unconditional logging. On a serial-console platform a debug line can cost
