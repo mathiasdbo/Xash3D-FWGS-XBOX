@@ -55,6 +55,39 @@ compute shaders, indirect multi-draw, bindless textures and persistent
 mapping, none of which exist on the NV2A or the RSX. Check the *hardware
 feature*, not the *engine lineage*, before planning work around a technique.
 
+### ALWAYS look for the project's own environment script before hand-rolling one
+
+Four hypotheses, six failed builds and roughly an hour went into diagnosing why
+nxdk would not compile here — MSYS path conversion, libcxx header shadowing,
+empty `-I` arguments, Windows SDK auto-detection. All four were wrong.
+
+`deps/nxdk/bin/activate` had existed the whole time. It emits exactly the right
+`PATH` and `NXDK_DIR`, and the real problem was simply the wrong shell: nxdk
+wants MSYS2 MinGW-64, whose `/mingw64/bin` carries the clang it expects, and Git
+Bash has no such directory.
+
+**Before deriving an environment, look for one.** `activate`, `env.sh`,
+`*-config`, a CI workflow file, a sibling project that already builds the same
+thing. The cost of looking is a minute; the cost of not looking was every wrong
+hypothesis above, each of which was individually plausible and locally
+consistent with the evidence.
+
+**Corollary, and the sharper half:** every one of those hypotheses was
+*supported* by real command output. Plausible mechanisms that fit the symptom
+are cheap to generate and expensive to test. Prefer the check that would
+*eliminate a whole class* — "does an official recipe exist?" — over the check
+that confirms one mechanism.
+
+### NEVER run a mutating agent against a tree you are working in
+
+A workflow spawned to explore build recipes ran `make clean` in `deps/nxdk` and
+deleted nineteen freshly built libraries, while the main session was using
+them. No conflict was reported, because nothing detects it.
+
+Agents that only read are safe to run alongside anything. Agents that build,
+clean or edit need either an isolated worktree or exclusive use of the tree.
+Decide which before launching, not after.
+
 ### NEVER call something the top risk without reading the conditional around it
 
 `xshlib.py:47-50` sets `-melf_i386`, so this project recorded "the static

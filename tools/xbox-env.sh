@@ -1,68 +1,78 @@
 #!/usr/bin/env sh
-# Environment for building nxdk and the Xbox target on a Windows host.
+# Build environment for nxdk and the Xbox target.
 #
-#   . tools/xbox-env.sh        (source it, do not execute it)
+# Do not source this from Git Bash. See "Which shell" below — that is the whole
+# point of this file.
 #
-# Every line here exists because getting it wrong produces a *silent* failure
-# rather than an error. Read the notes before changing anything.
+#   Build nxdk:
+#     MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc '
+#       cd <repo>/deps/nxdk && eval "$(./bin/activate -s)" && make NXDK_ONLY=y -j8'
+#
+# Verified working 2026-09-05: 19 libraries, including libSDL2, libpbkit,
+# libpdclib, libnxdk_hal, libSDL_ttf and libc++.
 
-REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# --- Which shell -------------------------------------------------------------
+#
+# **MSYS2 MinGW-64, not Git Bash.** nxdk expects `/mingw64/bin` on PATH, which
+# Git Bash does not have. MSYS2 ships clang 21.1.8 there along with lld-link,
+# llvm-lib, llvm-ar and llvm-objcopy.
+#
+# A separate LLVM in "C:/Program Files/LLVM" is NOT a substitute. It will
+# compile individual files and then fail the build in ways that look like
+# source bugs.
 
-# --- NXDK_DIR must be a Windows-form path ------------------------------------
+# --- Use nxdk's own activate script ------------------------------------------
 #
-# THE ONE THAT COSTS AN HOUR IF YOU GET IT WRONG.
+# deps/nxdk/bin/activate emits the correct exports. Do not hand-roll PATH and
+# NXDK_DIR; that is how the traps below get sprung.
 #
-# deps/nxdk/bin/nxdk-cc is a POSIX shell script that passes
-# "-isystem ${NXDK_DIR}/lib/pdclib/include" and five more include paths to a
-# NATIVE clang.exe. If NXDK_DIR holds an MSYS-form path (/g/Proyectos/...),
-# clang cannot resolve those directories and **silently drops them** — there
-# is no warning, because clang omits non-existent -I paths without comment.
+#   eval "$(./bin/activate -s)"
 #
-# The compile then falls through to the Visual Studio and Windows SDK headers
-# that clang auto-detects from the i386-pc-win32 triple, and fails much later
-# with something that looks unrelated:
+# The `-s` is mandatory. Sourced with no arguments, activate ends in
+#   exec "${@:-${SHELL:-sh}}"
+# which spawns a new interactive shell and hangs a non-interactive caller.
+
+# --- NXDK_DIR is an MSYS-form path -------------------------------------------
+#
+# activate exports NXDK_DIR="/g/Proyectos/.../deps/nxdk". Leave it that way.
+#
+# Setting it to Windows form (G:/Proyectos/...) looks like it helps — a single
+# file will compile — but it breaks make's target matching, because make's
+# internal paths are /g/... form. `make $NXDK_DIR/lib/libpdclib.lib` then
+# reports **exit 0 while building nothing**, since no rule matches that target
+# name. A build that succeeds without producing output is the worst failure
+# mode in this file.
+
+# --- The failure this all prevents -------------------------------------------
+#
+# Get any of the above wrong and nxdk-cc's six include directories never reach
+# clang. clang discards non-existent -I paths silently, so the compile falls
+# through to the Visual Studio and Windows SDK headers that clang auto-detects
+# from the i386-pc-win32 triple, and dies somewhere unrelated:
 #
 #   pdclib/functions/ctype/isalpha.c:15:14:
 #     error: use of undeclared identifier '_PDCLIB_lc_ctype'
 #
-# because it compiled against C:\...\Windows Kits\10\...\ucrt\ctype.h instead
-# of pdclib's. Confirm the search path with:
+# having compiled against Windows Kits' ucrt/ctype.h instead of pdclib's.
+#
+# Confirm rather than assume:
 #
 #   nxdk-cc -v -c <file> 2>&1 | sed -n '/search starts here/,/End of search/p'
 #
-# pdclib, xboxrt and winapi must all appear there. If they do not, this
-# variable is wrong.
-NXDK_DIR=$(cd "$REPO_ROOT/deps/nxdk" && pwd -W 2>/dev/null || echo "$REPO_ROOT/deps/nxdk")
-export NXDK_DIR
+# pdclib, xboxrt and winapi must appear. If they do not, the environment is
+# wrong regardless of what any other symptom suggests.
 
-# --- Toolchain ---------------------------------------------------------------
-# clang and the LLVM binutils: nxdk needs clang, lld-link, llvm-lib, llvm-ar.
-# llvm-objcopy is needed too, but note it rejects -G/--localize-symbol on COFF;
-# --redefine-sym is the one symbol option that works. See docs/r3d/x0-probe-results.md §4.
-LLVM_BIN="/c/Program Files/LLVM/bin"
-
-# GNU make. Git Bash does not ship one; MSYS2 or the nxdk docs' toolchain does.
-MAKE_BIN="/c/msys64/usr/bin"
-
-# nxdk's own wrappers (nxdk-cc, nxdk-cxx, nxdk-link, cxbe, extract-xiso).
-NXDK_BIN="$REPO_ROOT/deps/nxdk/bin"
-
-PATH="$LLVM_BIN:$NXDK_BIN:$MAKE_BIN:$PATH"
-export PATH
-
-# --- Check -------------------------------------------------------------------
-for tool in clang make nxdk-cc nxdk-link; do
-	command -v "$tool" >/dev/null 2>&1 || echo "xbox-env: MISSING $tool"
-done
-
-echo "xbox-env: NXDK_DIR=$NXDK_DIR"
-echo "xbox-env: clang $(clang --version 2>/dev/null | head -1 | sed 's/.*version //;s/ .*//')"
-
-# --- Building nxdk -----------------------------------------------------------
+# --- Spaces in paths ---------------------------------------------------------
 #
-#   cd deps/nxdk && make NXDK_ONLY=y -j8
+# nxdk and make both split on spaces. This repository's path is space-free, but
+# $HOME on this machine is not ("C:/Users/Mathias Development"), so keep build
+# inputs and outputs inside the repo. The Mortyr Xbox demo works around the same
+# problem with junctions (C:\nxdk -> the real, spaced path) and notes that
+# $(CURDIR) resolves junctions back to the spaced form, so project Makefiles
+# must keep SRCS relative.
+
+# --- Do not run a mutating agent against this tree ----------------------------
 #
-# NXDK_ONLY=y implies NXDK_CXX=y and NXDK_SDL=y (Makefile:63-67), so it builds
-# every library including SDL2 and libcxx. That is what we want — mainui is
-# C++ and the platform layer is SDL2 — but it is also why the build pulls every
-# library's include flags into every translation unit.
+# A workflow exploring build recipes ran `make clean` here and deleted 19
+# freshly built libraries. Build artifacts under deps/nxdk are not cheap to
+# reproduce; treat the tree as single-writer.
