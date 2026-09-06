@@ -56,6 +56,11 @@ OUR_INCLUDES=(
 	-I "$REPO/filesystem"
 	-I "$REPO/pm_shared"
 	-I "$REPO/3rdparty/library_suffix/include"
+	-I "$REPO/3rdparty/MultiEmulator/include"        # cl_main.c
+	-I "$REPO/3rdparty/opus/opus/include"            # voice.c
+	-I "$REPO/3rdparty/opusfile/opusfile/include"    # snd_ogg_opus.c
+	-I "$REPO/3rdparty/vorbis/vorbis-src/include"    # snd_ogg_vorbis.c
+	-I "$REPO/3rdparty/libogg/libogg/include"        # both ogg decoders
 	-I "$NXDK_DIR/lib/sdl/SDL2/include"   # XASH_SDL=2 means <SDL.h> must resolve
 )
 

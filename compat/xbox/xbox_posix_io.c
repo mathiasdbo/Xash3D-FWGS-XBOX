@@ -770,3 +770,35 @@ int fileno( FILE *stream )
 	if( !stream ) { errno = EBADF; return -1; }
 	return ( int )stream->handle;
 }
+
+
+/*
+====================
+_fseeki64 / _ftelli64
+
+MSVC's 64-bit stdio offsets. 3rdparty/vorbis reaches for them under _WIN32,
+which is true here.
+
+**These are 32-bit underneath.** pdclib's fseek and ftell take and return long,
+which is 32 bits on this target, so files above 2 GB cannot be addressed. That
+is not a limitation worth engineering around: the Xbox's media is a DVD or a
+hard disc partition far below that, and FATX caps a single file at 4 GB anyway.
+Recorded so nobody later assumes the 64 in the name is real.
+====================
+*/
+int _fseeki64( FILE *stream, long long offset, int origin )
+{
+	if( offset > 0x7FFFFFFFLL || offset < -0x80000000LL )
+	{
+		errno = EINVAL;
+		return -1;
+	}
+
+	return fseek( stream, ( long )offset, origin );
+}
+
+long long _ftelli64( FILE *stream )
+{
+	long pos = ftell( stream );
+	return ( pos < 0 ) ? -1LL : ( long long )pos;
+}

@@ -93,6 +93,15 @@ typedef struct tagPOINT { long x, y; } POINT, *PPOINT, *LPPOINT;
 #ifndef SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE
 #define SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE "SDL_JOYSTICK_HIDAPI_PS5_RUMBLE"
 #endif
+#ifndef SDL_HINT_VIDEO_X11_FORCE_EGL
+#define SDL_HINT_VIDEO_X11_FORCE_EGL "SDL_VIDEO_X11_FORCE_EGL"
+#endif
+#ifndef SDL_HINT_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO
+#define SDL_HINT_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO "SDL_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO"
+#endif
+#ifndef SDL_HINT_ANDROID_BLOCK_ON_PAUSE
+#define SDL_HINT_ANDROID_BLOCK_ON_PAUSE "SDL_ANDROID_BLOCK_ON_PAUSE"
+#endif
 #ifndef SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED
 #define SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED "SDL_JOYSTICK_HIDAPI_SWITCH_HOME_LED"
 #endif
@@ -129,6 +138,9 @@ unsigned short *_wfullpath( unsigned short *abs, const unsigned short *rel, unsi
 
 struct _PDCLIB_file_t;
 int   fileno( struct _PDCLIB_file_t *stream );
+
+int       _fseeki64( struct _PDCLIB_file_t *stream, long long offset, int origin );
+long long _ftelli64( struct _PDCLIB_file_t *stream );
 
 struct tm;
 errno_t localtime_s( struct tm *result, const long *timer );
