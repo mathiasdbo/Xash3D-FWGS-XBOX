@@ -147,12 +147,30 @@ configuration nothing runs is a configuration that is already broken.
 **Corollary:** add a target to CI the moment it compiles, even while the
 binary does nothing useful.
 
-### NEVER let a tool rewrite a file's line endings
+### ALWAYS edit existing files as bytes, never through text mode
 
-Rewriting `.gitignore` through a text-processing script converted the whole
-file from CRLF to LF, turning a 14-line addition into a 766-line diff. On a
-fork, that hides the real change and poisons every future merge. Preserve the
-original bytes and append.
+Files created on this host land as **CRLF**. Python's text mode reads
+universal-newlines and writes `os.linesep`, so any read-modify-write in text
+mode silently flips a file's line endings — in either direction, depending on
+which side started as which.
+
+The cost is not cosmetic. A 14-line addition to `.gitignore` became a 766-line
+diff; a 24-line addition to `fork-plan.md` became 390. On a fork that hides the
+real change, poisons every future merge, and makes review useless.
+
+Passing `newline=""` on read or `newline="\n"` on write does not save you.
+Both were tried; the second is what caused the 390-line diff, by forcing LF
+onto a CRLF file. The same trap bites the *search* side: a pattern written with
+LF will not match a CRLF file, which fails silently as "anchor not found".
+
+**Open with `"rb"`, replace on `bytes`, write with `"wb"`.** Then check with
+`git diff --stat` before committing: if the changed-line count is anywhere near
+the file's length, the edit is wrong no matter how correct the content looks.
+
+This rule existed after the first occurrence and was violated twice more,
+because text mode is what comes to hand. It is a reflex problem, not a
+knowledge problem — which is why the check afterwards matters more than the
+intention beforehand.
 
 ### ALWAYS state which question an answer is answering when the scope has moved
 
