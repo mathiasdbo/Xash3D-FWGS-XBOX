@@ -58,10 +58,11 @@ echo
 
 if [ "$fail" -gt 0 ]; then
 	echo "distinct errors, by frequency:"
-	# Strip file:line and the -Wflag suffix, and blank out identifiers, so the
-	# same cause groups together.
-	sed -E 's/^[^ ]*error: //; s/ \[-W[^]]*\]$//' "$LOG" \
-		| sed -E "s/'[^']*'/'X'/g" \
+	# Drop the file:line prefix and the -Wflag suffix so the same cause groups
+	# together. Identifiers are KEPT: an earlier version blanked them, which
+	# turned "unknown type name 'convar_t'; did you mean 'cvar_t'?" into
+	# "unknown type name 'X'; did you mean 'X'?" and hid the answer.
+	sed 's/^.*error: //' "$LOG" | sed 's/ \[-W.*\]$//' \
 		| sort | uniq -c | sort -rn | head -30
 	echo
 	echo "full log: $LOG"

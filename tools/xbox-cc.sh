@@ -17,9 +17,16 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
-# MSYS2's MinGW-64 clang. MSYSTEM alone does not put it on PATH — that is the
-# login profile's job, which a non-login shell skips.
-export PATH="/mingw64/bin:$PATH"
+# MSYS2's MinGW-64 clang, by absolute path.
+#
+# NOT "/mingw64/bin". That only resolves when MSYS2's own bash is interpreting
+# this script; when the shebang picks Git Bash instead - which happens whenever
+# something exec's this file directly rather than passing it to a chosen bash -
+# the path is meaningless, PATH silently gains nothing, and nxdk's activate
+# reports "clang: command not found" three lines before the real failure.
+#
+# /c/msys64/... resolves in both, because both mount C: at /c.
+export PATH="/c/msys64/mingw64/bin:$PATH"
 
 eval "$("$REPO/deps/nxdk/bin/activate" -s)"
 
@@ -49,6 +56,7 @@ OUR_INCLUDES=(
 	-I "$REPO/filesystem"
 	-I "$REPO/pm_shared"
 	-I "$REPO/3rdparty/library_suffix/include"
+	-I "$NXDK_DIR/lib/sdl/SDL2/include"   # XASH_SDL=2 means <SDL.h> must resolve
 )
 
 # nxdk-cc's own set, verbatim but after ours.
@@ -76,6 +84,10 @@ ENGINE_DEFINES=(
 	-DXASH_STATIC_LIBS=1          # engine/wscript:155, and mandatory here
 	-DXASH_NO_LIBDL=1             # engine/wscript:127
 	-DXASH_CRASHHANDLER=0         # engine/wscript:83
+	-D__XBOX__=1                  # SDL_config.h:32,46 picks SDL_config_windows.h
+	                              # unless this is set, and that config typedefs
+	                              # uintptr_t as unsigned int, colliding with
+	                              # pdclib. Selects SDL_config_xbox.h instead.
 	-DXASH_SDL=2                  # nxdk ships XboxDev/nxdk-sdl, SDL 2.0.9 with
 	                              # native src/video/xbox, src/audio/xbox and
 	                              # src/joystick/xbox drivers. common/defaults.h:33
