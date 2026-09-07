@@ -500,12 +500,19 @@ So there are two different things to validate, and only one of them is
 
 1. **Data correctness — is what got baked right?** Vertex positions, UVs,
    lightmap texel values, the lightstyle policy's output, texture and bone
-   assignment. This is exactly the render-half loader rewrite `divergences.md`
-   already anticipates (`Mod_LoadVertexes/Edges/SurfEdges/Surfaces/
-   Textures/Lighting`, six functions, high merge risk) — mpak.c's loader
-   reconstructs the same `glpoly2_t`/`samples` structures `ref/gl` already
-   consumes, and a pixel-compare against the loose-folder path is a real,
-   meaningful test of it.
+   assignment. **Corrected 2026-09-07 — the wrong layer was named.**
+   `filesystem/mpak.c` is a `searchpath_t` VFS shim (`divergences.md:66`),
+   raw bytes in, raw bytes out, the same job `pak.c` does for `.pak` — it
+   does not touch `glpoly2_t` or build anything. The reconstruction is the
+   render-half loader rewrite `divergences.md` already anticipates
+   (`Mod_LoadVertexes/Edges/SurfEdges/Surfaces/Textures/Lighting`, six
+   functions in `mod_bmodel.c`, high merge risk): those six read the bytes
+   `mpak.c` hands them and populate the same `msurface_t`/`glpoly2_t`
+   structures the loose-folder path does, which `ref/gl` then consumes
+   unmodified via `GL_BuildPolygonFromSurface` (`gl_rsurf.c:381`) and
+   `samples` (assigned at `mod_bmodel.c:3952`). A pixel-compare against the
+   loose-folder path is a real, meaningful test of those six functions, not
+   of `mpak.c`.
 2. **Draw-order correctness — is the per-cluster, per-material list and the
    index chunking actually right for pushbuffer submission?** `ref/gl` cannot
    exercise this; nothing in this codebase can except a pushbuffer consumer.
@@ -544,9 +551,12 @@ known to be correct, consuming the format XB decided.
 - `r_alphasort`'s job is already done by `R_TransEntityCompare`
   (`gl_rmain.c:86`); keep that order when the entity list becomes a baked
   walk.
-- Fix `swizzleNV2A` on DXT blocks (`TextureOpt.cpp:110-132`): Xbox
-  `D3DFMT_DXT1` is linear by block rows; the Morton swizzle is for
-  uncompressed surfaces.
+- ~~Fix `swizzleNV2A` on DXT blocks (`TextureOpt.cpp:110-132`)~~ **Moved to
+  XB, 2026-09-07: this line duplicated XB's DXT block-row fix and left the
+  plan asserting two owners for the same bug.** `TextureOpt.cpp` is
+  `tools/asset-studio`, the PC baker — X9 never touches it, and XB already
+  lists this fix. What belongs here instead: verify on hardware that XB's
+  fix produced a correct swizzle, since xemu is not validation for this.
 - Aspect ratio: implement `R_SetDisplayTransform`'s separate `scale_x`/
   `scale_y` and feed a display aspect rather than pixel dimensions.
   `V_AdjustFov` (`cl_view.c:252`) returns early on 640×480, which is exactly

@@ -291,13 +291,16 @@ abstraction proves itself.
 Continuous, per target.
 
 Ironwail's *principles* everywhere, its *techniques* only on E6. The item
-list is `xbox-performance-review.md` §3 — nineteen rows, five already in the
-tree, one of those five present but disabled and another present but wrong,
-seven of them baker work — and each row names
-its phase. Plus the concrete lessons from the Rust port: no allocation in the
-frame loop; no unconditional logging on a serial-console platform; memoised
-bone setup, which is new work rather than a restoration, since the reference
-is eager.
+list is `xbox-performance-review.md` §3 — nineteen rows. **Corrected
+2026-09-07:** seven are present in the tree in some form — five correct and
+unqualified, plus a sixth present but disabled and a seventh present but
+wrong, additional to the five, not counted inside them. Seven of the
+nineteen are baker work (a different cut across the same table: some rows
+are both present-in-some-form and baker-owned, such as the disabled batching
+row and the wrong DXT row). Each row names its phase. Plus the concrete
+lessons from the Rust port: no allocation in the frame loop; no unconditional
+logging on a serial-console platform; memoised bone setup, which is new work
+rather than a restoration, since the reference is eager.
 
 Measurement is per target and on real hardware. xemu does not emulate DMA
 timing or the serial channel faithfully.
