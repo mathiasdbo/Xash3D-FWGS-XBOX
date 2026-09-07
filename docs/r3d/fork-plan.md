@@ -484,10 +484,42 @@ Then the format, decided once:
 - **Post-T&L cache ordering** of indices. Free offline, invisible to the
   engine.
 
-**Exit:** `ref/gl` on PC renders a map from the baked render-half,
-pixel-compared against the loose-folder path. The console path runs first on
-the machine with a debugger — the D4 principle — and X9 becomes a renderer
-job instead of a renderer-plus-format job.
+**The exit below was wrong as first written. Found in review, 2026-09-07.**
+"`ref/gl` renders the baked render-half" cannot mean what it sounds like it
+means, because `ref/gl` has no consumer for most of what this phase bakes.
+Its default world path is `glpoly2_t` fans drawn per polygon
+(`R_RenderBrushPoly`, `gl_rsurf.c:1479`) built from `surf->samples`
+(`GL_BuildLightmaps`, `:3898`); its one indexed, batched path is `R_DrawVBO`,
+which §1 of `xbox-performance-review.md` says not to port — it is off by
+default and not a base to build on. `ref/gl` has no concept of "per-cluster,
+per-material draw list" or "post-T&L cache order" at all: it walks its own
+texture chain every frame regardless of what order anything was baked in.
+
+So there are two different things to validate, and only one of them is
+`ref/gl`'s job:
+
+1. **Data correctness — is what got baked right?** Vertex positions, UVs,
+   lightmap texel values, the lightstyle policy's output, texture and bone
+   assignment. This is exactly the render-half loader rewrite `divergences.md`
+   already anticipates (`Mod_LoadVertexes/Edges/SurfEdges/Surfaces/
+   Textures/Lighting`, six functions, high merge risk) — mpak.c's loader
+   reconstructs the same `glpoly2_t`/`samples` structures `ref/gl` already
+   consumes, and a pixel-compare against the loose-folder path is a real,
+   meaningful test of it.
+2. **Draw-order correctness — is the per-cluster, per-material list and the
+   index chunking actually right for pushbuffer submission?** `ref/gl` cannot
+   exercise this; nothing in this codebase can except a pushbuffer consumer.
+   That consumer is `ref/nv2a`, and it does not exist until X9.
+
+**Exit, split honestly:** `ref/gl` on PC renders a map from the baked
+render-half — vertex, UV, lightmap and material data — pixel-compared against
+the loose-folder path. This validates (1). It does **not** validate the
+per-cluster/per-material draw-list order, the `base_vertex` index chunking, or
+the post-T&L cache ordering — those are unverified until X9 builds their only
+consumer, on hardware, and X9's exit criterion is where that verification
+actually happens. The D4 principle (the console path runs first on the machine
+with a debugger) holds for the data; it does not hold for the submission
+shape, and this document should not have implied it did.
 
 ## X9 — `ref/nv2a`
 
@@ -522,7 +554,12 @@ known to be correct, consuming the format XB decided.
 
 **Exit:** a map drawn on the NV2A, compared frame by frame against X5's
 software output and the PC capture — and a hardware frame time on `c1a3` and
-`crossfire` against X5's baseline.
+`crossfire` against X5's baseline. This is also, per XB's corrected exit
+criterion, **the first time the per-cluster/per-material draw-list order, the
+`base_vertex` index chunking and the post-T&L cache ordering are verified at
+all** — nothing before this phase has a consumer for that shape. Treat the
+first hardware run of this phase as a validation of XB's baked format, not
+only of the backend, and be ready for the bug to be in the bake.
 
 ## X10 — First playable
 

@@ -44,39 +44,58 @@ radix sort by type and translucency to minimise state changes. It is
 cache-friendly, allocation-free, and a fixed-function pipeline pays more for a
 state change than a programmable one does.
 
-**CORRECTED 2026-09-06 — the reference already batches; the claim is
-smaller than it was.** `R_GenerateVBO` (`ref/gl/gl_rsurf.c:2130`) builds
-per-texture, per-lightmap vertex arrays at map load and `R_DrawVBO` (`:58`)
-draws the world from them; translucent entities are `qsort`ed by
-`R_TransEntityCompare` (`gl_rmain.c:522`). So world batching by material is
-not new work. What Ironwail's sort adds over that is a *global* key across
-entity types and a sort that never allocates — real, but incremental. The
-part that is genuinely worth more on the NV2A is different and was not
-named: **every draw call and every state change is CPU time writing
-pushbuffer words into write-combined memory.** Fewest submissions wins, and
-that argues for per-material batching across the whole visible set, which
-constrains how the baker organises per-leaf lists (§2).
+**CORRECTED 2026-09-06, then corrected again 2026-09-07 — the first
+correction overstated what is live.** `R_GenerateVBO`
+(`ref/gl/gl_rsurf.c:2130`) builds per-texture, per-lightmap vertex arrays and
+`R_DrawVBO` (defined at `:3262`, not `:58` — that is the forward declaration)
+draws the world from them, but only when `R_HasEnabledVBO()` is true
+(`gl_rsurf.c:2118`), and the cvar it reads defaults to off:
+`CVAR_DEFINE( r_vbo, "gl_vbo", "0", …, "draw world using VBO (known to be
+glitchy)" )` (`gl_opengl.c:34`). `R_DrawVBO` itself early-returns at `:3268`
+without it. So **"world batching by material is not new work" was false as a
+statement about the shipped default** — the default world path is the
+`pglBegin`-per-polygon texture-chain walk (`R_RenderBrushPoly`,
+`gl_rsurf.c:1479`), not the VBO path. Do not port `R_DrawVBO`; it is not a
+base to build on, only a shape to note.
+
+Translucent-entity sorting is a separate mechanism and stands: it is not gated
+by `r_vbo` and runs unconditionally — see the `r_alphasort` paragraph below,
+which this document previously left as an unqualified "port it" alongside this
+same mistake.
+
+The part that is genuinely worth more on the NV2A regardless of any of the
+above: **every draw call and every state change is CPU time writing
+pushbuffer words into write-combined memory.** There is no driver batching
+anything on pbkit. Fewest submissions wins, and that argues for per-material
+batching across the whole visible set — new work, done in the baker (§2,
+`fork-plan.md` XB), not a port of anything upstream ships enabled.
 
 **Zero-allocation ring buffers.** The previous Rust project already mapped
 this one: `ferrum-core/src/decals.rs` was described in its roadmap as *"an
 Ironwail-style zero-allocation `DecalRingBuffer` (`MAX_DECALS = 2048`)"*. The
 pattern generalises to every transient per-frame collection.
 
-**`r_alphasort` — distance-sorted transparent brushes.** Ironwail added it to
-fix sorting artefacts on transparent surfaces. It is a CPU sort by distance
-and it transfers completely; GoldSrc has the identical artefact.
+~~**`r_alphasort` — distance-sorted transparent brushes.**~~ **CORRECTED
+2026-09-07: already in the tree, and unconditionally, not behind `r_vbo`.**
+`R_TransEntityCompare` (`gl_rmain.c:86-117`) already sorts translucent
+entities back to front by squared distance to the view origin, with
+`kRenderTransAlpha` brush entities forced last — the GoldSrc rule. Ironwail
+added this over QuakeSpasm, which never had it; GoldSrc always did. Nothing to
+port.
 
 Its companion `r_oit` (order-independent transparency) does **not** transfer —
-it needs per-pixel linked lists and fragment atomics. But `r_alphasort` is the
-cheap solution that fixes most of the same cases, and it is the one worth
-having.
+it needs per-pixel linked lists and fragment atomics.
 
 **PVS caching**, reduced heap usage, and faster map loading. All CPU and data
 structure work.
 
 None of this needs a design decision. It needs porting — after checking, item
-by item, that the reference does not already do it. Two of the four items
-originally listed above turned out to be in the tree.
+by item, that the reference does not already do it. **Three of the five items
+originally listed above turned out to be in the tree already**: sign-bit
+culling, translucent-entity sorting (`r_alphasort`'s job), and — qualified,
+not unqualified — the shape of per-material batching, whose only shipped form
+defaults to off and is not a base to build on. See `xbox-performance-review.md`
+§3 for the full accounting across all eighteen items this project considered.
 
 ### Threaded saving — transfers, for a different reason than it looks
 
@@ -110,7 +129,7 @@ missed entirely.
 | Ironwail does, per frame, on the GPU | We do, once, in the baker | Caveat found 2026-09-06 |
 |---|---|---|
 | Compute-shader culling of surfaces | Precomputed per-leaf draw lists | Per-leaf lists must be merged per material at draw time or the draw count explodes — see §1 on pushbuffer cost. Bake them **per cluster, per material** |
-| Sorting draws to minimise state changes | Bake the sort order; runtime is a copy | The reference already sorts at load (`R_GenerateVBO`). The saving is load time and NV2A-native layout, not a new capability |
+| Sorting draws to minimise state changes | Bake the sort order; runtime is a copy | **Corrected 2026-09-07.** `R_GenerateVBO` exists but only runs when `r_vbo` is enabled, which defaults to off (`gl_opengl.c:34`) — it is not a live default to inherit savings from. The baked per-cluster, per-material order is new work, done once, at bake time; it is not "a copy" of anything the reference does by default |
 | Indirect multi-draw to avoid CPU submission | Bake contiguous index ranges so one draw covers many surfaces | Correct, and it is the `base_vertex`-chunked u16 decision the Rust port already made |
 | GPU lightmap updates and format conversion | Bake lightmaps in final hardware format, RGB565, no runtime conversion | **Wrong as stated.** A face carries up to 4 lightstyle layers (`MAXLIGHTMAPS 4`, `common/com_model.h:37`) combined at runtime with `g_lightstylevalue` (`gl_rsurf.c:751`). The baker bakes style 0 only (`BspParser.cpp:514-523`). "No runtime conversion" therefore means **no switchable or flickering lights on Xbox** unless per-style pages are baked and combined at runtime — which is the runtime work this row claims to remove. Undecided; see `xbox-performance-review.md` §2 |
 | Bindless textures to avoid rebinds | Bake a per-map atlas so there is nothing to rebind | Correct. Already produced by `PakManager.cpp` |
