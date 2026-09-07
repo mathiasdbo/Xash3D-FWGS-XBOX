@@ -106,15 +106,36 @@ broken, and whether that is distinguishable from success.`,
     when: d => /engine\/(common|server|client)\/|ref\//.test(d),
     prompt: `Review performance for a 733 MHz CPU with 64 MB shared with the GPU.
 
-Look for allocations in per-frame or per-entity paths, work done eagerly that
-the reference memoises lazily, unconditional logging (a debug line costs
-milliseconds on a serial console), and hash or string lookups where an index
-would do.
+Look for allocations in per-frame or per-entity paths, work redone every frame
+that a cheap cache would remove — check whether the reference itself already
+memoises it before calling the redone work a divergence; the reference is
+mostly eager (bone setup, \`R_StudioSetupBones\`, \`gl_studio.c:815\`, is a named
+example), so caching it is usually new work, not a restoration — unconditional
+logging (a debug line costs milliseconds on a serial console), and hash or
+string lookups where an index would do.
 
 Ironwail's *principles* transfer — less CPU per frame, batch, sort by state,
 never allocate in the loop. Its *techniques* do not: no compute shaders, no
 indirect draw, no bindless textures on this hardware. Flag anyone conflating
 the two.`,
+  },
+  reference: {
+    label: 'review:reference-claims',
+    when: d => /docs\/r3d\/|ref\/|\.claude\/agents\//.test(d),
+    prompt: `Audit every claim about what the reference renderer does.
+
+For each statement in the diff of the form "the reference does / does not /
+already / never X" — in a document, a plan, a code comment, or a specialist's
+standing prompt — find it in \`ref/gl\`, \`ref/soft\`, \`engine/client\` or
+\`engine/common/mod_bmodel.c\` and cite \`file:line\`, or name the function
+that would contain it and does not.
+
+Check the default, not the capability: \`r_vbo\` exists and defaults to off
+(\`gl_opengl.c:34\`). Check the mechanism, not the name: the bone "cache" at
+\`gl_studio.c:72\` is not a per-frame memo, and world dlights are lightmap
+sub-uploads, not per-pixel lights. Five of nineteen "ports from Ironwail" in
+this project were already in the tree and one ran the other way; every one was
+a claim of this shape. A claim without a line is a finding.`,
   },
 }
 

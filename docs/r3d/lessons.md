@@ -252,6 +252,46 @@ whose predicate is `() => true`, and dead refuters making "nobody answered"
 arithmetically identical to "everybody refuted it". The review workflow found
 it in itself. That is the argument for pointing the reviewer at the reviewer.
 
+### NEVER list an optimisation as a port without grepping the reference for it
+
+`optimization-transfer.md` listed nineteen things to bring over from
+Ironwail. Four were already in the tree — sign-bit frustum culling
+(`gl_frustum.c:119`), distance-sorted translucent entities (`gl_rmain.c:86`),
+per-vertex studio lighting (`gl_studio.c:25`), lightmap pages — and a fifth,
+world batching, is present but disabled as glitchy (`gl_opengl.c:34`). One
+claim ran the other way: "memoised bone setup, as the reference does" — it
+does not, `R_StudioSetupBones` is eager, and the false claim had already been
+copied into a specialist's standing prompt.
+
+Every one of those was a claim about what `ref/gl` does, made from memory of
+Quake or Ironwail. **Before writing "port X from Y", grep this tree for X.**
+Cite the line where it is, or the function where it is absent. A reviewer
+whose only job is that check now exists (`reference-renderer-specialist`); it
+exists because five of nineteen got through without one — and a sixth
+miscounted claim, about the table's own row and baker counts, got through
+after the specialist existed, because nobody had run it on the document yet.
+
+**A seventh got through the specialist's own document, in the paragraph
+correcting the fourth.** Writing up `r_alphasort` as present, I read
+`R_TransEntityCompare`'s `dist1 > dist2 → return -1` and its sentinel
+`1000000000` for `kRenderTransAlpha` brushes, and wrote "forced last" —
+plausible, unchecked, and backwards: the sentinel is the *largest* distance,
+the comparator sorts descending, and the draw loop walks from index 0, so
+those entities are forced to the **front** and drawn **first**. Citing the
+right lines (`gl_rmain.c:86-117`, `:872-874`) is not the same as tracing what
+they do; I had the citations right and the conclusion inverted. Caught by
+`pr-review`'s `upstream` and `reference` lenses together, in the first round
+of this branch's review where both actually ran — a caching defect in named
+`Workflow` resolution had silently reused a stale script missing the
+`reference` lens for several earlier invocations; worked around by invoking
+via `scriptPath` instead of `name`, filed separately as tool feedback.
+
+**Corollary:** a sort comparator's return-value convention and the loop's
+iteration order are two separate facts, and getting either one backwards
+inverts the conclusion. When a claim depends on both, trace both, in the
+code, in the same sitting — not one now and the other from memory of how
+sorts "usually" work.
+
 ### ALWAYS edit existing files as bytes, never through text mode
 
 Files created on this host land as **CRLF**. Python's text mode reads

@@ -31,36 +31,77 @@ sending geometry. On this machine that trade is backwards.
 
 Nothing hardware-specific about any of these.
 
-**`R_CullBox` with precomputed plane sign bits.** Ironwail's frustum test
-selects the box corner to test from the plane's `signbits` rather than testing
-all eight. Pure integer and float work, and it is in the per-frame path for
-every entity.
+~~**`R_CullBox` with precomputed plane sign bits.**~~ **CORRECTED 2026-09-06:
+already in the tree, nothing to port.** `ref/gl/gl_frustum.c:24` computes
+`signbits = SignbitsForPlane()` for every frustum plane and `GL_FrustumCullBox`
+(`:102`) switches on `p->signbits` at `:119`. This is Quake-lineage code
+(`BoxOnPlaneSide`), not an Ironwail invention, and it was listed here as a port
+because the Ironwail feature list was read instead of `ref/gl`. See
+`xbox-performance-review.md` §1.
 
 **Radix-sorted draw batching.** Ironwail groups draws with a two-pass LSD
 radix sort by type and translucency to minimise state changes. It is
-cache-friendly, allocation-free, and it is **worth more on the NV2A than on a
-modern GPU**, because a fixed-function pipeline pays more for a state change
-than a programmable one does. This is the single most undervalued item on the
-list.
+cache-friendly, allocation-free, and a fixed-function pipeline pays more for a
+state change than a programmable one does.
+
+**CORRECTED 2026-09-06, then corrected again 2026-09-07 — the first
+correction overstated what is live.** `R_GenerateVBO`
+(`ref/gl/gl_rsurf.c:2130`) builds per-texture, per-lightmap vertex arrays and
+`R_DrawVBO` (defined at `:3262`, not `:58` — that is the forward declaration)
+draws the world from them, but only when `R_HasEnabledVBO()` is true
+(`gl_rsurf.c:2118`), and the cvar it reads defaults to off:
+`CVAR_DEFINE( r_vbo, "gl_vbo", "0", …, "draw world using VBO (known to be
+glitchy)" )` (`gl_opengl.c:34`). `R_DrawVBO` itself early-returns at `:3268`
+without it. So **"world batching by material is not new work" was false as a
+statement about the shipped default** — the default world path is the
+`pglBegin`-per-polygon texture-chain walk (`R_RenderBrushPoly`,
+`gl_rsurf.c:1479`), not the VBO path. Do not port `R_DrawVBO`; it is not a
+base to build on, only a shape to note.
+
+Translucent-entity sorting is a separate mechanism and stands: it is not gated
+by `r_vbo` and runs unconditionally — see the `r_alphasort` paragraph below,
+which this document previously left as an unqualified "port it" alongside this
+same mistake.
+
+The part that is genuinely worth more on the NV2A regardless of any of the
+above: **every draw call and every state change is CPU time writing
+pushbuffer words into write-combined memory.** There is no driver batching
+anything on pbkit. Fewest submissions wins, and that argues for per-material
+batching across the whole visible set — new work, done in the baker (§2,
+`fork-plan.md` XB), not a port of anything upstream ships enabled.
 
 **Zero-allocation ring buffers.** The previous Rust project already mapped
 this one: `ferrum-core/src/decals.rs` was described in its roadmap as *"an
 Ironwail-style zero-allocation `DecalRingBuffer` (`MAX_DECALS = 2048`)"*. The
 pattern generalises to every transient per-frame collection.
 
-**`r_alphasort` — distance-sorted transparent brushes.** Ironwail added it to
-fix sorting artefacts on transparent surfaces. It is a CPU sort by distance
-and it transfers completely; GoldSrc has the identical artefact.
+~~**`r_alphasort` — distance-sorted transparent brushes.**~~ **CORRECTED
+2026-09-07: already in the tree, and unconditionally, not behind `r_vbo`.**
+`R_TransEntityCompare` (`gl_rmain.c:86-117`) already sorts translucent
+entities back to front by squared distance to the view origin, with
+`kRenderTransAlpha` brush entities forced to the **front** of the sorted
+array (a sentinel distance of `1e9` at `:104`, not their real distance) and
+drawn **first** — treated as the single farthest object, not the nearest.
+**Corrected 2026-09-07: an earlier version of this paragraph said "forced
+last"; it is forced first.** Nothing to port: **GoldSrc always had this**,
+checked directly against `ref/gl` in this tree. Whether Ironwail "added" it
+over QuakeSpasm is a claim about two other codebases, neither vendored here —
+unverified, and it should have been stated as such rather than as fact each
+time it was repeated.
 
 Its companion `r_oit` (order-independent transparency) does **not** transfer —
-it needs per-pixel linked lists and fragment atomics. But `r_alphasort` is the
-cheap solution that fixes most of the same cases, and it is the one worth
-having.
+it needs per-pixel linked lists and fragment atomics.
 
 **PVS caching**, reduced heap usage, and faster map loading. All CPU and data
 structure work.
 
-None of this needs a design decision. It needs porting.
+None of this needs a design decision. It needs porting — after checking, item
+by item, that the reference does not already do it. **Three of the five items
+originally listed above turned out to be in the tree already**: sign-bit
+culling, translucent-entity sorting (`r_alphasort`'s job), and — qualified,
+not unqualified — the shape of per-material batching, whose only shipped form
+defaults to off and is not a base to build on. See `xbox-performance-review.md`
+§3 for the full accounting across all nineteen items this project considered.
 
 ### Threaded saving — transfers, for a different reason than it looks
 
@@ -91,13 +132,13 @@ measured.
 This is where most of Ironwail's value is recoverable, and it is the part I
 missed entirely.
 
-| Ironwail does, per frame, on the GPU | We do, once, in the baker |
-|---|---|
-| Compute-shader culling of surfaces | Precomputed per-leaf draw lists |
-| Sorting draws to minimise state changes | Bake the sort order; runtime is a copy |
-| Indirect multi-draw to avoid CPU submission | Bake contiguous index ranges so one draw covers many surfaces |
-| GPU lightmap updates and format conversion | Bake lightmaps in final hardware format, RGB565, no runtime conversion |
-| Bindless textures to avoid rebinds | Bake a per-map atlas so there is nothing to rebind |
+| Ironwail does, per frame, on the GPU | We do, once, in the baker | Caveat found 2026-09-06 |
+|---|---|---|
+| Compute-shader culling of surfaces | Precomputed per-leaf draw lists | Per-leaf lists must be merged per material at draw time or the draw count explodes — see §1 on pushbuffer cost. Bake them **per cluster, per material** |
+| Sorting draws to minimise state changes | Bake the sort order; runtime is a copy | **Corrected 2026-09-07.** `R_GenerateVBO` exists but only runs when `r_vbo` is enabled, which defaults to off (`gl_opengl.c:34`) — it is not a live default to inherit savings from. The baked per-cluster, per-material order is new work, done once, at bake time; it is not "a copy" of anything the reference does by default |
+| Indirect multi-draw to avoid CPU submission | Bake contiguous index ranges so one draw covers many surfaces | Correct, and it is the `base_vertex`-chunked u16 decision the Rust port already made |
+| GPU lightmap updates and format conversion | Bake lightmaps in final hardware format, RGB565, no runtime conversion | **Wrong as stated.** A face carries up to 4 lightstyle layers (`MAXLIGHTMAPS 4`, `common/com_model.h:37`) combined at runtime with `g_lightstylevalue` (`gl_rsurf.c:751`). The baker bakes style 0 only (`BspParser.cpp:514-523`). "No runtime conversion" therefore means **no switchable or flickering lights on Xbox** unless per-style pages are baked and combined at runtime — which is the runtime work this row claims to remove. Undecided; see `xbox-performance-review.md` §2 |
+| Bindless textures to avoid rebinds | Bake a per-map atlas so there is nothing to rebind | Correct. Already produced by `PakManager.cpp` |
 
 Every row is the same trade: **static data, computed ahead of time, at the
 cost of disc space and bake duration** — both of which we have and neither of
@@ -121,10 +162,26 @@ rasteriser and a 1998 CPU; the NV2A is not going to be the bottleneck on it.
 So work should be pushed onto the GPU wherever the interface allows, even when
 that looks wasteful by 1998 standards.
 
-**Matrix-palette skinning in VP20.** The biggest single CPU win available. The
-Rust port measured its eager bone pipeline at roughly 1.6 M cycles per frame —
-13 % of the budget — on one of the emptiest maps in the game. The vertex
-transform half of that belongs on the vertex units, which are idle.
+**Matrix-palette skinning in VP20.** Probably the biggest single CPU win
+available, with two constraints this document did not state until 2026-09-06:
+
+- **Only half of the measured cost moves.** The Rust port's 1.6 M cycles per
+  frame (13 % of the budget on an empty map) covered *building* the bone
+  palette — the parent-chain `Matrix3x4_ConcatTransforms` walk at
+  `gl_studio.c:802`/`:950` — and *applying* it to vertices. VP20 takes the
+  second half. The first stays on the CPU regardless, and the reference does
+  it eagerly every frame for every entity (`R_StudioSetupBones`,
+  `gl_studio.c:815`); the `cached_bonestransform` at `:72-76` is the
+  parent-attachment cache for `R_StudioMergeBones`, **not** a per-frame memo.
+  An earlier version of §4 said the reference memoises lazily. It does not.
+- **The palette does not fit.** VP20 has 192 constant registers
+  (`deps/nxdk/tools/vp20compiler/config.h:11`) and a 3×4 bone costs three of
+  them. After the view-projection matrix and light constants that is roughly
+  50 bones per program; `MAXSTUDIOBONES` is 128 (`engine/studio.h:40`). Any
+  mesh whose bone set exceeds the palette has to be **partitioned by bone
+  subset at bake time** — the classic D3D8 problem — and the baker does not
+  do that today. Whether any retail model crosses the limit is a one-minute
+  census; the partition code must exist for the ones that do.
 
 **Vertex lighting through fixed-function T&L.** Eight lights per vertex,
 computed in hardware, free. Currently a CPU cost in the reference.
@@ -178,8 +235,18 @@ transform not moved to VP20.
 
 Where it would not: the transcendental calls inside `angle_quaternion`. Six
 `sinf`/`cosf` per bone dominate, and SSE1 has no transcendental instructions.
-That cost is removed by *not calling it* — lazy, memoised pose computation, as
-the reference does — not by vectorising it.
+That cost is removed by *not calling it* — lazy, memoised pose computation —
+not by vectorising it. **CORRECTED 2026-09-06:** an earlier version said "as
+the reference does". The reference does not memoise (§3); this would be new
+work, and it is the right new work.
+
+**Also unstated until now:** there is no SIMD anywhere in this tree — a grep
+for `__SSE__`, `xmmintrin`, `USE_SIMD` or `_mm_` over `public/`, `engine/`,
+`ref/` and `common/` returns nothing — and Ironwail is not vendored, so the
+"five-minute check" above cannot be run from this checkout. `nxdk-cc` already
+passes `-march=pentium3` (`deps/nxdk/bin/nxdk-cc:9`), so what the compiler
+auto-vectorises is already had; anything beyond that is intrinsics written
+by hand, and it should wait for a profile that names the loop.
 
 ---
 

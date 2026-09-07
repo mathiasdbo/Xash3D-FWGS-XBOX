@@ -161,6 +161,7 @@ touches, and never ask permission first.
 | `asset-pipeline-specialist` | The baker, the `.mpak` format, `filesystem/`, manifests, asset discovery |
 | `upstream-fidelity-specialist` | Divergence form and merge risk. **Run before closing any phase** |
 | `console-performance-specialist` | Per-frame and per-entity code; any optimisation proposed for a retro target |
+| `reference-renderer-specialist` | What `ref/gl` actually does, by `file:line`. **Run on any claim of the form "the reference does X"**, and on any `docs/r3d/` change that describes renderer behaviour |
 
 ## Verification
 

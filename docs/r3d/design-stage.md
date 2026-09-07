@@ -150,6 +150,25 @@ engineering, and they change the plan materially:
 **Output:** an answer to each, written down, so the epic list stops carrying
 work nobody has committed to.
 
+## D8 — Lightstyles and bone palettes, by census
+
+**Question:** what does the console lose, and what does the baker have to
+partition?
+
+Two facts the plan carried as opinions until 2026-09-06. A face carries up to
+four lightstyle layers (`MAXLIGHTMAPS 4`) combined every frame, and the baker
+bakes only the first — so "final-format lightmaps" as written turns off every
+switchable and flickering light in the game. And a VP20 program holds roughly
+50 bone matrices against `MAXSTUDIOBONES 128`, so some models must be split by
+bone subset before GPU skinning can touch them.
+
+**How to answer:** two scripts over the retail assets. Count faces per map
+with `styles[1..3] != 255`; count bones per mesh per model. Minutes each.
+
+**Output:** the lightstyle policy, written down with the number that chose it,
+and the list of models the partitioner must handle. Both are inputs to
+`fork-plan.md` XB.
+
 ## Exit criteria for E0
 
 - D1 has a proven mechanism, not a plan to find one.
@@ -157,5 +176,7 @@ work nobody has committed to.
 - D3 has a header and three sketched consumers.
 - D4, D5 and D6 have written decisions.
 - D7 is answered by the project owner.
+- D8 is answered by the two censuses, before XB starts.
 
 E1 may begin as soon as D1 and D2 are answered. E4 may not begin before D3.
+XB may not begin before D8.
