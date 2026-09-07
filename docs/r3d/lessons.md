@@ -279,10 +279,12 @@ plausible, unchecked, and backwards: the sentinel is the *largest* distance,
 the comparator sorts descending, and the draw loop walks from index 0, so
 those entities are forced to the **front** and drawn **first**. Citing the
 right lines (`gl_rmain.c:86-117`, `:872-874`) is not the same as tracing what
-they do; I had the citations right and the conclusion inverted. Two
-independent reviewers caught it — not the one built for this class of error,
-because it never ran (see the `pr-review` caching bug this same round also
-surfaced) — a plain `upstream` pass caught it on the second read.
+they do; I had the citations right and the conclusion inverted. Caught by
+`pr-review`'s `upstream` and `reference` lenses together, in the first round
+of this branch's review where both actually ran — a caching defect in named
+`Workflow` resolution had silently reused a stale script missing the
+`reference` lens for several earlier invocations; worked around by invoking
+via `scriptPath` instead of `name`, filed separately as tool feedback.
 
 **Corollary:** a sort comparator's return-value convention and the loop's
 iteration order are two separate facts, and getting either one backwards

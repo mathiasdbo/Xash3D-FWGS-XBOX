@@ -9,7 +9,8 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 `docs/r3d/xbox-performance-review.md` read `optimization-transfer.md` and the
 X-phases against `ref/gl`, the baker and nxdk. Of its nineteen real items,
-four were already in the tree, one is present but disabled, and seven are baker
+four were already in the tree and correct, one is present but disabled, one
+is present but wrong (`TextureOpt.cpp`'s DXT swizzle), and seven are baker
 work with no owning phase. What changed as a result:
 
 - **XB — Baker output for the NV2A**, a new phase between X5 and X9. Two
