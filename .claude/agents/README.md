@@ -10,6 +10,6 @@ upstream nobody recorded.
 
 One of them is a check on the others. `reference-renderer-specialist` confirms
 or refutes any statement about what the reference renderer does, by reading
-it and citing the line. It was added after five of eighteen planned "ports
+it and citing the line. It was added after five of nineteen planned "ports
 from Ironwail" turned out to already be in the tree, and one claim about the
 reference had been copied into another specialist's prompt while false.

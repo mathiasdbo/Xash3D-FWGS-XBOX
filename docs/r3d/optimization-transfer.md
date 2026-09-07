@@ -79,9 +79,12 @@ pattern generalises to every transient per-frame collection.
 2026-09-07: already in the tree, and unconditionally, not behind `r_vbo`.**
 `R_TransEntityCompare` (`gl_rmain.c:86-117`) already sorts translucent
 entities back to front by squared distance to the view origin, with
-`kRenderTransAlpha` brush entities forced last — the GoldSrc rule. Ironwail
-added this over QuakeSpasm, which never had it; GoldSrc always did. Nothing to
-port.
+`kRenderTransAlpha` brush entities forced to the **front** of the sorted
+array (a sentinel distance of `1e9` at `:104`, not their real distance) and
+drawn **first** — treated as the single farthest object, not the nearest.
+**Corrected 2026-09-07: an earlier version of this paragraph said "forced
+last"; it is forced first.** Ironwail added this mechanism over QuakeSpasm,
+which never had it; GoldSrc always did. Nothing to port.
 
 Its companion `r_oit` (order-independent transparency) does **not** transfer —
 it needs per-pixel linked lists and fragment atomics.
@@ -95,7 +98,7 @@ originally listed above turned out to be in the tree already**: sign-bit
 culling, translucent-entity sorting (`r_alphasort`'s job), and — qualified,
 not unqualified — the shape of per-material batching, whose only shipped form
 defaults to off and is not a base to build on. See `xbox-performance-review.md`
-§3 for the full accounting across all eighteen items this project considered.
+§3 for the full accounting across all nineteen items this project considered.
 
 ### Threaded saving — transfers, for a different reason than it looks
 

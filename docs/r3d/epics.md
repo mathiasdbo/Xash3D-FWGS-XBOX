@@ -223,7 +223,7 @@ paragraph called dynamic lighting "the real variance" — N per-pixel lights to
 already per-vertex and its world dlights are lightmap sub-uploads
 (`xbox-performance-review.md` §1.3). The decision that actually changes what
 the player sees is the lightstyle policy, and it belongs to `fork-plan.md`
-XB — the baker phase between X5 and X9 that owns nine of the eighteen real
+XB — the baker phase between X5 and X9 that owns seven of the nineteen real
 performance items and, until 2026-09-06, did not exist.
 
 **Exit:** a map drawn in xemu with lightmaps, animated entities and sprites,
@@ -291,8 +291,9 @@ abstraction proves itself.
 Continuous, per target.
 
 Ironwail's *principles* everywhere, its *techniques* only on E6. The item
-list is `xbox-performance-review.md` §3 — eighteen rows, four already in the
-tree, one present but disabled, nine of them baker work — and each row names
+list is `xbox-performance-review.md` §3 — nineteen rows, five already in the
+tree, one of those five present but disabled and another present but wrong,
+seven of them baker work — and each row names
 its phase. Plus the concrete lessons from the Rust port: no allocation in the
 frame loop; no unconditional logging on a serial-console platform; memoised
 bone setup, which is new work rather than a restoration, since the reference

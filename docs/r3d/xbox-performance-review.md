@@ -199,15 +199,22 @@ already contain, with the phase that owns each:
 | DXT linear-by-block-row fix | **Bug present** (`TextureOpt.cpp:110-132`) | Baker stage |
 | Zero-allocation transient buffers (decals etc.) | `MAX_DECAL_SURFS 4096` static; allocation audit not done | X11 |
 | Threaded save / load I/O | Absent; nxdk threads work (probe §1.4) | X10/X11 |
-| `r_alphasort` for translucent brushes | **Present.** `R_TransEntityCompare` (`gl_rmain.c:86-117`) already sorts translucent entities back to front by squared distance, with `kRenderTransAlpha` brushes forced last — the GoldSrc rule, not an omission. What Ironwail added over QuakeSpasm, GoldSrc always had | — |
+| `r_alphasort` for translucent brushes | **Present.** `R_TransEntityCompare` (`gl_rmain.c:86-117`) already sorts translucent entities by squared distance, descending — a `kRenderTransAlpha` brush gets a sentinel distance of `1e9` (`:104`) rather than its real one, so it always sorts to the **front** of the array and is drawn **first** (`gl_rmain.c:872-874` draws index 0 onward), as if it were the single farthest object. **Corrected 2026-09-07: an earlier version of this row said "forced last"; it is forced first.** GoldSrc always had this; Ironwail added it over QuakeSpasm, which did not | — |
 | VP20 water deform (`EmitWaterPolys`, `gl_rsurf.c:926`) | Absent; CPU sine warp | X9, low priority |
 | SSE intrinsics | Absent; no SIMD anywhere in the tree | After a hardware profile names a loop |
 | Under-culling vs `R_CullSurface` backface | Reference culls per face (`gl_cull.c:83-111`) | X11, measure both |
 
-Nine of eighteen are baker work. The plan has no baker phase. Four of the
-eighteen were already in the tree before this project started, and a fifth
-(world batching) is present but disabled as glitchy — which is the cost of
-reading Ironwail's feature list instead of `ref/gl`.
+**Corrected 2026-09-07: the table above has nineteen rows, not eighteen, and
+seven are Baker-owned, not nine** — both miscounted in an earlier version of
+this document and repeated into five other files before anyone recounted the
+table itself. Seven are baker work (rows marked "Baker stage"), and the plan
+had no baker phase for any of them. Five were already present and correct in
+the tree before this project started (sign-bit culling, translucent entity
+sort under both its names, per-vertex studio lighting, lightmap-space
+dlights); a sixth (world batching) is present but disabled as glitchy; a
+seventh (the DXT swizzle) is present and wrong. That is the cost of reading
+Ironwail's feature list instead of `ref/gl` — and of not recounting a table
+after editing it, which is the same failure mode one level up.
 
 ---
 

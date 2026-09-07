@@ -447,7 +447,7 @@ the Xbox critical path entirely. Keep them as an upstream nice-to-have.
 ## XB — Baker output for the NV2A
 
 Between X5 and X9, and runnable alongside X6–X8: it touches only
-`tools/asset-studio` and the PC build. Nine of the eighteen real items in
+`tools/asset-studio` and the PC build. Seven of the nineteen real items in
 `xbox-performance-review.md` §3 are baker work, and until this phase existed
 none of them had an owner.
 
