@@ -29,9 +29,13 @@ already / never X":
   `R_StudioMergeBones`, not a per-frame memo. A familiar word is where the
   wrong claims hide.
 - **Separate lineage from novelty.** Sign-bit culling, distance-sorted
-  translucency and PVS entity filtering are Quake's; Ironwail added them over
-  QuakeSpasm, and GoldSrc always had them. Nothing is a port if the tree
-  already contains it.
+  translucency and PVS entity filtering are already in this tree — checked
+  directly, `file:line`. Whether a given one was Ironwail's addition over
+  QuakeSpasm is a claim about two codebases neither vendored nor fetched
+  here; say "checked against this tree" for what you verified and
+  "unverified" for the Ironwail/QuakeSpasm lineage, rather than letting the
+  second borrow the first's confidence. Nothing here is a port if the tree
+  already contains it, whichever upstream project gets credit for it.
 
 What you do not do: design the replacement, estimate its gain, or judge
 whether it fits the NV2A. `render-architecture-specialist`,

@@ -74,10 +74,12 @@ decision, and it is a much smaller item than the plan says.
 ### 1.4 "Radix-sorted batching is the single most undervalued item" — the reference already batches
 
 `R_GenerateVBO` (`gl_rsurf.c:2130`) builds per-texture, per-lightmap arrays at
-map load; `R_DrawVBO` (`:58`) draws the world from them; translucent entities
-are `qsort`ed by `R_TransEntityCompare` (`gl_rmain.c:522`). Material batching
-of the world exists. What Ironwail adds is a global sort key across entity
-types and a sort that does not allocate — worthwhile, incremental.
+map load; `R_DrawVBO` (defined at `gl_rsurf.c:3262` — `:58` is the forward
+declaration, corrected here 2026-09-07 to match `optimization-transfer.md`)
+draws the world from them; translucent entities are `qsort`ed by
+`R_TransEntityCompare` (`gl_rmain.c:522`). Material batching of the world
+exists. What Ironwail adds is a global sort key across entity types and a
+sort that does not allocate — worthwhile, incremental.
 
 **Qualified 2026-09-06, on a second look:** that VBO path is **off by
 default** — `CVAR_DEFINE( r_vbo, "gl_vbo", "0", …, "draw world using VBO
@@ -199,7 +201,7 @@ already contain, with the phase that owns each:
 | DXT linear-by-block-row fix | **Bug present** (`TextureOpt.cpp:110-132`) | Baker stage |
 | Zero-allocation transient buffers (decals etc.) | `MAX_DECAL_SURFS 4096` static; allocation audit not done | X11 |
 | Threaded save / load I/O | Absent; nxdk threads work (probe §1.4) | X10/X11 |
-| `r_alphasort` for translucent brushes | **Present.** `R_TransEntityCompare` (`gl_rmain.c:86-117`) already sorts translucent entities by squared distance, descending — a `kRenderTransAlpha` brush gets a sentinel distance of `1e9` (`:104`) rather than its real one, so it always sorts to the **front** of the array and is drawn **first** (`gl_rmain.c:872-874` draws index 0 onward), as if it were the single farthest object. **Corrected 2026-09-07: an earlier version of this row said "forced last"; it is forced first.** GoldSrc always had this; Ironwail added it over QuakeSpasm, which did not | — |
+| `r_alphasort` for translucent brushes | **Present.** `R_TransEntityCompare` (`gl_rmain.c:86-117`) already sorts translucent entities by squared distance, descending — a `kRenderTransAlpha` brush gets a sentinel distance of `1e9` (`:104`) rather than its real one, so it always sorts to the **front** of the array and is drawn **first** (`gl_rmain.c:872-874` draws index 0 onward), as if it were the single farthest object. **Corrected 2026-09-07: an earlier version of this row said "forced last"; it is forced first.** GoldSrc always had this, checked directly against `ref/gl`. Whether Ironwail added it over QuakeSpasm — neither vendored here — is unverified, not fact | — |
 | VP20 water deform (`EmitWaterPolys`, `gl_rsurf.c:926`) | Absent; CPU sine warp | X9, low priority |
 | SSE intrinsics | Absent; no SIMD anywhere in the tree | After a hardware profile names a loop |
 | Under-culling vs `R_CullSurface` backface | Reference culls per face (`gl_cull.c:83-111`) | X11, measure both |

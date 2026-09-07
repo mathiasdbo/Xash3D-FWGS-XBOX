@@ -83,8 +83,11 @@ entities back to front by squared distance to the view origin, with
 array (a sentinel distance of `1e9` at `:104`, not their real distance) and
 drawn **first** — treated as the single farthest object, not the nearest.
 **Corrected 2026-09-07: an earlier version of this paragraph said "forced
-last"; it is forced first.** Ironwail added this mechanism over QuakeSpasm,
-which never had it; GoldSrc always did. Nothing to port.
+last"; it is forced first.** Nothing to port: **GoldSrc always had this**,
+checked directly against `ref/gl` in this tree. Whether Ironwail "added" it
+over QuakeSpasm is a claim about two other codebases, neither vendored here —
+unverified, and it should have been stated as such rather than as fact each
+time it was repeated.
 
 Its companion `r_oit` (order-independent transparency) does **not** transfer —
 it needs per-pixel linked lists and fragment atomics.
