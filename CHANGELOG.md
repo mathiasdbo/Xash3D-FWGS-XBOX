@@ -5,6 +5,73 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Measured — X1: opus, opusfile, vorbis and MultiEmulator, for real
+
+The previous entry flagged this as "genuinely unknown in either
+direction" - whether the four vendored, never-before-built third-party
+libraries behind 38 of the still-undefined symbols even compile for Xbox
+at all. Answered: **overwhelmingly yes.** Compiled every real source file
+each submodule's own `wscript` names (not everything under the directory
+- each excludes its own demo/test/CLI files), individually, with
+`tools/xbox-cc.sh` plus the extra flags `wscript` declares.
+
+**176 of 179 real library source files compile clean** (173 portable/
+generic files plus six x86 SIMD files `opus`'s own `wscript` adds
+unconditionally for any `x86*` `DEST_CPU`):
+
+- `3rdparty/MultiEmulator`: 10 of 10, including `RevEmu2013.c` -
+  `GenerateRevEmu2013` is real and needs no fix.
+- `3rdparty/libogg`: 2 of 2 (`config_types.h` hand-generated for this
+  measurement from its `waf 'subst'` template, matching what a real build
+  would produce - nxdk's pdclib has `inttypes.h`, so that's the branch a
+  real configure check would also pick).
+- `3rdparty/vorbis`: 21 of 21, no extra defines needed at all.
+- `3rdparty/opus`: 140 of 142 (136 portable + 6 x86 SIMD). One trap: opus
+  refuses to compile at all without
+  `VAR_ARRAYS`/`USE_ALLOCA`/`NONTHREADSAFE_PSEUDOSTACK` defined, and its
+  own `wscript` picks based on `alloca.h`'s availability - which nxdk's
+  pdclib does not have. `VAR_ARRAYS` (C99 VLAs, no libc dependency) fixed
+  all 37 first-pass failures at once - they were all the identical error,
+  not 37 different problems. **Corrected, found in review: an earlier
+  version of this measurement excluded the six x86 SIMD files by
+  reasoning alone (Pentium III has no SSE2) rather than testing them -
+  tested properly, five of six compile clean and one
+  (`celt/x86/vq_sse2.c`) fails with a real, loud clang error requiring
+  SSE2 target support `-march=pentium3` does not enable**, confirming the
+  original reasoning but as a fact about that one file, not a blanket
+  exclusion. The other true remaining gap: `celt/celt.c`'s fatal-error
+  path calls MSVC-only `_set_abort_behavior`/`_WRITE_ABORT_MSG` under
+  `#if defined(_MSC_VER)` - genuinely true for nxdk's target, but neither
+  symbol exists in its pdclib.
+- `3rdparty/opusfile`: 3 of 4. `stream.c`'s `#if defined(_WIN32)` branch
+  needs six Win32 file-query functions nxdk doesn't have - and its own
+  `#else` POSIX fallback isn't free either, since nxdk's pdclib also
+  lacks `fseeko`/`ftello`. Neither of the file's own two branches is
+  usable as written. **Corrected, found in review: "nxdk has no
+  file-length query at all" was false - `GetFileSize`/`GetFileSizeEx` are
+  real, implemented functions in nxdk's `winapi`.** The actual gap is
+  narrower: `_fileno`/`_get_osfhandle`, the bridge from a stdio `FILE *`
+  to the `HANDLE` `GetFileSizeEx` needs, which nxdk genuinely does lack -
+  only `SEEK_END` needs that bridge, and `compat/xbox/`'s existing
+  `r3d_fds[]` file-descriptor tracking is a plausible place to build it.
+
+The three remaining gaps deliberately left unfixed here: whether the
+right form is a `compat/xbox` shim (matching `xbox_win32_ext.c`'s
+established pattern) or a direct patch to the vendored file (matching
+`library_suffix`'s own precedent) is a real decision, not a default one
+measurement pass should make on its own; `vq_sse2.c` simply stays
+excluded from the SIMD set, a fact rather than a decision.
+
+Whether the five x86 SIMD files that DO compile are safe to actually call
+on real Xbox hardware is a separate, unanswered question - a clean
+compile does not prove a function tagged for SSE2 target support won't
+fault without a genuine runtime feature check, and none of this has run
+on real hardware or in xemu.
+
+**No architectural blocker anywhere in 179 files.** The question this
+branch answers is not "are three things missing" - it's "can these
+libraries work on Xbox at all," and the answer is yes.
+
 ### Added — X1: the full undefined-symbol picture, with the real library list
 
 Linked against every base nxdk library `main.exe`'s own `Makefile`
