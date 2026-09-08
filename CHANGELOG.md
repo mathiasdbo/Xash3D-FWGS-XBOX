@@ -5,6 +5,89 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — first Codex review round on the SDL-video-init branch
+
+One finding (medium severity, confidence 0.82), and it corrected an
+overclaim in this same branch's own first commit:
+
+- **"SDL owns no video on Xbox" was not true as stated.** The commit
+  dropped `SDL_INIT_VIDEO` from `sys_sdl2.c`'s early, defensive `SDL_Init`
+  call and claimed that settled the question. Codex traced the *normal*
+  client path instead - `CL_Init` → `VID_Init` → `vid_sdl2.c` →
+  `SDL_CreateWindow` - and found it still reaches nxdk's real, currently-
+  compiling `SDL_xbvideo.c` driver, since `defaults.h`'s generic
+  `XASH_SDL` arm still selects `VIDEO_SDL` for Xbox and SDL lazily
+  auto-inits its video subsystem on the first `SDL_CreateWindow` call
+  regardless of what flags the earlier `SDL_Init` call passed. Traced
+  further to confirm the mechanism, not just the claim:
+  `XBOX_CreateWindow`/`XBOX_VideoInit` read `XVideoGetMode()`, which
+  returns a module-static `VIDEO_MODE vmCurrent = {0,0,0,0}` until
+  something calls `XVideoSetMode()` - a genuine 0×0 window and
+  display-mode registration if that path ever runs before a real mode
+  exists. Not fixed with new code: no Xbox `main()`, link, or running
+  binary exists in this tree at all yet, so nothing currently drives
+  execution as far as `CL_Init` - the risk is architecturally real and
+  worth deciding, but deciding it now would guess at design that belongs
+  to whoever wires up a real Xbox entry point (X1/X2). Corrected the three
+  places that repeated the overclaim (`sys_sdl2.c`'s own comment,
+  `divergences.md`'s #14, `fork-plan.md`'s X0-checklist correction) rather
+  than just the one Codex pointed at, since all three were written in the
+  same commit from the same wrong premise.
+
+### Added — X0: SDL owns no video on Xbox, and two plan corrections
+
+`engine/platform/sdl2/sys_sdl2.c`'s early, defensive `SDL_Init` call in
+`SDLash_Init` now omits `SDL_INIT_VIDEO` for Xbox (`#if XASH_XBOX` /
+`#else`, every other `XASH_WIN32` target unaffected) — divergence #14.
+Measured, not merely planned: `x0-probe-results.md` already named this "an
+explicit change, not a hope" back when the log channel branch's own
+`Sys_Error` comment cited it as still outstanding. **This one call does
+not decide the whole video-ownership question** — corrected below, found
+in the first Codex review round on this branch: the *normal* client path
+(`CL_Init` → `VID_Init` → `vid_sdl2.c` → `SDL_CreateWindow`) still reaches
+nxdk's real, compiling `SDL_xbvideo.c` driver regardless of this flag,
+since SDL lazily auto-inits its video subsystem on the first
+`SDL_CreateWindow` call and `defaults.h`'s generic `XASH_SDL` arm still
+selects `VIDEO_SDL` for Xbox. What this one call actually avoids: the
+early call failing or doing pointless work before anything has established
+a real video mode for `XVideoGetMode()` to return, and any `SDL_Init`
+failure there demoting the whole engine to `HOST_DEDICATED`. Updated the
+one comment (`system.c`'s
+`Sys_Error`) that cited this as not-yet-made to reflect that it now is,
+while keeping its broader point (any `SDL_Init` failure still reaches that
+branch) intact. Verified: full sweep still 186 ok, 34 failing, unchanged.
+
+Two corrections to `fork-plan.md`'s X0 checklist, found while scoping this
+work:
+
+- **`-DXBOX`/`sys/types.h`/the five SDL hint constants were already done**,
+  from the toolchain-bring-up branch — marked done rather than left as an
+  open bullet a future reader would re-investigate for nothing.
+- **`VIDEO_XBOX`/`INPUT_XBOX` in `common/backends.h`/`common/defaults.h`
+  was never actually X0 scope** — though the reason is narrower than
+  first written here; corrected again below, same day, once Codex's review
+  showed the video path is currently live in the tree, just not yet
+  reachable by any running code. `x0-probe-results.md` §2-3 already says
+  Xbox's real video backend (`vid_xbox.c`, against nxdk's HAL framebuffer)
+  is X5 work, with its own unmeasured per-frame-cost question attached;
+  `INPUT_SDL` needs no Xbox-specific branch at all, since `defaults.h`'s
+  generic `#if XASH_SDL` arm already selects it the same as any other SDL
+  platform, with no equivalent risk. X0's own exit criterion (boots,
+  prints, exits) has never itself called `CL_Init`, so it needs none of
+  this *directly* — but "X0 doesn't need it" is not the same claim as
+  "nothing in the tree can reach it," which turned out to be false; see
+  the correction immediately below for the difference. Moved off X0's
+  checklist onto X5's, where the actual work was already scheduled.
+
+`DEST_OS` stays open, but is now backed by a measured cost
+(`x0-probe-results.md` §7: `DEST_OS = xbox` plus a one-token widening of
+`engine/wscript:181`) with an explicit note that the missing piece is
+writing waf's own toolchain-integration module — real, separate,
+open-ended engineering on the scale of `nswitch`/`psvita`'s own dedicated
+modules, not a ride-along on this branch. Nothing currently blocks on it:
+every measurement so far, including this one, has gone through
+`tools/xbox-cc.sh` and manual `nxdk-link` invocations instead of waf.
+
 ### Fixed — second Codex review round on the log channel branch
 
 The re-review after the first round's fixes (one finding, medium severity,

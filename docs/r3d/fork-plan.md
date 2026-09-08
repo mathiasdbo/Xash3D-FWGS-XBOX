@@ -119,10 +119,59 @@ rather than a prerequisite for us.
     **Until this exists nothing in the tree compiles at all**:
     `common/defaults.h:20` includes it and every `XASH_*` macro comes from it.
     It is a third-party submodule, so plan for a fork.
-  - Plumb `-DXBOX` into every engine TU; add a `sys/types.h` shim; patch the
-    five hint constants; pick a `DEST_OS` that is not `win32`; add
-    `VIDEO_XBOX`/`INPUT_XBOX` to `common/backends.h:18-23` and a branch to
-    `common/defaults.h:32-53`; drop `SDL_INIT_VIDEO` from `sys_sdl2.c:130`.
+  - ~~Plumb `-DXBOX` into every engine TU; add a `sys/types.h` shim; patch
+    the five hint constants.~~ **Done.** `tools/xbox-cc.sh` passes
+    `-D__XBOX__=1` (the exact macro `SDL_config.h:32,46` checks);
+    `compat/xbox/sys/types.h` is the shim; all five hints are defined,
+    guarded, in `compat/xbox/xbox_prelude.h`.
+  - ~~Drop `SDL_INIT_VIDEO` from `sys_sdl2.c:130`.~~ **Done, 2026-09-08.**
+    `#if XASH_XBOX` now omits it from the `SDL_Init` flags; every other
+    `XASH_WIN32` target is unaffected.
+  - **`VIDEO_XBOX`/`INPUT_XBOX` in `common/backends.h`/`common/defaults.h` —
+    corrected 2026-09-08, found in review: this was never X0 scope, though
+    the reason is narrower than a first pass at this correction claimed.**
+    A dedicated `VIDEO_XBOX` backend (`vid_xbox.c` against nxdk's HAL
+    framebuffer directly) is real rendering work with a real
+    per-frame-cost question attached (§3's LUT-blit budget) — it belongs to
+    X5, where that work is already scheduled, not to a
+    toolchain-and-log-channel phase. **Correction to the correction, found
+    by Codex's own review of the branch that first wrote this note: Xbox
+    is not currently kept off `vid_sdl2.c`.** `defaults.h`'s generic
+    `#if XASH_SDL` arm still selects `VIDEO_SDL` for Xbox today, `vid_sdl2.c`
+    genuinely compiles, and nxdk ships a real (if minimal) `SDL_xbvideo.c`
+    driver a normal client boot would reach through it — see divergence
+    #14 for the full trace, including the 0×0 window/display-mode risk
+    that path has today because nothing has called `XVideoSetMode()` yet.
+    Not currently reachable only because no Xbox `main()`/link/running
+    binary exists in this tree at all - a fact about X1/X2 not having
+    happened yet, not a property of the video architecture. `INPUT_SDL`
+    needs no Xbox-specific branch at all: it comes through the same generic
+    `#if XASH_SDL` arm, and §1's own bottom line only asks to compile
+    `in_sdl2.c` "as inert" - not to replace it, and input has no equivalent
+    of the 0×0-mode risk. X0's own exit criterion (boots, prints, exits)
+    still needs none of this *itself* - X0 has never called `CL_Init`. What
+    it does need, before X1/X2 wires up a real entry point: a decision
+    about whether that entry point calls `XVideoSetMode()` with a sane
+    default before reaching `Host_Main`, or forces Xbox into
+    `Host_IsDedicated()`-equivalent behaviour until `VIDEO_XBOX` exists at
+    X5. Left undecided here on purpose - deciding it now would guess at
+    X1/X2's own design; `vid_xbox.c` itself still belongs on X5's list.
+  - Pick a `DEST_OS` that is not `win32`. **Still open** — measured, not
+    merely planned: `x0-probe-results.md` §7 shows `DEST_OS = xbox` plus a
+    one-token widening of `engine/wscript:181`'s denylist is the cheaper
+    fork (three broken Win32 files avoided against two POSIX ones, which
+    would need `#ifdef`-ing individually rather than excluding wholesale).
+    What that measurement does not cover is wiring `DEST_OS` into waf's own
+    `configure()` in the first place — `nswitch`/`psvita` each get there
+    through a dedicated `conf.load(<platform>)` toolchain module
+    (`scripts/waifulib/`) handling cross-compilation specifics, and nxdk's
+    toolchain has no such module yet. Writing one is real, separate,
+    open-ended engineering, not a one-line fork like the source-selection
+    question it unblocks — worth its own phase-sized branch, not a
+    ride-along on this checklist. Every measurement so far (X0's own
+    toolchain, X1's static-linking probe) has gone through `tools/xbox-cc.sh`
+    and manual `nxdk-link` invocations instead, bypassing waf entirely, so
+    nothing currently blocks on this being unresolved.
   - `public/miniz.c` does not compile for nxdk — `<sys/stat.h>`, `errno_t`,
     `localtime_s`, and `_MSC_VER` steering it into the Win32 branch.
   - ~~**Build nxdk on the dev host.**~~ **Done 2026-09-05.** 19 libraries,

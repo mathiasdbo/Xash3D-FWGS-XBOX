@@ -432,13 +432,14 @@ void Sys_Error( const char *error, ... )
 		// enforces that today. Corrected 2026-09-07, found in review: an
 		// earlier version of this comment stated unreachability as fact.
 		// sys_sdl2.c:129-133 sets host.type = HOST_DEDICATED on ANY
-		// SDL_Init() failure, and sys_sdl2.c still passes SDL_INIT_VIDEO
-		// unconditionally for Xbox (x0-probe-results.md:110 already flags
-		// dropping it as required, "an explicit change, not a hope", not
-		// yet made) - so this branch is plausibly reachable before that
-		// lands. The guard below is correct either way: it only excludes
-		// calls to a console Xbox never has, so being wrong about
-		// reachability costs nothing here. Same widening as above.
+		// SDL_Init() failure - updated 2026-09-08: sys_sdl2.c no longer
+		// passes SDL_INIT_VIDEO for Xbox (x0-probe-results.md's "an
+		// explicit change, not a hope" is now made), but SDL_Init can still
+		// fail for reasons unrelated to that flag, so this branch stays
+		// plausibly reachable regardless. The guard below is correct either
+		// way: it only excludes calls to a console Xbox never has, so being
+		// wrong about reachability costs nothing here. Same widening as
+		// above.
 #if XASH_WIN32 && !XASH_XBOX
 		Wcon_ShowConsole( true );
 		Wcon_DisableInput();	// disable input line for dedicated server

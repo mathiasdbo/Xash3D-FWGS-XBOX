@@ -127,7 +127,32 @@ void SDLash_Init( void )
 		SDL_setenv( "SDL_GAMECONTROLLER_IGNORE_DEVICES", "0x28DE/0x11FF", 1 );
 	}
 
+	// No SDL_INIT_VIDEO in THIS call, on Xbox: found in review,
+	// x0-probe-results.md §2. This is narrower than it looks - corrected
+	// 2026-09-08, found in review: an earlier version of this comment
+	// claimed the engine "does not own the video mode on Xbox regardless",
+	// as if this one flag closed the question. It does not. nxdk's
+	// SDL_xbvideo.c is a real, currently-compiling driver
+	// (XBOX_CreateWindow/XBOX_VideoInit), and the NORMAL client path
+	// (CL_Init -> VID_Init -> vid_sdl2.c -> SDL_CreateWindow) still reaches
+	// it regardless of this flag, since SDL lazily auto-inits its video
+	// subsystem on the first SDL_CreateWindow call either way. What this
+	// flag actually avoids is only the EARLY, defensive call below failing
+	// or doing pointless work before anything has decided what Xbox's
+	// video story even is yet - it does not prevent a later, real client
+	// boot from reaching SDL_xbvideo.c. That path is currently unreachable
+	// for an unrelated reason: no Xbox main()/link/running binary exists
+	// in this tree at all yet, so nothing drives execution as far as
+	// CL_Init. See divergence #14 for the full trace (XVideoGetMode()
+	// would return a genuine 0x0 mode if that path ran today, since
+	// nothing has called XVideoSetMode()) and what still needs deciding
+	// before a real Xbox entry point lands. XASH_XBOX only, not
+	// XASH_WIN32: every other XASH_WIN32 target has a real window to own.
+#if XASH_XBOX
+	if( SDL_Init( SDL_INIT_TIMER | SDL_INIT_EVENTS ) )
+#else
 	if( SDL_Init( SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_EVENTS ) )
+#endif
 	{
 		Sys_Warn( "SDL_Init failed: %s", SDL_GetError() );
 		host.type = HOST_DEDICATED;
