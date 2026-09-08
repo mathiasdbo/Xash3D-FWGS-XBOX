@@ -5,6 +5,61 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X1: the ten duplicate symbols, fixed and verified by relinking
+
+`fork-plan.md`'s X1 section measured this back on 2026-09-06 (linking
+every non-networking, non-test Xbox object file with `nxdk-link
+-errorlimit:0` reported exactly ten duplicate symbols: `FI`, six `FS_*`
+names, `_Mem_Alloc`, `_Mem_Free`) but never fixed it. Fixed now, verified
+by relinking rather than by trusting the fix reads correctly.
+
+Eight of the ten (`FI` and all six `FS_*` names) are a blanket `#if
+XASH_XBOX` `#define` block in `filesystem/filesystem_internal.h`, renaming
+`filesystem/*.c`'s real implementations away from
+`engine/common/filesystem_engine.c`'s same-named thin wrapper functions -
+which call through a dynamically-loaded `fs_api_t` vtable, an architecture
+that cannot work on Xbox at all regardless of this collision, since Xbox
+has no dynamic library loading. Scoped so it can only affect
+`filesystem/`'s own translation units: confirmed by grep that
+`filesystem_internal.h` is never included from `engine/` or `ref/`.
+
+`_Mem_Alloc`/`_Mem_Free` could not use the same blanket `#define`:
+`fs_interface_t` (`fscallback.h`) has struct *member* fields also literally
+named `_Mem_Alloc`/`_Mem_Free` (the engine's own allocator, handed to
+filesystem at init so it can route through the engine's real pools instead
+of an independent one - correcting `fork-plan.md`'s own earlier
+description of these as "the filesystem's own allocator"). A blind
+`#define` renamed those struct-member accesses too, caught immediately by
+compiling `dll.c`/`filesystem.c` against that version, not assumed safe.
+Renamed by hand instead, at exactly the two declarations, two definitions,
+and the three `Mem_Malloc`/`Mem_Calloc`/`Mem_Free` macros that reference
+them, leaving `g_engfuncs._Mem_Alloc`/`engfuncs->_Mem_Alloc` (the struct
+members) untouched.
+
+**Verified by relinking, not just recompiling.** `deps/nxdk/bin/nxdk-link
+-errorlimit:0` over every object file a real Xbox build would actually
+select reported these same ten duplicates before the fix and zero after -
+confirmed the same session. The object set needed narrowing first: a naive
+relink over everything `tools/xbox-sweep.sh` compiles found nine
+*additional* apparent duplicates (`SNDDMA_*`/`VoiceCapture_*` between
+`platform/sdl1/s_sdl1.c` and `platform/sdl2/s_sdl2.c`), which turned out to
+be this session's own measurement artifact - a real Xbox build only
+selects `platform/sdl2`, never `platform/sdl1` alongside it - not a real
+collision. Excluding `filesystem/tests`, `public/tests`, and every
+`engine/platform/*` subdirectory other than `sdl2`/`xbox`/`misc` brought
+the count back to exactly the original ten.
+
+Full sweep unaffected: 186 ok, 34 failing, unchanged - this branch's own
+`tools/xbox-sweep.sh --expect-fail 34` confirms it.
+
+**Not yet known, same as before the fix**: the relink now reports 335
+undefined-symbol errors instead of duplicates - `_WinMainCRTStartup`,
+nxdk's `winapi`/`hal`/`pdclib` surface, libm, `SDL_*` - because no nxdk
+libraries, no entry point, and no game module are on the command line yet.
+That is the next measurement X1's own exit criterion needs, not yet
+attempted: the real `-libpath:` and library list nxdk's sample `Makefile`s
+use.
+
 ### Fixed — first Codex review round on the SDL-video-init branch
 
 One finding (medium severity, confidence 0.82), and it corrected an

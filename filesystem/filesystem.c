@@ -78,12 +78,16 @@ void FS_EnsureOpenFile( file_t *file ) {}
 void FS_BackupFileName( file_t *file, const char *path, uint options ) {}
 #endif
 
-void _Mem_Free( void *data, const char *filename, int fileline )
+// FSLIB_MEM_FREE/FSLIB_MEM_ALLOC (filesystem_internal.h): the function
+// DEFINED here, not the g_engfuncs._Mem_Free/._Mem_Alloc CALLED inside it -
+// those are struct member accesses into the engine-provided callback table
+// and must keep their real names unchanged regardless of platform.
+void FSLIB_MEM_FREE( void *data, const char *filename, int fileline )
 {
 	g_engfuncs._Mem_Free( data, filename, fileline );
 }
 
-void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
+void *FSLIB_MEM_ALLOC( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
 {
 	return g_engfuncs._Mem_Alloc( poolptr, size, clear, filename, fileline );
 }

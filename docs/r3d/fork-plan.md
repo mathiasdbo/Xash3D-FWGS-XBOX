@@ -309,8 +309,14 @@ _FS_LoadDirectFile  _FS_Search
 **Ten.** All of them one boundary: the filesystem module defines the FS API,
 and `engine/common/filesystem_engine.c` re-exports the same names as thin
 wrappers. `_FI` is the known struct-versus-pointer collision
-(`filesystem/filesystem.c:30` against `filesystem_engine.c:41`), and the
-`_Mem_*` pair is `zone.c` against the filesystem's own allocator.
+(`filesystem/filesystem.c:30` against `filesystem_engine.c:41`). **Corrected
+2026-09-08, found while fixing this: the `_Mem_*` pair is not "`zone.c`
+against the filesystem's own allocator" as if filesystem had an independent
+one — `filesystem/filesystem.c`'s `_Mem_Alloc`/`_Mem_Free` are thin
+forwarders to `g_engfuncs._Mem_Alloc`/`._Mem_Free`, the engine's own real
+allocator handed over via `fs_interface_t` at init. The collision is in
+*name* only, not in behaviour — but the name collision is exactly as real,
+and needed the identical fix.**
 
 A first run reported 21. Eleven of those were `_main`, from
 `filesystem/tests/` and `public/tests/` — unit-test programs that have no
@@ -326,15 +332,51 @@ COMDAT-folding hazard the earlier probe found. The largest risk this project
 recorded is retired, and it was retired by measuring rather than by
 building the machinery to survive it.
 
-**Not yet known:** the link reported zero undefined symbols, which cannot be
-true — no SDL library, no game module and no nxdk libraries were on the
-command line. lld almost certainly stopped at the duplicates. The undefined
-picture is a separate measurement, and it belongs to the real link, not this
-probe.
+### FIXED, 2026-09-08: the ten duplicates, verified by relinking
 
-**Still the gate, no longer the top risk.** Downgraded from "this may not
-work at all" to "three known fallbacks, one needing no new tools" — but the
-measurement that would close it has never been run.
+Went with the `#define` branch, not `objcopy` — the toolchain reality
+above still holds (`objcopy` does not exist anywhere in nxdk, per "What
+stands" below). Eight of the ten (`FI`, all six `FS_*` names) are a blanket
+`#if XASH_XBOX` `#define` block in `filesystem/filesystem_internal.h`,
+scoped so it can only ever affect `filesystem/`'s own translation units
+(confirmed by grep: no `engine/` or `ref/` file includes
+`filesystem_internal.h`). `_Mem_Alloc`/`_Mem_Free` needed a hand rename
+instead of a blanket one: `fs_interface_t` (`fscallback.h`) has struct
+*member* fields also literally named `_Mem_Alloc`/`_Mem_Free` — the
+engine's own allocator, handed to filesystem at init — and a blind
+`#define` rewrote those too, caught immediately by trying to compile
+`dll.c`/`filesystem.c` against that version rather than assumed safe.
+Divergence #15 has the full account.
+
+**Verified by relinking, not just recompiling.** `deps/nxdk/bin/nxdk-link
+-errorlimit:0` over every object file a real Xbox build would actually
+select (excluding `filesystem/tests`, `public/tests`, and every
+`engine/platform/*` subdirectory other than `sdl2`/`xbox`/`misc` — files
+`tools/xbox-sweep.sh` compiles individually regardless of which platform
+would really select them, the exact "N of M compile has never meant N of M
+would link" gap that script's own header names) reported these same ten
+duplicates before the fix, byte-for-byte matching this measurement, and
+**zero** duplicate-symbol errors after — confirmed the same session, not
+assumed from the fix reading correctly. The first re-link attempt (before
+narrowing the object set to what a real build selects) found nine
+*additional* apparent duplicates, `SNDDMA_*`/`VoiceCapture_*` between
+`platform/sdl1/s_sdl1.c` and `platform/sdl2/s_sdl2.c` — a measurement
+artifact of linking both SDL1 and SDL2 sound backends together, which a
+real Xbox build never does (only `XASH_SDL=2` is selected), not a real
+collision.
+
+**Not yet known:** the relink reported zero duplicate-symbol errors and
+moved on to 335 undefined-symbol errors instead — `_WinMainCRTStartup`, the
+whole of nxdk's `winapi`/`hal`/`pdclib` surface, libm functions, `SDL_*` —
+because no SDL library, no game module and no nxdk libraries were on the
+command line, exactly as this section already predicted. The undefined
+picture is still a separate measurement, needing the real `-libpath:` and
+library list nxdk's own sample `Makefile`s use — not yet attempted.
+
+**Downgraded again.** From "three known fallbacks, one needing no new
+tools" to "fixed and verified" for the duplicate-symbol question
+specifically. The undefined-symbol measurement is what remains before this
+phase's own exit criterion (a real link succeeding) is provable.
 
 Static linking is **mandatory**, not preferred: nxdk's `LoadLibraryExA`
 unconditionally returns NULL (`deps/nxdk/lib/winapi/libloaderapi.c:16-23`) and
