@@ -323,3 +323,156 @@ intention beforehand.
 instead of a partial reimplementation" are different questions with opposite
 answers. An answer carried over from the earlier framing is wrong without
 being incorrect, which is the hardest kind to catch.
+
+### NEVER call something "the one" of anything without grepping for siblings
+
+Fixing `Sys_Print`'s call to `Wcon_WinPrint` — an undefined-symbol landmine,
+`con_win.c` does not compile for Xbox — I wrote it up as "the one call site
+X0's log channel routes through" and "the one function". Both false. A
+`grep -rn "Wcon_" engine/common/*.c` I did not run at the time turns up five
+more: two in `Sys_Error`, one in `Sys_DestroyConsole`, two in `Host_Main`
+(the last two behind the raw `_WIN32` macro, not `XASH_WIN32`, so the fix I
+already had would not even have widened them). All five are the identical
+class of bug, in files this same commit range touched or sat next to.
+
+Found by `pr-review`, on the branch that introduced the claim — not by me
+rereading my own work, which is the point. **"The one" is a completeness
+claim, and completeness claims need the search that would falsify them, not
+confidence that the search would come back empty.**
+
+**The very fix for this was itself incomplete, one round later.** When I
+finally ran the grep above, I scoped it to `engine/common/*.c` — reasonable,
+since that is where all five siblings turned out to live, but not actually
+exhaustive. A sixth site, `Wcon_Input` via `Platform_Input`, sat in
+`engine/platform/platform.h` the whole time, outside that glob, and survived
+one full review-and-fix commit before a second review round caught it. The
+lesson does not just apply to the original mistake; it applies to the search
+written to fix it. A grep scoped to "where I expect the answer to be" is the
+same failure shape as a claim of "the one", just one level removed — the
+fix is `grep -rn "Wcon_" engine/` (the whole tree), not a directory chosen
+because it is where the pattern happened to cluster last time.
+
+The five-minute cost of the wider grep is smaller than one wrong sentence
+propagating into a changelog and a divergence-ledger row, which is what
+happened here twice before anyone checked with the right scope.
+
+**A third round, and the widened grep still missed one — because it was
+scoped by name, not by mechanism.** `grep -rn "Wcon_" engine/` finds every
+`Wcon_*` call, correctly this time. It cannot find `Win32_NanoSleep`, which
+is the identical bug — a symbol declared in `platform.h`, defined only in
+`sys_win.c`, which does not compile for Xbox — wearing a different prefix.
+The pattern was never really "calls starting with `Wcon_`"; it was "any
+declared-but-Win32-only-defined symbol reachable under a guard that admits
+Xbox." A name-prefix grep is a proxy for that, and a proxy is exactly the
+kind of search that comes back clean without having asked the real
+question. The question that would have found all eight sites in one pass:
+which functions does `engine/platform/win32/*.c` define that `platform.h`
+declares, and which of those are called under `XASH_WIN32` or bare
+`_WIN32` with no `!XASH_XBOX`? That is a slower search to write and a
+faster one to trust.
+
+### NEVER trust a new tool's exit code without testing its failure path too
+
+Writing `tools/xbox-check-nxdk-cc-drift.sh` - a checker to close exactly the
+kind of gap this file's own entries keep finding - the first version ran
+clean (`every nxdk-cc flag is present`, exit 0) on the first try. That was
+not a passed test. It was a script that had never been shown a real
+discrepancy, reporting the only thing it had ever been asked about.
+
+Injecting one and re-running found two failures stacked on top of each
+other, both invisible to a clean-looking exit code:
+
+1. **PATH, not the pattern, first.** The exact `grep`/`sed` pipeline gave
+   silently different results depending on which binaries the invoking
+   shell's ambient `PATH` resolved to before this script pinned it -
+   `\s` matching nothing, `\\$` failing to strip a trailing backslash in
+   either sed mode, with no error either way. `xbox-cc.sh` already pins
+   `PATH` for exactly this reason; this new script did not, until tested
+   against an actual discrepancy rather than the no-discrepancy case.
+2. **Even a purpose-built test injection can lie.** The first two attempts
+   to inject a test flag used `printf`/`sed` one-liners that silently
+   produced literal `\n` text instead of a real newline - the identical
+   class of shell-interpretation trap the checker itself exists to survive
+   - and both attempts reported the checker as passing, because nothing
+   had actually been injected. Only editing the file directly with a real
+   text edit, then independently confirming the injection with `od`/`xxd`
+   before trusting the checker's response to it, surfaced either bug.
+
+**A tool that has only ever seen the passing case has not been tested,
+regardless of what its exit code says.** Manufacture the failing case,
+verify by an independent method that the failing case is actually present
+before running the tool against it, and only then trust a clean result on
+the real one.
+
+### "Checked individually" is a claim about the search, not a guarantee about what remains
+
+Two review rounds in a row on this branch each ran the mechanism-based
+search the previous entry describes, each reported finding every remaining
+site, and each was wrong. Round three found `Win32_NanoSleep` and
+`Platform_DebuggerPresent` and said "found all eight sites in one pass."
+Round four found `Sys_SetupCrashHandler`/`Sys_RestoreCrashHandler` - the
+identical shape, declared in `platform.h`, defined only in a Win32-only
+file, called under an unwidened guard - which the round-three search should
+have caught and did not.
+
+Nothing was wrong with the search *method* either time. Both times it was
+the right question, asked correctly, and it still returned an incomplete
+answer, because a search over a large, unfamiliar surface (every function
+`engine/platform/win32/*.c` defines, cross-referenced against every call
+site) is itself a place to make an ordinary mistake - missing one grep
+target, stopping one file short, misreading one guard - independent of
+whether the underlying method is sound.
+
+**The fix is not "search more carefully next time."** It is: state what was
+checked as a fact about the search ("grepped these files for this
+pattern"), not as a fact about the codebase ("this is complete"). A
+completeness claim should be phrased so that finding a tenth site next
+round is a correction to the claim, not evidence the method failed - and
+should expect that correction, rather than being surprised by it. This
+branch is on its fifth review round; the count of sites found this way
+across three of those rounds is 2, 2, then 1 - a declining but nonzero
+trend, not a proof of zero remaining.
+
+### NEVER trust a hand-typed backslash-then-newline in a generated shell script without re-reading the raw bytes
+
+Twice in one editing session, a shell one-liner or a Python string literal
+meant to insert a real line-continuation (`\` followed by an actual newline
+byte) instead produced the two-character sequence backslash-then-`n` -
+visually almost identical in a diff or a `sed -n` listing, syntactically
+valid enough that `bash -n` did not catch it either time (a literal `\n`
+mid-line just becomes part of the argument to the preceding command), and
+both times it silently broke the string the line was building
+(`tools/xbox-sweep.sh`'s own error message ended up containing a literal
+`\n` instead of wrapping). Caught only by `od -c` on the specific bytes,
+not by re-reading the file with a normal tool.
+
+**After any programmatic edit that constructs a line continuation, or
+after two failed attempts to get one right the same way, dump the exact
+bytes with `od -c` (or equivalent) before trusting the file - do not
+re-attempt the same escaping approach a third time and hope.** This is the
+same failure this file already has an entry for
+(`printf`/`sed` test-harness escaping), recurring in a different tool
+(Python `bytes` literals instead of a bash heredoc) - the shape is "an
+editing tool's own escaping, not the target file's content, produced the
+bug," and it generalises across whichever tool is doing the constructing.
+
+### NEVER explain a syntax trap by typing the exact sequence that trips it
+
+Fixing a `-Wcomment` warning caused by a literal `/*` inside a doc comment's
+prose (`engine/common/*.c`, where the `/` before `*.c` reads as a nested
+comment's opening delimiter), the first replacement wording explained the
+bug by describing it as "the original wording here spelled that as a
+literal `engine/common/*.c` glob, and the `/*` inside it read as..." -
+which itself contains the identical `/*` sequence, still inside the same
+block comment, and reproduced the exact warning it was written to explain.
+Caught only by recompiling immediately after the edit rather than trusting
+the fix on sight.
+
+**When writing prose that explains a syntax trap, describe the trap in
+words rather than typing the triggering sequence, and recompile (or
+otherwise re-run the check that found it) after the fix, even when the fix
+looks obviously right.** The failure mode is specific to explaining a bug
+inside the same syntactic context the bug lives in - a comment about a
+comment-breaking sequence, a string about a string-escaping bug, a shell
+line about a shell-quoting bug - and "obviously right" is exactly the
+state of mind the original bug was written in too.

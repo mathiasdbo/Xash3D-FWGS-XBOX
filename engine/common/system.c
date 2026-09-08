@@ -415,7 +415,11 @@ void Sys_Error( const char *error, ... )
 #if XASH_SDL >= 2
 		if( host.hWnd ) SDL_HideWindow( host.hWnd );
 #endif
-#if XASH_WIN32
+		// Widened 2026-09-07, found in review: same landmine as Wcon_WinPrint
+		// (divergence #7c) - Wcon_ShowConsole's only definition (con_win.c)
+		// does not compile for Xbox. No replacement needed here: there is no
+		// console window to hide, unlike Sys_Print, which needed one.
+#if XASH_WIN32 && !XASH_XBOX
 		Wcon_ShowConsole( false );
 #endif
 		Sys_Print( text );
@@ -423,7 +427,19 @@ void Sys_Error( const char *error, ... )
 	}
 	else
 	{
-#if XASH_WIN32
+		// Xbox is not INTENDED to be Host_IsDedicated() - there is no
+		// Xbox-specific -dedicated path anywhere in this tree - but nothing
+		// enforces that today. Corrected 2026-09-07, found in review: an
+		// earlier version of this comment stated unreachability as fact.
+		// sys_sdl2.c:129-133 sets host.type = HOST_DEDICATED on ANY
+		// SDL_Init() failure, and sys_sdl2.c still passes SDL_INIT_VIDEO
+		// unconditionally for Xbox (x0-probe-results.md:110 already flags
+		// dropping it as required, "an explicit change, not a hope", not
+		// yet made) - so this branch is plausibly reachable before that
+		// lands. The guard below is correct either way: it only excludes
+		// calls to a console Xbox never has, so being wrong about
+		// reachability costs nothing here. Same widening as above.
+#if XASH_WIN32 && !XASH_XBOX
 		Wcon_ShowConsole( true );
 		Wcon_DisableInput();	// disable input line for dedicated server
 #endif
@@ -461,7 +477,15 @@ void Sys_Print( const char *pMsg )
 	}
 #endif
 
-#if XASH_WIN32
+#if XASH_XBOX
+	// Not the XASH_WIN32 branch below: that block's CRLF pairing exists for
+	// a Windows console (WriteConsole-style APIs), and Wcon_WinPrint - its
+	// only consumer - is not compiled for Xbox (needs SetConsoleTextAttribute
+	// and the FOREGROUND_* constants, neither of which nxdk has). Without
+	// this branch, Xbox would otherwise fall into the block below and call a
+	// symbol no Xbox translation unit defines. See con_xbox.c.
+	Xbox_ConPrint( pMsg );
+#elif XASH_WIN32
 	{
 		const char	*msg;
 		static char	buffer[MAX_PRINT_MSG];

@@ -116,12 +116,30 @@ typedef struct tagPOINT { long x, y; } POINT, *PPOINT, *LPPOINT;
 typedef int errno_t;
 #endif
 
-/* socklen_t. A POSIX type that arrives from <sys/socket.h> everywhere else;
- * nxdk has no sockets headers at all. engine/platform/stub/net_stub.h assumes
- * it exists - it defines WSAsize_t but not this - so the no-network build
- * needs it even though nothing will ever call a socket function. */
+/* socklen_t. A POSIX type that arrives from <sys/socket.h> everywhere else.
+ * nxdk has no <sys/socket.h> of its own, but it does vendor full lwIP
+ * headers (<lwip/sockets.h>, used by engine/platform/xbox/net_xbox_log.c) -
+ * corrected 2026-09-07; an earlier version of this comment said nxdk has no
+ * sockets headers at all, which was true of what the engine's own net_ws.c
+ * needs (real BSD sockaddr_in6/sockaddr_storage/in6_addr by value - see
+ * docs/r3d/fork-plan.md's "Networking is parked" section) but not of what
+ * exists in the tree. **Corrected 2026-09-07, found in review: the consumer
+ * named below was wrong.** It is not engine/platform/stub/net_stub.h - that
+ * file never mentions socklen_t at all. It is
+ * engine/common/net_ws_private.h:90, NET_SockAddrLen's unconditional return
+ * type, compiled regardless of which platform stub is selected - so the
+ * no-network build still needs a definition even though nothing in it will
+ * ever call a socket function.
+ *
+ * SOCKLEN_T_DEFINED, not just the typedef: lwip/sockets.h:117 checks that
+ * exact macro before typedef'ing its own (as u32_t, not int) - the mechanism
+ * it documents at :115 for exactly this situation. Defining only the
+ * typedef would compile fine until some other file includes both this
+ * prelude and <lwip/sockets.h>, and then fail with a redefinition error one
+ * layer removed from the actual cause. */
 #ifndef R3D_HAVE_SOCKLEN_T
 #define R3D_HAVE_SOCKLEN_T
+#define SOCKLEN_T_DEFINED
 typedef int socklen_t;
 #endif
 

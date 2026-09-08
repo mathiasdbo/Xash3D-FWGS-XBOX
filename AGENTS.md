@@ -118,34 +118,45 @@ Delete rules that stop being true. A stale rule costs more than a missing one.
 
 ## Review on every PR
 
-**Run `pr-review` before opening a PR, and again after any commit that
-responds to it.** It is a committed workflow (`.claude/workflows/`), not an
-ad-hoc decision, so every change gets the same scrutiny and the reviewers
-carry the same standing context instead of rediscovering it.
+**Run `tools/codex-review.sh --base main` before opening a PR.** It hands
+the diff to Codex (the `openai-codex` Claude Code plugin, run in the
+background — a review can take several minutes) with standing project
+context from `docs/r3d/codex-review-focus.md`, adversarially: Codex is
+instructed to try to break confidence in the change, not validate it, and
+defaults to `approve` only when it cannot support a substantive finding.
 
-```
-Workflow({ name: 'pr-review' })                      # main..HEAD
-Workflow({ name: 'pr-review', args: { base: 'main', head: 'my-branch' } })
-```
+This replaced a Claude-side multi-agent workflow (`.claude/workflows/
+pr-review.js`, removed 2026-09-07) whose 6-lens/3-refuter fan-out cost
+25-37 subagent calls and millions of tokens per round, and took 11 rounds
+to close one branch. Moving review compute onto Codex keeps the scrutiny
+without that cost.
 
-It reads the diff, picks the lenses that apply, and puts every finding to
-**three adversarial refuters** who default to rejecting it. Only findings
-that survive a majority are reported. That ratio matters: on the first run
-it was 35 raised, 10 confirmed — acting on all 35 would have meant 25
-unnecessary changes to code that was correct.
+**Fix-or-justify threshold:** any finding with severity `critical`/`high`,
+or `confidence >= 0.6`, gets fixed or a written reason for not fixing — a
+finding you disagree with gets a written reason, not silence, same as
+before. Lower-severity, lower-confidence findings are worth a glance but
+are not mandatory to act on.
 
-Post the confirmed findings to the PR, then fix or justify each one. A
-finding you disagree with gets a written reason, not silence.
+**Cadence: capped at two rounds.** Run the review, fix or justify what's
+actionable, run it once more to catch anything the fixes themselves
+introduced — then open the PR regardless of what the second round finds.
+Do not run a third round. If round 2 raises something clearly real, fix it
+and stop; if it's not clearly real or not worth chasing further, note it as
+deliberately deferred in the PR description instead of re-reviewing again.
 
-**It has already earned its place.** The first run found a stub whose
-justifying comment inverted the guard it cited, which would have made every
-file inside `pak0.pak` unreadable — the whole of retail Half-Life's content.
-Three independent lenses found it; the compiler could not, and neither did
-the author.
+Add a trap to `docs/r3d/codex-review-focus.md` when a class of defect gets
+through — it carries the specific failure shapes this project has already
+hit (the POSIX layer's partial-read/write traps, the "measure the
+measurement" lesson from `tools/xbox-sweep.sh`'s own history, reference-
+fidelity claims that turned out false), which is what makes it find things
+a generic review prompt does not.
 
-Add a lens to `.claude/workflows/pr-review.js` when a class of defect gets
-through. The lens prompts carry the specific traps this project has already
-hit, which is what makes them find things a generic review does not.
+**It has already earned its place.** The first run of the workflow this
+replaced found a stub whose justifying comment inverted the guard it
+cited, which would have made every file inside `pak0.pak` unreadable — the
+whole of retail Half-Life's content. Three independent lenses found it;
+the compiler could not, and neither did the author. That history is why
+review runs on every PR rather than only the ones that look risky.
 
 ## Specialist review
 

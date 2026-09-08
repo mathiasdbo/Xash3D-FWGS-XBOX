@@ -107,6 +107,15 @@ char *Wcon_Input( void );
 void Wcon_WinPrint( const char *pMsg );
 #endif
 
+#if XASH_XBOX
+void Xbox_Init( qboolean con_showalways );
+void Xbox_Shutdown( void );
+void Xbox_ConPrint( const char *pMsg );
+qboolean Xbox_NetLogInit( void );
+void Xbox_NetLogPrint( const char *pMsg );
+qboolean Xbox_NanoSleep( int nsec );
+#endif
+
 #if XASH_NSWITCH
 void NSwitch_Init( void );
 void NSwitch_Shutdown( void );
@@ -151,6 +160,13 @@ static inline void Platform_Init( qboolean con_showalways )
 	PSVita_Init( );
 #elif XASH_DOS
 	DOS_Init( );
+#elif XASH_XBOX
+	// Must come before the XASH_WIN32 arm below: XASH_XBOX implies
+	// XASH_WIN32, and Win32_Init's only definition (engine/platform/win32/
+	// sys_win.c) does not compile for Xbox - needs shellapi.h, which nxdk
+	// does not have. Found in review, the same landmine class as
+	// Wcon_WinPrint in Sys_Print (divergence #7c), left unaddressed there.
+	Xbox_Init( con_showalways );
 #elif XASH_WIN32
 	Win32_Init( con_showalways );
 #elif XASH_LINUX
@@ -166,6 +182,8 @@ static inline void Platform_Shutdown( void )
 	PSVita_Shutdown( );
 #elif XASH_DOS
 	DOS_Shutdown( );
+#elif XASH_XBOX
+	Xbox_Shutdown( );
 #elif XASH_WIN32
 	Win32_Shutdown( );
 #elif XASH_LINUX
@@ -179,7 +197,21 @@ static inline void Platform_Shutdown( void )
 
 static inline qboolean Sys_DebuggerPresent( void )
 {
-#if XASH_LINUX || XASH_WIN32
+	// Found using the mechanism-based search this branch's lessons.md entry
+	// asked for, not a name-prefix grep: Platform_DebuggerPresent is
+	// defined per-platform (sys_linux.c, sys_win.c), and XASH_WIN32 admits
+	// Xbox with no exclusion. Called from Sys_DebugBreak (its own body
+	// calls Sys_DebuggerPresent at system.c:89), which itself is called
+	// from two places, not one - Sys_Warn (system.c:372) and Sys_Error
+	// (system.c:409, corrected 2026-09-07, found in review: this comment
+	// previously cited :408, one line early - Sys_Error's own
+	// Sys_DebugBreak call, not Sys_Warn's, which the earlier version also
+	// did not mention at all). Both are on the same landmine-fixing path
+	// this branch has already touched more than once. false is honest and
+	// safe here, matching what every non-Linux/non-Win32 platform already
+	// gets below: Xbox has no debugger-attached concept to report,
+	// the same shape as the six Wcon_* exclusions in divergence #7c.
+#if XASH_LINUX || ( XASH_WIN32 && !XASH_XBOX )
 	return Platform_DebuggerPresent();
 #else
 	return false;
@@ -208,6 +240,17 @@ static inline qboolean Platform_NanoSleep( int nsec )
 	if( ret < 0 )
 		return errno == EINTR; // ignore EINTR error, it just means sleep was interrupted
 	return true;
+#elif XASH_XBOX
+	// Must come before the XASH_WIN32 arm below: found in review, a seventh
+	// Win32_* landmine of the identical class the other six already fixed
+	// (divergence #7c) - Win32_NanoSleep's only definition (sys_win.c:86)
+	// does not compile for Xbox, and the previous "grep for siblings" pass
+	// could not have found it, because it does not share the Wcon_ prefix
+	// the grep was keyed on. Called unconditionally from host.c's
+	// frame-pacing loop (host.c:571), which never checks the return value
+	// and measures elapsed time either way - a false-returning stub here
+	// would not crash, but would silently disable FPS capping and spin.
+	return Xbox_NanoSleep( nsec );
 #elif XASH_WIN32
 	return Win32_NanoSleep( nsec );
 #else
@@ -215,7 +258,29 @@ static inline qboolean Platform_NanoSleep( int nsec )
 #endif
 }
 
-#if XASH_WIN32 || XASH_FREEBSD || XASH_NETBSD || XASH_OPENBSD || XASH_ANDROID || XASH_LINUX || XASH_APPLE
+// (XASH_WIN32 && !XASH_XBOX), not bare XASH_WIN32: found in review, a tenth
+// landmine of the class divergence #7c already fixed nine of - declared
+// here, defined only in engine/platform/win32/crash_win.c, which needs
+// <dbghelp.h> and <psapi.h> (SetUnhandledExceptionFilter,
+// MiniDumpWriteDump, EnumProcessModules), none of which nxdk has -
+// x0-probe-results.md:242 already named this exact gap.
+//
+// Corrected 2026-09-07, found in review: the citation here previously said
+// "Called unconditionally from Host_Main (host.c:1089, :1401), gated only
+// by -noch" - wrong on three counts. host.c:1401 is a blank line; the real
+// Sys_RestoreCrashHandler() call is at host.c:1410, inside
+// Host_ShutdownWithReason (reached via Host_Shutdown, not from within
+// Host_Main's own control flow), and it runs unconditionally on every
+// shutdown - -noch does not gate it. Only Sys_SetupCrashHandler's call
+// (host.c:1089) is both correctly cited and correctly described: it is
+// inside Host_InitCommon (called from Host_Main, host.c:1176), gated by
+// `if( !Sys_CheckParm( "-noch" ))`. The "found all eight sites in one
+// pass" claim two lessons.md entries ago was itself an overclaim - these
+// two fit the identical mechanism-search description and were missed
+// anyway. No Xbox replacement: there is no crash-reporting mechanism to
+// hand a minidump to yet, so the existing empty stub below is the right
+// answer, not a new one.
+#if ( XASH_WIN32 && !XASH_XBOX ) || XASH_FREEBSD || XASH_NETBSD || XASH_OPENBSD || XASH_ANDROID || XASH_LINUX || XASH_APPLE
 void Sys_SetupCrashHandler( const char *argv0 );
 void Sys_RestoreCrashHandler( void );
 #else
@@ -326,7 +391,12 @@ static inline void Platform_SetTimer( float time )
 
 static inline char *Platform_Input( void )
 {
-#if XASH_WIN32
+	// XASH_WIN32 && !XASH_XBOX, not bare XASH_WIN32: found in review, the
+	// same landmine class as every other Wcon_* site this branch fixed -
+	// Wcon_Input's only definition (con_win.c) does not compile for Xbox.
+	// No console to read input from on Xbox either; the existing NULL
+	// fallback below is already the right answer, not a new one.
+#if XASH_WIN32 && !XASH_XBOX
 	return Wcon_Input();
 #elif XASH_POSIX && !XASH_MOBILE_PLATFORM && !XASH_LOW_MEMORY
 	return Posix_Input();

@@ -47,7 +47,9 @@ void Sys_DestroyConsole( void )
 {
 	// last text message into console or log
 	Con_Reportf( "%s: Exiting!\n", __func__ );
-#if XASH_WIN32
+	// Widened 2026-09-07, found in review: same landmine as Wcon_WinPrint
+	// (divergence #7c). No console to destroy on Xbox; no replacement needed.
+#if XASH_WIN32 && !XASH_XBOX
 	Wcon_DestroyConsole();
 #endif
 }

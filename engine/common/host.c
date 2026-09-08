@@ -1238,7 +1238,24 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 
 	if( Host_IsDedicated( ))
 	{
-#ifdef _WIN32
+		// defined(_WIN32) && !XASH_XBOX, not #ifdef _WIN32: this guard uses
+		// the raw compiler-predefined macro rather than the project's
+		// XASH_WIN32 abstraction, so XASH_XBOX && !XASH_XBOX-style widening
+		// does not apply automatically the way it does elsewhere - _WIN32 is
+		// genuinely predefined for nxdk's i386-pc-win32 target (measured,
+		// x0-probe-results.md), so this compiled for Xbox regardless. Found
+		// in review, same landmine class as Wcon_WinPrint (divergence #7c).
+		//
+		// Xbox is not INTENDED to be Host_IsDedicated() here either, but
+		// corrected 2026-09-07, found in review: an earlier version of this
+		// comment stated that as settled fact. system.c's Sys_Error carries
+		// the same guard on the same reachability question and, as of the
+		// same review round, no longer claims it either - see that comment
+		// (system.c, Sys_Error's HOST_DEDICATED branch) for why. No
+		// replacement is needed regardless: there is no console window to
+		// init commands for on Xbox, so being wrong about reachability
+		// costs nothing here.
+#if defined(_WIN32) && !XASH_XBOX
 		Wcon_InitConsoleCommands ();
 #endif
 
@@ -1259,7 +1276,11 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 	switch( host.type )
 	{
 	case HOST_NORMAL:
-#ifdef _WIN32
+		// Same fix and same reasoning as Wcon_InitConsoleCommands above -
+		// raw _WIN32, not XASH_WIN32. This one is worse unguarded: it runs
+		// on every ordinary boot, dedicated or not, found in review. No
+		// console to hide on Xbox; no replacement needed.
+#if defined(_WIN32) && !XASH_XBOX
 		Wcon_ShowConsole( false ); // hide console
 #endif
 		// execute startup config and cmdline

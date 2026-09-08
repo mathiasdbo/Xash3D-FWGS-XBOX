@@ -156,11 +156,21 @@ socket structures opaquely, while `net_ws.c` uses `sockaddr_in6`,
 are present regardless of the flag, so upstream never hits this. On a
 platform with no BSD headers at all, it does not build.
 
-**Routing through nxdk's lwIP** would give the real types — it vendors lwIP
-with a `compat/posix` layer carrying exactly those structs. But nxdk ships
-no `lwipopts.h` and no `arch/cc.h`; its `lib/net/Makefile` compiles the
-sources and leaves the port layer to the application. Writing one is
-perhaps a hundred lines, and it would be written for code X3 deletes.
+**Routing through nxdk's lwIP would give the real types, and the port layer
+already exists — corrected 2026-09-07, this section previously said
+otherwise and was wrong.** nxdk ships both `lwipopts.h` and `arch/cc.h`
+(`deps/nxdk/lib/net/nforceif/include/`), `LWIP_SOCKET` and `LWIP_UDP` are on,
+and `libnxdk_net.lib` is already built with them — `deps/nxdk/samples/
+httpd_bsd` proves BSD sockets work here, and X0's log channel now does too
+(`engine/platform/xbox/net_xbox_log.c`, divergence #13). There is no hundred
+lines to write.
+
+What is still genuinely unknown, and is a smaller question than "does nxdk
+have a port layer": whether `net_ws.c`'s specific field-by-field use of
+`sockaddr_in6`/`sockaddr_storage`/`in6_addr` compiles unmodified against
+`<lwip/sockets.h>`'s versions of those types, or needs a translation shim.
+That is the actual remaining unknown, not the port layer, and it is a
+question about one file, answerable by trying to compile it — not yet done.
 
 So: parked, not forgotten. Two things worth doing later, in this order:
 

@@ -13,12 +13,53 @@
 # compiler had failed for a reason whose message did not contain that word, and
 # the script called it a pass. A sweep that cannot fail is worse than no sweep,
 # because it gets believed.
+#
+# WHAT THIS DOES NOT CATCH, found in review 2026-09-07: every invocation ends
+# in `-c` (see tools/xbox-cc.sh), so clang never runs a linker and a call to a
+# DECLARED-but-never-DEFINED function is invisible here - legal C at the TU
+# level, and a hard failure only at final link. That is exactly the shape of
+# bug X0's log-channel work found and fixed (Wcon_WinPrint, divergence #7c):
+# declared in platform.h, defined only in a file that itself does not compile
+# for this target. "N of M compile" has never meant "N of M would link", and
+# no version of this tool checks the second, stronger claim - there is no
+# Xbox link step yet to check it with (that is X1's job). Read a clean sweep
+# as "no syntax or missing-declaration errors", not as "this would boot".
 set -u
+
+# Found in review, 2026-09-07: the previous fix to this file's own exit
+# code (make the fall-through explicit rather than accidental) was itself
+# incomplete - explicit is not the same as machine-checkable. "$fail -gt 0"
+# being the expected, tracked X0 baseline is a fact a human reading this
+# file's comments knows; nothing distinguished that tracked baseline from
+# a real regression for any caller checking only the exit code, whether
+# that caller is a human running `&&` or a future CI gate. --expect-fail
+# closes that gap without hardcoding a project-specific number into this
+# general-purpose script: the caller supplies the currently-tracked count
+# (CHANGELOG.md's own "N ok, M failing" line is the source of truth), and
+# this script treats ANY difference - worse OR better - as something that
+# needs a conscious decision, not silent drift in either direction. Optional
+# and off by default, so ad-hoc single-directory sweeps with no meaningful
+# baseline are unaffected.
+EXPECT_FAIL=""
+ARGS=()
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--expect-fail)
+			EXPECT_FAIL="$2"
+			shift 2
+			;;
+		*)
+			ARGS+=("$1")
+			shift
+			;;
+	esac
+done
+set -- "${ARGS[@]}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
-DIR="${1:?usage: xbox-sweep.sh <dir> [more dirs...]}"
+DIR="${1:?usage: xbox-sweep.sh [--expect-fail N] <dir> [more dirs...]}"
 
 SCRATCH="${SCRATCH:-$REPO/.sweep}"
 if ! mkdir -p "$SCRATCH"; then
@@ -44,6 +85,9 @@ fail=0
 mute=0
 
 for d in "$@"; do
+	d_ok=0
+	d_fail=0
+
 	while IFS= read -r f; do
 		obj="$SCRATCH/$( echo "$f" | tr '/' '_' | sed 's/\.c$/.obj/' )"
 		# -o as an argument, not via the OUT env var: xbox-cc.sh appends "$@"
@@ -55,8 +99,29 @@ for d in "$@"; do
 
 		if [ "$status" -eq 0 ]; then
 			ok=$(( ok + 1 ))
+			d_ok=$(( d_ok + 1 ))
 		else
+			# Checked before the generic "error:" count, not folded into it:
+			# found in review, xbox-cc.sh's own preflight (the library_suffix
+			# auto-patch step) can fail with text that itself contains
+			# "error:" (git apply's "error: patch failed: ..."), which would
+			# otherwise be misclassified as an ordinary per-file compile
+			# error - and would repeat identically for every remaining file
+			# in this sweep, since the preflight runs before clang ever sees
+			# a single one of them. Fail the whole sweep here rather than
+			# grinding through 200+ files that cannot possibly do anything
+			# but reproduce the same preflight failure.
+			if printf '%s' "$out" | grep -q '^XBOX_CC_PREFLIGHT_FAILURE:'; then
+				echo
+				echo "*** xbox-cc.sh's own preflight failed before reaching clang. ***"
+				echo "*** Every remaining file would fail identically - stopping now. ***"
+				echo
+				printf '%s\n' "$out"
+				exit 2
+			fi
+
 			fail=$(( fail + 1 ))
+			d_fail=$(( d_fail + 1 ))
 			n=$( printf '%s' "$out" | grep -c 'error:' )
 
 			if [ "$n" -eq 0 ]; then
@@ -79,7 +144,51 @@ for d in "$@"; do
 			fi
 		fi
 	done < <( find "$d" -name '*.c' | sort )
+
+	# Found in review, 2026-09-07: the guard below this loop only ever looked
+	# at the AGGREGATE ok+fail total across every directory on the command
+	# line. The canonical invocation passes five directories at once (engine
+	# filesystem public common compat); a single bad one among them - typo'd,
+	# or an uninitialised submodule - contributes 0/0 here and is silently
+	# absorbed into a large, legitimate-looking nonzero total from the other
+	# four. The run then reports what looks like a full, successful sweep
+	# while an entire directory's files were never compiled. Check
+	# per-directory, right here, before moving to the next one, so which
+	# directory came up empty is also known rather than inferred after the
+	# fact.
+	#
+	# Zero .c FILES is not by itself the fault: common/ is one of the five
+	# directories the canonical invocation passes, and it is genuinely
+	# header-only - found while testing this exact fix against the real
+	# five-directory command, not a hypothetical one. What actually means
+	# "typo, or a submodule never initialised" is a directory with NO FILES
+	# AT ALL, .c or otherwise - so check that, and only warn (not fail) on
+	# the header-only case.
+	if [ "$(( d_ok + d_fail ))" -eq 0 ]; then
+		if [ -z "$( find "$d" -type f -print -quit )" ]; then
+			echo "xbox-sweep: directory contains no files at all: $d" >&2
+			echo "  Typo'd directory, or a submodule not yet initialised" \
+				"(git submodule update --init)?" >&2
+			exit 2
+		else
+			echo "xbox-sweep: note - $d has files but zero .c files (header-only" >&2
+			echo "  directory - expected, not a failure)." >&2
+		fi
+	fi
 done
+
+# What's left for THIS check, now that the per-directory check above
+# handles the real failure (a directory with no files at all): every
+# directory passed on the command line was individually confirmed to have
+# at least one file, so the only way ok+fail is still 0 here is that every
+# directory given was legitimately header-only (running this against
+# `common` alone, say). That is not a bug - there was nothing to compile -
+# so this is informational, not fatal. ${1:?...} above already rejects a
+# fully empty "$@" separately, before the for loop is ever reached.
+if [ "$(( ok + fail ))" -eq 0 ]; then
+	echo "xbox-sweep: no .c files in any of: $* (header-only input, nothing to compile)"
+	exit 0
+fi
 
 echo
 echo "compile: $ok ok, $fail failing   (scratch: $SCRATCH)"
@@ -98,8 +207,23 @@ if [ "$mute" -gt 0 ]; then
 
 	# If NOTHING compiled and nothing explained why, the sweep measured the
 	# environment, not the tree. Say so with an exit status a caller can test.
-	if [ "$ok" -eq 0 ]; then
-		echo "compile: 0 ok and no diagnostics - this is an environment fault." >&2
+	#
+	# mute -eq fail, not ok -eq 0: found in review, 2026-09-07. "Nothing
+	# explained why" means every failure is unexplained, not merely that
+	# zero files fully succeeded - the two are different questions. A mass
+	# real regression (fail=220, every one with a genuine clang "error:",
+	# so ok=0) that happens to ALSO include one unrelated, truly
+	# undiagnosed hiccup on a single file (mute=1) satisfied the old
+	# `ok -eq 0` check and exited here before ever reaching the "distinct
+	# errors, by frequency" ranking below - misreporting a real, already-
+	# diagnosed 219-file regression as "check your toolchain" and hiding
+	# the one summary that would have shown it for what it was. A
+	# genuinely broken toolchain (NXDK_DIR unset, say) mutes every file
+	# identically, so mute -eq fail already covers the case this check
+	# exists for; it just also correctly declines to fire when most of the
+	# failures have a real diagnostic sitting in $LOG.
+	if [ "$mute" -eq "$fail" ]; then
+		echo "compile: $fail failing and no diagnostics - this is an environment fault." >&2
 		echo "Run tools/xbox-env.sh and check NXDK_DIR before believing any number." >&2
 		exit 2
 	fi
@@ -116,3 +240,54 @@ if [ "$fail" -gt "$mute" ]; then
 	echo
 	echo "full log: $LOG"
 fi
+
+# Found in review, 2026-09-07, critical: everything above this point only
+# ever echoes diagnostics - there is no exit statement anywhere after the
+# early-outs above (preflight failure, a genuinely empty directory, the
+# all-mute environment-fault case), so on the single most common real
+# outcome - some files compile and some do not, exactly what "186 ok, 34
+# failing" is - the script falls off the end of the file and exits with
+# whatever the last command (an "echo" or "fi") happened to return: 0,
+# always, regardless of $fail. `tools/xbox-sweep.sh ...; echo $?` prints 0
+# even when real clang "error:" diagnostics were seen on every failing
+# file. Nothing in this tree currently reads this exit code (no CI
+# workflow, no other script calls this one), so this was not a live outage
+# - but it is exactly the shape this project keeps finding and fixing in
+# its own tools (see this file's own header: "a sweep that cannot fail is
+# worse than no sweep, because it gets believed"), here at the aggregate
+# script level rather than the per-file one, and it survived nine review
+# rounds on the branch that hardened this exact file twice already.
+#
+# Made explicit rather than unconditionally nonzero: X0's own baseline is
+# 186 of 220 compiling, by design - 26 files this build never selects under
+# any Xbox config, 6 in the parked networking group, 2 in platform/posix/ -
+# so "$fail -gt 0" is the EXPECTED, tracked outcome right now, not a
+# regression by itself. Exiting nonzero on any fail>0 would make every
+# sweep this project has run so far report as failed, training whoever
+# runs it to ignore or override the exit code - worse than no check.
+#
+# But "expected right now" is not the same as "unverifiable" - found in
+# review, 2026-09-07, second pass: without --expect-fail, this script
+# genuinely cannot distinguish its own tracked baseline from a real
+# regression by exit status alone, which is exactly what "a sweep that
+# cannot fail is worse than no sweep, because it gets believed" (this
+# file's own header) describes, one level up from the per-file check that
+# line was originally about.
+if [ -n "$EXPECT_FAIL" ]; then
+	if [ "$fail" -eq "$EXPECT_FAIL" ]; then
+		echo "baseline: $fail failing matches --expect-fail $EXPECT_FAIL."
+		exit 0
+	elif [ "$fail" -gt "$EXPECT_FAIL" ]; then
+		echo "xbox-sweep: REGRESSION - $fail failing, expected $EXPECT_FAIL." >&2
+		echo "  $(( fail - EXPECT_FAIL )) more file(s) fail than the tracked baseline." >&2
+		exit 1
+	else
+		echo "xbox-sweep: IMPROVEMENT - $fail failing, expected $EXPECT_FAIL." >&2
+		echo "  $(( EXPECT_FAIL - fail )) fewer file(s) fail than the tracked baseline -" >&2
+		echo "  update the tracked count (CHANGELOG.md) and the --expect-fail caller" >&2
+		echo "  passes, so this does not silently drift the next time it changes." >&2
+		exit 1
+	fi
+fi
+
+exit 0

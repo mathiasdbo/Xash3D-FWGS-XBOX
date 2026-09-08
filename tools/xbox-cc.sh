@@ -11,11 +11,85 @@
 # compat/xbox/unistd.h. The flags below are nxdk-cc's, reordered so ours win.
 #
 # Keep this in sync with deps/nxdk/bin/nxdk-cc if nxdk is ever updated. It is
-# a short, stable script; the divergence is the include ORDER, nothing else.
+# a short, stable script.
+#
+# Corrected 2026-09-07, found in review: this comment used to claim the
+# divergence from nxdk-cc was the include order, nothing else - false,
+# -fuse-ld=nxdk-link was silently missing below too. Currently inert, because
+# this script always ends in -c and clang never invokes a linker either way -
+# but a future version of this script that drops -c to attempt a real link
+# would silently fall back to the default linker instead of nxdk-link with no
+# error, which is exactly the kind of failure this project's tools keep
+# producing when a claim about "the only difference" turns out to be wrong.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
+
+# Auto-apply the XASH_XBOX sub-platform patch to the library_suffix submodule
+# if it is not already applied. Idempotent - a grep before the apply, so a
+# fresh clone gets patched on the first invocation and every later one is a
+# no-op file read.
+#
+# Found in review, 2026-09-07: without this, XASH_XBOX is never defined on a
+# fresh clone + `git submodule update --init`, because the patch lived only
+# as a dirty, uncommitted change in one working tree's submodule checkout -
+# invisible to git log, invisible to CI, invisible to anyone else who clones
+# this branch. Every `#if XASH_XBOX` in the tree silently evaluates to false
+# (an undefined macro in #if is 0, not an error), which is worse than a build
+# failure: everything still compiles, just as the wrong platform. Divergence
+# #5 in docs/r3d/divergences.md already named this "fragile as a process -
+# an unapplied patch looks like a compiler bug"; this is that process fixed,
+# not a new problem this script introduces.
+BUILD_H="$REPO/3rdparty/library_suffix/include/build.h"
+if [ ! -f "$BUILD_H" ]; then
+	# Found in review: the `[ -f "$BUILD_H" ] &&` below short-circuits
+	# silently when the submodule was never initialised at all
+	# (`git submodule update --init`), which is exactly the fresh-clone case
+	# this whole mechanism exists for - and unlike a failed git apply, that
+	# case emitted no XBOX_CC_PREFLIGHT_FAILURE marker, so xbox-sweep.sh's
+	# fast-fail never fired either; every file would instead fail
+	# individually on clang's own "build.h: file not found", the identical
+	# diagnosis repeated once per translation unit.
+	echo "XBOX_CC_PREFLIGHT_FAILURE: 3rdparty/library_suffix/include/build.h does not exist"
+	echo "  - the submodule is not initialised. Run:" >&2
+	echo "  git submodule update --init 3rdparty/library_suffix" >&2
+	exit 1
+elif ! grep -q "define XASH_XBOX 1" "$BUILD_H"; then
+	# -c core.autocrlf=false, not just relying on whatever is configured:
+	# under MSYSTEM=MINGW64 (this script's own required invocation, per
+	# xbox-env.sh) $HOME resolves to MSYS2's own home directory, not the
+	# Windows user profile, so the personal .gitconfig that sets
+	# core.autocrlf=false is never found - only the system-wide gitconfig at
+	# `C:/Program Files/Git/etc/gitconfig`, which sets it TRUE, applies.
+	# build.h is a pure-LF file (measured: 0 CRLF, 290 bare LF in the pinned
+	# commit) and the patch is pure LF too, so with autocrlf=true still in
+	# effect `git apply` "succeeds" - exit 0, XASH_XBOX genuinely gets
+	# defined - while silently rewriting the entire file to CRLF in the
+	# process, which turned a 9-line diff into a 589-line one and would have
+	# made every future `git -C 3rdparty/library_suffix diff` against the
+	# pinned commit unreadable. Caught only by testing this from a clean
+	# checkout before shipping it, not by the mechanism itself.
+	if ! git -c core.autocrlf=false -C "$REPO/3rdparty/library_suffix" apply \
+		"$REPO/patches/library_suffix-xbox-subplatform.patch" 2>&1; then
+		# XBOX_CC_PREFLIGHT_FAILURE, not just an error message: found in
+		# review, git apply's own failure text ("error: patch failed: ...")
+		# contains the literal substring xbox-sweep.sh greps for to count
+		# compiler errors, so without a distinct marker this preflight
+		# failure would be silently misclassified as an ordinary N-error
+		# compile failure for every single file in a sweep - defeating the
+		# exact "broken toolchain vs real compile error" distinction that
+		# tool exists to make, by feeding it something that is neither a
+		# broken toolchain in the sense it checks for (a mute compiler) nor
+		# a real per-file compile error, but a third thing it had no way to
+		# recognize. xbox-sweep.sh checks for this exact string first, ahead
+		# of the generic "error:" count.
+		echo "XBOX_CC_PREFLIGHT_FAILURE: could not apply patches/library_suffix-xbox-subplatform.patch"
+		echo "  to 3rdparty/library_suffix/include/build.h - check it still applies" >&2
+		echo "  cleanly against the submodule's pinned commit." >&2
+		exit 1
+	fi
+fi
 
 # MSYS2's MinGW-64 clang, by absolute path.
 #
@@ -72,6 +146,11 @@ OUR_INCLUDES=(
 	-I "$REPO/3rdparty/vorbis/vorbis-src/include"    # snd_ogg_vorbis.c
 	-I "$REPO/3rdparty/libogg/libogg/include"        # both ogg decoders
 	-I "$NXDK_DIR/lib/sdl/SDL2/include"   # XASH_SDL=2 means <SDL.h> must resolve
+	-I "$NXDK_DIR/lib/net/lwip/src/include"  # <lwip/sockets.h> etc. -
+	                                          # deps/nxdk/lib/net/Makefile:22
+	-I "$NXDK_DIR/lib/net/nforceif/include"  # lwipopts.h - the config nxdk's
+	                                          # own build actually used,
+	                                          # deps/nxdk/lib/net/Makefile:23
 )
 
 # nxdk-cc's own set, verbatim but after ours.
@@ -137,6 +216,7 @@ OUT="${OUT:-/tmp/$(basename "${SRC%.c}").obj}"
 exec clang \
 	-target i386-pc-win32 \
 	-march=pentium3 \
+	-fuse-ld=nxdk-link \
 	-ffreestanding \
 	-nostdlib \
 	-fno-builtin \

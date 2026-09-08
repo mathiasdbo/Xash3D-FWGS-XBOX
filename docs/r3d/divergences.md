@@ -33,28 +33,110 @@ Preferred forms, from cheapest to most expensive to maintain:
 
 | # | What | Why | Form | Merge risk | Exit |
 |---|------|-----|------|------------|------|
+| 13 | `engine/platform/xbox/net_xbox_log.c` — new file, plus two `-I` flags in `tools/xbox-cc.sh` | The log channel's second tier: UDP broadcast over nxdk's own lwIP (`libnxdk_net.lib`, already built — `deps/nxdk/samples/httpd_bsd` proves BSD sockets work here, which is a narrower and more optimistic finding than `fork-plan.md`'s "no lwipopts.h, no arch/cc.h" note about the *engine's* `net_ws.c`; that note is still correct for the parked networking group, which needs real `sockaddr_in6`/`sockaddr_storage` by value, not just a working socket call). Deliberately **not** wired to fire automatically — `nxNetInit`'s DHCP wait is a genuine, bounded-but-real block of up to ~10 seconds (`nxdk/net.c:118-128`, corrected 2026-09-07, found in review: was off by one, pointing at the `if (ipv4_dhcp)` guard rather than the retry loop), and firing it from inside the print path used for the first line of boot output would freeze exactly the thing this phase exists to make visible | New file in an upstream-shaped directory; `-I` flags only, no upstream file edited | Low | None, it is permanent |
+| 12 | `engine/platform/xbox/con_xbox.c` — new file | `Sys_Print`'s Windows branch calls `Wcon_WinPrint`, whose only definition (`con_win.c`) does not compile for Xbox and is selected by no `DEST_OS` this target would choose — an undefined-symbol landmine at final link. **Corrected 2026-09-07, twice: this row originally called it "the one function X0's log channel routes through" — false; eight siblings existed across three review rounds, see divergence #7c.** Provides `Xbox_ConPrint`, over nxdk's kernel `DbgPrint` (video-independent, live from process start, captured by xemu) rather than `hal/debug.h`'s `debugPrint` (needs a video mode, which is X4/X5 work) — **found in review, 2026-09-07: this passed the raw engine message straight through, unlike every other `XASH_WIN32` target's `Sys_Print` path, which either interprets `^N` colour codes as real console colours (`Wcon_WinPrint`) or strips them for a plain-text sink (`Sys_PrintLog`'s `need_strip` path). Fixed to call `COM_StripColors` before both `DbgPrint` and the UDP broadcast tier, truncating to the last `MAX_PRINT_MSG` bytes first the same way the Win32 branch already guards against an overlong message** — bounded output, `COM_StripColors` never grows its input; `Xbox_Init`/`Xbox_Shutdown`, genuinely empty — `Win32_Init` calls `LoadLibraryW`, which nxdk does not declare, define or alias at all; `Xbox_NanoSleep`, a real implementation over `KeDelayExecutionThread` (the same primitive `nxNetInit` already uses), because `Win32_NanoSleep`'s caller (`host.c`'s frame-pacing loop) never checks the return value and a false-returning stub would have silently disabled FPS capping rather than failing loudly; and `Platform_SetStatus`/`Platform_ShellExecute`, genuinely empty — both are declared with no per-platform dispatcher at all (unlike `Wcon_*`/`Win32_*`), so no guard could fix them, only providing the symbol could. Checked, not assumed, that their three un-dispatched siblings (`Platform_DoubleTime`, `Platform_Sleep`, `Platform_MessageBox`) needed the same treatment — they did not, all three are also defined in `engine/platform/sdl2/sys_sdl2.c` and this build already selects that path | New file in an upstream-shaped directory, mirroring `engine/platform/win32/`, `posix/` etc. Declared in `platform.h` under a new `#if XASH_XBOX` block | Low. Nothing upstream references this file | None, it is permanent — every console port needs its own print sink |
 | 11 | `.gitignore` — `.sweep/` and `*.stackdump` added | Scratch output from `tools/xbox-sweep.sh`, and a crash dump an MSYS `grep` left behind that `git add -A` picked up once | Appended, same block as #1 | Low | None, it is permanent |
 | 10 | Tree-wide `-include compat/xbox/xbox_prelude.h` | Win32 types, code pages, `POINT`, `socklen_t`, `errno_t`, declarations for everything `compat/xbox` implements, and SDL hints postdating 2.0.9. All of them are reached through `<windows.h>` or `<SDL.h>`, which come from nxdk — defining them there would be a divergence inside a vendored submodule | A compiler flag in `tools/xbox-cc.sh`. **No upstream file is edited**, which is the point | **Medium as a hazard, not as a conflict.** It is prepended to every TU, nxdk's own headers included, so anything it defines that nxdk also defines is a redefinition error at scale. Every entry is `#ifndef`-guarded | Shrinks as nxdk grows the surface. The SDL hints disappear the day nxdk-sdl rebases past 2.0.9; the Win32 declarations disappear as `compat/xbox` items land upstream in nxdk |
 | 9 | `engine/platform/sdl2/vid_sdl2.c` — 4 blocks widened to `#if XASH_WIN32 && !XASH_XBOX` | Window icons, via `HICON`, `LoadIcon`, `SendMessage( WM_SETICON )` and `SDL_SysWMinfo::info.win.window` — an `HWND` nxdk's SDL does not have, because there is no window manager | `#ifdef`, one token each | Medium — upstream edits this file | None. A console has no window icon, and no title bar to put one in |
 | 8 | `engine/client/identification.c` — 5 blocks widened to `#if XASH_WIN32 && !XASH_XBOX` | Builds a machine fingerprint out of the Windows registry and `GetVolumeInformation`, neither of which exists. Falls through to the file-based path the non-Windows targets already use | `#ifdef`, one token each | Low — the file changes rarely | The EEPROM serial is the honest Xbox fingerprint if one is ever wanted. Moot while networking is parked |
+| 7c | `engine/common/system.c` (`Sys_Print`, `Sys_Error` ×2), `engine/common/sys_con.c` (`Sys_DestroyConsole`), `engine/common/host.c` (`Host_Main` ×2 — **corrected 2026-09-07: this row named a function called `Host_Init`, which does not exist in this file; both sites are in `Host_Main`**), `engine/platform/platform.h` (`Platform_Input`, `Platform_NanoSleep`, `Sys_DebuggerPresent`'s dispatch of `Platform_DebuggerPresent`, `Sys_SetupCrashHandler`/`Sys_RestoreCrashHandler` — found across four later rounds, not with the first six) — 10 guard sites across 4 files | Every `Wcon_*`/`Win32_*`/`Platform_DebuggerPresent`/crash-handler call reachable under `XASH_WIN32` (or, at `host.c`'s two sites, the raw `_WIN32` macro — confirmed predefined for nxdk's target, so widening `XASH_WIN32` alone would have missed them). All ten are the identical class: the symbol's only Xbox-reachable definition (`con_win.c`, `sys_win.c` or `crash_win.c`) does not compile for Xbox — `crash_win.c` needs `<dbghelp.h>`/`<psapi.h>`, both absent from nxdk, already named in `x0-probe-results.md:242`. **Found across four separate review rounds, on the very branch that fixed the first one** — divergence #12's row originally called `Sys_Print` "the one call site", wrong the day it was written; `Wcon_Input` via `Platform_Input` survived one full cycle after that correction; `Win32_NanoSleep` and `Platform_DebuggerPresent` survived a second, found by the third round's mechanism-based search — which then itself claimed "found all eight sites in one pass," also wrong: `Sys_SetupCrashHandler`/`Sys_RestoreCrashHandler` fit the identical description (declared in `platform.h`, defined only in a Win32-only file, unwidened guard) and were missed anyway, surviving a fourth round before the fifth caught them. Two needed real replacements — `Sys_Print` (`Xbox_ConPrint`) and `Platform_NanoSleep` (`Xbox_NanoSleep`), both in divergence #12. The other eight are excluded with none: Xbox has no console window to show, hide, destroy, add commands to, or read input from, no debugger-attached state to report, and — for the crash handler — no minidump target to hand a report to either. `XASH_CRASHHANDLER=0` (`engine/wscript:83`, also passed by `tools/xbox-cc.sh`) is not an existing mitigation for this; nothing in the tree checks that macro's value, it gates nothing. See "Divergence #7c: the `Wcon_*` stub question, considered and rejected" below the table for why this stays `#ifdef` rather than routing through `con_xbox.c`. | `#ifdef`, one `#elif XASH_XBOX`/widened condition per site | Medium — `system.c`, `host.c` and `platform.h` are files upstream touches occasionally, though each edit is one line or one token | None. See divergences #12, #13 |
 | 7b | `engine/common/system.c` — 3 guard sites | `Sys_WaitForQuit` pumps a message queue that does not exist and would hang forever; `Sys_CanRestart` joins iOS in returning false, because there is no `exec` — nxdk can `XReboot()`, but that returns to the dashboard rather than relaunching the title | `#ifdef` | Low | None. The platform lacks the concept, not just the API |
 | 7 | `filesystem/sys.c` — one added `#include` | The POSIX branch calls `lseek` and `dup` but never includes `<unistd.h>`; on Linux it arrives transitively. A genuine portability fix, not an Xbox special case | One line in an upstream file | Low | **Send it upstream** — it is correct everywhere, not just here |
 | 6 | `filesystem/sys.c` — 10 blocks widened to `#if XASH_WIN32 && !XASH_XBOX` | Those blocks use the MSVC wide-char CRT — `_wopen`, `_wstat`, `_findfirst`/`_findnext`/`_findclose`, `_A_SUBDIR`, `MultiByteToWideChar`, `SetCurrentDirectoryW` — none of which nxdk has. Every one already has a POSIX `#else` branch, and `compat/xbox` supplies what that branch needs — **with one exception, found in review:** `FS_SetCurrentDirectory` (`:491`) falls to `:511`, which prints "not implemented, ignoring..." and returns **true**, so `compat/xbox`'s honest `ENOSYS` from `chdir()` is never observed. That silent success is what makes X0.5 larger than it looked — see `fork-plan.md` | `#ifdef`, 10 single-line edits | Medium — upstream touches this file, though each edit is one token | Would disappear if nxdk grew the wide CRT, which is unlikely. Better exit: propose upstream that these blocks test a capability rather than a platform |
-| 5 | `3rdparty/library_suffix` — `include/build.h`, 9 lines | `build.h` has no Xbox case, and nxdk targets `i386-pc-win32` so `_WIN32` is defined and the engine would believe it is running on Windows. Adds `XASH_XBOX` as a sub-platform of `XASH_WIN32`, keyed on nxdk's own `-DNXDK`, mirroring how `XASH_ANDROID` nests inside `XASH_LINUX` | **Patch file** at `patches/library_suffix-xbox-subplatform.patch`, applied to the submodule working tree. Not committed to the submodule, because that would require forking `FWGS/library-suffix` | Low as a diff, but **fragile as a process** — an unapplied patch looks like a compiler bug | **Send it upstream.** Small, generic, and useful to any Xbox port. If FWGS takes it the divergence disappears; until then, fork or keep re-applying |
+| 5 | `3rdparty/library_suffix` — `include/build.h`, 9 lines | `build.h` has no Xbox case, and nxdk targets `i386-pc-win32` so `_WIN32` is defined and the engine would believe it is running on Windows. Adds `XASH_XBOX` as a sub-platform of `XASH_WIN32`, keyed on nxdk's own `-DNXDK`, mirroring how `XASH_ANDROID` nests inside `XASH_LINUX` | **Patch file** at `patches/library_suffix-xbox-subplatform.patch`, applied to the submodule working tree. Not committed to the submodule, because that would require forking `FWGS/library-suffix`. **Auto-applied now, found in review 2026-09-07:** `tools/xbox-cc.sh` checks whether `build.h` already defines `XASH_XBOX` and applies the patch itself if not, idempotently. Until this, the patch existed only as a dirty, uncommitted change in one working tree — invisible to `git log`, to CI, to a fresh clone. Every `#if XASH_XBOX` in the tree would have silently evaluated to false rather than failing to build, which is worse than a compile error | Low as a diff. **No longer fragile as a process** — the "an unapplied patch looks like a compiler bug" risk this row used to name is closed by the auto-apply, not merely documented around | **Send it upstream.** Small, generic, and useful to any Xbox port. If FWGS takes it the divergence disappears; until then, the auto-apply is permanent, low-maintenance infrastructure rather than tribal knowledge |
 | 4 | `.gitignore` — negations added for `.claude/` | Upstream ignores `.claude/` globally (`:369`), which kept the specialist agent definitions and the `pr-review` workflow out of version control. They are project configuration and belong in the repo | Appended negations | Low — same file and same place as divergence #1 | None, it is permanent |
 | 3 | `.gitmodules` — four entries appended, under a new `deps/` directory | The game SDKs and the Xbox toolchain have to be pinned, not assumed present on the machine. `deps/` does not exist upstream, so only the `.gitmodules` file itself is shared | Appended entries, new directory | Low — upstream adds submodules occasionally; the conflict is additive and always resolvable by keeping both sides | None, it is permanent |
 | 2 | `README.md` — replaced | The repository has its own name and identity; the root README is the first thing anyone arriving sees. It carries the credits section and the licence notice, both mandatory in a GPL derivative work | Full replacement | Low — guaranteed conflict on every merge, but always trivial: discard upstream's side | None, it is permanent. The original reads with `git show upstream-master:README.md` |
 | 1 | `.gitignore` — block appended | Upstream's `.gitignore` globally ignores `AGENTS.md` (:367), `CMakeLists.txt` (:68) and `build-*` (:312), which silently kept three of our files out of version control | Appended at the end of the file, with explicit negations | Low — upstream edits this file occasionally, but the conflict would be trivial and always at the end | None, it is permanent |
 
-**Shape as of X0.** Four upstream C files carry a total of 22 `XASH_XBOX`
-mentions; every one of them is a widened platform test, not a rewrite. Of the
-184 translation units that compile for this target, 180 needed no edit at all
-— and of the 34 that do not, 26 are files the build never selects, 6 are the
-parked networking group, and 2 are the `platform/posix/` pair that a one-word
-`engine/wscript:181` change excludes. None of them is waiting on an `#ifdef` in
-engine code. That ratio is the whole bet behind treating
-`XASH_XBOX` as a sub-platform of `XASH_WIN32`, and it is the number to
-re-measure whenever it looks like it is slipping.
+**Shape as of X0. Corrected 2026-09-07, three times in the same day — the
+first two corrections each introduced a new error while fixing the last
+one, found across three separate review rounds.** This time, two facts are
+kept deliberately separate rather than added together, because conflating
+them is exactly what went wrong twice before.
+
+**Fact one: which files carry `XASH_XBOX` guards, headers included.** Seven
+— `engine/client/identification.c`, `engine/common/system.c`,
+`engine/common/sys_con.c`, `engine/common/host.c`,
+`engine/platform/sdl2/vid_sdl2.c`, `filesystem/sys.c`, and
+`engine/platform/platform.h` — 40 lines carrying the macro between them
+(`grep -c`; 41 raw token occurrences, because `host.c:1243` names it twice
+on a single line).
+
+Corrected 2026-09-07, found in review: 40/41 is every line that mentions
+the macro, and that is not the same number as the guards themselves — five
+of those forty lines are comment prose that discusses `XASH_XBOX` rather
+than testing it (`host.c:1241,1243`; `platform.h:164,261,394`, each a
+comment explaining why a nearby `#if` is shaped the way it is). Recounted
+by grepping each file for an actual `#if`/`#elif`/`#ifdef`/`#ifndef`
+directive line containing the macro: **35** guard directives, not 40. Line
+count is still the more useful number for "how much of these files
+mentions Xbox at all" — it is what the per-file tallies elsewhere in this
+document already use — so both numbers stay, kept apart rather than one
+standing in for the other: 40 lines mention the macro, 35 of them are the
+guards that actually widen a platform test. Every one of those 35 is a
+widened platform test, not a rewrite. `platform.h` is the one that grew
+across rounds: the declaration block, then `Platform_Init`/
+`Platform_Shutdown`, then `Platform_Input`, then `Platform_NanoSleep`, then
+`Sys_DebuggerPresent`'s dispatch of `Platform_DebuggerPresent`, then
+`Sys_SetupCrashHandler`/`Sys_RestoreCrashHandler` — the last two rounds
+each claimed to have checked exhaustively and each still missed one, which
+is its own lesson about how much confidence "checked individually" deserves
+after the fact rather than the moment it is written.
+
+**Fact two: the `.c`-file compile count, which `platform.h` is not part of,
+because it is not a `.c` file.** `find engine filesystem public common
+compat -name '*.c' | wc -l` gives 220, and 186 of those 220 compile. Of the
+186: six are the `.c` files from fact one that carry guards; two are new,
+`engine/platform/xbox/con_xbox.c` and `net_xbox_log.c` (divergences #12,
+#13), the cheap form on the ladder and not edits to anything upstream; the
+remaining 178 are upstream `.c` files that needed no edit at all
+(178 + 6 + 2 = 186). Of the 34 that do not compile, 26 are files the build
+never selects, 6 are the parked networking group, and 2 are the
+`platform/posix/` pair that a one-word `engine/wscript:181` change excludes.
+None of them is waiting on an `#ifdef` in engine code.
+
+That 178-of-186 ratio is the whole bet behind treating `XASH_XBOX` as a
+sub-platform of `XASH_WIN32`, and it is the number to re-measure whenever it
+looks like it is slipping. The two prior corrections to this paragraph both
+failed by mixing fact one's count (files, including a header, that carry
+guards) into fact two's arithmetic (a `.c`-file-only compile count) as if
+they were the same denominator. They are not, and this version does not
+add them together.
+
+**Divergence #7c: the `Wcon_*` stub question, considered and rejected.**
+Moved out of the table row above, 2026-09-07, found in review: the
+paragraph below used to sit inside #7c's "Why" cell, after a blank line,
+which broke the row out of valid Markdown table syntax — its Form/Merge
+risk/Exit cells were still present in the text, but glued onto the end of
+a free paragraph rather than parsed as table cells, leaving the row
+effectively incomplete to any reader or tool that parses the table
+structurally rather than eyeballing the raw text.
+
+Considered and rejected, 2026-09-07, found in review: routing the six
+`Wcon_*` sites (`host.c` ×2, `sys_con.c` ×1, `system.c` ×3) through new
+stub functions in `con_xbox.c` instead, the way `Xbox_ConPrint`/
+`Xbox_Init`/`Xbox_NanoSleep` were. The ladder in `AGENTS.md` ranks a new
+file above `#ifdef`, and `con_xbox.c` already exists, so the question is
+fair. It does not reduce to the same move, though: `Xbox_ConPrint` etc.
+replace a call to a *different-named* function (`Wcon_WinPrint` →
+`Xbox_ConPrint`), which upstream's own dispatch pattern
+(`Platform_Init`/`Platform_Shutdown`) already made room for — no upstream
+line needed editing beyond what an `#elif XASH_XBOX` arm already does
+elsewhere in `platform.h`. These six sites call `Wcon_*` by name directly,
+with no such dispatch point above them; giving
+`Wcon_InitConsoleCommands`/`Wcon_ShowConsole`/`Wcon_DisableInput`/
+`Wcon_DestroyConsole` real, empty definitions in `con_xbox.c` under those
+exact names would need `con_win.c` excluded from the Xbox file set at the
+build-system level, or the two definitions collide at link time — and no
+`wscript` Xbox target exists yet to exclude it from (that is explicitly
+X1's job, `tools/xbox-sweep.sh`'s own header comment). Building that
+exclusion now, for four functions alone, ahead of the rest of X1's build
+integration, is a larger and riskier change than the six lines of
+`#ifdef` it would replace. Revisit when X1 wires up the real Xbox
+`wscript` target — routing these four through `con_xbox.c` then costs
+nothing extra, because the exclusion has to exist for the whole file set
+at that point regardless.
 
 ## Anticipated divergences
 
