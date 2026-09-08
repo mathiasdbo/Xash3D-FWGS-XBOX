@@ -365,40 +365,115 @@ artifact of linking both SDL1 and SDL2 sound backends together, which a
 real Xbox build never does (only `XASH_SDL=2` is selected), not a real
 collision.
 
-**Not yet known:** the relink reported zero duplicate-symbol errors and
-moved on to 335 undefined-symbol errors instead — `_WinMainCRTStartup`, the
-whole of nxdk's `winapi`/`hal`/`pdclib` surface, libm functions, `SDL_*` —
-because no SDL library, no game module and no nxdk libraries were on the
-command line, exactly as this section already predicted. The undefined
-picture is still a separate measurement, needing the real `-libpath:` and
-library list nxdk's own sample `Makefile`s use — not yet attempted.
+### MEASURED, 2026-09-08: the undefined-symbol picture, with the real library list
 
-**Downgraded again.** From "three known fallbacks, one needing no new
-tools" to "fixed and verified" for the duplicate-symbol question
-specifically. The undefined-symbol measurement is what remains before this
-phase's own exit criterion (a real link succeeding) is provable.
+Linking against every base nxdk library `main.exe`'s own `Makefile`
+dependency chain accumulates for an `NXDK_SDL=y` build (`libxboxkrnl`,
+`libpdclib`, `libwinapi`, `libnxdk_hal`, `libnxdk`, `libnxdk_automount_d`,
+`libpbkit`, `nxdk_usb`, `libxboxrt`, `libzlib`, `libpng`, `libjpeg`,
+`libnxdk_net`, `libSDL2`, `libSDL2_image`, `libSDL_ttf`, `libfreetype`,
+`winmm` — all 18, already built on this dev host, per `lib/Makefile`'s own
+chain of `main.exe: $(NXDK_DIR)/lib/libX.lib` rules) dropped the count from
+335 to 107, then to 102 after three small fixes (below). Zero duplicate-
+symbol errors throughout — the fix above holds under the real library set,
+not just the bare-object measurement.
+
+Three real, small fixes, none speculative:
+
+- **`Q_buildos`/`Q_buildarch`** were never actually missing - their real
+  implementation (`3rdparty/library_suffix/src/library_suffix.c`) compiles
+  clean for Xbox and was simply never in this project's own sweep/link
+  scope. **Corrected 2026-09-08, found in review: a first pass at this
+  fix only included the file in the manual measurement, not in the
+  repository's own documented sweep command - a future checkout following
+  it verbatim would still reproduce the identical gap.** Fixed for real by
+  extending the canonical command: `tools/xbox-sweep.sh engine filesystem
+  public common compat 3rdparty/library_suffix/src`, now 187 of 221 (was
+  186 of 220), same 34 failing.
+- **`Q_stricmp`/`Q_strnicmp`** were a genuine, small upstream gap:
+  `crtlib.h`'s own `#if HAVE_STRICMP || HAVE_STRCASECMP` already
+  anticipates a platform with neither, but nothing anywhere in this tree
+  ever defined the `#else` branch's fallback. Not Xbox-specific — any
+  platform bypassing waf's configure-time check (as `tools/xbox-cc.sh`
+  does) or genuinely lacking both hits the identical gap. Fixed with a
+  portable, generic implementation in `public/crtlib.c`, worth sending
+  upstream per this project's own "send upstream anything generically
+  useful" rule.
+- **`COM_CheckLibraryDirectDependency`** is an eleventh landmine of
+  divergence #7c's class: its call site (`cl_game.c`) is guarded by
+  `XASH_WIN32 && !XASH_64BIT`, reachable on Xbox as written, but its only
+  definition (`engine/platform/win32/lib_win.c`) parses a real PE import
+  table — Win32 loader machinery nxdk has no equivalent of. Xbox has no
+  dynamically-loaded `client.dll` to inspect in the first place (static
+  single-image build), so no replacement is needed, same as the other ten;
+  widened to `&& !XASH_XBOX`.
+
+**What remains, fully accounted for — 102 of 102, not "the rest":**
+
+- **63: the already-parked networking group** (`NET_*`, `Netchan_*`,
+  `HTTP_*`, `XRcon_*`, `SteamBroker_*`, and `net_*`'s internal statics) -
+  exactly the six files (`net_ws.c`, `net_chan.c`, `xrcon.c`, `cl_steam.c`,
+  the two `http/` files) this section already documents as parked,
+  deliberately. Expected; not a new finding.
+- **1: `_main`** - no Xbox entry point exists in this tree yet. Expected;
+  X1/X2's own job.
+- **38, a genuinely new finding: `3rdparty/opus`, `3rdparty/opusfile`,
+  `3rdparty/vorbis` and `3rdparty/MultiEmulator` have never been compiled
+  or measured for Xbox at all.** 37 symbols (`op_*`/`opus_*`/`ov_*`/
+  `vorbis_comment_query`) are audio-codec calls from `engine/client/sound/
+  voice.c` (which compiles clean) and `engine/client/soundlib/
+  snd_ogg_vorbis.c` (also compiles clean) into these vendored-but-never-
+  built third-party libraries; 1 (`GenerateRevEmu2013`, called from
+  `cl_main.c`) is `3rdparty/MultiEmulator/src/RevEmu2013.c`, likewise never
+  built. Unlike the `library_suffix`/`Q_buildos` case, this is not just a
+  sweep-scope gap - nobody has yet checked whether `3rdparty/opus`,
+  `opusfile`, `vorbis` or `MultiEmulator` even compile under nxdk's
+  toolchain. Real, separate, unscoped work: not attempted here, not folded
+  into this measurement's "known and accepted" bucket the way the parked
+  networking group is.
+
+**The gate is closed for the duplicate-symbol question. It is not closed
+for "a real link succeeds"**: 63 + 1 symbols are accepted, deliberate gaps
+with an owning decision already on record; 38 are a real, newly-measured
+gap with no owning decision yet. Whoever picks that up next should treat
+it as its own investigation - "does `3rdparty/opus` build for `i386-pc-
+win32` with nxdk's flags" is not yet known in either direction.
 
 Static linking is **mandatory**, not preferred: nxdk's `LoadLibraryExA`
 unconditionally returns NULL (`deps/nxdk/lib/winapi/libloaderapi.c:16-23`) and
 `SDL_LOADSO_DISABLED 1`. There is no dynamic path for anything.
 
-**Measure before choosing.** Compile `engine/`, `filesystem/` and `ref/soft/`
-with the real `nxdk-cc` line, archive `public` with `llvm-lib`, link with the
-exact `nxdk-link` flags plus `-errorlimit:0`, **no `ld -r`, no objcopy**, and
-count the genuine duplicates. Nobody has done this; every figure so far came
-from synthetic modules or from linking one object twice.
+~~**Measure before choosing.** Compile `engine/`, `filesystem/` and
+`ref/soft/` with the real `nxdk-cc` line, archive `public` with `llvm-lib`,
+link with the exact `nxdk-link` flags plus `-errorlimit:0`, **no `ld -r`, no
+objcopy**, and count the genuine duplicates. Nobody has done this; every
+figure so far came from synthetic modules or from linking one object
+twice.~~ **Done, 2026-09-06 through 2026-09-08 — see "MEASURED" and
+"FIXED"/"MEASURED" above, not repeated here.** The real count was "a
+handful" (ten), not "a large structural list": `#define`-based renaming was
+the actual fix (not `llvm-objcopy --redefine-sym`, which was the other
+handful-sized fallback considered here and not needed once `#define` proved
+sufficient), verified by relinking with zero duplicate-symbol errors under
+the real object set. The large-structural-list fallback below (`ld -r`
+twice, `objcopy --set-section-flags`, `xshlib.py`'s missing `_` prefix) was
+never needed and stays here only as a historical record of the path not
+taken — `xshlib.py` is bypassed on Xbox entirely regardless, per "What
+stands" below.
 
-- A handful of real conflicts → `llvm-objcopy --redefine-sym`, the one symbol
-  option that works on COFF, and `xshlib.py` is bypassed on Xbox entirely.
+- ~~A handful of real conflicts → `llvm-objcopy --redefine-sym`, the one
+  symbol option that works on COFF~~ **Not the path taken — see above.**
+  `xshlib.py` is bypassed on Xbox entirely.
 - A large structural list → GNU `ld -r -m i386pe` run **twice** (one pass
   folds duplicate COMDATs but leaves a dangling undefined that binds silently
   to the engine at final link, exit 0, no diagnostic), then `objcopy` with
   `.data` included in `--set-section-flags`, then the missing `_` prefix at
-  `xshlib.py:36`.
+  `xshlib.py:36`. **Moot — the real count was ten, not a large structural
+  list.**
 
-One genuine conflict is already known: `fs_globals_t FI;`
+~~One genuine conflict is already known: `fs_globals_t FI;`
 (`filesystem/filesystem.c:30`) against `fs_globals_t *FI;`
-(`filesystem_engine.c:41`) — struct versus pointer, same name.
+(`filesystem_engine.c:41`) — struct versus pointer, same name.~~ **Fixed,
+see "FIXED" above — this was one of the ten, not the only one.**
 
 Also required here: **`exports.txt` does not exist for `ref_soft`, `menu`,
 `server` or `client`** — only `filesystem/` and `ref/gl/` have one, and

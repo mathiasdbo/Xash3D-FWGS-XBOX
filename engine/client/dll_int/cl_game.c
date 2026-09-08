@@ -3993,7 +3993,27 @@ qboolean CL_LoadProgs( const char *name )
 
 	// a1ba: we need to check if client.dll has direct dependency on SDL2
 	// and if so, disable relative mouse mode
-#if XASH_WIN32 && !XASH_64BIT
+	//
+	// XASH_WIN32 && !XASH_64BIT && !XASH_XBOX, not bare XASH_WIN32 && !XASH_64BIT:
+	// found in review, 2026-09-08 (X1, undefined-symbol measurement) - an
+	// eleventh landmine of the class divergence #7c already documents ten
+	// of. COM_CheckLibraryDirectDependency itself is declared
+	// UNCONDITIONALLY (engine/common/library.h:46, no guard at all) -
+	// corrected in review: an earlier version of this comment said it was
+	// "declared under this same guard", false, caught before merging. It
+	// is only this ONE CALL SITE, guarded by XASH_WIN32 && !XASH_64BIT,
+	// that is reachable on Xbox as written. Its only definition
+	// (engine/platform/win32/lib_win.c) parses a real PE import table via
+	// PIMAGE_NT_HEADERS/GetImportDescriptor - Win32 loader machinery nxdk
+	// has no equivalent of, and does not compile for Xbox. Xbox has no
+	// dynamically-loaded client.dll to inspect in the first place (static
+	// single-image build, per AGENTS.md), so there is nothing this check
+	// could answer even if it did compile - no replacement needed, same
+	// as the other ten.
+	// clgame.client_dll_uses_sdl stays at its zero-initialised default
+	// (false), which is what "no direct dependency found" already means
+	// to every caller of this flag.
+#if XASH_WIN32 && !XASH_64BIT && !XASH_XBOX
 	clgame.client_dll_uses_sdl = COM_CheckLibraryDirectDependency( name, OS_LIB_PREFIX "SDL2." OS_LIB_EXT, false );
 	Con_Printf( S_NOTE "%s uses %s for mouse input\n", name, clgame.client_dll_uses_sdl ? "SDL2" : "Windows API" );
 #endif

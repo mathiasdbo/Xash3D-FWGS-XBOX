@@ -5,6 +5,57 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X1: the full undefined-symbol picture, with the real library list
+
+Linked against every base nxdk library `main.exe`'s own `Makefile`
+dependency chain accumulates for an `NXDK_SDL=y` build (18 libraries,
+already built on this dev host) instead of no libraries at all. Dropped
+the undefined-symbol count from 335 to 107, then to 102 after three real,
+small fixes:
+
+- **`Q_buildos`/`Q_buildarch`** were never actually missing - their real
+  implementation (`3rdparty/library_suffix/src/library_suffix.c`) compiles
+  clean for Xbox and was simply never in this project's own sweep/link
+  scope. **Corrected 2026-09-08, found in review: an earlier version of
+  this entry called this "fixed" when only the manual measurement had
+  included the file - nothing in the repository's own documented sweep
+  command did, so a future checkout following it verbatim would still
+  reproduce the exact same gap.** The canonical sweep command now includes
+  it: `tools/xbox-sweep.sh engine filesystem public common compat
+  3rdparty/library_suffix/src`, giving 187 of 221 (was 186 of 220) with
+  the same 34 failing. `--expect-fail 34` still matches.
+- **`Q_stricmp`/`Q_strnicmp`** — a genuine, generic upstream gap: `crtlib.h`
+  already anticipates a platform with neither `stricmp` nor `strcasecmp`,
+  but nothing ever defined the fallback. Fixed with a portable
+  implementation in `public/crtlib.c`, divergence #16, worth sending
+  upstream.
+- **`COM_CheckLibraryDirectDependency`** — an eleventh landmine of
+  divergence #7c's class, found for the first time by an actual link
+  rather than a source review: its call site is reachable on Xbox as
+  written, but its only definition parses a real Win32 PE import table.
+  Widened the same way as the other ten; no replacement needed, Xbox has
+  no dynamically-loaded `client.dll` to inspect.
+
+**What remains is now fully accounted for, not just "the rest":**
+
+- 63 symbols: the already-parked networking group (`net_ws.c`,
+  `net_chan.c`, `xrcon.c`, `cl_steam.c`, the two `http/` files) -
+  expected, already documented, not a new finding.
+- 1: `_main` - no Xbox entry point exists yet, X1/X2's own job.
+- **38, a genuinely new finding: `3rdparty/opus`, `opusfile`, `vorbis` and
+  `MultiEmulator` have never been compiled or measured for Xbox at all.**
+  37 audio-codec symbols called from `engine/client/sound/voice.c` and
+  `engine/client/soundlib/snd_ogg_vorbis.c` (both compile clean) into
+  these vendored-but-never-built libraries, plus `GenerateRevEmu2013`
+  (`3rdparty/MultiEmulator`). Unlike the `library_suffix` case, nobody has
+  checked whether these actually compile under nxdk's toolchain in either
+  direction - real, separate, unscoped work, not attempted here.
+
+Full sweep, against the canonical command as extended above: 187 ok, 34
+failing (was 186 of 220, before `3rdparty/library_suffix/src` joined the
+canonical set earlier in this same entry) - the 34 real failures are
+unchanged, only the denominator moved.
+
 ### Added — X1: the ten duplicate symbols, fixed and verified by relinking
 
 `fork-plan.md`'s X1 section measured this back on 2026-09-06 (linking

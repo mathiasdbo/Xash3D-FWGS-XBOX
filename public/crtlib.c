@@ -256,6 +256,54 @@ qboolean Q_stricmpext( const char *pattern, const char *text )
 	return Q_strnicmpext( pattern, text, ~((size_t)0) );
 }
 
+// Found in review, 2026-09-08 (X1, undefined-symbol measurement): crtlib.h's
+// own #if HAVE_STRICMP || HAVE_STRCASECMP already anticipates a platform
+// with neither - that is exactly the #else branch declaring these two
+// `extern`, with no local fallback - but nothing anywhere in this tree
+// ever defined one. Not Xbox-specific: this is upstream's own declared
+// contract for ANY platform lacking both, first actually exercised by a
+// build that takes neither branch of the waf-configure-time check the
+// header's condition depends on (tools/xbox-cc.sh bypasses waf entirely,
+// so HAVE_STRICMP/HAVE_STRCASECMP are simply undefined here, correctly
+// resolving to the same "false" a real check would give - confirmed by
+// grepping nxdk's pdclib for both names and finding neither). A portable,
+// generic implementation, not an Xbox workaround - worth sending upstream
+// per AGENTS.md's own "send upstream anything generically useful" rule,
+// since any future platform hitting the same gap needs the identical fix.
+#if !HAVE_STRICMP && !HAVE_STRCASECMP
+int Q_stricmp( const char *s1, const char *s2 )
+{
+	if( !s1 || !s2 )
+		return ( s1 ? 1 : 0 ) - ( s2 ? 1 : 0 );
+
+	while( *s1 && *s2 && Q_tolower( *s1 ) == Q_tolower( *s2 ))
+	{
+		s1++;
+		s2++;
+	}
+
+	return (int)(unsigned char)Q_tolower( *s1 ) - (int)(unsigned char)Q_tolower( *s2 );
+}
+
+int Q_strnicmp( const char *s1, const char *s2, size_t n )
+{
+	if( !s1 || !s2 )
+		return ( s1 ? 1 : 0 ) - ( s2 ? 1 : 0 );
+
+	while( n && *s1 && *s2 && Q_tolower( *s1 ) == Q_tolower( *s2 ))
+	{
+		s1++;
+		s2++;
+		n--;
+	}
+
+	if( n == 0 )
+		return 0;
+
+	return (int)(unsigned char)Q_tolower( *s1 ) - (int)(unsigned char)Q_tolower( *s2 );
+}
+#endif // !HAVE_STRICMP && !HAVE_STRCASECMP
+
 int Q_strcmp_constant_time( const char *s1, const char *s2 )
 {
 	if( !s1 || !s2 )
