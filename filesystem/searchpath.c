@@ -70,6 +70,32 @@ static const fs_archive_t g_archives[] =
 		.type = SEARCHPATH_WAD,
 		.pfnAddArchive_Fullpath = FS_AddWad_Fullpath,
 		.real_archive = true,
+	}, {
+		// Found in review (round 2): an earlier version of this entry set
+		// mount_after_plain_dir (since removed - see below) so a
+		// discovered .mpak would outrank a same-named loose "maps/<name>.bsp".
+		// That is real future behavior - an .mpak's whole reason to exist
+		// is superseding the loose file it was baked from - but shipping
+		// it NOW is actively harmful: filesystem/mpak.c serves the whole
+		// archive as raw MPAK-magic bytes, and Mod_LoadModel's
+		// format-dispatch switch (model.c) does not recognize that magic
+		// yet, so a map that would otherwise load fine from the loose
+		// .bsp would instead hard-fail with "has unknown format" the
+		// moment its baked .mpak sibling is merely PRESENT alongside it -
+		// zero benefit (nothing can consume the winning bytes) for a real
+		// regression risk. An ordinary entry here (mounted in the main
+		// group like every other archive type, before the plain
+		// directory) means a loose .bsp wins if both are present, so
+		// baking a map's .mpak cannot break that map's loose-file load
+		// path. Precedence flips to favor .mpak once the real
+		// Mod_LoadModel/brush-model MPAK parser exists to make winning
+		// safe - not before (see this file's own scope note in the
+		// header comment).
+		.ext = "mpak",
+		.type = SEARCHPATH_MPAK,
+		.pfnAddArchive_Fullpath = FS_AddMpak_Fullpath,
+		.load_wads = false, // an .mpak never embeds a .wad; nothing to scan for
+		.real_archive = true,
 	},
 };
 

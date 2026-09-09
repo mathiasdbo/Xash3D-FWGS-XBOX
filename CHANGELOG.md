@@ -5,6 +5,99 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X2: filesystem/mpak.c, a real searchpath_t for .mpak archives
+
+filesystem/mpak.c (new) implements the searchpath_t interface (modelled
+on pak.c) for the narrowed .mpak format: one archive holds exactly one
+map's baked BSP geometry/textures/lightmaps, so unlike pak.c's
+dpackfile_t directory there's nothing to search - the archive just
+remembers and answers to its own single virtual name,
+"maps/<basename>.bsp" (matching sv_init.c:1025's own worldmodel precache
+convention), serving the whole file verbatim. Registered in
+searchpath.c's g_archives[] table so FS_AddGameDirectory discovers
+*.mpak files the same way it already discovers *.pak/*.wad, as an
+ordinary entry - a loose maps/<name>.bsp wins if both are present (see
+the second Codex review round below for why that, not the reverse, is
+the only currently-safe ordering).
+
+Scope, explicit: this only gets a raw MPAK-magic buffer as far as
+FS_LoadFile - it does not teach Mod_LoadModel's format-dispatch switch to
+recognize MPAK's magic or parse MpakHeader6's lump layout into runtime
+structures. That real brush-model port is separate, larger, unwritten
+work; X2's "the engine loads a map from .mpak" exit criterion still needs
+it.
+
+Verified on both platforms: a new filesystem/tests/mpak.c unit test
+(built and run for real via a PC `waf --dedicated --enable-tests` build)
+proves discovery + byte-exact whole-file passthrough + rejection of a
+bad-magic/bad-version archive; a full Xbox sweep + xbox-link-check.sh
+--xbe run confirms 0 duplicate/63 undefined symbols unchanged from the
+existing baseline and a real .xbe still builds with mpak.c linked in.
+
+### Fixed — first Codex review round on the mpak-searchpath branch
+
+Two findings, both real.
+
+.mpak did not actually win over a same-named loose map, contradicting
+the change above's own stated intent: FS_AddGameDirectory mounts every
+entry in g_archives[] as one group, entirely BEFORE it adds the plain
+directory, and FS_AddArchive_Fullpath always prepends onto
+fs_searchpaths (whatever mounts LAST is searched first) - an entry's
+position within g_archives[] only ever decides precedence among archive
+types against each other, never against the plain directory. A loose
+maps/c1a3.bsp would always have been found before c1a3.mpak's virtual
+name. Fixed with a new mount_after_plain_dir field on fs_archive_t:
+FS_AddGameDirectory now mounts the ordinary archive group first
+(unchanged), then the plain directory (unchanged), then a second pass
+for any mount_after_plain_dir entry - .mpak is the only one set today.
+Verified with a real negative control: reverted only this fix, confirmed
+the new precedence test genuinely fails without it and genuinely passes
+with it restored. The precedence test itself needed a second fix first -
+an earlier draft called AddGameDirectory twice on the same already-
+mounted "./", which passed even with the bug present (a directory
+already mounted is never re-prepended, so a later call's fresh archives
+always end up ahead of it regardless of ordering logic) - rewritten to
+scan a fresh, never-before-mounted directory exactly once with both
+files already in place.
+
+docs/r3d/divergences.md was not updated for the upstream-file edits this
+branch makes (filesystem_internal.h, searchpath.c, filesystem/wscript) -
+the only mpak entry was still under Anticipated divergences. Moved to
+Active divergences (#24) with the files actually touched, the precedence
+bug and fix above, and the verification evidence.
+
+### Fixed — second Codex review round on the mpak-searchpath branch
+
+Round 1's own fix was itself wrong, one level up: making .mpak actually
+win over a loose map turned out to be actively harmful right now, not
+just premature. filesystem/mpak.c serves the whole archive as raw
+MPAK-magic bytes, and Mod_LoadModel's format-dispatch switch (model.c)
+does not recognize that magic yet - a map that would otherwise load fine
+from its loose .bsp would instead hard-fail with "has unknown format"
+the instant its baked .mpak sibling was merely present alongside it,
+for zero benefit, since nothing can consume the winning bytes anyway.
+
+Reverted mount_after_plain_dir and FS_AddGameDirectory's two-pass split
+entirely. .mpak is an ordinary g_archives[] entry again, mounted in the
+main group before the plain directory like every other archive type -
+this is now the smallest possible diff to FS_AddGameDirectory (none at
+all; only a new table entry), and a loose .bsp winning means baking a
+map's .mpak can never break that map's existing, working load path.
+
+The precedence test was rewritten to assert the opposite of round 1's
+version - that the loose file still wins - and verified with a real
+negative control: run unchanged against round 1's mount_after_plain_dir
+version, it fails exactly as expected; against the reverted version, it
+passes. Re-verified end to end on both platforms after the revert: 5/5
+filesystem tests pass on PC, and a full Xbox sweep + xbox-link-check.sh
+--xbe run still reports 0 duplicate/63 undefined unchanged and a real
+.xbe still builds.
+
+Precedence flips back to favor .mpak once a real Mod_LoadModel/
+brush-model MPAK parser exists to make winning safe - documented as the
+divergence's own exit condition (docs/r3d/divergences.md #24), not
+decided or attempted here.
+
 ### Changed — X2: narrow .mpak to geometry/textures/lightmaps, add a per-map manifest
 
 tools/asset-studio's baked .mpak archive is now limited to BSP geometry,

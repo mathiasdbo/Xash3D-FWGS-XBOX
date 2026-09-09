@@ -52,7 +52,8 @@ def build(bld):
 			'interface' : 'tests/interface.cpp',
 			'caseinsensitive' : 'tests/caseinsensitive.c',
 			'no-init': 'tests/no-init.c',
-			'filecopy': 'tests/filecopy.c'
+			'filecopy': 'tests/filecopy.c',
+			'mpak': 'tests/mpak.c'
 		}
 
 		for i in tests:

@@ -131,6 +131,7 @@ typedef struct dir_s dir_t;
 typedef struct zip_s zip_t;
 typedef struct pack_s pack_t;
 typedef struct wfile_s wfile_t;
+typedef struct mpak_s mpak_t;
 typedef struct android_assets_s android_assets_t;
 
 #define FILE_BUFF_SIZE (2048)
@@ -176,7 +177,8 @@ typedef enum searchpathtype_e
 	SEARCHPATH_WAD,
 	SEARCHPATH_ZIP,
 	SEARCHPATH_PK3DIR, // it's actually a plain directory but it must behave like a ZIP archive,
-	SEARCHPATH_ANDROID_ASSETS
+	SEARCHPATH_ANDROID_ASSETS,
+	SEARCHPATH_MPAK // one archive = one map's baked geometry/textures/lightmaps; see mpak.c's header comment
 } searchpathtype_t;
 
 typedef struct stringlist_s
@@ -199,6 +201,7 @@ typedef struct searchpath_s
 		pack_t  *pack;
 		wfile_t *wad;
 		zip_t   *zip;
+		mpak_t  *mpak;
 		android_assets_t *assets;
 	};
 
@@ -365,6 +368,11 @@ searchpath_t *FS_AddWad_Fullpath( const char *wadfile, int flags );
 // zip.c
 //
 searchpath_t *FS_AddZip_Fullpath( const char *zipfile, int flags );
+
+//
+// mpak.c
+//
+searchpath_t *FS_AddMpak_Fullpath( const char *mpakfile, int flags );
 
 //
 // dir.c

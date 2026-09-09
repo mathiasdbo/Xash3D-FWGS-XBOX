@@ -1255,9 +1255,19 @@ in `engine/client/sound/s_load.c`) and does not need to be reinvented here.
 What the manifest+mpak split does NOT yet solve — a single combined budget
 across the CPU heap and the physically separate, contiguous GPU texture
 pool — remains X3's job (see "One ledger, two allocators" below).
-`filesystem/mpak.c` itself (the C reader consuming the narrowed format) is
-still unwritten; only the baker side (`tools/asset-studio`) reflects the new
-scope so far.
+`filesystem/mpak.c` now exists as a real `searchpath_t` (modelled on
+`pak.c`, registered in `searchpath.c`'s `g_archives[]` table): one archive
+= one map, served under the single virtual name `"maps/<basename>.bsp"`
+its own precache name always uses (`sv_init.c:1025`). Verified both on PC
+(a real `filesystem/tests/mpak.c` unit test, built and run via `waf
+--dedicated --enable-tests`) and on Xbox (`xbox-sweep.sh` +
+`xbox-link-check.sh --xbe`, 0 duplicate/63 undefined unchanged, a real
+`.xbe` still builds). This is filesystem plumbing only - it proves an
+`.mpak` archive is discovered and its bytes resolve through the VFS, not
+that the engine can parse them. Teaching `Mod_LoadModel`'s format-dispatch
+switch to recognize MPAK's magic and parse `MpakHeader6`'s lump layout
+into runtime `mnode_t`/`mleaf_t`/etc. structures - the actual brush-model
+port - remains unwritten and is real, separate, larger work.
 
 **Exit:** the engine loads a map from `.mpak` and runs the server loop with
 `ref/null`.
