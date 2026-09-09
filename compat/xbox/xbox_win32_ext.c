@@ -503,3 +503,25 @@ errno_t gmtime_s( struct tm *result, const time_t *timer )
 	*result = *r;
 	return 0;
 }
+
+/*
+====================
+_set_abort_behavior
+
+Real MSVC CRT surface, declared in xbox_prelude.h - see the comment there
+for why 3rdparty/opus's celt_fatal() genuinely reaches this call under
+`#if defined(_MSC_VER)`. On real MSVC this toggles whether an assertion-
+failure dialog box appears before abort(); Xbox has no such dialog, so
+there is nothing to toggle. Genuinely empty, not a stub standing in for
+missing behaviour - the previous flag state real MSVC would return is
+meaningless here too, since nothing that reaches this call ever checks
+the return value (celt_fatal discards it, matching real MSVC usage
+elsewhere: the flag is set-and-forget, never read back).
+====================
+*/
+unsigned int _set_abort_behavior( unsigned int flags, unsigned int mask )
+{
+	(void)flags;
+	(void)mask;
+	return 0;
+}

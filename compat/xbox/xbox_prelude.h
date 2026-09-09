@@ -167,6 +167,20 @@ errno_t gmtime_s( struct tm *result, const long *timer );
 void *__stdcall GetModuleHandleA( const char *name );
 int   __stdcall GetModuleHandleExA( unsigned long flags, const char *name, void **module );
 int   __stdcall GetModuleHandleExW( unsigned long flags, LPCWSTR name, void **module );
+
+// _set_abort_behavior/_WRITE_ABORT_MSG: found in review, 2026-09-08 (X1,
+// third-party audio codec measurement). Real MSVC CRT surface
+// (<stdlib.h> there, not <windows.h>), not declared anywhere in nxdk's
+// pdclib. 3rdparty/opus/opus/celt/arch.h's celt_fatal() calls this under
+// `#if defined(_MSC_VER)` - genuinely true for nxdk's clang target
+// (x0-probe-results.md's own §1 measurement: `_MSC_VER 1950`), so this is
+// reachable as written, not a landmine that never fires. On real MSVC it
+// only toggles whether an assertion-failure dialog box gets shown before
+// abort() - Xbox has no such dialog to suppress or show, so the no-op
+// definition in xbox_win32_ext.c is not a stub standing in for missing
+// behaviour, it is the complete, correct behaviour for this platform.
+#define _WRITE_ABORT_MSG 1
+unsigned int _set_abort_behavior( unsigned int flags, unsigned int mask );
 char *getcwd( char *buf, unsigned int size );
 
 #ifdef __cplusplus

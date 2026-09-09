@@ -5,6 +5,42 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X1: link the third-party audio codecs in, for real
+
+Fixed the one remaining opus gap the previous entry left open: `celt.c`
+needs `_set_abort_behavior`/`_WRITE_ABORT_MSG` under a live `_MSC_VER`
+branch nxdk's clang target genuinely takes, and neither exists in nxdk's
+pdclib. Added both to `compat/xbox` (declaration in `xbox_prelude.h`,
+no-op definition in `xbox_win32_ext.c` — real MSVC only uses this pair to
+suppress a debug dialog Xbox has no equivalent of, so the no-op is the
+complete behaviour, not a stand-in). `celt.c` compiles clean; opus is now
+141 of 142, only `vq_sse2.c` excluded. The main engine sweep baseline is
+unaffected (187 ok, 34 failing, unchanged).
+
+With that fixed, compiled all 174 fully-working third-party objects (opus,
+vorbis, libogg, MultiEmulator — opusfile still excluded, its own
+`stream.c` gap is separate and unfixed) and linked them in alongside the
+main engine and the full 18-library nxdk set: 0 duplicate symbols, 74
+undefined — down from the 102 measured previously, because the codecs now
+supply real definitions the engine build only had references to before.
+All 74 are accounted for: 63 parked networking symbols (unchanged), 1
+`_main` (no Xbox entry point exists yet), 10 opusfile symbols pending its
+own fix.
+
+Built `tools/xbox-link-check.sh` rather than leaving this as a one-off
+measurement — the exact "not repository-backed" mistake this project's
+review process already caught once this same phase (see the duplicate-
+symbol entry below). It composes with `tools/xbox-sweep.sh` (reuses its
+last output, does not recompile the engine), compiles the third-party
+codecs fresh each run against each submodule's own `wscript` flags,
+regenerates libogg's `config_types.h` automatically, links with the real
+library set, and takes `--expect-undefined N` to gate on regression versus
+improvement the same way `xbox-sweep.sh --expect-fail` already does. Any
+duplicate symbol is always a hard failure, no exceptions. Verified against
+`--expect-undefined 74` (exact match) and its three failure paths
+individually (no prior sweep, count too low, count too high) — each fails
+loudly and exits 1 as designed.
+
 ### Measured — X1: opus, opusfile, vorbis and MultiEmulator, for real
 
 The previous entry flagged this as "genuinely unknown in either

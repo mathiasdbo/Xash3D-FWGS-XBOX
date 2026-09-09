@@ -533,6 +533,52 @@ real reason to exclude that one file specifically, not the whole x86
 SIMD set), not an open question about
 whether these libraries can work here at all.
 
+### FIXED, 2026-09-08: `celt.c`'s abort-dialog suppression, and a real link with the third-party codecs included
+
+The `celt.c` gap named above is fixed: `_set_abort_behavior`/
+`_WRITE_ABORT_MSG` are now declared in `compat/xbox/xbox_prelude.h` and
+defined (no-op, matching real MSVC's own no-dialog-here behaviour on this
+platform) in `compat/xbox/xbox_win32_ext.c` — divergence #17. `celt.c`
+compiles clean; **opus is now 141 of 142**, only `vq_sse2.c` excluded (the
+genuine, loud `-march=pentium3`/no-SSE2 compile failure named above, not a
+judgment call). The main engine sweep baseline is unaffected by this
+tree-wide `-include` addition (`187 ok, 34 failing`, unchanged).
+
+With that fix in place, all 174 fully-working third-party objects (141
+opus + 21 vorbis + 2 libogg + 10 MultiEmulator — `opusfile` still excluded,
+`stream.c`'s gap above is unfixed) were compiled and linked in alongside
+the main engine set and the full 18-library nxdk set, the same way the
+duplicate-symbol and undefined-symbol measurements above were done, but
+now with real third-party objects present instead of the engine linked
+alone: **0 duplicate symbols, 74 undefined** — down from the 102 measured
+above, because opus/vorbis/libogg/MultiEmulator supply their own real
+definitions where the engine build previously only had symbol
+*references*. The 74 are fully accounted for: 63 parked networking symbols
+(unchanged from the 102 above), 1 `_main` (no Xbox entry point exists in
+this tree yet, see divergence #14's own note on this), and 10
+opusfile-specific symbols (`op_*`, `opus_tags_query`) pending `stream.c`'s
+own separate fix.
+
+Built as a real, reusable tool rather than another one-off measurement —
+`tools/xbox-link-check.sh` — after recognizing this was the exact
+"not repository-backed" mistake this project's own review process had
+already caught once earlier in the same phase (the duplicate-symbol
+sweep-command gap, see the FIXED section above). It composes with
+`tools/xbox-sweep.sh` rather than duplicating it (reuses whatever objects
+that sweep last left in `$SCRATCH/*.obj`, does not recompile the engine),
+compiles the third-party codec objects fresh each run against each
+submodule's own documented `wscript` flags, regenerates libogg's
+`config_types.h` from an inline template (previously hand-generated per
+measurement, now automatic), links with the real 18-library set, and
+takes `--expect-undefined N` to gate on regression/improvement the same
+way `tools/xbox-sweep.sh --expect-fail` already does. Any duplicate
+symbol at all is always a hard failure — there is no accepted-duplicate
+case, unlike undefined symbols. Verified against `--expect-undefined 74`:
+`0 duplicate, 74 undefined`, matching the hand-checked figures above
+exactly; also verified its three failure paths directly (no prior sweep →
+fails loudly with the documented instruction; `--expect-undefined` too
+low → REGRESSION; too high → IMPROVEMENT), each exiting 1 as designed.
+
 Static linking is **mandatory**, not preferred: nxdk's `LoadLibraryExA`
 unconditionally returns NULL (`deps/nxdk/lib/winapi/libloaderapi.c:16-23`) and
 `SDL_LOADSO_DISABLED 1`. There is no dynamic path for anything.
