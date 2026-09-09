@@ -1239,6 +1239,26 @@ upstream actively maintains.
   frames, no video at all. Asset-path bugs found here are found without a
   renderer in the picture.
 
+**`.mpak` scope, narrowed.** `.mpak` is limited to BSP geometry, level
+(WAD-resolved) textures, and lightmaps — the genuinely sequential-I/O-shaped
+data a monolithic per-map archive earns its keep for on the Xbox's slow IDE
+bus. Models, sprites and sounds are ordinary, already-self-contained GoldSrc
+files upstream's own loaders already read directly from disk; `tools/asset-studio`
+no longer embeds them, and instead writes their names to a sibling
+`<mapname>.assets.txt` manifest (plus a shared `global.assets.txt` for
+engine-wide assets like the menu/HUD sprites). The manifest is a build-time
+precache list only — it carries no memory-management responsibility of its
+own. Cross-level dedup/eviction is already solved by the reference engine's
+existing mark-and-sweep (`Mod_PurgeStudioCache` / `Mod_FreeUnused` in
+`engine/common/model.c`, `S_EndRegistration`'s generation-counter equivalent
+in `engine/client/sound/s_load.c`) and does not need to be reinvented here.
+What the manifest+mpak split does NOT yet solve — a single combined budget
+across the CPU heap and the physically separate, contiguous GPU texture
+pool — remains X3's job (see "One ledger, two allocators" below).
+`filesystem/mpak.c` itself (the C reader consuming the narrowed format) is
+still unwritten; only the baker side (`tools/asset-studio`) reflects the new
+scope so far.
+
 **Exit:** the engine loads a map from `.mpak` and runs the server loop with
 `ref/null`.
 

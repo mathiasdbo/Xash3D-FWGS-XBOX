@@ -15,12 +15,34 @@ namespace formats {
     constexpr uint32_t MPAK_BAKER_BUILD_ID = 1;
 
     // MPAKv6 fixed-size header, written verbatim (2048-byte padded) at the start of
-    // every .mpak archive. Both PakManager (BSP maps / global asset packs) and
-    // UiPacker (menu backgrounds) serialize this same struct so the Rust reader
-    // (filesystem/mpak.c, not written yet) only has to know one layout.
+    // every .mpak archive. PakManager (BSP maps) and UiPacker (menu backgrounds)
+    // serialize this same struct so the engine-side C reader
+    // (filesystem/mpak.c, X2 - see docs/r3d/fork-plan.md) only has to know
+    // one layout.
+    //
+    // Corrected 2026-09: earlier comments here said "the Rust reader" -
+    // stale, left over from this repo's own pre-rename bootstrap (this
+    // project's real engine is Xash3D-FWGS in C, not Rust; see git log's
+    // very first commit). filesystem/mpak.c is, and always was meant to
+    // be, a C file.
+    //
+    // Scope, X2: .mpak is deliberately limited to BSP geometry, level
+    // (WAD-resolved) textures, and lightmaps - the genuinely sequential-
+    // I/O-shaped data a monolithic per-map archive earns its keep for on
+    // the Xbox's slow IDE bus. Models, sprites and sounds are ordinary,
+    // already-self-contained GoldSrc files upstream's own loaders already
+    // read - main.cpp no longer parses or embeds them here at all, it
+    // writes their names to a sibling <mapname>.assets.txt manifest
+    // instead (a real, checked build step whose deployment consumer -
+    // staging those loose files onto whatever the engine's search path
+    // ends up being - is separate work, not this tool's job). lenAssetDict
+    // and lenAssetData below are consequently always 0 for every archive
+    // this tool produces now - kept in the struct (append-only, see
+    // IMPORTANT below) rather than removed, since removing a field is a
+    // version bump this scope change does not otherwise need.
     //
     // IMPORTANT: this format has no offset table - byte layout order IS the format,
-    // and the Rust reader hardcodes these offsets. New fields may only be appended
+    // and the C reader hardcodes these offsets. New fields may only be appended
     // after lenTexinfo; never reorder or remove existing fields.
     //
     // v5 -> v6: two real layout changes, which is why (unlike v4->v5) this bump
@@ -83,8 +105,8 @@ namespace formats {
         uint32_t count512 = 0;
         uint32_t lenArray512 = 0;
 
-        uint32_t lenAssetDict = 0;
-        uint32_t lenAssetData = 0;
+        uint32_t lenAssetDict = 0;  // always 0 now - see the X2 scope note above
+        uint32_t lenAssetData = 0;  // always 0 now - see the X2 scope note above
 
         uint32_t lenEntities = 0;       // raw LUMP_ENTITIES ASCII text, NUL-terminated
 

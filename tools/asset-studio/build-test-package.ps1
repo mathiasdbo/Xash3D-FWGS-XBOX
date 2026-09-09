@@ -2,8 +2,10 @@
 # HEREDADO DE FERRUM56 (Rust). NO FUNCIONA TAL CUAL.
 #
 # La mitad de horneado sigue siendo valida y es por lo que se conserva: sabe
-# invocar el baker con los argumentos correctos para los ~125 mapas, el
-# global.mpak y los manifiestos.
+# invocar el baker con los argumentos correctos para los ~125 mapas y los
+# manifiestos. Actualizado (X2, docs/r3d/fork-plan.md): .mpak ahora se
+# limita a geometria/texturas/lightmaps - global.mpak como archivo ya no
+# existe, --global solo produce global.assets.txt.
 #
 # La mitad de compilacion esta muerta: invoca `cargo build -p ferrum-engine` y
 # copia ferrum-engine.exe, y ese motor ya no existe. Hay que reescribirla
@@ -19,23 +21,29 @@
     standalone, runnable folder (ferrum56-build-test by default).
 
 .DESCRIPTION
-    The engine resolves every archive relative to its working directory
-    (ferrum-engine/src/main.rs: "global.mpak", "menu.mpak", "menu_bg.mpak",
-    "<map>.mpak"), so "a runnable build" is really "a directory holding the
-    executable next to a complete set of .mpak files plus the handful of loose
-    files the engine still reads directly from disk". This script produces
-    exactly that directory, and is safe to re-run after every code change -
-    the engine is always recopied, while map archives are only rebaked when
-    their source .bsp is newer (or -Force is passed).
+    Corrected (X2, docs/r3d/fork-plan.md): the "ferrum-engine/src/main.rs"
+    archive-resolution reference below is stale - that engine (and the
+    Rust project this script was inherited from) no longer exists, and
+    .mpak's own scope has since narrowed. What still holds: "a runnable
+    build" is "a directory holding the executable next to a complete set
+    of per-map .mpak files (BSP geometry/textures/lightmaps only now)
+    plus the manifests (global.assets.txt, "<map>.assets.txt") naming
+    every loose model/sprite/sound a deployment step still needs to
+    stage". This script produces exactly that directory, and is safe to
+    re-run after every code change - the engine is always recopied,
+    while map archives are only rebaked when their source .bsp is newer
+    (or -Force is passed).
 
     Asset layout produced here deliberately differs from the Xbox
     "monolithic packaging" model described in .agents/AGENTS.md: the whole
-    retail sound tree (~65 MB, 2500+ files) goes into global.mpak ONCE
-    instead of being duplicated into all ~125 map archives, which would cost
-    several GB and dominate bake time. Per-map sound duplication only earns
-    its keep on the Xbox's seek-bound IDE/DVD path; a PC test build wants the
-    shared archive. Map archives still carry their own textures, lightmaps
-    and entity-scraped models, so the per-map bake is otherwise unchanged.
+    retail sound tree (~65 MB, 2500+ files) is listed in global.assets.txt
+    ONCE instead of being duplicated into all ~125 per-map manifests, which
+    would cost several GB if it were still baked as bytes (it no longer
+    is - see the .mpak scope note above) and dominate bake time either
+    way. Per-map sound duplication only earns its keep on the Xbox's
+    seek-bound IDE/DVD path; a PC test build wants the shared listing.
+    Map archives still carry their own textures, lightmaps and BSP
+    geometry, so the per-map bake is otherwise unchanged.
 
 .PARAMETER GameDir
     A retail Half-Life "valve" directory - the source of every asset.
@@ -77,6 +85,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+# Found in review (round 2): $hudManifest/$menuManifest below used to be
+# built from $RepoRoot, which - like the rest of this script's dead
+# compilation half - actually resolves to $PSScriptRoot's PARENT
+# (tools/), not the real repo root, so both paths pointed at files that
+# have never existed there. The curated manifests these two names are
+# supposed to find are checked in right next to this script instead
+# (tools/asset-studio/manifests/); this fixes the still-valid baking half
+# without touching $RepoRoot itself, which the dead compilation half
+# (cargo build -p ferrum-engine, $StudioDir, etc. below) still depends on
+# and is not this fix's job to repair.
+$AssetStudioManifests = Join-Path $PSScriptRoot "manifests"
 
 function Write-Step($message) {
     Write-Host ""
@@ -171,8 +191,9 @@ Invoke-Native -What "asset studio build" -Command { cmake --build $StudioBuild -
 if (-not (Test-Path $Baker)) { throw "baker not found after build: $Baker" }
 
 # ---------------------------------------------------------------------------
-# 3. global.mpak - shared assets: every retail sound, the HUD sprite sheets,
-#    and the handful of always-loaded models.
+# 3. global.assets.txt - shared assets: every retail sound, the HUD sprite
+#    sheets, and the handful of always-loaded models, listed (not
+#    embedded - see the .mpak scope note above).
 # ---------------------------------------------------------------------------
 
 $ManifestDir = Join-Path $OutDir "_manifests"
@@ -189,17 +210,30 @@ $AllSoundsManifest = Join-Path $ManifestDir "all_sounds.txt"
 Set-Content -Path $AllSoundsManifest -Value $soundNames -Encoding utf8
 Write-Host "    $($soundNames.Count) sounds -> $AllSoundsManifest"
 
-$GlobalMpak = Join-Path $OutDir "global.mpak"
-Write-Step "Baking global.mpak"
-if (-not $Force -and (Test-Path $GlobalMpak)) {
-    Write-Host "    already present - pass -Force to rebake"
+# Found in review, X2: --global no longer bakes an archive at all - .mpak
+# is scoped to BSP geometry/textures/lightmaps now, and a "shared engine
+# assets" bundle never had any of those. --global only ever produces
+# global.assets.txt (the manifest of models/sprites/sounds a deployment
+# step needs to stage as loose files) - this section used to Get-Item a
+# global.mpak that this exact baker invocation stopped producing, which
+# would have failed outright on a clean OutDir. $Baker still takes
+# --output <path> as where to derive the manifest name from (it replaces
+# the extension with .assets.txt), so the path passed here is renamed to
+# make that derivation land somewhere sensible, not because a .mpak of
+# that name is expected to exist afterward.
+$GlobalManifest = Join-Path $OutDir "global.assets.txt"
+Write-Step "Listing global.assets.txt (shared engine assets)"
+if (-not $Force -and (Test-Path $GlobalManifest)) {
+    Write-Host "    already present - pass -Force to relist"
 } else {
-    $hudManifest = Join-Path $RepoRoot "hud_sprites_manifest.txt"
-    Invoke-Native -What "global.mpak bake" -Quiet -Command {
-        & $Baker --game-dir $GameDir --global --output $GlobalMpak --sounds $AllSoundsManifest --sprites $hudManifest
+    $hudManifest = Join-Path $AssetStudioManifests "hud_sprites_manifest.txt"
+    if (-not (Test-Path $hudManifest)) { throw "hud sprites manifest not found: $hudManifest" }
+    $GlobalMpakArg = Join-Path $OutDir "global.mpak"
+    Invoke-Native -What "global assets list" -Quiet -Command {
+        & $Baker --game-dir $GameDir --global --output $GlobalMpakArg --sounds $AllSoundsManifest --sprites $hudManifest
     }
 }
-Write-Host "    global.mpak ($([math]::Round((Get-Item $GlobalMpak).Length / 1MB, 1)) MB)"
+Write-Host "    global.assets.txt ($((Get-Content $GlobalManifest).Count) entries)"
 
 # ---------------------------------------------------------------------------
 # 4. Menu archives
@@ -216,7 +250,8 @@ if (-not $Force -and (Test-Path $menuMpak)) {
 } elseif (-not (Test-Path $XashExtras)) {
     Write-Warn "xash-extras not found at $XashExtras - the menu will fall back to plain text"
 } else {
-    $menuManifest = Join-Path $RepoRoot "menu_assets_manifest.txt"
+    $menuManifest = Join-Path $AssetStudioManifests "menu_assets_manifest.txt"
+    if (-not (Test-Path $menuManifest)) { throw "menu assets manifest not found: $menuManifest" }
     Invoke-Native -What "menu.mpak bake" -Quiet -Command {
         & $Baker --pack-menu --xash-extras-dir $XashExtras --menu-manifest $menuManifest --resource-dir $ResourceDir --output $menuMpak
     }
@@ -255,7 +290,17 @@ $index = 0
 foreach ($bsp in $bspFiles) {
     $index++
     $target = Join-Path $OutDir "$($bsp.BaseName).mpak"
-    if (-not $Force -and (Test-Path $target) -and (Get-Item $target).LastWriteTime -gt $bsp.LastWriteTime) {
+    # Found in review (round 2): a bake now produces two required outputs
+    # (main.cpp writes both <map>.mpak and a sibling <map>.assets.txt),
+    # but this skip check only ever looked at the .mpak - a pre-X2 output
+    # directory, or one from a branch switch, would report every map
+    # "already up to date" while never producing a single .assets.txt,
+    # leaving the later staging step with no per-map loose-asset list at
+    # all. Both outputs must exist and be newer than the source .bsp.
+    $assetManifest = Join-Path $OutDir "$($bsp.BaseName).assets.txt"
+    if (-not $Force -and (Test-Path $target) -and (Test-Path $assetManifest) -and
+        (Get-Item $target).LastWriteTime -gt $bsp.LastWriteTime -and
+        (Get-Item $assetManifest).LastWriteTime -gt $bsp.LastWriteTime) {
         $skipped++
         continue
     }
@@ -268,6 +313,7 @@ foreach ($bsp in $bspFiles) {
             & $Baker --game-dir $GameDir --map $bsp.Name --output $target
         }
         if (-not (Test-Path $target)) { throw "$($bsp.BaseName) produced no archive" }
+        if (-not (Test-Path $assetManifest)) { throw "$($bsp.BaseName) produced no asset manifest" }
         $baked++
     } catch {
         $failed += $bsp.BaseName

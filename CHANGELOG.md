@@ -5,6 +5,63 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — X2: narrow .mpak to geometry/textures/lightmaps, add a per-map manifest
+
+tools/asset-studio's baked .mpak archive is now limited to BSP geometry,
+level (WAD-resolved) textures, and lightmaps - the data a monolithic
+per-map archive earns its keep for on the Xbox's slow IDE bus. Models,
+sprites and sounds are ordinary GoldSrc files upstream's own loaders
+already read directly from disk, so main.cpp no longer parses or embeds
+them at all; it instead writes their names to a sibling
+<mapname>.assets.txt manifest (and a shared global.assets.txt for
+engine-wide assets), replacing the old asset-dict embedding.
+
+MpakHeader.h's lenAssetDict/lenAssetData fields are kept (append-only,
+never removed) but are always 0 now - documented inline.
+
+Corrected stale pre-pivot documentation found while touching this code:
+tools/asset-studio was inherited from this repo's own pre-rename
+bootstrap (its first-ever commit is literally "Bootstrap the Ferrum56
+fork"), and MpakHeader.h's comments still said "the Rust reader
+(filesystem/mpak.c, not written yet)" - the real reader is, and was
+always meant to be, C, not Rust.
+
+Analysis: the manifest is a build-time precache list only, with no
+memory-management responsibility of its own - cross-level asset
+dedup/eviction is already solved correctly by the reference engine's
+existing mark-and-sweep (Mod_PurgeStudioCache/Mod_FreeUnused in
+engine/common/model.c, S_EndRegistration's generation-counter
+equivalent in engine/client/sound/s_load.c). A single combined
+CPU-heap + GPU-texture-pool memory budget remains unsolved and stays
+X3's job.
+
+Found in review: AssetManifest silently reported success after a
+failed open or a mid-write failure (disk-full, permissions) - fixed
+with a real ok() check, verified with a repro against a nonexistent
+output directory. packSprites wrote a stale "hud/" prefix instead of
+the real sprites/ path the engine actually requests
+(SPR_GetList("sprites/hud.txt", ...), hud.cpp:447) - fixed and
+verified against a scratch manifest. build-test-package.ps1 updated to
+track global.assets.txt instead of the now-retired global.mpak.
+
+Found in a second review pass: packSounds/packSprites/packModelManifest
+had the same false-clean-success shape as AssetManifest above, one
+level up - an explicitly requested --sounds/--sprites/--models manifest
+that failed to open only warned, and main() never checked anything.
+Fixed the same way: all three now return bool, main() treats false as
+fatal, verified with real repros against missing manifest paths.
+build-test-package.ps1's per-map skip check also only looked at the
+.mpak's freshness, not the now-required sibling .assets.txt - a pre-X2
+output directory would report every map "up to date" while producing
+no per-map manifests; fixed to require both files. Also corrected
+$hudManifest/$menuManifest, which resolved against $RepoRoot (itself
+already broken - resolves to tools/, not the repo root, part of this
+script's already-flagged-dead compilation half) to point at the real
+checked-in tools/asset-studio/manifests/ instead.
+
+filesystem/mpak.c (the C engine-side reader for the narrowed format)
+is not written yet - still X2 work.
+
 ### Added — X1: a real .xbe exists
 
 engine/platform/xbox/xbox_main.c (new) provides main() - deliberately

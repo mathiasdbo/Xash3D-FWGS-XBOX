@@ -7,42 +7,94 @@
 #include "formats/PakManager.h"
 #include "formats/VfsIndexer.h"
 #include "formats/UiPacker.h"
-#include "formats/MdlParser.h"
-#include "formats/SprParser.h"
 
 namespace {
 
-// Reads a whole file into a byte buffer, or returns an empty vector on
-// failure (callers already warn on an empty/unresolved path via VfsIndexer,
-// so a second warning here would be redundant - only genuine I/O errors
-// after a successful VFS resolution land here).
-std::vector<uint8_t> readFileBytes(const std::string& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        return {};
+// AssetManifest: the replacement for embedding models/sprites/sounds into
+// the .mpak archive at all. Scope decision, found while starting X2's real
+// engine-side reader (docs/r3d/fork-plan.md): .mpak stays limited to what
+// filesystem/mpak.c actually needs a monolithic, offset-addressed archive
+// for - BSP geometry, level (WAD-resolved) textures, and the lightmap
+// atlas, all genuinely sequential-I/O-shaped data a per-map bundle helps
+// with on the Xbox's slow IDE bus. Models, sprites and sounds are ordinary,
+// already-self-contained GoldSrc files (a real .mdl has its own embedded
+// skins, a real .spr its own frames) upstream Xash3D-FWGS's own loaders
+// already know how to read - baking them into .mpak meant re-parsing and
+// re-encoding formats this project does not need to touch at all, just to
+// put them somewhere they can be found by name.
+//
+// Every function below that used to call pak.addAsset/addTexture now
+// writes to this manifest instead - the same asset names, in the same
+// discovery order, just recorded rather than embedded. A later step (not
+// this tool's job) copies the named loose files onto whatever the engine's
+// real search path ends up being; filesystem/mpak.c never needs to know
+// these names at all.
+// Found in review: the first version of this class only ever warned on a
+// failed open and silently dropped every add() from then on - main()
+// still printed "Successfully compiled..." and returned 0 regardless, so
+// a bad output directory or a permissions error produced a believable
+// success with a missing or truncated manifest. ok() now reflects real
+// stream state (checked after every write, not just at construction) and
+// main() checks it before ever reporting success.
+class AssetManifest {
+public:
+    explicit AssetManifest(const std::string& path) : mPath(path), mFile(path) {
+        if (!mFile) {
+            std::cerr << "Error: could not open asset manifest for writing: " << path << "\n";
+        }
     }
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<uint8_t> buffer(static_cast<size_t>(size));
-    if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        return {};
-    }
-    return buffer;
-}
 
-// Packs sound/<name> (raw bytes, no transcoding - see WavParser's removal:
-// most of the retail sound tree is already 8-bit PCM, where ADPCM would
-// cost quality for little size win) plus sound/sentences.txt and
-// sound/materials.txt if present, both of which load through the SDK's
-// own pfnLoadFileForMe("sound/...") calls verbatim.
-void packSounds(const std::string& manifestPath, formats::VfsIndexer& vfs, formats::PakManager& pak) {
+    void add(const std::string& assetName) {
+        if (!mFile.good()) {
+            return; // already failed; ok() will report it
+        }
+        if (mSeen.insert(assetName).second) {
+            mFile << assetName << "\n";
+            if (!mFile.good()) {
+                std::cerr << "Error: write failed to asset manifest: " << mPath << "\n";
+            }
+        }
+    }
+
+    // Must be called after every add() this run will do, before trusting
+    // the manifest exists and is complete - flushes and checks the
+    // stream's own error state, which a mid-write disk-full or permission
+    // failure would otherwise leave undetected until the process exits.
+    bool ok() {
+        mFile.flush();
+        return mFile.good();
+    }
+
+    size_t count() const { return mSeen.size(); }
+
+private:
+    std::string mPath;
+    std::ofstream mFile;
+    std::set<std::string> mSeen;
+};
+
+// Records sound/<name> - manifest entries mirror precache names exactly,
+// e.g. "player/pl_step1.wav", the strings the SDK passes to
+// PRECACHE_SOUND/EMIT_SOUND, always implicitly relative to sound/ - plus
+// sound/sentences.txt and sound/materials.txt if present, both of which
+// load through the SDK's own pfnLoadFileForMe("sound/...") calls verbatim.
+//
+// Found in review (round 2): a caller explicitly passing --sounds <path>
+// that fails to open only ever printed a warning and returned - main()
+// never checked that, so a typo'd or moved manifest path produced a
+// believable "Successfully compiled..." with the sounds simply missing,
+// exactly the false-clean result this branch's ok()-checked AssetManifest
+// was already trying to rule out for write failures. Returns false now so
+// main() can treat an explicitly-requested manifest that can't be opened
+// as fatal, same as a write failure.
+bool packSounds(const std::string& manifestPath, formats::VfsIndexer& vfs, AssetManifest& out) {
     std::ifstream manifest(manifestPath);
     if (!manifest) {
-        std::cerr << "Warning: could not open sound manifest: " << manifestPath << "\n";
-        return;
+        std::cerr << "Error: could not open sound manifest: " << manifestPath << "\n";
+        return false;
     }
 
-    size_t packedCount = 0;
+    size_t listedCount = 0;
     std::string line;
     while (std::getline(manifest, line)) {
         // Trim trailing CR (Windows-authored manifests) and surrounding whitespace.
@@ -55,25 +107,16 @@ void packSounds(const std::string& manifestPath, formats::VfsIndexer& vfs, forma
         }
         line = line.substr(start);
 
-        // Manifest entries are raw precache names, e.g. "player/pl_step1.wav" -
-        // the exact strings the SDK passes to PRECACHE_SOUND/EMIT_SOUND, always
-        // implicitly relative to sound/. Packed asset names carry the "sound/"
-        // prefix so they match what pfnLoadFileForMe/find_asset resolve against.
         std::string assetName = "sound/" + line;
         std::string resolvedPath = vfs.findFileByName(assetName);
         if (resolvedPath.empty()) {
             std::cerr << "Warning: sound not found in VFS: " << assetName << "\n";
             continue;
         }
-        auto bytes = readFileBytes(resolvedPath);
-        if (bytes.empty()) {
-            std::cerr << "Warning: failed to read sound file: " << resolvedPath << "\n";
-            continue;
-        }
-        pak.addAsset(assetName, bytes);
-        ++packedCount;
+        out.add(assetName);
+        ++listedCount;
     }
-    std::cout << "Packed " << packedCount << " sounds from manifest: " << manifestPath << "\n";
+    std::cout << "Listed " << listedCount << " sounds from manifest: " << manifestPath << "\n";
 
     for (const char* support : {"sound/sentences.txt", "sound/materials.txt"}) {
         std::string resolvedPath = vfs.findFileByName(support);
@@ -82,12 +125,10 @@ void packSounds(const std::string& manifestPath, formats::VfsIndexer& vfs, forma
                       << "will degrade gracefully, matching real GoldSrc's own missing-file behavior)\n";
             continue;
         }
-        auto bytes = readFileBytes(resolvedPath);
-        if (!bytes.empty()) {
-            pak.addAsset(support, bytes);
-            std::cout << "Packed " << support << "\n";
-        }
+        out.add(support);
+        std::cout << "Listed " << support << "\n";
     }
+    return true;
 }
 
 // Adds every name in a manifest to the asset set, for models the BSP entity
@@ -102,13 +143,18 @@ void packSounds(const std::string& manifestPath, formats::VfsIndexer& vfs, forma
 // has to be supplied.
 //
 // Names are inserted into the same uniqueAssets set the scrape feeds, so
-// they go through the identical MdlParser + addTexture packing path rather
+// they go through the identical VFS-resolution-then-manifest path rather
 // than a second, divergent one.
-void packModelManifest(const std::string& manifestPath, std::set<std::string>& uniqueAssets) {
+//
+// Found in review (round 2): same false-clean-success shape as
+// packSounds above - an explicitly-requested manifest that fails to open
+// only warned, so main() reported success while silently missing every
+// code-only-referenced model this manifest exists to cover.
+bool packModelManifest(const std::string& manifestPath, std::set<std::string>& uniqueAssets) {
     std::ifstream manifest(manifestPath);
     if (!manifest) {
-        std::cerr << "Warning: could not open models manifest: " << manifestPath << "\n";
-        return;
+        std::cerr << "Error: could not open models manifest: " << manifestPath << "\n";
+        return false;
     }
 
     size_t listed = 0;
@@ -128,36 +174,39 @@ void packModelManifest(const std::string& manifestPath, std::set<std::string>& u
         ++listed;
     }
     std::cout << "Model manifest listed " << listed << " models: " << manifestPath << "\n";
+    return true;
 }
 
-// Packs hud/<name> (raw bytes through addAsset, NOT addTexture) - real
-// sprites/hud.txt + the 15 sprites/weapon_<classname>.txt manifests +
-// their sprite sheets, for the P16+ Sprite HUD & Weapon Selection phase.
+// Records sprites/<name> - real sprites/hud.txt + the 15
+// sprites/weapon_<classname>.txt manifests + their sprite sheets, for the
+// P16+ Sprite HUD & Weapon Selection phase.
 //
-// Two deliberate departures from how every other .mdl/.spr in this build
-// gets packed (see the uniqueAssets loop below):
-// - addAsset, not addTexture: addTexture rescales into the 64/256/512
-//   runtime texture-array size bins (see PakManager::addTexture), which
-//   would distort e.g. 640hud7.spr (256x128) into a square bin and
-//   destroy every pixel-exact rect hud.txt's x/y/w/h columns describe.
-//   These sheets are decoded and uploaded as their own standalone
-//   textures at load time instead - addAsset's raw-bytes-through path is
-//   the right fit. (Consumer TBD: the engine-side reader has not been
-//   written yet, see docs/r3d/fork-plan.md F1.)
-// - the "hud/" prefix, not "sprites/": this same build already packs a
-//   PATCHED "sprites/crosshairs.spr" for 3D world-space rendering (see
-//   uniqueAssets' hardcoded global-asset list below), and the engine feeds
-//   every ".spr"-suffixed asset-dict name to that patched-format parser. A raw retail sheet packed under the same name would
-//   collide and be silently misinterpreted as patched data. "hud/" keeps
-//   the two asset families disjoint by construction.
-void packSprites(const std::string& manifestPath, formats::VfsIndexer& vfs, formats::PakManager& pak) {
+// Corrected, found in review: an earlier version of this wrote "hud/" +
+// line to the manifest instead of the real sprites/ path - a leftover
+// from when this build embedded a raw sheet under "hud/" specifically to
+// disambiguate it from a PATCHED "sprites/crosshairs.spr" sharing the
+// asset dict's flat namespace (real MSVC/lld semantics do not apply here,
+// this was this tool's own internal dict). That disambiguation reason is
+// gone - nothing is patched or embedded any more - but the write was
+// never updated to match, so the manifest named a path
+// ("hud/hud.txt") the engine never actually asks for.
+// SPR_GetList("sprites/hud.txt", ...) (deps/hlsdk/cl_dll/hud.cpp:447) is
+// what the real client loads, via FS_LoadFile on that exact string
+// (engine/client/dll_int/cl_game.c:1565) - the manifest now records
+// vfsName (already computed below as "sprites/" + line) verbatim, so a
+// deployment step staging these names finds files the engine will
+// genuinely request.
+//
+// Found in review (round 2): same false-clean-success shape as
+// packSounds/packModelManifest above - fixed the same way.
+bool packSprites(const std::string& manifestPath, formats::VfsIndexer& vfs, AssetManifest& out) {
     std::ifstream manifest(manifestPath);
     if (!manifest) {
-        std::cerr << "Warning: could not open sprites manifest: " << manifestPath << "\n";
-        return;
+        std::cerr << "Error: could not open sprites manifest: " << manifestPath << "\n";
+        return false;
     }
 
-    size_t packedCount = 0;
+    size_t listedCount = 0;
     std::string line;
     while (std::getline(manifest, line)) {
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
@@ -177,15 +226,11 @@ void packSprites(const std::string& manifestPath, formats::VfsIndexer& vfs, form
             std::cerr << "Warning: sprite asset not found in VFS: " << vfsName << "\n";
             continue;
         }
-        auto bytes = readFileBytes(resolvedPath);
-        if (bytes.empty()) {
-            std::cerr << "Warning: failed to read sprite asset: " << resolvedPath << "\n";
-            continue;
-        }
-        pak.addAsset("hud/" + line, bytes);
-        ++packedCount;
+        out.add(vfsName);
+        ++listedCount;
     }
-    std::cout << "Packed " << packedCount << " HUD/weapon sprite assets from manifest: " << manifestPath << "\n";
+    std::cout << "Listed " << listedCount << " HUD/weapon sprite assets from manifest: " << manifestPath << "\n";
+    return true;
 }
 
 } // namespace
@@ -301,8 +346,30 @@ int main(int argc, char *argv[]) {
 
     std::set<std::string> uniqueAssets;
 
+    // Manifest path: outputPath with its extension replaced by
+    // ".assets.txt" - e.g. "c1a3.mpak" -> "c1a3.assets.txt",
+    // "global.mpak" -> "global.assets.txt". Same directory, same base
+    // name, so the two files this tool now produces per invocation stay
+    // obviously paired without a separate CLI flag.
+    std::string manifestPath = outputPath;
+    {
+        size_t dot = manifestPath.find_last_of('.');
+        size_t slash = manifestPath.find_last_of("/\\");
+        if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+            manifestPath = manifestPath.substr(0, dot);
+        }
+        manifestPath += ".assets.txt";
+    }
+    AssetManifest assetManifest(manifestPath);
+
     if (buildGlobal) {
-        std::cout << "\nBuilding global.mpak with shared engine assets...\n";
+        // Scope decision, X2 (docs/r3d/fork-plan.md): .mpak is now limited
+        // to BSP geometry/level textures/lightmaps - none of which a
+        // "shared engine assets" bundle has any of. global.mpak as an
+        // archive is retired; this mode now only ever produces the
+        // manifest below, listing the same always-needed names it used to
+        // embed, for whatever deployment step stages loose files.
+        std::cout << "\nListing shared engine assets (global.assets.txt, no global.mpak)...\n";
         uniqueAssets.insert("models/player.mdl");
         uniqueAssets.insert("models/v_crowbar.mdl");
         uniqueAssets.insert("models/w_crowbar.mdl");
@@ -352,64 +419,55 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Merged in before the packing loop so manifest-listed models take the
-    // same MdlParser/addTexture path as entity-scraped ones, and duplicates
-    // between the two collapse (uniqueAssets is a set).
-    if (!modelsManifest.empty()) {
-        packModelManifest(modelsManifest, uniqueAssets);
+    // Merged in before the listing loop so manifest-listed models go
+    // through the same VFS-resolution check as entity-scraped ones, and
+    // duplicates between the two collapse (uniqueAssets is a set).
+    if (!modelsManifest.empty() && !packModelManifest(modelsManifest, uniqueAssets)) {
+        return 1;
     }
 
+    // Scope decision, X2 (docs/r3d/fork-plan.md): models and sprites are
+    // no longer parsed, re-encoded, or embedded here at all - a real .mdl
+    // already has its own skins, a real .spr its own frames, and upstream
+    // Xash3D-FWGS's own loaders already read both formats unmodified. This
+    // loop's only remaining job is to confirm each referenced asset
+    // genuinely exists in the retail tree (still real, still useful - it
+    // is exactly the check that used to precede parsing) and record its
+    // name in the manifest instead of loading/rewriting its bytes.
     for (const auto& asset : uniqueAssets) {
         std::string resolvedPath = vfs.findFileByName(asset);
         if (resolvedPath.empty()) {
             std::cerr << "Warning: Could not find asset in VFS: " << asset << "\n";
             continue;
         }
-
-        if (asset.find(".mdl") != std::string::npos) {
-            formats::MdlParser mdl;
-            if (mdl.load(resolvedPath)) {
-                std::vector<formats::TextureLocation> locs;
-                for (const auto& tex : mdl.getTextures()) {
-                    bool masked = (tex.flags & formats::STUDIO_NF_MASKED) != 0;
-                    locs.push_back(pak.addTexture(tex.width, tex.height, tex.rgba.data(), masked));
-                }
-                auto patched = mdl.getPatchedData(locs);
-                pak.addAsset(asset, patched);
-                std::cout << "Packed MDL: " << asset << "\n";
-            }
-        } else if (asset.find(".spr") != std::string::npos) {
-            formats::SprParser spr;
-            if (spr.load(resolvedPath)) {
-                bool masked = (spr.getHeader().texFormat == formats::SPR_ALPHTEST);
-                std::vector<formats::TextureLocation> locs;
-                for (const auto& frame : spr.getFrames()) {
-                    locs.push_back(pak.addTexture(frame.width, frame.height, frame.rgba.data(), masked));
-                }
-                auto patched = spr.getPatchedData(locs);
-                pak.addAsset(asset, patched);
-                std::cout << "Packed SPR: " << asset << "\n";
-            }
-        }
+        assetManifest.add(asset);
     }
 
-    if (!soundsManifest.empty()) {
-        packSounds(soundsManifest, vfs, pak);
+    if (!soundsManifest.empty() && !packSounds(soundsManifest, vfs, assetManifest)) {
+        return 1;
     }
 
-    if (!spritesManifest.empty()) {
-        packSprites(spritesManifest, vfs, pak);
+    if (!spritesManifest.empty() && !packSprites(spritesManifest, vfs, assetManifest)) {
+        return 1;
     }
 
-    if (!pak.save(outputPath)) {
+    if (!assetManifest.ok()) {
+        std::cerr << "Failed to write asset manifest: " << manifestPath << "\n";
+        return 1;
+    }
+    std::cout << "Wrote " << assetManifest.count() << " asset name(s) to " << manifestPath << "\n";
+
+    // buildGlobal never had BSP geometry to begin with (see the comment
+    // above) - nothing left to save once the manifest above is written.
+    if (!buildGlobal && !pak.save(outputPath)) {
         std::cerr << "Failed to save MPAK archive: " << outputPath << "\n";
         return 1;
     }
 
     if (buildGlobal) {
-        std::cout << "\nSuccessfully compiled global.mpak into " << outputPath << "!\n";
+        std::cout << "\nSuccessfully listed shared engine assets into " << manifestPath << "!\n";
     } else {
-        std::cout << "\nSuccessfully compiled map into " << outputPath << "!\n";
+        std::cout << "\nSuccessfully compiled map into " << outputPath << " and " << manifestPath << "!\n";
     }
     return 0;
 }
