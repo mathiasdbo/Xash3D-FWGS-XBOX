@@ -144,9 +144,43 @@ shift
 # it during the build (xshlib.py:112) and the Xbox path bypasses waf. Generate it
 # here so engine/platform/misc/lib_static.c compiles, and keep it out of the tree
 # so it cannot go stale against the real library list.
+#
+# server/client, X1's stub game module: only lib_static.c itself includes this
+# header, so passing real library names here does not affect any other file
+# this script compiles - everything else that reaches this -I just never
+# references the symbols this generates.
+#
+# menu: found in review, 2026-09-09 - an earlier version of this branch
+# compiled and linked in all 82 mainui objects but never registered "menu"
+# in this table at all. engine/common/lib_common.c:220's own default
+# (COM_GenerateClientLibraryPath("menu",...)) and engine/common/host.c:914
+# both confirm "menu" (not "gameui" or anything else) is the real name
+# lib_static.c's Lib_Find has to resolve - under XASH_INTERNAL_GAMELIBS
+# (set whenever XASH_STATIC_LIBS is, already true here), that function
+# just copies the name through unchanged (lib_common.c:133-134). mainui's
+# own 3rdparty/mainui/exports.txt (GetMenuAPI, GetExtAPI) already names
+# its real entry points - those functions genuinely exist in
+# 3rdparty/mainui/udll_int.cpp, this just wires the already-real menu
+# module into the same by-name table the (genuinely stub) server/client
+# modules use, no new stub code needed for menu at all.
+#
+# Found in review, 2026-09-09: checking only generated_library_tables.h's own
+# existence let a $GEN_DIR left behind by an older version of this script -
+# back when it generated that header with zero library names, before
+# generated_lib_*_exports.c existed at all - look "already generated" and
+# skip regenerating forever, even though the exports files this script
+# now also needs were never produced. Every expected output is checked now,
+# not just the first one written.
 GEN_DIR="$REPO/.sweep/gen"
-if [ ! -f "$GEN_DIR/generated_library_tables.h" ]; then
-	"$REPO/tools/gen-library-tables.sh" "$GEN_DIR" > /dev/null
+if [ ! -f "$GEN_DIR/generated_library_tables.h" ] \
+	|| [ ! -f "$GEN_DIR/generated_lib_server_exports.c" ] \
+	|| [ ! -f "$GEN_DIR/generated_lib_client_exports.c" ] \
+	|| [ ! -f "$GEN_DIR/generated_lib_menu_exports.c" ]; then
+	"$REPO/tools/gen-library-tables.sh" "$GEN_DIR" \
+		"server:$REPO/stub_game/server/exports.txt" \
+		"client:$REPO/stub_game/client/exports.txt" \
+		"menu:$REPO/3rdparty/mainui/exports.txt" \
+		> /dev/null
 fi
 
 OUR_INCLUDES=(

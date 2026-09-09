@@ -288,7 +288,93 @@ if [ -d "$MAINUI_DIR" ]; then
 		exit 1
 	fi
 	echo "xbox-link-check: $MAINUI_OBJ_COUNT menu module objects included (from tools/xbox-mainui-sweep.sh, manifest clean)." >&2
+
+	# Found in review, 2026-09-09: mainui's 82 objects being IN the link
+	# does not mean the menu module is actually REACHABLE - lib_static.c's
+	# Lib_Find only resolves names present in generated_library_tables.h,
+	# and an earlier version of this branch never registered "menu" there
+	# at all, so COM_LoadLibrary("menu") would have returned NULL even
+	# with every mainui symbol correctly linked in. Compiled here, inside
+	# this if-block rather than alongside stub_game below, deliberately:
+	# generated_lib_menu_exports.c declares `extern void GetMenuAPI(void)`
+	# etc. and takes their real addresses (3rdparty/mainui/udll_int.cpp's
+	# own functions, not stub code) - compiling it when $MAINUI_OBJS is
+	# empty would introduce undefined symbols for a module that was never
+	# linked in, breaking the "measure engine+third-party only" case this
+	# script's own mainui-optionality exists to support.
+	MENU_EXPORTS_C="$SCRATCH/gen/generated_lib_menu_exports.c"
+	if [ ! -f "$MENU_EXPORTS_C" ]; then
+		echo "xbox-link-check: $MENU_EXPORTS_C does not exist." >&2
+		echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
+		echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+		exit 1
+	fi
+	MENU_EXPORTS_OBJ="$SCRATCH/gen/generated_lib_menu_exports.obj"
+	if ! tools/xbox-cc.sh "$MENU_EXPORTS_C" -o "$MENU_EXPORTS_OBJ" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+		echo "xbox-link-check: STUB GAME MODULE FILE THAT WAS SUPPOSED TO COMPILE DID NOT: $MENU_EXPORTS_C" >&2
+		cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+		exit 2
+	fi
+	MAINUI_OBJS="$MAINUI_OBJS $MENU_EXPORTS_OBJ"
+	echo "xbox-link-check: menu registered in the static library table (GetMenuAPI/GetExtAPI, real mainui functions)." >&2
+else
+	# Found in review, 2026-09-09 (second pass on the same fix): the outer
+	# table generated_library_tables.h writes ALWAYS declares
+	# `extern table_t lib_menu_exports[]` now (tools/xbox-cc.sh passes
+	# "menu:..." to tools/gen-library-tables.sh unconditionally, since that
+	# script has no way to know at generation time whether this run will
+	# include mainui) - so when mainui is NOT linked, that declaration
+	# would itself be an undefined symbol (`_lib_menu_exports`, verified:
+	# this is exactly what a real run with $MAINUI_DIR absent produced
+	# before this fix). A trivial, real definition here - a genuinely
+	# empty, terminated table_t array, the same shape gen-library-tables.sh
+	# itself would write for an empty exports.txt - keeps the "measure
+	# engine+third-party only" case working without referencing any
+	# mainui symbol at all.
+	MENU_EXPORTS_OBJ="$SCRATCH/gen/generated_lib_menu_exports_empty.obj"
+	MENU_EXPORTS_STUB_C="$SCRATCH/gen/generated_lib_menu_exports_empty.c"
+	{
+		echo "typedef struct {const char *name;void *func;} table_t;"
+		echo "table_t lib_menu_exports[] = { {0,0} };"
+	} > "$MENU_EXPORTS_STUB_C"
+	if ! tools/xbox-cc.sh "$MENU_EXPORTS_STUB_C" -o "$MENU_EXPORTS_OBJ" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+		echo "xbox-link-check: FALLBACK EMPTY lib_menu_exports FAILED TO COMPILE (should never happen):" >&2
+		cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+		exit 2
+	fi
+	MAINUI_OBJS="$MENU_EXPORTS_OBJ"
+	echo "xbox-link-check: mainui not swept - menu registered with an empty table (COM_LoadLibrary(\"menu\") would resolve but export nothing)." >&2
 fi
+
+# stub_game: X1's own exit line names a fourth piece besides engine,
+# filesystem and menu - "a stub game module". Compiled fresh every run,
+# same reasoning as the third-party objects above (small, cheap, no
+# separate sweep script earns its keep for three files). Not optional the
+# way $MAINUI_OBJS is: tools/gen-library-tables.sh's own generated
+# generated_lib_server_exports.c/generated_lib_client_exports.c
+# reference server_stub.c's GetEntityAPI2 by name (an `extern void
+# GetEntityAPI2(void);` declaration written into the generated file
+# itself), so leaving any one of these three out of the link would be an
+# immediate, deliberately-introduced undefined symbol - there is no
+# meaningful "measure without the stub" configuration the way there is a
+# meaningful "measure without the menu module" one.
+STUB_GAME_OBJS=""
+for f in stub_game/server/server_stub.c "$SCRATCH/gen/generated_lib_server_exports.c" "$SCRATCH/gen/generated_lib_client_exports.c"; do
+	if [ ! -f "$f" ]; then
+		echo "xbox-link-check: $f does not exist." >&2
+		echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
+		echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+		exit 1
+	fi
+	obj="$SCRATCH/gen/$(echo "$f" | tr '/' '_' | sed 's/\.c$/.obj/')"
+	if ! tools/xbox-cc.sh "$f" -o "$obj" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+		echo "xbox-link-check: STUB GAME MODULE FILE THAT WAS SUPPOSED TO COMPILE DID NOT: $f" >&2
+		cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+		exit 2
+	fi
+	STUB_GAME_OBJS="$STUB_GAME_OBJS $obj"
+done
+echo "xbox-link-check: stub game module included (server_stub.c + generated export tables)." >&2
 
 NXDK_DIR="deps/nxdk"
 LIBS=(
@@ -331,7 +417,7 @@ LIBS=(
 RESPONSE="$SCRATCH/link-check-response.txt"
 : > "$RESPONSE"
 # shellcheck disable=SC2086
-for f in $ENGINE_OBJS $THIRDPARTY_OBJS $MAINUI_OBJS "${LIBS[@]}"; do
+for f in $ENGINE_OBJS $THIRDPARTY_OBJS $MAINUI_OBJS $STUB_GAME_OBJS "${LIBS[@]}"; do
 	echo "\"$(cygpath -m "$f")\"" >> "$RESPONSE"
 done
 

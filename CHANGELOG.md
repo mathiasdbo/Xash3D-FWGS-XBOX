@@ -5,6 +5,70 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X1: all four names in the exit line link - a stub game module too
+
+stub_game/ (new) - deliberately not deps/hlsdk (the real, ~160-file
+Half-Life SDK already vendored for a later phase). Proves the
+engine's static-linking-by-name mechanism (lib_static.c's Lib_Find,
+since Xbox has no dynamic loading) resolves a real game module, not
+that any gameplay logic works - real game code is X7's job.
+
+server/server_stub.c exports GetEntityAPI2, because sv_game.c
+genuinely hard-requires at least one of GetEntityAPI/GetEntityAPI2 to
+exist. Returns a validated-but-entirely-zeroed DLL_FUNCTIONS - every
+pointer NULL, honest about implementing nothing, safe because nothing
+in this tree calls through any of them yet (no Xbox entry point
+exists). client/exports.txt is deliberately empty: the client's
+per-name lookup only matters during a real client boot never reached,
+and a missing name just leaves that one pointer NULL rather than
+failing the load - a materially softer contract than the server side.
+
+tools/gen-library-tables.sh extended to generate a real per-library
+export table, not just the previously-empty outer one.
+
+Verified by linking: server_stub.c plus both generated export tables
+compiled and linked in alongside the full engine + third-party + menu
+set: 0 duplicate symbols, 64 undefined - the exact already-known set,
+verified symbol-for-symbol identical. Main engine baseline unaffected
+(187 ok, 34 failing).
+
+Found in review, two findings. The first version only exported
+GetEntityAPI2, missing that sv_game.c performs a second, entirely
+separate hard check for GiveFnptrsToDll immediately after -
+SV_LoadProgs fails and frees the library before GetEntityAPI2 is ever
+called if it's absent, so a stub without it links but is not actually
+loadable under the real engine's own load sequence. Fixed with a
+matching, equally honest no-op GiveFnptrsToDll. Also: xbox-cc.sh only
+checked whether generated_library_tables.h existed before skipping
+regeneration - a stale .sweep/gen from an older, zero-library-name
+version of that script would look already-generated forever even
+though the two files this build now needs were never produced. Fixed
+by checking all three expected outputs, not just the first. Both
+verified: reproduced the exact stale-cache scenario directly, and
+re-confirmed 0 duplicate, 64 undefined, symbol-for-symbol identical.
+
+Found in a second review pass, two more findings. SV_LoadProgs calls
+pfnGetGameDescription/pfnGameInit/pfnRegisterEncoders unconditionally
+as part of its own successful-load path, not deferred to a later game
+frame like every other DLL_FUNCTIONS member - the earlier "safe
+because nothing calls through these pointers yet" claim was false for
+these three. Fixed with real, honest, minimal bodies for exactly
+these three; the other ~37 members stay genuinely NULL.
+
+Also: 82 mainui objects being in the link never meant the menu module
+was reachable - lib_static.c's Lib_Find only resolves names present
+in the generated table, and menu was never registered there at all.
+Fixed by extending the generation to cover mainui's own real
+GetMenuAPI/GetExtAPI exports (no new stub code needed) and compiling
+that table into the link, with a trivial empty fallback for runs
+without mainui swept (the outer table now declares the symbol
+unconditionally). Both configurations re-verified: 0 duplicate, 64
+undefined, checked against the known categories directly.
+
+All four names in X1's own exit line now genuinely link together into
+one binary. Only an actual bootable XBE remains - _main is still among
+the 64 undefined symbols, and an XBE cannot exist without one.
+
 ### Added — X1: it links - engine, filesystem, third-party audio, and the menu module, together
 
 Linked the menu module's 82 objects in alongside the already-proven

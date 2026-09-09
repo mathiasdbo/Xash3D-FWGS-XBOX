@@ -1000,9 +1000,125 @@ ordinary cases unaffected.
 **Answers three of the four names in this phase's own Exit line.**
 Engine, filesystem, and the menu module all link together, cleanly, with
 zero duplicate symbols and only the already-known, deliberately-parked
-gaps left. Only "a stub game module" and an actual bootable XBE (this
-section still only produces a test `.exe` via `nxdk-link`'s raw `-out:`,
-not a real `nxdk-cxbe` conversion) remain.
+gaps left.
+
+### FIXED, 2026-09-09: the fourth name, too — a stub game module links in
+
+`stub_game/` (new, divergence #22) — deliberately not `deps/hlsdk` (the
+real, ~160-file Half-Life SDK already vendored for a later phase). A
+"stub" proves the engine's static-linking-by-name mechanism
+(`engine/platform/misc/lib_static.c`'s `Lib_Find`, populated by
+`tools/gen-library-tables.sh`, since Xbox has no dynamic loading and
+bypasses `xshlib.py`'s GNU-binutils relocatable-object machinery
+entirely) resolves a real game module, not that any gameplay logic
+works — real game code is X7's job.
+
+`server/server_stub.c` exports `GetEntityAPI2` because
+`engine/server/sv_game.c:5235` genuinely hard-requires at least one of
+`GetEntityAPI`/`GetEntityAPI2` — it fails loudly ("missing GetEntityAPI
+and GetEntityAPI2 exports") otherwise. Returns a validated-but-
+entirely-zeroed `DLL_FUNCTIONS`: every function pointer `NULL`, honest
+about implementing nothing rather than a fake success — safe because
+nothing in this tree calls through any of those pointers yet (no Xbox
+`main()`/entry point exists, divergence #14). `client/exports.txt` is
+deliberately **empty**: `cl_game.c`'s per-name `COM_GetProcAddress`
+lookups only matter inside `CL_LoadProgs`, which only runs during a
+real client boot never reached, and a name missing from a static table
+just leaves that one function pointer `NULL` rather than failing the
+load — a materially different, softer contract than the server side's
+hard check, so there is nothing dishonest about exporting zero names
+where zero are actually implemented.
+
+`tools/gen-library-tables.sh` extended to generate a real per-library
+export table (`lib_<name>_exports[]`, mirroring `xshlib.py:83-89`'s
+`write_export_list()` exactly — the same extern-void-then-take-its-
+address idiom for whatever the function's real signature is, not a new
+invention), not just the previously-empty outer table.
+
+**Verified by linking, not just compiling**: `server_stub.c` plus both
+generated export tables compiled and linked in alongside the full
+engine + third-party + menu set: **0 duplicate symbols, 64 undefined —
+the exact already-known set, verified symbol-for-symbol identical.**
+The main engine sweep baseline is unaffected (`187 ok, 34 failing`).
+
+**Corrected 2026-09-09, found in review, two findings:**
+
+**Missing second hard requirement.** The first version of `server_stub.c`
+only exported `GetEntityAPI2`. `engine/server/sv_game.c:5245-5255`
+performs an entirely separate, equally hard check for `GiveFnptrsToDll`
+immediately after the `GetEntityAPI`/`GetEntityAPI2` check —
+`SV_LoadProgs` fails ("missing GiveFnptrsToDll export") and frees the
+library before `GetEntityAPI2` is ever called if this second export is
+absent. A stub without it links but is not actually loadable under the
+real engine's own load sequence — a genuine gap between "the symbol
+table resolves" and "this satisfies the real contract," exactly the
+kind of thing that matters given this section's whole point is proving
+the load *mechanism*, not just producing a clean link count. Fixed: a
+matching, equally honest no-op `GiveFnptrsToDll( enginefuncs_t *,
+globalvars_t * )` — its own typedef (`GIVEFNPTRSTODLL`) is local to
+`sv_game.c`, not a shared header, matched here by parameter type
+instead. Re-verified: still `0 duplicate, 64 undefined`, the identical
+set — confirmed symbol-for-symbol, not just by count.
+
+**Stale generation cache.** `tools/xbox-cc.sh` only checked whether
+`generated_library_tables.h` existed before skipping regeneration — a
+`.sweep/gen` left behind by an OLDER version of this script (from before
+`generated_lib_*_exports.c` existed at all, when the table only ever had
+zero library names) would look "already generated" forever, even though
+the two files this build now also needs were never produced. Fixed: all
+three expected outputs are checked, not just the first one written.
+Verified by reproducing the exact scenario — hand-writing a stale,
+pre-this-branch-shaped `generated_library_tables.h` with no matching
+exports files, then confirming `tools/xbox-cc.sh` correctly detects the
+gap and regenerates all three files.
+
+**Corrected 2026-09-09, found in a second review pass, two more
+findings:**
+
+**The stub still could not actually be loaded.** `SV_LoadProgs` calls
+`svgame.dllFuncs.pfnGetGameDescription()`, `.pfnGameInit()` and
+`.pfnRegisterEncoders()` unconditionally as part of its own successful-
+load path (`sv_game.c:5327,5330,5338`) — not deferred to a later game
+frame the way every other `DLL_FUNCTIONS` member genuinely is. An
+entirely-zeroed table would NULL-pointer-call all three the instant
+`SV_LoadProgs` succeeded, so the earlier "safe because nothing calls
+through these pointers yet" claim was false for these three
+specifically. Fixed with real, honest, minimal bodies for exactly
+these three (a static description string, and two no-ops) — the other
+~37 `DLL_FUNCTIONS` members stay genuinely `NULL`, since a full read of
+`SV_LoadProgs`'s own synchronous load path confirms nothing else in it
+touches them.
+
+**Menu was never actually registered.** 82 mainui objects being present
+in the link never meant the menu module was reachable —
+`lib_static.c`'s `Lib_Find` only resolves names present in
+`generated_library_tables.h`, and this section's first version never
+added `"menu"` there at all (`engine/common/lib_common.c:220`'s own
+default, `COM_GenerateClientLibraryPath("menu", ...)`, confirms `"menu"`
+— not `"gameui"` or anything else — is the real name to register; under
+`XASH_INTERNAL_GAMELIBS`, already set here, that function just copies
+the name through unchanged). Fixed by extending `tools/gen-library-
+tables.sh`'s invocation to also cover `3rdparty/mainui/exports.txt` —
+`GetMenuAPI`/`GetExtAPI`, real, already-existing functions in
+`3rdparty/mainui/udll_int.cpp`, no new stub code needed for menu at all
+— and compiling/linking the resulting export table in
+`tools/xbox-link-check.sh`. Because the outer table now declares
+`lib_menu_exports` unconditionally (generated once, before this script
+knows whether a given run will include mainui), a run *without* mainui
+swept needs a real, if trivial, definition too — a genuinely empty,
+terminated `table_t` array, so `COM_LoadLibrary("menu")` would still
+resolve to something (just export nothing) rather than leaving an
+undefined symbol. Both configurations re-verified directly: the "no
+mainui" measurement and the full measurement each report `0 duplicate,
+64 undefined`, and every one of the 64 was checked against the known
+networking/`_main` categories directly, not assumed from a count match.
+
+**All four names in this phase's own Exit line now genuinely link
+together into one binary.** Only an actual bootable XBE remains — this
+section still only produces a test `.exe` via `nxdk-link`'s raw
+`-out:`, not a real `nxdk-cxbe` conversion, and `_main` is still among
+the 64 undefined symbols (no Xbox entry point exists in this tree at
+all yet) — an XBE cannot exist without one.
 
 **Exit:** engine, filesystem, menu and a stub game module link into one XBE.
 
