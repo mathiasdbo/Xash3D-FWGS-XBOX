@@ -5,6 +5,70 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X1: it links - engine, filesystem, third-party audio, and the menu module, together
+
+Linked the menu module's 82 objects in alongside the already-proven
+engine and third-party audio sets plus deps/nxdk/lib/libc++.lib: 0
+duplicate symbols. Undefined started one over the known baseline -
+_atof, a real gap (nxdk's pdclib declares atof in <stdlib.h> but has
+never implemented it, own source says so) mainui's CFGScript.cpp,
+ConnectionProgress.cpp and ServerInfo.cpp call for ordinary cvar
+values. Fixed with compat/xbox/xbox_crt_ext.c (new, a self-contained
+parser - pdclib has no strtod either, so this can't just forward to
+it). Re-linked: 0 duplicate, 64 undefined - the exact already-known
+set, verified symbol-for-symbol identical.
+
+Along the way, adding 82 more objects pushed the raw nxdk-link command
+line past the OS argument-length limit. Fixed tools/xbox-link-check.sh
+to use a response file (@file, the standard link.exe convention lld
+already accepts) instead of a raw command line. Found building that
+fix: writing MSYS2-style paths into the response file failed with
+"could not open" for objects that genuinely existed - MSYS2 bash only
+auto-translates a POSIX path when it's an actual argv entry, not text
+a program reads back from a file. Fixed with cygpath -m on every path.
+
+tools/xbox-link-check.sh now includes the menu module automatically
+whenever tools/xbox-mainui-sweep.sh has been run (optional, so a
+caller measuring just engine+third-party isn't forced to sweep mainui
+first) - the real, permanent tool for the whole picture now.
+
+Found in review, two findings. tools/xbox-mainui-sweep.sh only ever
+added .obj files, never removed any - a file that compiled once, then
+got deleted, renamed, or started failing, left a stale object nothing
+could tell apart from a current one. Fixed: the sweep clears its
+output before every run and writes a manifest (OK=/FAIL=/TOTAL=)
+after every run; tools/xbox-link-check.sh now requires that manifest
+be present and clean before trusting mainui objects at all.
+
+Found in a second review pass on that same fix: the manifest write
+happened before the sweep's own zero-total rejection, so a broken,
+empty sweep still wrote "OK=0 FAIL=0 TOTAL=0" and exited 1 - a
+manifest that reads as clean (FAIL=0) to anything checking only that
+field, which is what the link-check side originally did. Fixed two
+ways: the sweep now rejects TOTAL=0 before writing any manifest at
+all, and the link-check side independently requires TOTAL>0 in
+whatever manifest it reads, plus checks the manifest's OK count
+against the real object count on disk. Verified by reproducing the
+exact scenario - hiding every mainui source file and running both
+scripts in sequence: the sweep fails loudly with no manifest written,
+and the link-check correctly refuses instead of silently proceeding
+with zero menu objects.
+
+Also: the first version of atof accumulated its exponent with no
+bound, then scaled once per exponent unit - a string like
+1e2147483647 would drive a multi-billion-iteration loop (a real
+CPU-hang, not theoretical: ServerInfo.cpp passes server-derived
+values straight to atof) and signed-overflow before that loop was
+even reached. Fixed by clamping exponent accumulation at 1000 - past
+double's real dynamic range, so legitimate values are unaffected and
+anything beyond correctly saturates to inf/0 without the unbounded
+loop. Verified natively: extreme exponents now resolve correctly in
+under a microsecond.
+
+Answers three of the four names in X1's own exit line: engine,
+filesystem, and the menu module all link together cleanly. Only a
+stub game module and an actual bootable XBE remain.
+
 ### Added — X1: the menu module - 82 of 82 files compile for Xbox
 
 Closed both gaps the previous entry left open, then swept the whole

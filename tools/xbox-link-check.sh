@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Attempt a real Xbox link across the main engine plus the third-party
-# audio codec libraries this project has verified compile for Xbox, and
-# gate on duplicate/undefined symbol counts.
+# Attempt a real Xbox link across the main engine, the third-party audio
+# codec libraries, and (optionally) the menu module - whatever this
+# project's own sweep scripts have most recently compiled - and gate on
+# duplicate/undefined symbol counts.
 #
 #   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-sweep.sh engine filesystem public common compat 3rdparty/library_suffix/src
+#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-mainui-sweep.sh   # optional - adds the menu module to the link
 #   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-link-check.sh --expect-undefined N
 #
 # --expect-undefined is written [optional] nowhere in this file on purpose:
@@ -224,6 +226,70 @@ done
 
 echo "xbox-link-check: $(echo $THIRDPARTY_OBJS | wc -w) third-party objects compiled." >&2
 
+# Menu module objects: optional, included only if present AND the sweep
+# that produced them says it was clean. Not compiled here (same "does not
+# recompile what another script already built" reasoning as $ENGINE_OBJS
+# above) - tools/xbox-mainui-sweep.sh is what produces
+# $SCRATCH/mainui/*.obj, and this script reuses its output the same way
+# it reuses tools/xbox-sweep.sh's. Optional rather than required: a caller
+# measuring just the engine+third-party picture (the original scope of
+# this script) should not be forced to also run the mainui sweep first.
+#
+# Found in review, 2026-09-09: listing *.obj on its own only proves files
+# exist, not that THIS checkout's source produced them - a file that
+# compiled once, then got deleted/renamed/started failing, would leave a
+# stale object nothing here could tell apart from a genuinely current
+# one, silently linking a source set that no longer matches HEAD.
+# tools/xbox-mainui-sweep.sh now clears $OUT_DIR before every run and
+# writes manifest.txt (OK=/FAIL=/TOTAL=) after every run, pass or fail -
+# required here, not just consulted: no manifest (never swept, or swept
+# by a version predating this fix) or FAIL>0 (last sweep was not clean)
+# both refuse to include mainui rather than guessing either way.
+MAINUI_DIR="$SCRATCH/mainui"
+MAINUI_OBJS=""
+if [ -d "$MAINUI_DIR" ]; then
+	MANIFEST="$MAINUI_DIR/manifest.txt"
+	if [ ! -f "$MANIFEST" ]; then
+		echo "xbox-link-check: $MAINUI_DIR exists but has no manifest.txt -" >&2
+		echo "  it predates the staleness fix, or the sweep never finished." >&2
+		echo "  Run tools/xbox-mainui-sweep.sh again before trusting these objects." >&2
+		exit 1
+	fi
+	MANIFEST_FAIL=$(sed -n 's/.*FAIL=\([0-9]*\).*/\1/p' "$MANIFEST")
+	MANIFEST_TOTAL=$(sed -n 's/.*TOTAL=\([0-9]*\).*/\1/p' "$MANIFEST")
+	# Found in review, 2026-09-09 (second pass): checking FAIL alone was
+	# not enough - tools/xbox-mainui-sweep.sh used to write "OK=0 FAIL=0
+	# TOTAL=0" for its own zero-files failure case before that case's own
+	# exit, and FAIL=0 read as clean here even though nothing was actually
+	# measured. Fixed at the source (that script now rejects TOTAL=0
+	# before ever writing a manifest), but this check requires TOTAL>0
+	# explicitly anyway - defense in depth against a hand-edited or
+	# older-script-written manifest, not a re-trust of the same field.
+	if [ -z "$MANIFEST_FAIL" ] || [ "$MANIFEST_FAIL" -gt 0 ] \
+		|| [ -z "$MANIFEST_TOTAL" ] || [ "$MANIFEST_TOTAL" -eq 0 ]; then
+		echo "xbox-link-check: $MAINUI_DIR/manifest.txt is not clean -" >&2
+		echo "  ($(cat "$MANIFEST" 2>/dev/null)) - the last mainui sweep was not" >&2
+		echo "  clean, or measured nothing." >&2
+		echo "  Fix the failures and re-run tools/xbox-mainui-sweep.sh, or remove" >&2
+		echo "  $MAINUI_DIR entirely to measure engine+third-party only." >&2
+		exit 1
+	fi
+	MAINUI_OBJS=$(ls "$MAINUI_DIR"/*.obj 2>/dev/null)
+	MAINUI_OBJ_COUNT=$(echo $MAINUI_OBJS | wc -w)
+	# The manifest's own OK count against what is actually on disk right
+	# now - the manifest could be stale relative to $OUT_DIR even though
+	# it was clean when written (an object deleted by hand after the
+	# sweep, a half-finished manual cleanup).
+	MANIFEST_OK=$(sed -n 's/.*OK=\([0-9]*\).*/\1/p' "$MANIFEST")
+	if [ -z "$MANIFEST_OK" ] || [ "$MAINUI_OBJ_COUNT" -ne "$MANIFEST_OK" ]; then
+		echo "xbox-link-check: $MAINUI_OBJ_COUNT objects on disk in $MAINUI_DIR" >&2
+		echo "  do not match manifest.txt's OK=$MANIFEST_OK - re-run" >&2
+		echo "  tools/xbox-mainui-sweep.sh to refresh both together." >&2
+		exit 1
+	fi
+	echo "xbox-link-check: $MAINUI_OBJ_COUNT menu module objects included (from tools/xbox-mainui-sweep.sh, manifest clean)." >&2
+fi
+
 NXDK_DIR="deps/nxdk"
 LIBS=(
 	"$NXDK_DIR/lib/xboxkrnl/libxboxkrnl.lib" "$NXDK_DIR/lib/libpdclib.lib"
@@ -235,12 +301,43 @@ LIBS=(
 	"$NXDK_DIR/lib/libnxdk_net.lib" "$NXDK_DIR/lib/libSDL2.lib"
 	"$NXDK_DIR/lib/libSDL2_image.lib" "$NXDK_DIR/lib/libSDL_ttf.lib"
 	"$NXDK_DIR/lib/libfreetype.lib" "$NXDK_DIR/lib/winmm.lib"
+	# libc++.lib: needed only when $MAINUI_OBJS is non-empty (the menu
+	# module is the only C++ code in this link), but harmless to always
+	# include - a real, prebuilt library (divergence discussion, X1's
+	# "a C++ toolchain" section), not a stub that silently degrades a
+	# C-only link.
+	"$NXDK_DIR/lib/libc++.lib"
 )
 
-LOG="$SCRATCH/link-check.txt"
+# Response file, not a raw command line: found in review, X1, 2026-09-09,
+# adding the menu module's 82 objects to the already-large engine +
+# third-party set pushed the full nxdk-link invocation past the OS
+# argument-length limit ("Argument list too long" - the underlying lld
+# invocation nxdk-link's own wrapper script builds, not this script's own
+# argv handling). lld's `-flavor link` mode (what nxdk-link uses) accepts
+# the standard MS link.exe `@file` convention - one quoted path per line -
+# same mechanism, sidesteps the OS limit entirely regardless of how many
+# objects a future sweep adds.
+#
+# cygpath -m on every path, not the raw MSYS2 form: found compiling this
+# fix, same run - MSYS2 bash auto-translates POSIX-style paths (/g/...)
+# to a real Windows path ONLY when they are actual argv entries passed
+# directly to a native exe's exec call. A path written as TEXT inside a
+# file the program reads back itself gets no such translation - lld read
+# "/g/Proyectos/.../foo.obj" literally and reported "could not open" for
+# an object that genuinely exists, because Windows has no such path.
+# -m (not -w) keeps forward slashes, which lld accepts fine and avoids
+# a second layer of backslash-escaping inside the response file.
+RESPONSE="$SCRATCH/link-check-response.txt"
+: > "$RESPONSE"
 # shellcheck disable=SC2086
+for f in $ENGINE_OBJS $THIRDPARTY_OBJS $MAINUI_OBJS "${LIBS[@]}"; do
+	echo "\"$(cygpath -m "$f")\"" >> "$RESPONSE"
+done
+
+LOG="$SCRATCH/link-check.txt"
 deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
-	-out:"$SCRATCH/link-check.exe" $ENGINE_OBJS $THIRDPARTY_OBJS "${LIBS[@]}" > "$LOG" 2>&1
+	-out:"$SCRATCH/link-check.exe" "@$RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
 
 DUP=$(grep -c 'duplicate symbol' "$LOG")

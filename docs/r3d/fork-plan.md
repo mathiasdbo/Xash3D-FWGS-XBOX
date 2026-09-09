@@ -903,9 +903,106 @@ synthetic file with `3rdparty/mainui/miniutl` never touched.
 **Not measured**: RTTI/`dynamic_cast`/exceptions (mainui's own `wscript`
 passes `-fno-rtti`, matching `tools/xbox-cxx.sh`'s scope, but nothing has
 tested whether `libc++.lib` alone is sufficient for whatever else 82
-files' worth of real code needs at link time beyond `new`/`delete`), and
-whether this whole module actually LINKS at all — this section only
-proves it compiles.
+files' worth of real code needs at link time beyond `new`/`delete`).
+
+### FIXED, 2026-09-09: it links — engine, filesystem, third-party audio, and the menu module, together
+
+**Not "whether this whole module actually LINKS at all" any more.**
+Linked the menu module's 82 objects in alongside the engine and
+third-party audio sets already proven (the FIXED sections above) plus
+`deps/nxdk/lib/libc++.lib`: **0 duplicate symbols.** Undefined started at
+65 — one more than the already-known 64 — and that one new symbol was
+`_atof`. Real gap, not a mainui-specific one: nxdk's pdclib **declares**
+`atof` in `<stdlib.h>` but has never implemented it (`deps/nxdk/lib/
+pdclib/include/stdlib.h:29`'s own comment: `TODO: atof(), strtof(),
+strtod(), strtold()`). `3rdparty/mainui/CFGScript.cpp`,
+`ConnectionProgress.cpp` and `ServerInfo.cpp` all call it for ordinary
+config/cvar values, not scientific-notation-heavy work. Fixed with
+`compat/xbox/xbox_crt_ext.c` (new — a self-contained C99 7.20.1.2 parser,
+not `return strtod(...)`, since pdclib has no `strtod` either) —
+divergence #21. **Re-linked with the fix: 0 duplicate, 64 undefined —
+exactly the already-known set (63 parked networking, 1 `_main`), verified
+symbol-for-symbol identical, not just count-identical.**
+
+Along the way, adding 82 more objects to an already-large link pushed the
+raw `nxdk-link` command line past the OS argument-length limit
+("Argument list too long"). Fixed `tools/xbox-link-check.sh` to build a
+response file (`@file`, the standard MS `link.exe` convention `lld
+-flavor link` — what `nxdk-link` wraps — already accepts) instead of a
+raw command line, which sidesteps the limit regardless of how large a
+future sweep gets. One more real trap found building this: writing
+MSYS2-style paths (`/g/...`) into that file failed with "could not open"
+for objects that genuinely existed — MSYS2 bash only auto-translates a
+POSIX path to a real Windows one when it is an actual `argv` entry passed
+directly to a native `exec`, not when it is text a program reads back
+from a file itself. Fixed with `cygpath -m` on every path written to the
+response file.
+
+`tools/xbox-link-check.sh` now includes the menu module automatically
+when `tools/xbox-mainui-sweep.sh` has been run (optional — a caller
+measuring just engine+third-party is not forced to also sweep mainui
+first), so this is the real, permanent, repository-backed measurement
+tool for the whole picture, not a one-off experiment.
+
+**Corrected 2026-09-09, found in review, two findings:**
+
+**Stale objects.** `tools/xbox-mainui-sweep.sh` only ever added `.obj`
+files to its output directory, never removed any — a file that compiled
+successfully once and later got deleted, renamed, or started failing
+would leave its stale object sitting there untouched, indistinguishable
+from a genuinely current one to anything reading the directory. Fixed:
+the sweep now clears every `.obj` (and its own manifest) before
+compiling, and writes `manifest.txt` (`OK=/FAIL=/TOTAL=`) after every
+run, pass or fail. `tools/xbox-link-check.sh` now requires that manifest
+before trusting mainui objects at all — refusing (not silently
+degrading) if it is missing (predates the fix, or the sweep never
+finished) or reports `FAIL>0` (the last sweep was not clean).
+
+**Corrected 2026-09-09, found in a second review pass on this same fix:
+the manifest write happened BEFORE the sweep's own zero-total rejection,
+so a broken, empty sweep would still write `OK=0 FAIL=0 TOTAL=0` and
+exit 1 — leaving a manifest that reads as clean (`FAIL=0`) to anything
+checking only that one field, which is exactly what
+`tools/xbox-link-check.sh`'s own manifest check originally did. Fixed
+two ways: the sweep now rejects `TOTAL=0` before ever writing a manifest
+at all (so that failure mode leaves no manifest, caught by the existing
+"missing manifest" refusal), and `tools/xbox-link-check.sh` independently
+requires `TOTAL>0` in whatever manifest it reads, as defense in depth
+against a hand-edited or older-script-written one. Also added a third
+check while fixing this: the manifest's own `OK` count against the real
+`.obj` count on disk right now, since the manifest could be stale
+relative to `$OUT_DIR` even when it was genuinely clean the moment it
+was written (an object deleted by hand afterward). Verified by
+reproducing the exact failure Codex described — hiding every mainui
+source file and running the sweep, then the link-check, in sequence:
+the sweep fails loudly and writes no manifest, and the link-check
+correctly refuses rather than silently proceeding with zero menu
+objects.** Also verified the disk/manifest mismatch case directly
+(deleting one `.obj` after a clean sweep) and the original three states
+(no manifest, failing manifest, genuinely clean manifest) — all five
+states now produce the correct accept/refuse decision.
+
+**Unbounded `atof` exponent.** The first version of `compat/xbox/
+xbox_crt_ext.c`'s `atof` accumulated its exponent digit-by-digit with no
+bound, then scaled by `10.0` once per exponent unit — a string like
+`1e2147483647` would have driven a multi-billion-iteration loop (a real
+CPU-hang on a 733 MHz CPU, not theoretical: `ServerInfo.cpp` passes
+server-derived `Info_ValueForKey` output straight to `atof`, once
+networking is unparked) and signed-overflowed the accumulator before
+that loop was even reached. Fixed by clamping exponent accumulation at
+1000 — past double's real ~±308/-324 dynamic range, so every legitimate
+value is unaffected and anything beyond it correctly saturates to
+inf/0 without the unbounded loop or the overflow. Verified natively, not
+just re-read: compiled and ran the same algorithm on the host — extreme
+exponents now resolve to the correct inf/-inf in under a microsecond,
+ordinary cases unaffected.
+
+**Answers three of the four names in this phase's own Exit line.**
+Engine, filesystem, and the menu module all link together, cleanly, with
+zero duplicate symbols and only the already-known, deliberately-parked
+gaps left. Only "a stub game module" and an actual bootable XBE (this
+section still only produces a test `.exe` via `nxdk-link`'s raw `-out:`,
+not a real `nxdk-cxbe` conversion) remain.
 
 **Exit:** engine, filesystem, menu and a stub game module link into one XBE.
 

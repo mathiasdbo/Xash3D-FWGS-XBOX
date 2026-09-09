@@ -109,6 +109,16 @@ SCRATCH="${SCRATCH:-$REPO/.sweep}"
 OUT_DIR="$SCRATCH/mainui"
 mkdir -p "$OUT_DIR" || { echo "xbox-mainui-sweep: cannot create $OUT_DIR" >&2; exit 1; }
 
+# Found in review, 2026-09-09: this loop only ever ADDS .obj files to
+# $OUT_DIR, never removes any. A file that compiled successfully in an
+# earlier run and later gets deleted, renamed, or starts failing leaves
+# its stale .obj sitting here untouched - tools/xbox-link-check.sh has no
+# way to tell that object apart from a genuinely current one, so a link
+# using it would be measuring a source set that no longer exists. Clear
+# every .obj (and the manifest below) before compiling, so what remains
+# after this run is exactly and only what this run actually produced.
+rm -f "$OUT_DIR"/*.obj "$OUT_DIR/manifest.txt"
+
 CXX_FLAGS=(
 	-I3rdparty/mainui -I3rdparty/mainui/miniutl -I3rdparty/mainui/font
 	-I3rdparty/mainui/controls -I3rdparty/mainui/menus -I3rdparty/mainui/model
@@ -141,6 +151,7 @@ echo
 echo "xbox-mainui-sweep: $OK ok, $FAIL failing, $TOTAL attempted   (full log: $LOG)"
 echo
 
+# Manifest: found in review, 2026-09-09, same pass as the stale-.obj
 # Found in review, 2026-09-09: the glob loop's own `[ -f "$f" ] || continue`
 # silently skips an unmatched glob (a moved/renamed source file, a stale
 # submodule layout, a future wscript source-list drift), so a broken
@@ -151,12 +162,31 @@ echo
 # is always a hard failure, unconditionally, regardless of what flags were
 # passed - there is no legitimate reason this sweep should ever compile
 # nothing.
+#
+# This check runs BEFORE the manifest is written, not after - found in a
+# second review pass on the manifest itself: an earlier version wrote
+# "OK=0 FAIL=0 TOTAL=0" here before reaching this exit, and FAIL=0 reads
+# as "clean" to anything only checking that one field (which is exactly
+# what tools/xbox-link-check.sh's own manifest check originally did) -
+# a broken, empty sweep would have certified itself as trustworthy right
+# before failing. No manifest is ever written for a run this exits out
+# of; tools/xbox-link-check.sh's "no manifest" refusal already covers it.
 if [ "$TOTAL" -eq 0 ]; then
 	echo "xbox-mainui-sweep: REGRESSION - 0 files matched any glob. The" >&2
 	echo "  submodule may not be checked out, or the source list has moved -" >&2
 	echo "  this is not a clean pass, it is nothing having been measured." >&2
 	exit 1
 fi
+
+# Manifest, now that TOTAL>0 is already established above.
+# tools/xbox-link-check.sh cannot trust "82 .obj files exist in
+# $OUT_DIR" on its own - the file count says nothing about whether THIS
+# run's compiles actually succeeded. Written after a run that at least
+# attempted something real, so a caller can tell "never swept, or swept
+# to a broken empty result" (no manifest) apart from "swept, but not
+# cleanly" (manifest says FAIL>0) apart from "swept and clean"
+# (FAIL=0, TOTAL>0) without re-deriving any of this itself.
+echo "OK=$OK FAIL=$FAIL TOTAL=$TOTAL" > "$OUT_DIR/manifest.txt"
 
 if [ -n "$EXPECT_TOTAL" ]; then
 	if [ "$TOTAL" -eq "$EXPECT_TOTAL" ]; then
