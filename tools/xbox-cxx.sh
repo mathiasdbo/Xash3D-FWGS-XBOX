@@ -73,6 +73,18 @@ elif ! grep -q "nxdk's winapi has no GetFileType" "$STREAM_C"; then
 	fi
 fi
 
+# Found in review, 2026-09-09: an earlier version of this script also ran
+# a miniutl/winlite.h preflight here (mainui's own nested-submodule patch).
+# That made compiling ANY C++ translation unit - including unrelated
+# future work like the HL SDK client/server this script's own docstring
+# says it exists to serve - fail whenever 3rdparty/mainui/miniutl was not
+# initialised, even though that submodule has nothing to do with
+# non-mainui code. Removed: this script stays generic, exactly what its
+# own docstring claims (compile one C++ translation unit, given the right
+# flags). tools/xbox-mainui-sweep.sh - the only caller that actually needs
+# the miniutl patch - carries that preflight itself now, scoped to where
+# it belongs.
+
 export PATH="/c/msys64/mingw64/bin:$PATH"
 
 eval "$("$REPO/deps/nxdk/bin/activate" -s)"

@@ -5,6 +5,56 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X1: the menu module - 82 of 82 files compile for Xbox
+
+Closed both gaps the previous entry left open, then swept the whole
+module. compat/xbox/new.h (new) matches real MSVC's own <new.h> -
+one line, #include <new>. Added a preflight that fails fast with both
+required commands spelled out if 3rdparty/mainui's nested miniutl
+submodule isn't initialised, instead of silently working around it.
+
+That surfaced one more gap of the identical shape: miniutl/winlite.h
+unconditionally includes <winsock2.h> and <dbghelp.h> under a
+genuinely-reachable _WIN32 block - both already-known, deliberately
+parked gaps (networking is parked, there is no crash-dump API on this
+platform at all), not new ones. Patched to skip exactly those two
+includes, keeping the rest of the file unchanged.
+
+Built tools/xbox-mainui-sweep.sh rather than leaving this as a one-off
+measurement - compiles every file mainui's own wscript declares, with
+its own real include roots and defines, gated the same way
+xbox-sweep.sh already gates on --expect-fail. Main engine baseline
+unaffected (187 ok, 34 failing).
+
+Found in review: the first version of this sweep never passed
+MAINUI_USE_CUSTOM_FONT_RENDER, so font/WinAPIFont.cpp - the file that
+actually calls real Win32 GDI, which nxdk does not have - compiled
+down to an empty translation unit instead of being tested. Fixed by
+passing that define (wscript's own configure() sets it
+unconditionally) plus MAINUI_USE_STB - not a guess, the only font
+backend upstream's own code leaves reachable here, since
+FreeTypeFont.cpp explicitly excludes _WIN32 regardless of nxdk having
+a real libfreetype.lib. Re-verified with the corrected defines: 82 of
+82, the same result, now for real.
+
+Also found in review: the miniutl preflight had been placed in
+tools/xbox-cxx.sh, forcing unrelated future C++ work (the HL SDK
+client/server) to need mainui's own submodule initialised. Moved into
+tools/xbox-mainui-sweep.sh, the only script that needs it -
+tools/xbox-cxx.sh is generic again.
+
+Not measured: RTTI/dynamic_cast/exceptions, or whether this whole
+module actually links - this only proves it compiles.
+
+Found in review (second pass): the sweep's glob loop silently skipped
+unmatched paths, so a broken checkout or source-list drift that
+matched nothing would have printed "0 ok, 0 failing" - and
+--expect-fail 0 alone would call that a pass. Fixed: zero attempted
+files is now always a hard failure, and --expect-total N compares the
+real attempted count against a tracked baseline. Verified both ways -
+hiding every source file fails loudly, the real checkout reports 82
+ok, 0 failing, 82 attempted matching both gates.
+
 ### Added — X1: a C++ toolchain, and new/delete link clean
 
 Nothing in this tree had compiled a single C++ translation unit for

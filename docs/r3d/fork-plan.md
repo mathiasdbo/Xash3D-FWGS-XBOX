@@ -812,6 +812,101 @@ flags) — both are real, separate gaps in getting the *menu module
 specifically* to compile, exactly the kind of thing this measurement
 pass exists to surface before guessing at scope.
 
+### FIXED, 2026-09-09: the menu module — 82 of 82 files compile for Xbox
+
+Both gaps above are closed, and the full picture is measured, not just
+one or two representative files.
+
+**`<new.h>`**: `compat/xbox/new.h` (new, divergence #19) — one line of
+substance, `#include <new>`, matching exactly what real MSVC's own
+`<new.h>` does. **`3rdparty/mainui/miniutl` initialisation**: the missing
+step is now a fast, explicit `tools/xbox-cxx.sh` preflight failure with
+both required commands spelled out (`git submodule update --init
+3rdparty/mainui` then `git -C 3rdparty/mainui submodule update --init
+miniutl`), the same shape as the `library_suffix`/`opusfile` preflights
+already use, rather than a silent local workaround.
+
+With `<new.h>` fixed, a fuller sweep surfaced one more real gap of the
+identical shape: `miniutl/winlite.h`'s `#ifdef _WIN32` block
+unconditionally includes `<winsock2.h>` and `<dbghelp.h>` — both
+genuinely reachable (same `_MSC_VER`/`_WIN32`-is-real-but-the-assumption-
+isn't class as divergences #17/#19), and both **already-known,
+deliberately-parked gaps** — real Winsock2 (this project's own networking
+is parked, see #7c/#13) and a debug-symbol API (no equivalent exists on
+this platform at all, #7c). Patched to skip exactly those two includes
+under `#ifndef NXDK`, keeping the rest of the file (`windows.h` itself,
+every `#undef` guarding a Win32/class-member name collision) unchanged —
+divergence #20, `patches/miniutl-xbox-winlite.patch`, same auto-apply
+mechanism as `library_suffix`/`opusfile`.
+
+Built `tools/xbox-mainui-sweep.sh` rather than leaving the measurement as
+a one-off shell loop — the exact "not repository-backed" mistake this
+project's review process has already caught more than once (the
+duplicate-symbol sweep-command gap, the pre-`xbox-link-check.sh` audio
+codec measurement). Compiles every file `3rdparty/mainui/wscript`'s own
+`build()` declares (`*.cpp` plus six subdirectories — not "everything
+under the directory," `tests/`/`vs2022/`/`dictgen.py` are not part of the
+library), with `wscript`'s own real include roots, its unconditional
+`STDINT_H=<cstdint>` define, and takes `--expect-fail N` the same way
+`tools/xbox-sweep.sh` already does.
+
+**Corrected 2026-09-09, found in review: the first version of this sweep
+never passed `-DMAINUI_USE_CUSTOM_FONT_RENDER`, so `font/WinAPIFont.cpp` —
+gated entirely on `defined(MAINUI_USE_CUSTOM_FONT_RENDER) &&
+!defined(MAINUI_USE_STB)`, and the file that actually calls real Win32
+GDI (`CreateCompatibleDC`, `EnumFontFamiliesExA`) — compiled down to an
+empty translation unit instead of being tested at all. The 82/82 result
+was vacuous for that one file, not real.** Fixed by passing the define
+`wscript`'s own `configure()` sets unconditionally, plus
+`-DMAINUI_USE_STB`: not a guess, the only font backend upstream's own
+code leaves reachable on this platform. `font/FreeTypeFont.cpp`'s own
+guard is `!defined(_WIN32) && defined(MAINUI_USE_FREETYPE)` — real
+Windows never gets FreeType in upstream's own code, and `_WIN32` is
+genuinely true here (same as every other `_MSC_VER`/`_WIN32`-is-real
+trap this phase has already named), so FreeType was never a live option
+regardless of nxdk having a real `libfreetype.lib`. `WinAPIFont.cpp`
+needs real GDI, which does not exist. `StbFont.cpp` is fully
+self-contained (`stb_truetype.h`, no OS font API at all) — the same
+bucket `wscript`'s own `configure()` already puts every other
+console/embedded target in (`android`, `darwin`, `nswitch`, `psvita`,
+`emscripten` all get `MAINUI_USE_STB` unconditionally; Xbox has no
+`DEST_OS` assigned yet to trigger that list, but belongs in it for the
+identical reason — no window manager, divergence #9). Re-verified with
+the corrected defines: **82 of 82**, the same result, now for real —
+`tools/xbox-mainui-sweep.sh --expect-fail 0 --expect-total 82` passes
+exactly. The main engine sweep baseline is unaffected (`187 ok, 34
+failing`, unchanged).
+
+**Corrected 2026-09-09, found in review (second pass): the sweep's own
+glob loop silently skipped an unmatched path (`[ -f "$f" ] || continue`),
+so a broken checkout, a moved source file, or a future `wscript`
+source-list drift that matched nothing would have printed "0 ok, 0
+failing" — and `--expect-fail 0` alone would call that a pass, the exact
+false-clean class this project's review process keeps catching.** Fixed:
+zero attempted files is now always a hard failure, unconditionally, and
+`--expect-total N` compares the real attempted count against a tracked
+baseline the same way `--expect-fail` already does. Verified both ways —
+hiding every mainui source file (renamed away, not deleted) makes the
+sweep fail loudly with "0 files matched any glob," and the real checkout
+still reports `82 ok, 0 failing, 82 attempted` matching both gates.
+
+**Also found in review: the `miniutl` patch preflight had been placed in
+`tools/xbox-cxx.sh`, the generic C++ compiler script, forcing every
+caller — including unrelated future work like the HL SDK `client`/
+`server` that script's own docstring says it exists to serve — to have
+`3rdparty/mainui/miniutl` initialised even to compile something that has
+nothing to do with the menu module.** Moved into
+`tools/xbox-mainui-sweep.sh`, the only script that actually needs it.
+`tools/xbox-cxx.sh` is generic again, verified by compiling an unrelated
+synthetic file with `3rdparty/mainui/miniutl` never touched.
+
+**Not measured**: RTTI/`dynamic_cast`/exceptions (mainui's own `wscript`
+passes `-fno-rtti`, matching `tools/xbox-cxx.sh`'s scope, but nothing has
+tested whether `libc++.lib` alone is sufficient for whatever else 82
+files' worth of real code needs at link time beyond `new`/`delete`), and
+whether this whole module actually LINKS at all — this section only
+proves it compiles.
+
 **Exit:** engine, filesystem, menu and a stub game module link into one XBE.
 
 ## X2 — Filesystem and headless boot

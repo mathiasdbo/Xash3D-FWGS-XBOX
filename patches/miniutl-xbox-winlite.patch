@@ -1,0 +1,23 @@
+diff --git a/winlite.h b/winlite.h
+index 10b6046..6a986ab 100644
+--- a/winlite.h
++++ b/winlite.h
+@@ -41,9 +41,18 @@
+ // if we include windows.h before winsock2, we get winsock1, and that breaks
+ // the parts of the code where we need to use winsock2 - so include winsock2
+ // first...
++// NXDK: neither header exists - nxdk vendors lwIP's own sockets headers,
++// not real Winsock2, and has no <dbghelp.h> at all (this project's own
++// networking is deliberately parked and its crash handler is deliberately
++// absent - resonance3d's divergences.md #7c/#13). The rest of this file
++// (windows.h itself, every #undef below) still applies unchanged.
++#ifndef NXDK
+ #include <winsock2.h>
++#endif
+ #include <windows.h>
++#ifndef NXDK
+ #include <dbghelp.h>
++#endif
+ #undef PostMessage
+ #undef GetCurrentTime
+ #undef CreateEvent
