@@ -91,6 +91,31 @@ elif ! grep -q "define XASH_XBOX 1" "$BUILD_H"; then
 	fi
 fi
 
+# Same auto-apply mechanism, same reasoning, for opusfile's stream.c: found
+# in review, X1, 2026-09-08. op_get_file_callbacks/op_fopen/op_freopen's
+# _WIN32 branch calls GetFileType (nxdk's winapi does not have it) and
+# _wfopen/_wfreopen (nxdk has no wide-char CRT at all) - neither is a gap
+# this project can leave unpatched the way a missing symbol elsewhere gets
+# a compat/xbox shim, because nxdk has no equivalent Win32 API to shim
+# against. Widened to NXDK-specific branches instead: always-seekable (this
+# platform's FILE* is always a real FATX file, never a pipe) and plain
+# fopen/freopen (GoldSrc paths are ASCII, no Unicode filename to preserve).
+STREAM_C="$REPO/3rdparty/opusfile/opusfile/src/stream.c"
+if [ ! -f "$STREAM_C" ]; then
+	echo "XBOX_CC_PREFLIGHT_FAILURE: 3rdparty/opusfile/opusfile/src/stream.c does not exist"
+	echo "  - the submodule is not initialised. Run:" >&2
+	echo "  git submodule update --init 3rdparty/opusfile/opusfile" >&2
+	exit 1
+elif ! grep -q "nxdk's winapi has no GetFileType" "$STREAM_C"; then
+	if ! git -c core.autocrlf=false -C "$REPO/3rdparty/opusfile/opusfile" apply \
+		"$REPO/patches/opusfile-xbox-stream.patch" 2>&1; then
+		echo "XBOX_CC_PREFLIGHT_FAILURE: could not apply patches/opusfile-xbox-stream.patch"
+		echo "  to 3rdparty/opusfile/opusfile/src/stream.c - check it still applies" >&2
+		echo "  cleanly against the submodule's pinned commit." >&2
+		exit 1
+	fi
+fi
+
 # MSYS2's MinGW-64 clang, by absolute path.
 #
 # NOT "/mingw64/bin". That only resolves when MSYS2's own bash is interpreting

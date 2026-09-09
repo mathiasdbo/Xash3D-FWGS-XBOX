@@ -15,6 +15,7 @@ implementations.
 #define R3D_COMPAT_IO_H
 
 #include <sys/types.h>
+#include <stdint.h>   /* intptr_t, for _get_osfhandle */
 
 /* NOT via <unistd.h>. nxdk-cc appends "$@" after its own -I flags, so its
  * include directories are searched first and <unistd.h> resolves to nxdk's
@@ -58,6 +59,30 @@ int     _mkdir( const char *path );
 int     _rmdir( const char *path );
 int     _access( const char *path, int mode );
 int     _dup( int fd );
+
+/* Added 2026-09-08 for 3rdparty/opusfile's stream.c (op_fseek's SEEK_END
+ * path, via patches/opusfile-xbox-stream.patch). Real bodies in
+ * xbox_posix_io.c, not aliases of anything declared above - _fileno wraps
+ * this file's own fileno(), _get_osfhandle and _filelengthi64 are genuine
+ * new functionality (a real HANDLE lookup and a real GetFileSizeEx call),
+ * not thin renames.
+ *
+ * struct _PDCLIB_file_t, not FILE: this header does not include <stdio.h>
+ * itself (xbox_prelude.h's fileno() declaration uses the same forward
+ * declaration, for the same reason - stay self-contained regardless of
+ * what a caller included first). */
+struct _PDCLIB_file_t;
+int       _fileno( struct _PDCLIB_file_t *stream );
+intptr_t  _get_osfhandle( int fd );
+long long _filelengthi64( int fd );
+
+/* Added 2026-09-08, found in review: op_fseek's SEEK_END path (above)
+ * registers a borrowed r3d_fds slot via _fileno/fileno every time a
+ * seekable opusfile stream is opened, and only close(fd) ever releases
+ * a borrowed slot - plain fclose() does not know this table exists.
+ * opusfile's close callback is patched to call this before fclose(),
+ * or the slot leaks permanently (patches/opusfile-xbox-stream.patch). */
+void _r3d_release_stream_fd( struct _PDCLIB_file_t *stream );
 
 #ifdef __cplusplus
 }

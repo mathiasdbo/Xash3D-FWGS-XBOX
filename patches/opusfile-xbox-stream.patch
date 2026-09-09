@@ -1,0 +1,153 @@
+diff --git a/src/stream.c b/src/stream.c
+index 6559e1d..3cb55e8 100644
+--- a/src/stream.c
++++ b/src/stream.c
+@@ -62,7 +62,33 @@ static int op_fread(void *_stream,unsigned char *_ptr,int _buf_size){
+ }
+ 
+ static int op_fseek(void *_stream,opus_int64 _offset,int _whence){
+-#if defined(_WIN32)
++#if defined(NXDK)
++  /*Found in review, 2026-09-08: the _WIN32 path below type-puns an 8-byte
++     opus_int64 as fpos_t via fgetpos()/fsetpos(), which is only safe if
++     fpos_t is itself an 8-byte binary-compatible blob (true of MSVCRT,
++     which is what that comment is actually about). nxdk's pdclib fpos_t
++     is a real struct - _PDCLIB_uint64_t offset plus an int status field
++     (deps/nxdk/lib/pdclib/include/pdclib/_PDCLIB_int.h:288-292) - at
++     least 12 bytes, so fgetpos() writing through that cast overruns the
++     8-byte local. OP_ASSERT would have caught the size mismatch, but it
++     compiles to nothing unless OP_ENABLE_ASSERTIONS is defined, which
++     nothing in this build does - so the corruption is silent, not loud.
++     Uses this project's own _fseeki64/_ftelli64 (compat/xbox/
++     xbox_posix_io.c) instead of touching pdclib's fpos_t layout at all -
++     already real, already used by 3rdparty/vorbis under the same _WIN32
++     condition, no new assumption about pdclib internals.*/
++  opus_int64 pos;
++  if(_whence==SEEK_CUR){
++    pos=(opus_int64)_ftelli64((FILE *)_stream);
++    if(pos<0)return -1;
++  }
++  else if(_whence==SEEK_END)pos=_filelengthi64(_fileno((FILE *)_stream));
++  else if(_whence==SEEK_SET)pos=0;
++  else return -1;
++  if(pos<0||_offset<-pos||_offset>OP_INT64_MAX-pos)return -1;
++  pos+=_offset;
++  return _fseeki64((FILE *)_stream,pos,SEEK_SET);
++#elif defined(_WIN32)
+   /*_fseeki64() is not exposed until MSVCRT80.
+     This is the default starting with MSVC 2005 (_MSC_VER>=1400), but we want
+      to allow linking against older MSVCRT versions for compatibility back to
+@@ -104,7 +130,11 @@ static int op_fseek(void *_stream,opus_int64 _offset,int _whence){
+ }
+ 
+ static opus_int64 op_ftell(void *_stream){
+-#if defined(_WIN32)
++#if defined(NXDK)
++  /*Same reasoning as op_fseek above - _ftelli64 instead of the fpos_t
++     type-pun.*/
++  return (opus_int64)_ftelli64((FILE *)_stream);
++#elif defined(_WIN32)
+   /*_ftelli64() is not exposed until MSVCRT80, and ftello()/ftello64() have
+      the same problems as fseeko()/fseeko64() in MingW.
+     See above for a more detailed explanation.*/
+@@ -118,11 +148,30 @@ static opus_int64 op_ftell(void *_stream){
+ #endif
+ }
+ 
++#if defined(NXDK)
++/*Found in review, 2026-09-08: op_fseek's SEEK_END path above calls
++   fileno() once per seekable open (opusfile seeks to end during
++   op_open_seekable2_impl - opusfile.c:1399), which registers a borrowed
++   slot in compat/xbox's descriptor table. That slot is released ONLY by
++   this project's own close(fd) - plain fclose() has no idea the table
++   exists - so a plain fclose close callback leaked one slot per open
++   permanently (R3D_MAX_FDS - 3 = 61 total, for the life of the process).
++   This releases it first.*/
++static int op_fclose_nxdk(void *_stream){
++  _r3d_release_stream_fd((FILE *)_stream);
++  return fclose((FILE *)_stream);
++}
++#endif
++
+ static const OpusFileCallbacks OP_FILE_CALLBACKS={
+   op_fread,
+   op_fseek,
+   op_ftell,
++#if defined(NXDK)
++  op_fclose_nxdk
++#else
+   (op_close_func)fclose
++#endif
+ };
+ 
+ #if defined(_WIN32)
+@@ -265,6 +314,14 @@ static const OpusFileCallbacks OP_UNSEEKABLE_FILE_CALLBACKS={
+ # include <windows.h>
+ 
+ static const OpusFileCallbacks *op_get_file_callbacks(FILE *_fp){
++#if defined(NXDK)
++  /*nxdk's winapi has no GetFileType, and every FILE* reaching this function
++     on this platform comes from op_fopen/op_fdopen opening a real FATX file -
++     never a pipe or console handle - so the seekability probe real Windows
++     needs here has nothing to distinguish. Always seekable.*/
++  (void)_fp;
++  return &OP_FILE_CALLBACKS;
++#else
+   intptr_t h_file;
+   h_file=_get_osfhandle(_fileno(_fp));
+   if(h_file!=-1
+@@ -272,6 +329,7 @@ static const OpusFileCallbacks *op_get_file_callbacks(FILE *_fp){
+     return &OP_FILE_CALLBACKS;
+   }
+   return &OP_UNSEEKABLE_FILE_CALLBACKS;
++#endif
+ }
+ #else
+ static const OpusFileCallbacks *op_get_file_callbacks(FILE *_fp){
+@@ -282,7 +340,12 @@ static const OpusFileCallbacks *op_get_file_callbacks(FILE *_fp){
+ 
+ void *op_fopen(OpusFileCallbacks *_cb,const char *_path,const char *_mode){
+   FILE *fp;
+-#if !defined(_WIN32)
++/*NXDK: no wide-char CRT (_wfopen) exists on this platform, and GoldSrc/Xash3D
++   paths are plain ASCII throughout this compat layer (see
++   compat/xbox/xbox_posix_io.c's r3d_native_path) - there is no Unicode
++   filename to preserve here, so this takes the plain fopen() path real
++   Windows only gets when it isn't Windows at all.*/
++#if !defined(_WIN32) || defined(NXDK)
+   fp=fopen(_path,_mode);
+ #else
+   fp=NULL;
+@@ -304,7 +367,22 @@ void *op_fopen(OpusFileCallbacks *_cb,const char *_path,const char *_mode){
+ 
+ void *op_fdopen(OpusFileCallbacks *_cb,int _fd,const char *_mode){
+   FILE *fp;
++#if defined(NXDK)
++  /*fdopen() itself - not just the _WIN32 branch above - is unavailable:
++     nxdk's pdclib has no such function, and wrapping an externally-owned
++     descriptor in a pdclib FILE* without one would need real work inside
++     pdclib this project has no reason to take on for a function nothing
++     in this codebase calls (grepped: only op_fdopen's own declaration
++     and definition reference it, no caller anywhere in engine/). Fails
++     honestly rather than pretending, matching this platform's other
++     compat/xbox stubs (xbox_posix_io.c's chdir/getcwd).*/
++  (void)_fd;
++  (void)_mode;
++  errno=ENOSYS;
++  fp=NULL;
++#else
+   fp=fdopen(_fd,_mode);
++#endif
+   if(fp!=NULL)*_cb=*op_get_file_callbacks(fp);
+   return fp;
+ }
+@@ -312,7 +390,8 @@ void *op_fdopen(OpusFileCallbacks *_cb,int _fd,const char *_mode){
+ void *op_freopen(OpusFileCallbacks *_cb,const char *_path,const char *_mode,
+  void *_stream){
+   FILE *fp;
+-#if !defined(_WIN32)
++/*NXDK: same reasoning as op_fopen above.*/
++#if !defined(_WIN32) || defined(NXDK)
+   fp=freopen(_path,_mode,(FILE *)_stream);
+ #else
+   fp=NULL;

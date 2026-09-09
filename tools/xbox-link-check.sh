@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # Attempt a real Xbox link across the main engine plus the third-party
 # audio codec libraries this project has verified compile for Xbox, and
-# report duplicate/undefined symbol counts.
+# gate on duplicate/undefined symbol counts.
 #
 #   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-sweep.sh engine filesystem public common compat 3rdparty/library_suffix/src
-#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-link-check.sh [--expect-undefined N]
+#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-link-check.sh --expect-undefined N
+#
+# --expect-undefined is written [optional] nowhere in this file on purpose:
+# omitting it only skips the regression/improvement COMPARISON, not the
+# gate itself - any undefined symbol at all with no baseline given is a
+# hard failure (see the check below), because "undefined symbols exist,
+# nobody said how many were expected" is not a passing result to report.
 #
 # Two steps, on purpose: this script does NOT recompile the main engine -
 # that is what tools/xbox-sweep.sh already does, correctly, with its own
@@ -86,10 +92,20 @@ fi
 # against this exact toolchain would take the same VAR_ARRAYS branch.
 # vq_sse2.c is the one deliberate exclusion: it fails to compile at all
 # under -march=pentium3 (SSE2 intrinsics, Pentium III has none), a real,
-# loud clang error, not a judgment call. opusfile is NOT included here:
-# stream.c does not compile (needs a FILE*-to-HANDLE bridge nxdk does not
-# provide - see docs/r3d/fork-plan.md's X1 section), and info.c/
-# internal.c/opusfile.c are not known to link cleanly without it.
+# loud clang error, not a judgment call.
+#
+# opusfile: fixed and included, 2026-09-08. stream.c's _WIN32 branch needed
+# three things nxdk has no equivalent of at all (GetFileType, _wfopen/
+# _wfreopen's wide-char CRT) - patched to take NXDK-specific branches
+# instead of shimming Win32 APIs that do not exist here (see
+# patches/opusfile-xbox-stream.patch, applied automatically by
+# tools/xbox-cc.sh). The two calls stream.c makes that DO have a real
+# nxdk equivalent (_fileno, and a _get_osfhandle/_filelengthi64 pair built
+# on GetFileSizeEx) are real compat/xbox functions, not stubs - see
+# compat/xbox/xbox_posix_io.c. op_fdopen's unconditional fdopen() call
+# (pdclib has no such function, on any platform) fails honestly instead:
+# grepped the whole tree, nothing calls op_fdopen. info.c/internal.c/
+# opusfile.c needed no changes at all.
 #
 # config_types.h is regenerated every run rather than committed: it is
 # libogg's own waf 'subst' template output (INCLUDE_INTTYPES_H=1, the
@@ -140,6 +156,12 @@ OPUS_FLAGS=(
 VORBIS_FLAGS=( -I"$SCRATCH/3p/ogg-shadow" -I3rdparty/vorbis/vorbis-src/include -I3rdparty/vorbis/vorbis-src/lib -I3rdparty/libogg/libogg/include )
 OGG_FLAGS=( -I"$SCRATCH/3p/ogg-shadow" -I3rdparty/libogg/libogg/include )
 ME_FLAGS=( -I3rdparty/MultiEmulator/include -I3rdparty/MultiEmulator/src )
+# wscript's own `use = 'ogg opus'` on the opusfile target - its real include
+# path plus the two libraries' export_includes.
+OPUSFILE_FLAGS=(
+	-I"$SCRATCH/3p/ogg-shadow" -I3rdparty/opusfile/opusfile/include
+	-I3rdparty/opus/opus/include -I3rdparty/libogg/libogg/include
+)
 
 # Found in review, 2026-09-08: compile_3p's own `exit 2` only ends the
 # command-substitution subshell each call site ran it in ($(...)) - the
@@ -193,6 +215,10 @@ for f in 3rdparty/libogg/libogg/src/*.c; do
 done
 for f in 3rdparty/MultiEmulator/src/*.c; do
 	obj=$(compile_3p "$f" "${ME_FLAGS[@]}") || exit 2
+	THIRDPARTY_OBJS="$THIRDPARTY_OBJS $obj"
+done
+for name in info internal opusfile stream; do
+	obj=$(compile_3p "3rdparty/opusfile/opusfile/src/$name.c" "${OPUSFILE_FLAGS[@]}") || exit 2
 	THIRDPARTY_OBJS="$THIRDPARTY_OBJS $obj"
 done
 
@@ -252,6 +278,23 @@ fi
 if [ "$DUP" -gt 0 ]; then
 	echo "link-check: REGRESSION - $DUP duplicate symbol(s), expected 0." >&2
 	grep 'duplicate symbol' "$LOG" | sed 's/.*duplicate symbol: //' | sort -u >&2
+	exit 1
+fi
+
+# Found in review, 2026-09-08: --expect-undefined was documented as
+# optional, and the gate below only ran when it was actually passed - so
+# the exact command this script's own usage comment shows at the top,
+# without the flag, exited 0 on a link that failed with 64 real undefined
+# symbols. Indistinguishable from clean in the exit code, only visible in
+# text output nothing downstream reads. The same false-clean class this
+# tool exists to prevent. UNDEF > 0 with no baseline is now itself a hard
+# failure - there is no "just report it" mode once undefined symbols
+# exist, only "compare against a tracked count" or "fail".
+if [ "$UNDEF" -gt 0 ] && [ -z "$EXPECT_UNDEFINED" ]; then
+	echo "link-check: REGRESSION - $UNDEF undefined symbol(s), no --expect-undefined given." >&2
+	echo "  Pass --expect-undefined N (see the log above) to compare against a" >&2
+	echo "  tracked baseline, or fix them - a link with unresolved symbols is" >&2
+	echo "  never a passing result on its own." >&2
 	exit 1
 fi
 

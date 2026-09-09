@@ -27,6 +27,7 @@ anything else here changes.
 #include <stdlib.h>
 #include <errno.h>
 #include <stdio.h>   /* SEEK_SET / SEEK_CUR / SEEK_END */
+#include <stdint.h>  /* intptr_t, for _get_osfhandle */
 
 /* Console, so a small table is plenty. filesystem/ keeps few files open at a
  * time, and XASH_REDUCE_FD exists upstream precisely for platforms that cannot
@@ -853,6 +854,43 @@ int fileno( FILE *stream )
 	return fd;
 }
 
+/*
+====================
+_r3d_release_stream_fd
+
+Releases the borrowed r3d_fds slot fileno() registered for this FILE*, if
+one exists, WITHOUT touching the OS handle or the FILE itself - the real
+close still has to happen separately (fclose()).
+
+Added 2026-09-08 for 3rdparty/opusfile's stream.c: op_fseek's SEEK_END
+path calls fileno() once per seekable open (opusfile seeks to end during
+op_open_seekable2_impl, opusfile.c:1399), and a borrowed slot is released
+ONLY by this file's own close(fd) - never by fclose() alone, since fclose
+is pdclib's own function with no idea this table exists. opusfile's
+default close callback is plain fclose. Found in review: without this,
+every seekable opusfile open permanently consumed one of R3D_MAX_FDS - 3
+= 61 slots for the rest of the process's life, and after enough of them
+fileno()/_filelengthi64 would start failing even though the underlying
+file was genuinely closed - not yet exercised at runtime (nothing calls
+opusfile from the engine yet), but a real bug regardless of when it fires.
+Callers needing this: an NXDK-specific close callback that runs this
+before fclose(), matching the SEEK_END path's own fileno() call.
+====================
+*/
+void _r3d_release_stream_fd( FILE *stream )
+{
+	int fd;
+
+	for( fd = R3D_FIRST_FD; fd < R3D_MAX_FDS; fd++ )
+	{
+		if( r3d_borrowed[fd] && r3d_borrowed_file[fd] == stream )
+		{
+			close( fd );
+			return;
+		}
+	}
+}
+
 
 /*
 ====================
@@ -883,4 +921,71 @@ long long _ftelli64( FILE *stream )
 {
 	long pos = ftell( stream );
 	return ( pos < 0 ) ? -1LL : ( long long )pos;
+}
+
+/*
+====================
+_fileno / _get_osfhandle / _filelengthi64
+
+MSVC CRT names, added 2026-09-08 for 3rdparty/opusfile's stream.c (see
+patches/opusfile-xbox-stream.patch - only the two calls this platform
+still needs went through this file's own fileno()/r3d_fds, the rest of
+that file's _WIN32 branch was patched out instead of shimmed, since nxdk
+has no GetFileType or wide-char CRT to shim against at all).
+
+_fileno is the same function as fileno() above under its MSVC spelling -
+common/port.h's own "MSVC CRT aliases" pattern, applied here for
+third-party code that reaches for the underscore name directly instead of
+through a macro this project controls.
+
+_get_osfhandle looks up the real Win32 HANDLE fileno() registered for a
+descriptor. This is the one place outside fileno()/close() that reads
+r3d_fds directly rather than going through read()/write()/lseek() - a
+raw HANDLE is exactly what a caller doing its own GetFileSizeEx needs, and
+duplicating that lookup through an existing wrapper would cost a needless
+indirection for no safety benefit; FD_VALID still gates it.
+
+_filelengthi64 is real MSVC CRT surface for "how big is the file behind
+this descriptor" - opusfile's op_fseek uses it for SEEK_END, since fgetpos/
+fsetpos (used for SEEK_CUR/SEEK_SET) have no equivalent for "seek to the
+end" on their own. GetFileSizeEx is genuinely implemented by nxdk's winapi
+(deps/nxdk/lib/winapi/fileio.c, via FILE_NETWORK_OPEN_INFORMATION) - this
+is not a fabricated file length. 32-bit LARGE_INTEGER-to-long long is safe
+here for the same reason _fseeki64 above already only guards a 32-bit
+range: FATX caps a file at 4 GB, far under LARGE_INTEGER's real range.
+====================
+*/
+int _fileno( FILE *stream )
+{
+	return fileno( stream );
+}
+
+intptr_t _get_osfhandle( int fd )
+{
+	if( !FD_VALID( fd ))
+	{
+		errno = EBADF;
+		return -1;
+	}
+
+	return ( intptr_t )r3d_fds[fd];
+}
+
+long long _filelengthi64( int fd )
+{
+	LARGE_INTEGER size;
+
+	if( !FD_VALID( fd ))
+	{
+		errno = EBADF;
+		return -1;
+	}
+
+	if( !GetFileSizeEx( r3d_fds[fd], &size ))
+	{
+		errno = EIO;
+		return -1;
+	}
+
+	return ( long long )size.QuadPart;
 }

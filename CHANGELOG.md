@@ -5,6 +5,58 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X1: opusfile linked in too, 74 undefined down to 64
+
+Fixed the last third-party audio gap: `opusfile`'s `stream.c` called
+`GetFileType` and `_wfopen`/`_wfreopen` under a genuinely reachable
+`_WIN32` branch, neither of which nxdk has any equivalent of at all - no
+partial Win32 surface to shim against, unlike every other compat/xbox
+gap so far. Patched instead (`patches/opusfile-xbox-stream.patch`,
+auto-applied by `tools/xbox-cc.sh`, same mechanism as the existing
+library_suffix patch): always-seekable file callbacks (every FILE* this
+platform opens is a real FATX file, never a pipe), plain fopen/freopen
+(GoldSrc paths are ASCII, no Unicode filename to preserve), and an
+honest ENOSYS for op_fdopen (its fdopen() call has no pdclib equivalent
+at all, and nothing in this tree calls op_fdopen anyway). The two calls
+that do have a real nxdk equivalent - _fileno/_filelengthi64, for
+op_fseek's SEEK_END path - are genuine new compat/xbox functions built
+on the already-real GetFileSizeEx, not stubs. All 4 opusfile files now
+compile clean.
+
+Linked in alongside the previous 174 third-party objects: 0 duplicate
+symbols, 64 undefined - down from 74, because the 10 op_*/
+opus_tags_query symbols engine/client/soundlib/snd_ogg_opus.c already
+referenced are now supplied. The 64 remaining are exactly the 63 parked
+networking symbols plus 1 _main, unchanged. Verified with
+tools/xbox-link-check.sh --expect-undefined 64: exact match.
+
+Found in review: making op_get_file_callbacks always report seekable
+made op_fseek/op_ftell's own _WIN32 body live for the first time, and
+that body type-puns an 8-byte opus_int64 as fpos_t - safe on MSVCRT,
+not on nxdk's pdclib, whose fpos_t is a real struct at least 12 bytes
+wide. The OP_ASSERT meant to catch the size mismatch compiles to
+nothing without OP_ENABLE_ASSERTIONS, which this build never defines -
+a silent stack overrun on any seek or tell, not a loud one. Fixed by
+widening op_fseek/op_ftell too, onto this project's own _fseeki64/
+_ftelli64 (already real, already used by vorbis under the identical
+condition) instead of assuming anything about pdclib's fpos_t layout.
+
+Also found in review: tools/xbox-link-check.sh's --expect-undefined
+gate only ran when the flag was passed, so the exact command its own
+usage comment showed - without the flag - exited 0 on a link with 64
+real undefined symbols. Fixed: any undefined symbol with no
+--expect-undefined given is now itself a hard failure.
+
+Found in review, second pass: making op_get_file_callbacks always
+report seekable had a side effect the first fix missed - op_fseek's
+SEEK_END call to fileno() now runs on every seekable open (opusfile
+seeks to end during open), registering a borrowed slot in compat/xbox's
+descriptor table that only close(fd) ever releases, never plain
+fclose() - which is what opusfile's default close callback was. Every
+seekable open would have permanently consumed one of 61 available
+slots for the process's life. Fixed with a new _r3d_release_stream_fd
+and an NXDK-specific close callback that calls it before fclose.
+
 ### Added — X1: link the third-party audio codecs in, for real
 
 Fixed the one remaining opus gap the previous entry left open: `celt.c`

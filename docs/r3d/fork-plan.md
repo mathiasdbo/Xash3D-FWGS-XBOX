@@ -521,17 +521,26 @@ not part of the library); compiled every one of them individually with
   tracking) is a plausible place to build it, not an unimplementable gap.
   Not fixed here - same reasoning as `celt.c` above, the
   vendored-patch-versus-compat-shim question deserves its own decision.
+  **Fixed, 2026-09-08 - see the FIXED section below.** The
+  vendored-patch-versus-compat-shim question resolved as both, not
+  either/or: `GetFileType`/`_wfopen`/`_wfreopen` have no nxdk equivalent
+  at all, so `stream.c` is patched (matching `library_suffix`'s own
+  precedent, divergence #5) to skip them entirely rather than shim
+  something that does not exist; `_fileno`/`_get_osfhandle`/
+  `_filelengthi64` DO have a real nxdk equivalent (`GetFileSizeEx`), so
+  those are genuine new `compat/xbox` functions, not a patch. `fdopen()`
+  itself (not just its `_WIN32` caller) is also missing from pdclib -
+  `op_fdopen` fails honestly instead, since nothing in this tree calls
+  it. `3rdparty/opusfile` is now 4 of 4.
 
 **Answers the question this section asked.** `3rdparty/opus`/`opusfile`/
-`vorbis`/`MultiEmulator` are viable for Xbox - 176 of 179 real files
-(including the six x86 SIMD files a real build would select, tested
-directly rather than reasoned about) already compile, no architectural
-blocker found anywhere. What remains is three small, well-isolated gaps
-(`celt.c`'s abort-dialog suppression, `stream.c`'s missing `FILE*`-to-`HANDLE` bridge,
-`vq_sse2.c`'s genuine, loud compile failure under `-march=pentium3` — a
-real reason to exclude that one file specifically, not the whole x86
-SIMD set), not an open question about
-whether these libraries can work here at all.
+`vorbis`/`MultiEmulator` are viable for Xbox - 180 of 183 real files
+(176 of 179 named above, plus opusfile's 4 of 4, fixed 2026-09-08) now
+compile, no architectural blocker found anywhere. What remains is one
+well-isolated gap (`vq_sse2.c`'s genuine, loud compile failure under
+`-march=pentium3` — a real reason to exclude that one file specifically,
+not the whole x86 SIMD set), not an open question about whether these
+libraries can work here at all.
 
 ### FIXED, 2026-09-08: `celt.c`'s abort-dialog suppression, and a real link with the third-party codecs included
 
@@ -578,6 +587,76 @@ case, unlike undefined symbols. Verified against `--expect-undefined 74`:
 exactly; also verified its three failure paths directly (no prior sweep →
 fails loudly with the documented instruction; `--expect-undefined` too
 low → REGRESSION; too high → IMPROVEMENT), each exiting 1 as designed.
+
+### FIXED, 2026-09-08: `opusfile` linked in too, 74 undefined down to 64
+
+The `stream.c` gap named above is fixed — not by shimming, since two of
+its three missing calls (`GetFileType`, `_wfopen`/`_wfreopen`) have no
+nxdk equivalent to shim against at all. `op_get_file_callbacks`,
+`op_fopen`, `op_freopen` and `op_fdopen` are patched under
+`#if defined(NXDK)` instead (`patches/opusfile-xbox-stream.patch`,
+auto-applied by `tools/xbox-cc.sh` the same way divergence #5's
+`library_suffix` patch already is — divergence #18): always-seekable
+(every `FILE*` reaching this platform's `op_fopen`/`op_fdopen` is a real
+FATX file, never a pipe), plain `fopen`/`freopen` (GoldSrc paths are
+ASCII, no Unicode filename to preserve), and an honest `ENOSYS` for
+`op_fdopen` (its `fdopen()` call has no pdclib equivalent on any
+platform, and nothing in this tree calls `op_fdopen` at all). The two
+calls that DO have a real nxdk equivalent — `_fileno`/`_filelengthi64`
+for `op_fseek`'s `SEEK_END` path — are genuine new functions in
+`compat/xbox/xbox_posix_io.c` (declared in `compat/xbox/io.h`):
+`_get_osfhandle` looks up the real `HANDLE` this file's own `fileno()`
+already registers in `r3d_fds`, `_filelengthi64` calls the genuinely
+real `GetFileSizeEx` on it. `info.c`/`internal.c`/`opusfile.c` needed no
+changes. All 4 of 4 compile clean.
+
+**Corrected 2026-09-08, found in review:** the first version of this
+patch left `op_fseek`/`op_ftell`'s own `_WIN32` body untouched while
+`op_get_file_callbacks` was widened to always report seekable — meaning
+that body was now live, not merely compiling. It type-puns an 8-byte
+`opus_int64` as `fpos_t` for `fgetpos`/`fsetpos`, safe only if `fpos_t`
+is an opaque 8-byte blob (true of MSVCRT, false of nxdk's pdclib, whose
+`fpos_t` is a real ≥12-byte struct). The `OP_ASSERT` meant to catch this
+compiles to nothing without `OP_ENABLE_ASSERTIONS`, which nothing in
+this build defines — a silent stack overrun on any seek or tell, not a
+loud one. Fixed by widening `op_fseek`/`op_ftell` too, using this
+project's own `_fseeki64`/`_ftelli64` (already real, already used by
+`3rdparty/vorbis` under the identical condition) instead of making any
+new assumption about pdclib's `fpos_t` layout.
+
+Linked in alongside the 174 objects from the FIXED section above (178
+total): **0 duplicate symbols, 64 undefined** — down from 74, because
+the 10 `op_*`/`opus_tags_query` symbols `engine/client/soundlib/
+snd_ogg_opus.c` already referenced (part of the 74, previously
+unresolved because `opusfile` was not yet compiled) are now supplied.
+The 64 remaining are exactly the 63 parked networking symbols plus 1
+`_main`, unchanged. Re-verified with `tools/xbox-link-check.sh
+--expect-undefined 64`: exact match.
+
+Also found in review: `tools/xbox-link-check.sh`'s own `--expect-undefined`
+gate only ran when the flag was actually passed, so the exact command
+this script's own usage comment showed at the top — without the flag —
+exited 0 on a link with 64 real undefined symbols, indistinguishable
+from clean in the exit code. Fixed: any undefined symbol with no
+`--expect-undefined` given is now itself a hard failure.
+
+**Found in review, second pass:** making `op_get_file_callbacks` always
+report seekable had a side effect the first fix missed — `op_fseek`'s
+`SEEK_END` call to `fileno()` now runs on every seekable open (opusfile
+itself seeks to end during open, `opusfile.c:1399`), registering a
+borrowed slot in `compat/xbox`'s descriptor table. That slot is only
+ever released by this project's own `close(fd)`, never by plain
+`fclose()` — which is exactly what opusfile's default close callback
+was. Every seekable opusfile open would have permanently consumed one
+of `R3D_MAX_FDS - 3 = 61` slots for the process's whole life — latent,
+since nothing calls opusfile from the engine yet, but a real leak
+regardless of when it fires. Fixed with a new `_r3d_release_stream_fd`
+(releases a borrowed slot for a `FILE*` without touching the OS
+handle) and an NXDK-specific close callback (`op_fclose_nxdk`) that
+calls it before `fclose` — divergence #18. Re-verified: `stream.c`
+still compiles clean, and the full sweep plus link-check both still
+report their unchanged baselines (`187 ok, 34 failing`;
+`0 duplicate, 64 undefined`).
 
 Static linking is **mandatory**, not preferred: nxdk's `LoadLibraryExA`
 unconditionally returns NULL (`deps/nxdk/lib/winapi/libloaderapi.c:16-23`) and
