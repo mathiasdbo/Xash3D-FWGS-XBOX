@@ -50,10 +50,15 @@ fi
 export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
 
 EXPECT_UNDEFINED=""
+XBE_OUT=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--expect-undefined)
 			EXPECT_UNDEFINED="$2"
+			shift 2
+			;;
+		--xbe)
+			XBE_OUT="$2"
 			shift 2
 			;;
 		*)
@@ -493,4 +498,102 @@ if [ -n "$EXPECT_UNDEFINED" ]; then
 		echo "  Update the tracked count and whichever docs cite it." >&2
 		exit 1
 	fi
+fi
+
+# Found in review, 2026-09-09 (second pass): the symbol-identity check
+# below was originally only reached inside the `--xbe` block - meaning
+# the script's own documented, ordinary invocation (`--expect-undefined N`
+# alone, no `--xbe`, exactly the form the usage comment at the top of this
+# file shows) still only ever compared a COUNT, the exact false-clean
+# measurement class this whole check exists to close. A same-count swap
+# (one parked networking symbol accidentally getting defined somewhere
+# while an entirely different, genuinely new symbol goes undefined for an
+# unrelated reason) would still have passed as a clean "matches
+# --expect-undefined" result under ordinary use - it only got caught when
+# also requesting an XBE. Moved here, unconditional on `--xbe`, so every
+# successful --expect-undefined match is symbol-checked, not just the
+# ones that also happen to build an XBE. docs/r3d/
+# parked-undefined-symbols.txt is the real, checked-in reference - every
+# undefined symbol name this tree currently has, not just how many.
+if [ "$UNDEF" -gt 0 ]; then
+	PARKED_LIST="$REPO/docs/r3d/parked-undefined-symbols.txt"
+	if [ ! -f "$PARKED_LIST" ]; then
+		echo "link-check: $PARKED_LIST does not exist - nothing to compare the" >&2
+		echo "  real undefined symbol set against. Refusing to report a clean result." >&2
+		exit 1
+	fi
+	ACTUAL_UNDEF_LIST="$SCRATCH/xbe-actual-undefined.txt"
+	grep 'undefined symbol' "$LOG" | sed 's/.*undefined symbol: //' | sort -u > "$ACTUAL_UNDEF_LIST"
+	EXPECTED_UNDEF_LIST="$SCRATCH/xbe-expected-undefined.txt"
+	sort -u "$PARKED_LIST" > "$EXPECTED_UNDEF_LIST"
+	if ! diff -u "$EXPECTED_UNDEF_LIST" "$ACTUAL_UNDEF_LIST" > "$SCRATCH/xbe-undefined-diff.txt"; then
+		echo "link-check: REGRESSION - the actual undefined symbol set does not" >&2
+		echo "  match docs/r3d/parked-undefined-symbols.txt, even though the COUNT" >&2
+		echo "  may have matched --expect-undefined. Refusing to report a clean" >&2
+		echo "  result over an unexpected symbol set - see the diff:" >&2
+		cat "$SCRATCH/xbe-undefined-diff.txt" >&2
+		exit 1
+	fi
+	echo "link-check: actual undefined symbols match docs/r3d/parked-undefined-symbols.txt exactly."
+fi
+
+# --xbe: X1's own exit line names an actual XBE, not just a clean symbol
+# count. Deliberately a SEPARATE link, not a change to the measurement
+# link above: the measurement's own error-vs-warning accounting (TOTAL_ERR
+# counting only `lld: error:` lines) depends on undefined symbols staying
+# real link ERRORS, and -force:unresolved (lld's `-flavor link` emulation
+# of MSVC link.exe's real /force:unresolved flag - verified via `lld
+# -flavor link /?`, not guessed) turns them into warnings instead, which
+# would silently change what TOTAL_ERR means. Only reached after a
+# successful --expect-undefined match AND symbol-identity match above, so
+# this never runs on an unexplained, regressed, or substituted link.
+#
+# This is a genuine, deliberate use of /force:unresolved, not a way to
+# hide a real problem: every one of the (now symbol-verified) parked
+# symbols is the tracked, deliberately-parked networking group - forcing
+# them is exactly what "parked, not forgotten" means at link time. A
+# forced-unresolved import is not a silent no-op either: real MSVC/lld
+# semantics leave it resolving to address 0, so anything that ever
+# actually called one of these symbols would crash loudly, not pretend to
+# succeed - matching this project's own "fail honestly" posture elsewhere
+# (compat/xbox's chdir/getcwd stubs, stub_game's own honesty about
+# implementing nothing).
+if [ -n "$XBE_OUT" ]; then
+	XBE_EXE="$SCRATCH/xbe-build.exe"
+	# shellcheck disable=SC2086
+	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
+		-out:"$XBE_EXE" "@$RESPONSE" > "$SCRATCH/xbe-link.txt" 2>&1
+	XBE_LINK_STATUS=$?
+	if [ "$XBE_LINK_STATUS" -ne 0 ] || [ ! -f "$XBE_EXE" ]; then
+		echo "link-check: XBE build link failed (exit $XBE_LINK_STATUS) even with -force:unresolved -" >&2
+		echo "  this is not the same 63 (or N) parked symbols; something else broke. See:" >&2
+		echo "  $SCRATCH/xbe-link.txt" >&2
+		tail -n 20 "$SCRATCH/xbe-link.txt" >&2
+		exit 1
+	fi
+
+	CXBE="deps/nxdk/tools/cxbe/cxbe"
+	if [ ! -x "$CXBE" ] && [ ! -f "${CXBE}.exe" ]; then
+		echo "link-check: $CXBE not found or not built." >&2
+		echo "  Run: make -C deps/nxdk/tools/cxbe" >&2
+		exit 1
+	fi
+	if ! "$CXBE" -OUT:"$XBE_OUT" -TITLE:"Resonance3D" "$XBE_EXE" > "$SCRATCH/xbe-cxbe.txt" 2>&1; then
+		echo "link-check: cxbe conversion failed. See $SCRATCH/xbe-cxbe.txt" >&2
+		tail -n 20 "$SCRATCH/xbe-cxbe.txt" >&2
+		exit 1
+	fi
+	if [ ! -f "$XBE_OUT" ]; then
+		echo "link-check: cxbe reported success but $XBE_OUT does not exist." >&2
+		exit 1
+	fi
+	# XBEH, the real magic header every valid .xbe starts with - checked,
+	# not assumed from cxbe's own exit code alone.
+	MAGIC=$(head -c 4 "$XBE_OUT")
+	if [ "$MAGIC" != "XBEH" ]; then
+		echo "link-check: $XBE_OUT does not start with the XBEH magic header -" >&2
+		echo "  cxbe reported success but the output does not look like a real XBE." >&2
+		exit 1
+	fi
+	echo "link-check: $XBE_OUT is a real, valid XBE ($(wc -c < "$XBE_OUT") bytes)."
 fi

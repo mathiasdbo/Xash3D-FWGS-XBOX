@@ -1120,6 +1120,97 @@ section still only produces a test `.exe` via `nxdk-link`'s raw
 the 64 undefined symbols (no Xbox entry point exists in this tree at
 all yet) — an XBE cannot exist without one.
 
+### FIXED, 2026-09-09: a real .xbe exists
+
+`engine/platform/xbox/xbox_main.c` (new, divergence #23) provides
+`main()` — deliberately not `Host_Main`. Calling into the real engine
+boot sequence is genuinely X2+ work (`filesystem/`'s own POSIX layer is
+already flagged "bigger than it looked" below; nothing about a real
+boot — `Sys_Error`'s `SDL_INIT_VIDEO`-dropped path, `zone.c`'s
+allocator under real Xbox memory constraints, whether the log channel
+reaches a debugger — has been measured yet). Matches `deps/nxdk/
+samples/hello/main.c` almost exactly on purpose: an infinite loop
+calling `debugPrint`, nothing more, touching no engine subsystem at
+all. Resolving `_main` drops the tracked undefined-symbol count from
+**64 to exactly 63** — verified symbol-for-symbol, not just by count:
+the 63 remaining are exactly the parked networking group, `_main` gone
+entirely.
+
+**A linker cannot emit a loadable binary with unresolved symbols** —
+found attempting the actual `.xbe` conversion: `nxdk-link` with
+`-errorlimit:0` reports every undefined symbol but produces no `.exe`
+output at all when any remain, `-errorlimit:0` only means "don't stop
+after N errors," not "produce output anyway." The 63 parked networking
+symbols are real, deliberate, tracked debt — not something this phase
+should implement to get an `.exe` out. `lld`'s `-flavor link` mode
+(what `nxdk-link` wraps) genuinely supports MSVC `link.exe`'s real
+`/force:unresolved` flag (verified directly: `lld -flavor link /?`
+lists it, not guessed from documentation), which does exactly what
+"parked, not forgotten" already means at link time — a forced-
+unresolved import resolves to address `0`, so anything that ever
+actually called one of these 63 symbols would crash loudly, not
+silently succeed, matching this project's own "fail honestly" posture
+elsewhere (`compat/xbox`'s `chdir`/`getcwd` stubs, `stub_game`'s own
+honesty about implementing nothing).
+
+`tools/xbox-link-check.sh` gained a new `--xbe <path>` flag: after a
+successful `--expect-undefined` match (never on a mismatch or an
+unexplained failure), it runs a **separate** forced-unresolved link —
+deliberately not a change to the measurement link's own flags, since
+that link's error-vs-warning accounting depends on undefined symbols
+staying real link *errors*, and `/force:unresolved` turns them into
+warnings instead — then converts the result with `deps/nxdk/tools/
+cxbe/cxbe`, and verifies the output genuinely starts with the `XBEH`
+magic header rather than trusting `cxbe`'s exit code alone.
+
+**Corrected 2026-09-09, found in review: `--expect-undefined` only
+compares a COUNT, not which symbols they are.** A same-count swap —
+one parked networking symbol accidentally getting defined somewhere
+while an entirely different, genuinely new symbol goes undefined for
+an unrelated reason — would have passed that count check and then been
+silently forced into a real `.xbe`, hiding a real regression (a new
+address-0 landmine outside the deliberately-parked group) behind a
+"matches --expect-undefined" message that only ever checked the wrong
+thing. Fixed with `docs/r3d/parked-undefined-symbols.txt` (new) — the
+real, checked-in reference: every undefined symbol name, not just how
+many. Verified both ways: the real, correct 63-symbol set still
+builds; and a deliberately simulated same-count swap (one real symbol
+name replaced with a fake one in a scratch copy of the reference file)
+is caught and refused, with no `.xbe` produced.
+
+**Corrected 2026-09-09, found in a second review pass: the identity
+check above only ran inside the `--xbe` branch.** The script's own
+documented, ordinary invocation — `--expect-undefined N` alone, no
+`--xbe`, exactly the form its own usage comment shows — still only
+ever compared a COUNT, the exact false-clean class this check exists
+to close; the same-count swap only got caught when also requesting an
+XBE. Moved the identity check to run for every `UNDEF > 0` result,
+unconditional on `--xbe` — every successful `--expect-undefined` match
+is now symbol-checked, not just the ones that also happen to build an
+XBE. Re-verified both ways, this time without `--xbe` at all: the real
+63-symbol set still passes plainly, and the same simulated swap is
+caught and refused with no `--xbe` flag present.
+
+**Verified end to end, not just by exit code**: `tools/xbox-link-check.sh
+--expect-undefined 63 --xbe .sweep/resonance3d.xbe` produces a
+4,198,400-byte file starting with `5842 4548` (`XBEH`) — a real,
+structurally valid Original Xbox executable, built from the full
+engine + third-party audio + menu module + stub game module object
+set this entire phase has been proving compiles and links. Also
+verified the failure path: a deliberately wrong `--expect-undefined`
+count correctly refuses to attempt the XBE build at all, rather than
+silently producing one over an unexpected object set.
+
+**X1's own exit line, in full: "engine, filesystem, menu and a stub
+game module link into one XBE."** All five nouns are now literally
+true of this tree. Not a bootable, playable game — `main()` never
+calls into the real engine, `stub_game`'s server module would crash
+the instant any real gameplay function were invoked, and the 63 parked
+networking symbols are load-time landmines for the day networking
+stops being deliberately deferred — but a real `.xbe`, produced by
+this project's own real toolchain, from this project's own real
+source tree, genuinely exists for the first time.
+
 **Exit:** engine, filesystem, menu and a stub game module link into one XBE.
 
 ## X2 — Filesystem and headless boot
