@@ -5,6 +5,53 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X1: a C++ toolchain, and new/delete link clean
+
+Nothing in this tree had compiled a single C++ translation unit for
+Xbox before now - tools/xbox-cc.sh is C-only, and the menu module
+(3rdparty/mainui, 76 .cpp files) plus the HL SDK's client/server are
+all C++. Added tools/xbox-cxx.sh, the same reordered-includes/prelude/
+patch-preflight shape as xbox-cc.sh, calling nxdk-cxx's own flags
+reordered so compat/xbox wins.
+
+Verified against two representative test files (virtual dispatch,
+inheritance, templates, new/delete): both compile clean. Compiling is
+not linking, and this script only ever compiles, same scope as
+xbox-cc.sh.
+
+Found in review: an earlier version of this entry claimed
+deps/nxdk/lib/libcxx has no prebuilt library and that operator new/
+operator delete are undefined anywhere in the tree - false, a search
+that missed the library by name (it is deps/nxdk/lib/libc++.lib,
+literally "libc++" not "libcxx"). It is a real, prebuilt static
+library, already linked into every C++ target by nxdk's own CMake
+toolchain, and it genuinely defines operator new/delete as weak
+symbols. Verified by an actual link, not just reading the source: a
+new/delete test case linked against libc++.lib plus the base library
+set resolves both operators with zero errors. No compat/xbox shim is
+needed for new/delete - a caller linking real C++ code just needs
+libc++.lib in its library list.
+
+Also corrected two stale claims found while investigating this:
+3rdparty/mainui/exports.txt already exists (not "only filesystem/ and
+ref/gl/ have one" as an earlier entry claimed), and the exports.txt/
+xshlib.py mechanism this project's own earlier work already found is
+GNU ld -r/objcopy relocatable-object machinery this project bypasses
+for Xbox entirely - it cannot block a link that never calls it.
+
+Found in review: synthetic test files alone don't prove the tool works
+on the actual module they were built for - only that the flags work.
+Verified against a real 3rdparty/mainui/*.cpp file instead
+(utflib.cpp, with mainui's own wscript-declared include roots and
+STDINT_H define passed as extra args, deliberately not baked into the
+generic script): compiles clean. A second, more representative file
+surfaced two more real gaps along the way: the nested miniutl
+submodule was never initialised (undocumented anywhere), and
+miniutl.h includes the non-standard <new.h> MSVC ships but nxdk's
+libcxx does not provide. Neither blocks tools/xbox-cxx.sh itself -
+both are separate, unfixed gaps in the menu module specifically,
+recorded rather than chased further in this pass.
+
 ### Added — X1: opusfile linked in too, 74 undefined down to 64
 
 Fixed the last third-party audio gap: `opusfile`'s `stream.c` called

@@ -694,16 +694,123 @@ stands" below.
 (`filesystem_engine.c:41`) — struct versus pointer, same name.~~ **Fixed,
 see "FIXED" above — this was one of the ten, not the only one.**
 
-Also required here: **`exports.txt` does not exist for `ref_soft`, `menu`,
+~~Also required here: **`exports.txt` does not exist for `ref_soft`, `menu`,
 `server` or `client`** — only `filesystem/` and `ref/gl/` have one, and
 `xshlib.py:86` reads it unconditionally, so `--static-linking=ref_soft` fails
-today even on Linux. And note `XASH_STATIC_LIBS` implies
-`XASH_ALLOW_SAVERESTORE_OFFSETS`, which makes the **save format depend on link
-layout**.
+today even on Linux.~~ **Corrected 2026-09-09, found while investigating
+this: two claims here were wrong. `3rdparty/mainui/exports.txt` (the menu
+module) already exists (`GetMenuAPI`, `GetExtAPI`) — checked directly, not
+just "only filesystem/ and ref/gl/" as this row claimed. More importantly,
+`scripts/waifulib/xshlib.py`'s `apply_static()` (the code that actually
+reads `exports.txt`) is GNU `ld -r`/`objcopy -G` relocatable-object
+machinery — the exact "large structural list" fallback this section's own
+earlier row already retired as moot for Xbox, since there is no GNU
+binutils in this toolchain at all (`tools/xbox-cc.sh`/`tools/xbox-link-
+check.sh` bypass waf and `xshlib.py` entirely, doing every compile and
+link by hand). `exports.txt` existing or not existing for `server`/
+`client`/`ref_soft` cannot block an Xbox link that never calls
+`apply_static` in the first place. This is only a real requirement for the
+waf toolchain module (`DEST_OS` integration, X0's own open item) if that
+work ever chooses to route Xbox through `--static-linking` instead of
+continuing this project's own manual scripts — undecided, not yet needed.**
+And note `XASH_STATIC_LIBS` implies `XASH_ALLOW_SAVERESTORE_OFFSETS`, which
+makes the **save format depend on link layout**.
 
 Settle here which HL SDK base compiles under nxdk. **[from PS3]** Their goal
 10 used `FWGS/hlsdk-portable`, not the `halflife-updated` family pinned in
 `deps/`. Evidence, not proof, but it points one way.
+
+### MEASURED, 2026-09-09: the C++ toolchain compiles, and `new`/`delete` link clean
+
+The menu module (`3rdparty/mainui`, 76 `.cpp` files) and the HL SDK's
+`client`/`server` are all C++, and nothing in this tree had compiled a
+single C++ translation unit for Xbox before now — `tools/xbox-cc.sh` is
+C-only (`clang`, not `clang++`). Built `tools/xbox-cxx.sh`, the same
+reordered-includes/prelude/patch-preflight shape as `tools/xbox-cc.sh`
+(duplicated rather than shared — no sourcing convention exists yet between
+`tools/xbox-*.sh` scripts, not worth inventing for two copies), calling
+`nxdk-cxx`'s own flags (`deps/nxdk/bin/nxdk-cxx`) reordered so
+`compat/xbox` wins, same as the C script already does for `nxdk-cc`.
+
+Verified against two representative test files (virtual dispatch,
+inheritance, templates, `<cstdint>`, `new`/`delete`): both compile clean.
+**Compiling is not linking, and this script only ever compiles (`-c`),
+same scope as `tools/xbox-cc.sh`.**
+
+~~`deps/nxdk/lib/libcxx` vendors HEADERS only — grepped the whole
+`deps/nxdk` tree, there is no prebuilt `libcxx.lib` anywhere... genuinely
+undefined anywhere in this nxdk checkout... any C++ code using
+`new`/`delete` needs a `compat/xbox` shim for these two operators before
+it can link at all.~~ **False, corrected 2026-09-09, found in review: the
+search behind this claim missed the library by name alone.** The real
+file is `deps/nxdk/lib/libc++.lib` (literally "libc++", not "libcxx") —
+a genuine, prebuilt static library, not headers-only. `deps/nxdk/share/
+toolchain-nxdk.cmake:37` already links every C++ target against it, and
+`deps/nxdk/lib/libcxx/src/new.cpp` defines `operator new`/`operator
+delete` as weak symbols under `defined(NXDK)` — real, not aspirational.
+Verified by an actual `nxdk-link`, not just reading the source: the
+`new`/`delete` test case linked against `libc++.lib` plus the base
+library set (`libxboxkrnl`, `libpdclib`, `libwinapi`, `libnxdk_hal`,
+`libnxdk`, `libxboxrt`) resolves both operators with **zero errors** — a
+version with a real `main()` link with only a benign `lld` `.edata`-merge
+warning, nothing else. **No `compat/xbox` shim is needed for `new`/
+`delete` at all — a caller linking real C++ code just needs to add
+`deps/nxdk/lib/libc++.lib` to its library list**, the same way the
+existing 18-library set already gets built for C. Whatever else real C++
+code might need at link time (RTTI, `dynamic_cast`, exceptions — the
+`-fno-exceptions` flag both `nxdk-cxx` and `tools/xbox-cxx.sh` pass is
+still real and still means throwing/catching will not work) remains
+unmeasured, but the allocator question this row previously flagged as
+"a real decision, fixed once decided" was never actually open — `libc++`
+already decided it, correctly, for this exact platform.
+
+**Corrected 2026-09-09, found in review: synthetic test files alone don't
+prove the tool works on the actual module named above — they proved the
+toolchain flags work, not that mainui's own include/define surface is
+reachable.** Verified against a real `3rdparty/mainui/*.cpp` file
+instead, with mainui's own `wscript`-declared include roots and
+`STDINT_H=<cstdint>` define passed as extra args (deliberately not baked
+into `tools/xbox-cxx.sh` itself — that script's own docstring calls it a
+generic "one C++ translation unit" compiler, the same posture
+`tools/xbox-cc.sh` takes for the engine specifically but a menu-specific
+include list does not belong in a tool meant to also serve the HL SDK's
+`client`/`server` later). `3rdparty/mainui/utflib.cpp` — genuinely
+self-contained, no font/GL dependency — compiles clean with:
+
+```
+tools/xbox-cxx.sh 3rdparty/mainui/utflib.cpp \
+  -I3rdparty/mainui -I3rdparty/mainui/sdk_includes/common \
+  -I3rdparty/mainui/sdk_includes/engine -I3rdparty/mainui/sdk_includes/public \
+  -I3rdparty/mainui/sdk_includes/pm_shared -DSTDINT_H='<cstdint>'
+```
+
+A second, more representative file (`EventSystem.cpp`) surfaced two more
+real, concrete gaps along the way, worth recording rather than chasing
+further in this same pass:
+
+- **`3rdparty/mainui/miniutl` (a nested submodule, `FWGS/miniutl`) was
+  never initialised** — `git submodule status` reported it uninitialised
+  before this session, and nothing in `AGENTS.md`/`README.md` documents
+  running `git submodule update --init --recursive` (only a plain
+  non-recursive init, which does not descend into a submodule's own
+  `.gitmodules`). Fixed locally (`git -C 3rdparty/mainui submodule update
+  --init miniutl`) to continue investigating, but the actual fix belongs
+  in whatever setup instructions a fresh clone follows, not silently
+  worked around here.
+- **`3rdparty/mainui/miniutl/miniutl.h` includes `<new.h>`** (the
+  non-standard, pre-standard placement-new header MSVC has always
+  shipped, not the real `<new>` `tools/xbox-cxx.sh`'s test files already
+  used) — nxdk's `libcxx` does not provide it. Whether this needs a
+  one-line `compat/xbox` shim (`<new.h>` including `<new>` and nothing
+  else, matching how real MSVC's own `<new.h>` is defined) or whether
+  `miniutl` has a configuration knob to avoid it is unmeasured — not
+  fixed here.
+
+Neither of these blocks `tools/xbox-cxx.sh` itself, which does exactly
+what it claims (compiles one C++ translation unit given the right
+flags) — both are real, separate gaps in getting the *menu module
+specifically* to compile, exactly the kind of thing this measurement
+pass exists to surface before guessing at scope.
 
 **Exit:** engine, filesystem, menu and a stub game module link into one XBE.
 
