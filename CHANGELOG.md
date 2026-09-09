@@ -5,6 +5,120 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X2: filesystem/mpak_layout.h/.c, the real MPAK offset math
+
+MpakHeader6 has no offset table - "byte layout order IS the format" -
+and, verified directly against the real writer
+(tools/asset-studio/src/formats/PakManager.cpp's save(), not assumed
+from the header comment alone), that layout is NOT simply "walk the
+header's fields in declared order": every section is independently
+padded to a 2048-byte sector boundary, the vertex/index geometry block
+has no length field of its own at all (size = vCount/iCount times a
+fixed per-record size the header never states), and the texture block is
+target-dependent (Xbox writes one DXT atlas; PC writes three separate
+DXT arrays). Getting any of this wrong produces silent, wrong offsets,
+not a compile or link error.
+
+Mpak_ValidateHeader/Mpak_ComputeLayout compute every lump's real
+offset/length once, correctly, from a validated header. Real BSP-format
+lump sizes (dplane_t/dnode_t/dleaf_t/dclipnode_t/dmodel_t/dtexinfo_t)
+come from common/bspfile.h directly, not re-derived or guessed -
+confirmed byte-identical to the source .bsp's own lumps by tracing
+BspParser.cpp's getLumpData(LUMP_X) calls feeding PakManager's
+setXData() verbatim.
+
+Does not parse any lump's contents. dbspmodel_t and the
+Mod_LoadPlanes/Mod_LoadNodes/etc. functions that would consume these
+offsets are static, file-local to engine/common/mod_bmodel.c (confirmed
+by grep - nothing else in the tree references dbspmodel_t), so building
+runtime BSP structures from this layout is separate, larger, unwritten
+work that has to live inside that file.
+
+Verified two ways: a new filesystem/tests/mpak_layout.c unit test
+(hand-computes every expected offset independently - Mpak_RoundUpToSector
+is static, unreachable from the test - covering both PC/Xbox-target
+layouts plus six rejection cases: bad magic, bad version, a
+header-size mismatch simulating C/C++ struct drift, a truncated file, a
+non-divisible lump length, a lightmap-dimensions/byte-count mismatch);
+and a real bake from the actual retail install, both targets, where the
+computed end-of-archive offset landed EXACTLY on the real file size
+(9256960 and 8767488 bytes - not merely "close" or "under") and the
+computed entities-lump offset resolved to genuinely readable GoldSrc
+entity text.
+
+### Fixed — first Codex review round on the mpak-layout branch
+
+fs_offset_t is off_t (common/xash3d_types.h:48), confirmed 32-bit
+signed - sizeof(fs_offset_t) == 4 - on both Xbox
+(compat/xbox/sys/types.h:18) AND this PC/MSVC build, not Xbox-only.
+Mpak_PlaceLump took its length as fs_offset_t, and every call site
+passed a uint32_t header field straight through: a corrupted
+lenVisibility = 0xFFFFFFFF narrows to -1, which the old `length <= 0`
+check then treated as "empty, skip" instead of rejecting - a corrupted
+~4 GB lump silently vanishing instead of failing loudly. The geometry
+block had the same shape one level up -
+`(fs_offset_t)header->vCount * sizeof(mpak_vertex_t)` cast vCount to a
+32-bit signed type before multiplying, so a vCount of exactly 67108864
+makes the product exactly 2^32, wrapping to precisely 0 - a claimed 67
+million vertices reads back as "zero vertices, valid". Same fix
+applied to the lightmap width*height*layers*bytesPerPixel cross-check,
+same overflow shape.
+
+Fixed by widening every length to uint64_t before Mpak_PlaceLump ever
+sees it - the bounds check against fileSize is what decides validity
+now, not the parameter's own type; narrowing to fs_offset_t only
+happens after that check confirms the value fits safely.
+
+Verified with two real negative controls: reverted only this fix,
+confirmed two new regression tests (TestRejectsUint32MaxRawLumpLength,
+TestRejectsOverflowingVertexCount) genuinely fail against the old code
+and genuinely pass against the fix - both exercise the bug directly,
+not hypothetically, since fs_offset_t is confirmed 32-bit on this
+build too. Re-verified end to end: 6/6 filesystem tests pass, the real
+c1a3.mpak/c1a3_xbox.mpak cross-checks still compute identical
+byte-exact offsets (legitimate data was never near these overflow
+edges), and a full Xbox sweep + xbox-link-check.sh --xbe run still
+reports 0 duplicate/63 undefined unchanged and a real .xbe still
+builds.
+
+### Fixed — second Codex review round on the mpak-layout branch
+
+Round 1's own fix still had two more overflow paths one level up:
+
+Mpak_PlaceLump bounds-checked only the UNPADDED length against
+fileSize, then advanced *cursor by the separately-computed
+sector-rounded extent. A length that fits exactly (fileSize ==
+INT32_MAX, length == INT32_MAX - cursor, both individually in range)
+can still round up to one byte past what a 32-bit signed fs_offset_t
+cursor can hold, overflowing it. Fixed by computing the padded extent
+in uint64_t up front and bounds-checking THAT against the remaining
+space before *cursor or out->length are ever touched. The now-redundant
+Mpak_RoundUpToSector helper (same overflow shape, fs_offset_t-typed)
+was removed rather than left as dead, unsafe code beside its own fix.
+
+The lightmap size cross-check's plain uint64_t product
+(width * height * layers * bytesPerPixel) can itself overflow: three
+arbitrary uint32_t values multiplied together can need up to ~96 bits,
+and uint64_t only has 64. width=height=2^31, layers=1, bytesPerPixel=4
+makes the naive product exactly 2^64, wrapping to 0 - an "impossible"
+multi-gigapixel lightmap would have matched a declared
+lenLightmapAtlas of 0 and passed. Fixed with a checked multiplication
+helper (Mpak_CheckedMulU32) that rejects as soon as the running
+product would exceed UINT32_MAX - the ceiling for anything a real
+lenLightmapAtlas field could ever represent.
+
+Verified with two more real negative controls: reverted only this fix,
+confirmed two new regression tests (TestRejectsPaddedExtentOverflow,
+TestRejectsLightmapDimensionOverflow) genuinely fail against round 1's
+code and genuinely pass against this fix - both header-constructed
+directly since these are about the header's own internal arithmetic,
+not real file content. Re-verified end to end: 6/6 filesystem tests
+pass (10/10 within test_mpak_layout itself now), the real
+c1a3.mpak/c1a3_xbox.mpak cross-checks still compute identical
+byte-exact offsets, and a full Xbox sweep + xbox-link-check.sh --xbe
+run still reports 0 duplicate/63 undefined unchanged and a real .xbe
+still builds.
+
 ### Added — X2: filesystem/mpak.c, a real searchpath_t for .mpak archives
 
 filesystem/mpak.c (new) implements the searchpath_t interface (modelled

@@ -1269,6 +1269,35 @@ switch to recognize MPAK's magic and parse `MpakHeader6`'s lump layout
 into runtime `mnode_t`/`mleaf_t`/etc. structures - the actual brush-model
 port - remains unwritten and is real, separate, larger work.
 
+`filesystem/mpak_layout.h`/`.c` (new) now solve the hard, easy-to-get-wrong
+part of that remaining work: computing every lump's real byte offset and
+length. `MpakHeader6` has no offset table, and - verified directly against
+the real writer, `tools/asset-studio/src/formats/PakManager.cpp`'s
+`save()`, not assumed from the header comment alone - the actual layout
+isn't simply "walk the header's fields in declared order": every section
+is independently padded to a 2048-byte sector boundary, the vertex/index
+geometry block has no length field of its own at all, and the texture
+block is target-dependent (Xbox writes one DXT atlas; PC writes three
+separate DXT arrays). Getting any of that wrong produces silent, wrong
+offsets, not a compile or link error - exactly the failure class this
+project's practices exist to catch before it ships. Verified two ways: a
+real unit test (`filesystem/tests/mpak_layout.c`, hand-computes every
+expected offset independently rather than reusing the code under test,
+covering both target layouts plus six real corruption/rejection cases);
+and a real bake from the actual retail install, both targets, where the
+computed end-of-archive offset landed EXACTLY on the real file size
+(9256960 and 8767488 bytes) and the computed entities-lump offset
+resolved to genuinely readable GoldSrc entity text.
+
+Does not parse any lump's contents. `dbspmodel_t` and the
+`Mod_LoadPlanes`/`Mod_LoadNodes`/etc. functions that would actually
+consume these offsets are `static`, file-local to
+`engine/common/mod_bmodel.c` (confirmed by grep - nothing else in the
+tree references `dbspmodel_t`), so building runtime BSP structures from
+this layout has to live inside that file, not `filesystem/`. That's the
+next real step here, and it can now build on layout math already proven
+correct against real data instead of re-deriving it inline.
+
 **Exit:** the engine loads a map from `.mpak` and runs the server loop with
 `ref/null`.
 

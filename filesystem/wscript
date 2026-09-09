@@ -53,7 +53,11 @@ def build(bld):
 			'caseinsensitive' : 'tests/caseinsensitive.c',
 			'no-init': 'tests/no-init.c',
 			'filecopy': 'tests/filecopy.c',
-			'mpak': 'tests/mpak.c'
+			'mpak': 'tests/mpak.c',
+			# Standalone, unlike every test above (see tests/mpak_layout.c's
+			# own comment for why): links mpak_layout.c directly instead of
+			# loading filesystem_stdio.dylib/so/dll dynamically.
+			'mpak_layout': ['tests/mpak_layout.c', 'mpak_layout.c'],
 		}
 
 		for i in tests:
