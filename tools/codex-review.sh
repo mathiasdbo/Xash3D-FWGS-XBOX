@@ -129,18 +129,29 @@ STATUS=$?
 STDERR_CONTENT=$(cat "$STDERR_FILE")
 rm -f "$STDERR_FILE"
 
-if [ "$STATUS" -ne 0 ]; then
-	echo "codex-review: codex-companion.mjs exited $STATUS - Codex did not" >&2
-	echo "  complete a review turn." >&2
+# A nonzero exit here is NOT proof the review failed: codex-companion.mjs
+# has been observed to propagate the inner Codex CLI's own process exit
+# status as its own, even on a run that completed a full turn and printed a
+# fully valid, parseable result (parseError: null, a non-null result
+# object). Treating STATUS alone as fatal is exactly the bug the node
+# parser below already guards against one layer down (see its own comment)
+# - just recreated one layer up. So: only hard-fail on STATUS here when
+# there is no stdout to even attempt parsing (a real crash-before-output
+# case). Otherwise fall through to the node parser and let payload.parseError
+# / payload.result be the actual authority, same as a STATUS-0 run - if
+# parsing also fails, that failure path reports STATUS for context.
+if [ "$STATUS" -ne 0 ] && [ -z "$RAW" ]; then
+	echo "codex-review: codex-companion.mjs exited $STATUS with no output -" >&2
+	echo "  Codex did not complete a review turn." >&2
 	if [ -n "$STDERR_CONTENT" ]; then
 		echo "--- stderr ---" >&2
 		printf '%s\n' "$STDERR_CONTENT" >&2
 	fi
-	if [ -n "$RAW" ]; then
-		echo "--- stdout ---" >&2
-		printf '%s\n' "$RAW" >&2
-	fi
 	exit 2
+fi
+if [ "$STATUS" -ne 0 ]; then
+	echo "codex-review: warning - codex-companion.mjs exited $STATUS but printed" >&2
+	echo "  output; checking whether it is a valid result before failing." >&2
 fi
 
 # A nonempty stderr on a "successful" (exit 0) run is not fatal by itself -
