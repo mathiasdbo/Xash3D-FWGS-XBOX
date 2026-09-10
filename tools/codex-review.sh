@@ -23,6 +23,21 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
 BASE="main"
+# gpt-5.6-sol, not the account's own configured default (gpt-5.6-terra,
+# ~/.codex/config.toml): sol's own model-cache entry advertises a lower
+# default reasoning effort (low vs terra's medium) for the same "everyday
+# work" tier, at a real cost this project has now hit directly - the
+# account's usage limit was exhausted mid-session running reviews with no
+# model pin at all. --model, not documented in codex-companion.mjs's own
+# --help banner for adversarial-review but present and load-bearing in its
+# arg parser (the same undocumented-but-real shape as --json, found
+# earlier in this project's own history with this script), is passed
+# straight through unaliased to the underlying `codex` CLI - so this needs
+# the real model slug (gpt-5.6-sol), not a short name; codex-companion.mjs
+# only knows one alias itself ("spark"), and it is not this one.
+# CODEX_REVIEW_MODEL overrides it, e.g. CODEX_REVIEW_MODEL=gpt-5.6-terra
+# for a harder review when sol's lighter reasoning misses something subtle.
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-5.6-sol}"
 EXTRA=()
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -91,7 +106,7 @@ if [ "${#EXTRA[@]}" -gt 0 ]; then
 Additional focus for this run: ${EXTRA[*]}"
 fi
 
-echo "codex-review: reviewing ${MERGE_BASE}..HEAD (base: $BASE)" >&2
+echo "codex-review: reviewing ${MERGE_BASE}..HEAD (base: $BASE), model $CODEX_REVIEW_MODEL" >&2
 echo "codex-review: this can take several minutes." >&2
 
 STDERR_FILE=$(mktemp)
@@ -124,20 +139,57 @@ STDERR_FILE=$(mktemp)
 # codex-companion.mjs's internal recomputation trivially resolve to the
 # same SHA, so there is exactly one source of truth for the range instead
 # of two that happen to usually agree.
-RAW=$(node "$COMPANION" adversarial-review --json --base "$MERGE_BASE" --cwd "$REPO" "$FOCUS" 2>"$STDERR_FILE")
+RAW=$(node "$COMPANION" adversarial-review --json --base "$MERGE_BASE" --model "$CODEX_REVIEW_MODEL" --cwd "$REPO" "$FOCUS" 2>"$STDERR_FILE")
 STATUS=$?
 STDERR_CONTENT=$(cat "$STDERR_FILE")
 rm -f "$STDERR_FILE"
 
+# REVERTED, found wrong in Codex review of this exact change (round 2):
+# an earlier version of this block let a nonzero STATUS through to the
+# node parser below whenever stdout still parsed as valid JSON, on the
+# theory that codex-companion.mjs's own exit code is not proof of failure
+# by itself. That theory has a real, confirmed hole: STATUS comes from
+# codex.mjs's buildResultStatus(), `turnState.finalTurn?.status ===
+# "completed" ? 0 : 1` - a genuine, whole-turn lifecycle signal - but the
+# JSON payload this script parses comes from turnState.lastAgentMessage,
+# which codex.mjs's captureTurn() overwrites on EVERY streamed
+# agentMessage item, not only ones with phase "final_answer" and
+# lifecycle "completed" (confirmed by reading codex.mjs directly, not
+# assumed). So a turn that emits a plausible, well-formed, schema-shaped
+# JSON message mid-stream and THEN fails for an unrelated reason (hit a
+# usage limit, cancelled, crashed) leaves exactly that interim message
+# behind as `finalMessage`, with parseError: null and a fully-populated
+# result - indistinguishable, from this script's side, from a genuinely
+# completed review. Codex's own round-2 review of the fall-through
+# version demonstrated this for real against a live run
+# (review-mtvmjvf7-28ydid): an interim "approve" message survived a turn
+# that then failed on the usage limit. codex-companion.mjs does not
+# currently expose the one field that would disambiguate this
+# (finalAnswerSeen) through the JSON this script consumes, so there is no
+# reliable way to trust a nonzero-STATUS result here. A gate that can be
+# satisfied by an interrupted turn's interim commentary is worse than no
+# gate, because it gets believed - the same principle tools/xbox-sweep.sh's
+# own header comment already states about a sweep that cannot fail.
+# Any nonzero STATUS is fatal, full stop, exactly like a STATUS-0 run's
+# own "distrust a clean-looking success" stance below - the previous
+# false-failure case this script hit (a valid "approve" on a nonzero
+# STATUS from a genuinely completed-looking turn) stays an unsolved,
+# separate problem: real, but not safely fixable from this side without
+# codex-companion.mjs exposing more turn-completion detail than it does
+# today.
 if [ "$STATUS" -ne 0 ]; then
-	echo "codex-review: codex-companion.mjs exited $STATUS - Codex did not" >&2
-	echo "  complete a review turn." >&2
+	echo "codex-review: codex-companion.mjs exited $STATUS - the turn did not" >&2
+	echo "  reach a completed lifecycle state, so its output (even if it looks" >&2
+	echo "  like a valid, complete review) cannot be trusted as a passing" >&2
+	echo "  gate - it may be interim commentary from a turn that was then" >&2
+	echo "  interrupted, not a genuine final answer. Not treated as blocking" >&2
+	echo "  findings needing fix/justify - just an incomplete review." >&2
 	if [ -n "$STDERR_CONTENT" ]; then
 		echo "--- stderr ---" >&2
 		printf '%s\n' "$STDERR_CONTENT" >&2
 	fi
 	if [ -n "$RAW" ]; then
-		echo "--- stdout ---" >&2
+		echo "--- stdout (informational only, not a trusted result) ---" >&2
 		printf '%s\n' "$RAW" >&2
 	fi
 	exit 2
