@@ -1629,16 +1629,22 @@ real baker uses, run against the real Steam "Half-Life" install):
   addresses the submodel's normal array directly, exactly parallel to
   `vertindex`. Fixed to attribute normal-bones per mesh exactly too, no
   over-approximation. **The corrected, exact measurement finds ZERO
-  submodels over budget** — the previous "3 models, all bosses" was
-  entirely an artifact of adding an unrelated mesh's normal-bones into
-  the count; the worst real case across all 598 submodels in 296 studio
-  models is `v_grenade.mdl`'s `grenade_hand` mesh at 35 bones, 15 under
-  even the conservative ~50 estimate. **Bone-subset partitioning code is
-  not needed for the retail Half-Life content at all** — this closes the
-  question rather than scoping a fix. (`--budget N` still exists to
-  re-check headroom once a real VP20 shader constant layout narrows the
-  ~50 estimate; nothing was close enough at review time for that number
-  to matter.)
+  submodels over the provisional budget** — the previous "3 models, all
+  bosses" was entirely an artifact of adding an unrelated mesh's
+  normal-bones into the count; the worst real case across all 598
+  submodels in 296 studio models is `v_grenade.mdl`'s `grenade_hand` mesh
+  at 35 bones, 15 under the ~50 estimate. **This clears the retail
+  content against that estimate, but does NOT close the decision** —
+  found in a second review pass: the ~50-bone number is itself still an
+  unverified estimate (`config.h`'s 192 constants minus a guessed
+  view-projection-and-light reservation), not a measured hardware
+  palette, so 35 being under 50 is headroom against a guess, not proof
+  against the real budget. **Gate, matching the format-decision list
+  below: do not implement bone-subset partitioning code unless a
+  compiled VP20 shader's real constant layout puts the usable palette
+  below 35** — re-check for free with `census_bones --budget N` the
+  moment that real number exists. Until then this is "no partitioning
+  work is scheduled," not "no partitioning work will ever be needed."
 
 Then the format, decided once:
 
