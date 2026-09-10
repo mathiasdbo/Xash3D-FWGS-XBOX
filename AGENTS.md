@@ -199,10 +199,22 @@ touches, and never ask permission first.
   patches (`3rdparty/library_suffix`, `3rdparty/mainui`, `3rdparty/opusfile`
   auto-patched by `tools/xbox-cc.sh`) and an untracked `deps/nxdk` checkout,
   so two XISOs built from the identical commit can differ. Record, verbatim:
-  the commit hash, `git status --short` (captures the submodule/untracked
-  state at build time), and a SHA-256 of the XISO file itself, so the
-  changelog is bound to the literal artifact bytes even if the source tree
-  can't be perfectly reconstructed from the hash alone. Never overwrite an
+  the commit hash, `git submodule status` (pins every submodule's own
+  commit, not just which ones show dirty), `git status --short` (the
+  dirty/untracked summary at build time), and a SHA-256 of the XISO file
+  itself, so the changelog is bound to the literal artifact bytes even when
+  the source tree can't be perfectly reconstructed from the hash alone.
+  **Deliberately not required**: byte-level diffs of the dirty submodule
+  content, or hashes of every untracked file under `deps/nxdk` (a whole
+  vendored SDK checkout, not something this repo's own git tracks at all).
+  That would be real, audit-grade reproducibility, but it is disproportionate
+  to what this convention is actually for — a human going back to roughly
+  what a given XISO was, not a cryptographic rebuild guarantee. The three
+  patched submodules are deterministic from the pinned commit anyway
+  (`tools/xbox-cc.sh` reapplies the same tracked `patches/*.patch` files
+  every run); a real reproducibility/audit effort for `deps/nxdk` itself
+  would be separate, larger work, not a change to this changelog step.
+  Never overwrite an
   existing version folder — each one stays reachable so a specific build
   can always be gone back to.
 
