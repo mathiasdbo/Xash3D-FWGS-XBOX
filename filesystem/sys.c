@@ -502,7 +502,14 @@ int FS_SetCurrentDirectory( const char *path )
 		Sys_Error( "Changing directory to %s failed: %s\n", path, buf );
 		return false;
 	}
-#elif XASH_POSIX
+#elif XASH_POSIX || XASH_XBOX
+	// XASH_XBOX added here, not a new branch: X0.5 (docs/r3d/fork-plan.md),
+	// route 1 - compat/xbox/xbox_posix_io.c's chdir() now emulates a real
+	// per-process CWD (0 on success, -1 with errno set, same contract this
+	// branch already assumed for XASH_POSIX) instead of the honest,
+	// permanent ENOSYS it used to be. Divergence #6's own "one place in
+	// the ledger where 'compat/xbox supplies what that branch needs' is
+	// false" is no longer true - it does, now.
 	if( chdir( path ) < 0 )
 	{
 		Sys_Error( "Changing directory to %s failed: %s\n", path, strerror( errno ));

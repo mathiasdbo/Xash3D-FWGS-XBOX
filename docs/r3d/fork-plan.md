@@ -309,6 +309,24 @@ predicted. This is no longer an inference from reading the code; it is
 what actually happens. Neither route below is written yet. The exit
 line above is still unmet.
 
+**Route 1 written (divergence #31).** `compat/xbox/xbox_posix_io.c` now
+tracks a real, emulated process-wide `r3d_cwd` (default `"D:\\"`, the same
+`automount_d_drive` guarantee #29 already relies on); `chdir()` sets it for
+real (checked against `GetFileAttributesA`, not just accepted), `getcwd()`
+reads it back, and `r3d_native_path` — the one function every POSIX call in
+this file already routes through — resolves a relative path against it
+before the existing `/`→`\` conversion. `filesystem/sys.c`'s
+`FS_SetCurrentDirectory` now calls this real `chdir()` on Xbox instead of
+printing "not implemented, ignoring..." and returning true. Compiles and
+links clean (dedicated target: 96/0 sweep, 0 duplicate/0 undefined,
+unchanged XBE; broad sweep/link-check unaffected by the shared
+`filesystem/sys.c` edit). **Still not runtime-verified**: a live xemu
+re-boot to confirm `FI.numgames > 0` and `pak0.pak` actually opens was
+attempted with the network log channel (divergence #13) but a Windows
+Firewall prompt silently dropped the UDP listener across the attempts made
+this session — genuinely open, not inferred as done. The exit line above
+remains unmet until that boot is observed.
+
 ## X1 — Static linking proven
 
 ### MEASURED, 2026-09-06: ten duplicate symbols

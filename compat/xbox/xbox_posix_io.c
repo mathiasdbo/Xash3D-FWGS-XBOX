@@ -60,28 +60,95 @@ static FILE  *r3d_borrowed_file[R3D_MAX_FDS];
 
 /*
 ====================
+r3d_cwd
+
+X0.5 (docs/r3d/fork-plan.md), route 1 of the two the plan named: an
+emulated process-wide current directory, not a real one - nxdk has no
+SetCurrentDirectoryA and every path API resolves against
+ObDosDevicesDirectory() with no CWD in the stack at all
+(FS_AddGameHierarchy's "./" and "valve/" would otherwise NtOpenFile a DOS
+device named "." or "valve", which do not exist - STATUS_OBJECT_NAME_
+NOT_FOUND). The doc's own argument against this route was about chdir()
+AS AN API pretending to succeed at something real; this is different -
+on a single-process console nothing can observe an emulated CWD versus
+a real one, so it is not a lie, it is the only implementation a real CWD
+*could* have here.
+
+Defaults to "D:\" - not a guess: tools/xbox-dedicated-link-check.sh
+already links `-include:_automount_d_drive`, a CRT-init-array hook that
+mounts D: to the running XBE's own directory before main() runs, and
+engine/common/filesystem_engine.c's own XASH_XBOX branch (X2 W5,
+divergence #29) already hands FS_SetCurrentDirectory this exact value as
+its first real call - the default here is that same fact stated once
+more, defensively, for any path resolved before that call ever happens.
+====================
+*/
+static char r3d_cwd[MAX_PATH] = "D:\\";
+
+/*
+====================
+r3d_path_is_absolute
+
+The only absolute-path shape this platform has: a drive letter and a
+colon (FATX has no leading-slash-is-root convention the way POSIX does -
+there is no root without a drive). Every genuinely absolute path this
+codebase hands compat/xbox is built exactly this way (host.default_
+gamedir, fs_rootdir, "D:\" itself); everything else - GoldSrc's own
+"./", "valve/", "valve/maps/c1a3.bsp" - is relative and needs r3d_cwd.
+====================
+*/
+static int r3d_path_is_absolute( const char *path )
+{
+	return path && path[0] && path[1] == ':';
+}
+
+/*
+====================
 r3d_native_path
 
-GoldSrc paths are '/'-separated; FATX wants '\'. Converts in place into a
-caller-supplied buffer and returns it, or NULL if the path does not fit.
+GoldSrc paths are '/'-separated; FATX wants '\'. Converts into a
+caller-supplied buffer and returns it, or NULL if the result does not
+fit. An absolute path (r3d_path_is_absolute) converts unchanged, exactly
+as before this function grew CWD-awareness; a relative one resolves
+against r3d_cwd first, with one '\' joining the two - not simple
+concatenation, since neither r3d_cwd nor the incoming path can be
+assumed to already carry the separator at their shared edge.
 
-Deliberately does no other normalisation: no "..", no case folding, no drive
-mapping. Callers pass paths that filesystem/ has already assembled, and
-inventing a second normalisation layer here would make divergences between the
-two very hard to find.
+Still deliberately does no OTHER normalisation: no "..", no case
+folding, no collapsing a doubled separator at the join. Callers pass
+paths that filesystem/ has already assembled, and inventing a second
+normalisation layer here would make divergences between the two very
+hard to find - X0.5's own resolution adds exactly one new rule (relative
+resolves against r3d_cwd), not a general path-canonicalisation pass.
 ====================
 */
 static const char *r3d_native_path( const char *path, char *out, size_t out_size )
 {
-	size_t i;
+	size_t i = 0, j;
 
 	if( !path || !out || out_size == 0 )
 		return NULL;
 
-	for( i = 0; i < out_size - 1 && path[i]; i++ )
-		out[i] = ( path[i] == '/' ) ? '\\' : path[i];
+	if( !r3d_path_is_absolute( path ))
+	{
+		for( ; i < out_size - 1 && r3d_cwd[i]; i++ )
+			out[i] = r3d_cwd[i];
 
-	if( path[i] )   /* did not fit */
+		if( r3d_cwd[i] )   /* cwd alone did not fit */
+			return NULL;
+
+		if( i > 0 && out[i - 1] != '\\' && path[0] && path[0] != '/' )
+		{
+			if( i >= out_size - 1 )
+				return NULL;
+			out[i++] = '\\';
+		}
+	}
+
+	for( j = 0; i < out_size - 1 && path[j]; i++, j++ )
+		out[i] = ( path[j] == '/' ) ? '\\' : path[j];
+
+	if( path[j] )   /* did not fit */
 		return NULL;
 
 	out[i] = '\0';
@@ -604,28 +671,78 @@ int access( const char *path, int mode )
 ====================
 chdir / getcwd
 
-The Xbox has no per-process current directory. nxdk resolves every path
-against a drive letter and exposes no SetCurrentDirectoryA, so these fail
-rather than pretending to succeed - a silently wrong working directory would
-surface much later as files that cannot be found.
+X0.5, route 1 (docs/r3d/fork-plan.md) - see r3d_cwd's own comment above
+for why an emulated CWD is the right shape for this platform, not a lie
+this file used to refuse to tell. Real POSIX chdir semantics: an
+absolute argument replaces r3d_cwd outright; a relative one resolves
+against the CURRENT r3d_cwd first (through r3d_native_path, which
+already knows how), exactly like changing directory relative to where
+you already are. Existence is checked the same way FS_SysOpen would
+check any other directory - GetFileAttributesA, FILE_ATTRIBUTE_
+DIRECTORY - so chdir("valve") to a name that is not really a directory
+here fails instead of silently making every subsequent relative path
+wrong.
 
-filesystem_engine.c's root-directory detection has to be handed an absolute
-path instead. Tracked as X0.5 in docs/r3d/fork-plan.md.
+filesystem/sys.c's FS_SetCurrentDirectory routes to this function on
+Xbox now (widened alongside XASH_POSIX, not a new branch - this file's
+own contract already matches: 0 on success, -1 with errno set).
+
+Previously an honest, permanent ENOSYS ("the Xbox has no per-process
+current directory... fail rather than pretending to succeed" - a real,
+deliberate design note when it was written, now superseded by the case
+made above, kept here in the history rather than pretended away).
 ====================
 */
 int chdir( const char *path )
 {
-	( void )path;
-	errno = ENOSYS;
-	return -1;
+	char resolved[MAX_PATH];
+	DWORD attr;
+
+	if( !r3d_native_path( path, resolved, sizeof( resolved )))
+	{
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	attr = GetFileAttributesA( resolved );
+	if( attr == INVALID_FILE_ATTRIBUTES )
+	{
+		errno = r3d_errno_from_win32( GetLastError());
+		return -1;
+	}
+	if( !( attr & FILE_ATTRIBUTE_DIRECTORY ))
+	{
+		errno = ENOTDIR;
+		return -1;
+	}
+
+	if( strlen( resolved ) >= sizeof( r3d_cwd ))
+	{
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	memcpy( r3d_cwd, resolved, strlen( resolved ) + 1 );
+
+	return 0;
 }
 
 char *getcwd( char *buf, size_t size )
 {
-	( void )buf;
-	( void )size;
-	errno = ENOSYS;
-	return NULL;
+	size_t len = strlen( r3d_cwd );
+
+	if( !buf || size == 0 )
+	{
+		errno = EINVAL;
+		return NULL;
+	}
+	if( len >= size )
+	{
+		errno = ERANGE;
+		return NULL;
+	}
+
+	memcpy( buf, r3d_cwd, len + 1 );
+	return buf;
 }
 
 /*
