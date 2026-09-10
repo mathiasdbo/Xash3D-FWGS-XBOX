@@ -405,18 +405,60 @@ already uses:
    definition — the `.bsp` path is the reference.
 
 Prerequisite found while building for this pass: the dedicated test
-binary does not currently link on this PC configuration
+binary did not link on this PC configuration
 (`xash_tests_dedicated.exe`: unresolved `_Platform_Minimize_f` from
-`Host_Main`) — a pre-existing gap in the win32 dedicated build that the
-verification PR has to fix or route around (a small standalone
-`+map`-and-dump program against `filesystem_stdio` and the engine's
-static objects is the alternative).
+`Host_Main`). **Fixed in W3** (divergence #26): `Host_Main` registered
+"minimize" in the dead `else` of `if( Host_IsDedicated( ))` — the
+constant `true` under `XASH_DEDICATED` — and MSVC at `/Od` kept the
+reference where GCC folds it away; the `else` is now under
+`#if !XASH_DEDICATED`.
+
+**Built as W3** (divergence #27): `test_dumpworld <map> <outfile>` in
+`engine/common/mod_bmodel.c` (test builds only) loads the map through
+`Mod_LoadWorld` and writes the list above, pointers turned into indices,
+plus a CRC of each surface's lighting bytes sized the way
+`SV_RecursiveLightPoint` reads them (`sv_world.c:1549-1558`) and a CRC of
+each leaf's decompressed PVS; `tools/mpak-diff.sh` bakes, dumps from the
+retail directory via `-rodir` and from a directory whose only map source
+is the archive (`gameinfo.txt` with `basedir == gamedir`, so no `valve/`
+hierarchy is mounted underneath — a loose `.bsp` would otherwise win,
+divergence #24), byte-compares, and runs a control with the archive
+removed that must produce no dump. Results: `c1a3` and `crossfire`
+identical from `.bsp` and `.mpak` (5,897,085 / 5,143,563 bytes of dumped
+state, every leaf of the lump — the world's visible ones and the
+submodels' — included); the control run logs `Could not load model
+maps/c1a3.bsp from disk`; a flipped lighting byte, and a flipped ambient
+byte on the last world leaf and on the last leaf of the array, are each
+caught.
+
+Two corrections to this section's own assumptions, both measured by the
+first differential run:
+
+- `world.wadlist` is NOT dumped: `Mod_LoadEntities` keeps only the WADs
+  present on disk (`:2263-2279`), so the archive-only directory reports
+  0 where retail reports 4, legitimately; nothing but WAD texture lookup
+  reads the list.
+- "A directory holding only the archive" does not boot. The dedicated
+  host `Sys_Error`s without `gfx/conchars` (`host.c:1137`, and on win32
+  then waits on its console window forever), takes hulls 1..3 of every
+  brush model from `host.player_mins` that only the game library's
+  `pfnGetHullBounds` fills (`sv_pmove.c:449` — without `dlls/hl.dll` every
+  hull is empty and the dump differs), and once the library is loaded
+  `Sys_Error`s without `delta.lst` (`net_encode.c:854`). Grep-confirmed
+  those are the only file-dependent `Sys_Error` sites at startup. The
+  floor is `gfx.wad` + `dlls/hl.dll` + `delta.lst`; W4's directory holds
+  those, the archive and the manifest's loose files.
+
+Not covered by the dedicated differential: texture pixels
+(`Mod_LoadTextureData` is client-side, `:2855`) — names and dimensions
+are compared; the embedded miptex bytes rest on the baker's `--verify`
+until the client run.
 
 Then the X2 exit run: `+map c1a3` under `ref/null`/dedicated from a
-directory holding only `c1a3.mpak` and the manifest's loose files,
-server frames ticking. On Xbox that additionally needs `Host_Main`
-wired (X1 stopped short of it on purpose — `engine/platform/xbox/
-xbox_main.c`); that is its own package and its own risks.
+directory holding `c1a3.mpak`, the boot floor above and the manifest's
+loose files, server frames ticking. On Xbox that additionally needs
+`Host_Main` wired (X1 stopped short of it on purpose — `engine/platform/
+xbox/xbox_main.c`); that is its own package and its own risks.
 
 ## 9. Decisions taken by recommendation (override here if wrong)
 
@@ -439,8 +481,8 @@ xbox_main.c`); that is its own package and its own risks.
 |---|---|---|---|---|
 | W1 | **MPAK v7: BSP30 first sector, core lumps, profiles** | `tools/asset-studio`: `MpakHeader.h`, `PakManager.{h,cpp}`, `BspParser.cpp` (re-emit embedded miptex, copy 5 lumps), `main.cpp` (`--profile`); `filesystem/mpak.c` (probe at 0 and 128), `filesystem/mpak_layout.{h,c}` + tests (six lumps, descriptor offset, `dheader_t` cross-check) | Low — append-only past the first sector; layout test and real-bake cross-check already exist | v7 bakes of `c1a3` in both profiles; `test_mpak_layout` and `test_mpak` pass; end offset == file size for both; `dheader_t` table == computed layout; core `c1a3.mpak` ≤ 3 MB |
 | W2 | **Engine: nothing** — retained as a checkpoint | no files; the check is that `Mod_TestBmodelLumps` and `Mod_LoadBrushModel` accept a v7 archive as-is | — | `xash` / dedicated on PC: `map c1a3` from a directory holding only `c1a3.mpak` passes `SV_ValidateMap` and reaches `Mod_LoadBrushModel` (log lines), with no engine diff |
-| W3 | **Differential verification tool** | a small program under `engine/tests/` or `filesystem/tests/` that loads a map and dumps §8's fields; fixes or bypasses the `Platform_Minimize_f` dedicated-link gap | Low–medium | dump tool runs on PC; the §8 dump is byte-identical for `c1a3` and `crossfire` loaded from `.bsp` and from `.mpak` |
-| W4 | **Headless run from `.mpak` only** | game directory with only `.mpak` + manifest files; `+map c1a3` under `ref/null`/dedicated | Medium | server frames tick; `SV_TraceTexture`/light-point exercised by a scripted trace; X2 exit line on PC |
+| W3 | **Differential verification tool** — **done** | `test_dumpworld` in `engine/common/mod_bmodel.c` (test builds, #27) + `tools/mpak-diff.sh`; the `Platform_Minimize_f` link gap fixed in `host.c` (#26) | Low–medium | **met**: byte-identical dumps for `c1a3` and `crossfire` from `.bsp` and `.mpak`, control and negative control both behave (§8) |
+| W4 | **Headless run from `.mpak` + the boot floor** | game directory with `.mpak`, `gfx.wad`, `dlls/hl.dll`, `delta.lst` (§8's measured floor) + manifest files; `+map c1a3` under `ref/null`/dedicated | Medium | server frames tick; `SV_TraceTexture`/light-point exercised by a scripted trace; X2 exit line on PC |
 | W5 | **Xbox `Host_Main`** | `engine/platform/xbox/xbox_main.c`, whatever boot measures reveal | High (unmeasured, per X1's own notes) | same as W4, on hardware/xemu |
 | X9 | `nv2a` consumes the optional block; decides atlas/`lu/lv` | later | — | — |
 

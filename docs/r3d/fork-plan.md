@@ -1356,16 +1356,30 @@ the design doc, §2 and §10):
   proven against three single-byte negative controls; layout test at 18
   cases including the `dheader_t` cross-check; real-bake end-offset
   check exact for all three variants. See CHANGELOG.
-- **W2 — Engine: nothing**, kept as a checkpoint: `map c1a3` from a
-  directory holding only `c1a3.mpak` passes `SV_ValidateMap` and reaches
-  `Mod_LoadBrushModel` with no engine diff.
-- **W3 — Differential verification tool**: dump `model_t` from `.bsp` and
-  from `.mpak`, byte-compare every array, hull, PVS byte, per-surface
-  extents/bevels/samples offsets, per-texture name/dims/animation links.
-  W2 is measured with it, not asserted. Also fixes or routes around the
-  pre-existing `xash_tests_dedicated` link gap (`_Platform_Minimize_f`).
-- **W4 — Headless run** from a directory holding only `.mpak` + manifest
-  files, `+map c1a3` under `ref/null`/dedicated, server frames ticking.
+- **W2 — Engine: nothing**, kept as a checkpoint — **measured, by W3**:
+  `c1a3.mpak` from a directory whose only map source is the archive goes
+  through `Mod_LoadModel`'s version switch and the unmodified
+  `Mod_LoadBmodelLumps` into the same runtime state as the `.bsp`, with no
+  engine diff on the load path.
+- **W3 — Differential verification tool** — **done**: `test_dumpworld`
+  (`engine/common/mod_bmodel.c`, test builds, divergence #27) dumps the
+  runtime `model_t` — every array, hull, per-leaf PVS CRC, per-surface
+  extents/bevels/lighting CRC, per-texture name/dims/animation links —
+  and `tools/mpak-diff.sh` compares the `.bsp` and `.mpak` dumps
+  byte-for-byte with a no-archive control. `c1a3` and `crossfire`
+  identical (5,897,085 / 5,143,563 bytes of state, every leaf of the
+  lump); a flipped lighting byte and flipped leaf bytes in the archive
+  are caught. The `xash_tests_dedicated` link gap
+  (`_Platform_Minimize_f`) is fixed (divergence #26); the stock engine
+  tests run on this configuration for the first time (1011 pass). See
+  CHANGELOG.
+- **W4 — Headless run** from a directory holding `.mpak` + manifest files
+  **plus the measured boot floor** — `gfx.wad` (`host.c:1137`),
+  `dlls/hl.dll` (hull bounds come from `pfnGetHullBounds`,
+  `sv_pmove.c:449`) and `delta.lst` (`net_encode.c:854`); W3 found the
+  three by hitting each `Sys_Error` in turn and grep-confirmed there are
+  no others — `+map c1a3` under `ref/null`/dedicated, server frames
+  ticking.
 - **W5 — Xbox `Host_Main`**, the one part X1 deliberately stopped short of.
 
 W1 → W2 → W3 are ordered; W3's tool can be written against `.bsp` alone

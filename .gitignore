@@ -395,3 +395,4 @@ build-test/
 !.claude/workflows/*.js
 *.stackdump
 .sweep/
+.mpak-diff/

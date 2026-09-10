@@ -1265,7 +1265,20 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 		Cmd_AddRestrictedCommand( "quit", Sys_Quit_f, "quit the game" );
 		Cmd_AddRestrictedCommand( "exit", Sys_Quit_f, "quit the game" );
 	}
+	// Reference: host.c:1251 registers "minimize" in an unconditional else.
+	// Under XASH_DEDICATED, Host_IsDedicated() is the constant ( true )
+	// (common.h:99), so that else is dead - but no dedicated win32 build
+	// defines Platform_Minimize_f (only the sdl/fbdev/dos video files do,
+	// none of which a dedicated build compiles), and MSVC at /Od keeps the
+	// dead reference: `xash.exe`/`xash_tests_dedicated.exe` failed to link
+	// with "unresolved external symbol _Platform_Minimize_f referenced in
+	// function _Host_Main" on this tree's `-T debug --dedicated` build
+	// (docs/r3d/mpak-loading-design.md, section 8, found while building
+	// X2's verification). GCC folds the constant branch away even at -O0,
+	// which is why upstream never sees it. Divergence #26.
+#if !XASH_DEDICATED
 	else Cmd_AddRestrictedCommand( "minimize", Platform_Minimize_f, "minimize main window to tray" );
+#endif
 
 	host.errorframe = 0;
 

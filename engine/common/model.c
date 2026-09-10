@@ -183,6 +183,12 @@ void Mod_Init( void )
 
 	Cmd_AddCommand( "mapstats", Mod_PrintWorldStats_f, "show stats for currently loaded map" );
 	Cmd_AddCommand( "modellist", Mod_Modellist_f, "display loaded models list" );
+#if XASH_ENGINE_TESTS
+	// X2 W3 (docs/r3d/mpak-loading-design.md, section 8): the differential
+	// proof that a map loaded from .mpak is the same runtime model_t as the
+	// one loaded from its .bsp. Test builds only; driven by tools/mpak-diff.sh.
+	Cmd_AddCommand( "test_dumpworld", Mod_DumpWorld_f, "load a map as the world and dump its runtime BSP structures to a file" );
+#endif
 
 	Mod_ResetStudioAPI ();
 	Mod_InitStudioHull ();

@@ -4647,3 +4647,383 @@ int GAME_EXPORT Mod_SaveLump( const char *filename, const int lump, void *lumpda
 	FS_Close( f );
 	return LUMP_SAVE_OK;
 }
+
+#if XASH_ENGINE_TESTS
+/*
+===============================================================================
+
+	X2 W3: DIFFERENTIAL DUMP OF THE RUNTIME WORLD
+	(docs/r3d/mpak-loading-design.md, section 8; driven by tools/mpak-diff.sh)
+
+Loads a map as the world through the ordinary Mod_LoadWorld path and writes
+every structure the loaders above built - counts, planes, vertexes, edges,
+surfedges, texinfo, textures with their animation links, every surface with
+its extents/lightmap matrix/bevel/lighting bytes, marksurfaces, leafs with
+their decompressed PVS, nodes, clipnodes, hulls, submodels - as text, with
+every pointer turned into an index into the array it points at. Two dumps of
+the same map, one loaded from its .bsp and one from its .mpak, must be
+byte-identical; the .bsp path is the reference and any difference is a
+loader or baker bug. Floats print as %.9g, which round-trips IEEE single,
+so identical bits give identical text and different bits differ.
+
+Deliberately NOT dumped: world.wadlist[].usage (an .mpak embeds its
+textures, so the WAD lookup counts legitimately differ), and anything only
+a renderer fills (gl_texturenum, light_s/t, polys). Test builds only.
+
+===============================================================================
+*/
+static int Mod_DumpIndex( const void *p, const void *base, size_t elemsize )
+{
+	if( !p ) return -1;
+	return (int)(((const byte *)p - (const byte *)base ) / elemsize );
+}
+
+static void Mod_DumpVec3( file_t *f, const char *tag, const vec3_t v )
+{
+	FS_Printf( f, " %s=%.9g,%.9g,%.9g", tag, v[0], v[1], v[2] );
+}
+
+static void Mod_DumpPlane( file_t *f, const mplane_t *p )
+{
+	FS_Printf( f, " n=%.9g,%.9g,%.9g d=%.9g type=%d signbits=%d",
+		p->normal[0], p->normal[1], p->normal[2], p->dist, p->type, p->signbits );
+}
+
+static uint32_t Mod_DumpCRC( const void *data, size_t len )
+{
+	uint32_t crc;
+
+	CRC32_Init( &crc );
+	CRC32_ProcessBuffer( &crc, data, len );
+	return CRC32_Final( crc );
+}
+
+static void Mod_DumpClipnodes( file_t *f, const char *tag, const hull_t *hull, int count, qboolean bits32 )
+{
+	for( int i = 0; i < count; i++ )
+	{
+		if( bits32 )
+			FS_Printf( f, "%s %d: plane=%d c0=%d c1=%d\n", tag, i, hull->clipnodes32[i].planenum, hull->clipnodes32[i].children[0], hull->clipnodes32[i].children[1] );
+		else
+			FS_Printf( f, "%s %d: plane=%d c0=%d c1=%d\n", tag, i, hull->clipnodes16[i].planenum, hull->clipnodes16[i].children[0], hull->clipnodes16[i].children[1] );
+	}
+}
+
+static void Mod_DumpModelSummary( file_t *f, const model_t *mod, const model_t *world )
+{
+	FS_Printf( f, "model %s: type=%d flags=0x%x firstmodelsurface=%d nummodelsurfaces=%d numleafs=%d radius=%.9g",
+		mod->name, mod->type, mod->flags, mod->firstmodelsurface, mod->nummodelsurfaces, mod->numleafs, mod->radius );
+	Mod_DumpVec3( f, "mins", mod->mins );
+	Mod_DumpVec3( f, "maxs", mod->maxs );
+	FS_Printf( f, "\n" );
+
+	for( int h = 0; h < MAX_MAP_HULLS; h++ )
+	{
+		const hull_t *hull = &mod->hulls[h];
+
+		// hulls 1..3 of every model share the world's hull 1 clipnode array
+		// (Mod_MakeHull0 / the non-bsp30ext branch above, :1983-2014)
+		FS_Printf( f, "hull %d: first=%d last=%d planes=%s clipnodes=%s",
+			h, hull->firstclipnode, hull->lastclipnode,
+			hull->planes == NULL ? "none" : ( hull->planes == mod->planes ? "model" : "other" ),
+			hull->clipnodes16 == NULL ? "none" : ( h > 0 && hull->clipnodes16 == world->hulls[1].clipnodes16 ? "world-hull1" : "own" ));
+		Mod_DumpVec3( f, "clip_mins", hull->clip_mins );
+		Mod_DumpVec3( f, "clip_maxs", hull->clip_maxs );
+		FS_Printf( f, "\n" );
+	}
+}
+
+void Mod_DumpWorld_f( void )
+{
+	char      mapname[MAX_QPATH];
+	model_t   *mod;
+	file_t    *f;
+	byte      *pvs;
+
+	if( Cmd_Argc() != 3 )
+	{
+		Con_Printf( S_USAGE "test_dumpworld <mapname> <outfile>\n" );
+		return;
+	}
+
+	Q_snprintf( mapname, sizeof( mapname ), "maps/%s.bsp", Cmd_Argv( 1 ));
+	mod = Mod_LoadWorld( mapname, true ); // crash = true: a map that does not load ends the run loudly
+
+	if( !mod || mod->type != mod_brush )
+	{
+		Con_Printf( S_ERROR "test_dumpworld: %s did not load as a brush model\n", mapname );
+		return;
+	}
+
+	f = FS_Open( Cmd_Argv( 2 ), "wb", false );
+	if( !f )
+	{
+		Con_Printf( S_ERROR "test_dumpworld: cannot write %s\n", Cmd_Argv( 2 ));
+		return;
+	}
+
+	const qboolean qbsp2 = FBitSet( mod->flags, MODEL_QBSP2 ) ? true : false;
+
+	FS_Printf( f, "world %s\n", mod->name );
+	FS_Printf( f, "counts: submodels=%d planes=%d leafs=%d vertexes=%d edges=%d nodes=%d texinfo=%d surfaces=%d surfedges=%d clipnodes=%d marksurfaces=%d textures=%d\n",
+		mod->numsubmodels, mod->numplanes, mod->numleafs, mod->numvertexes, mod->numedges, mod->numnodes, mod->numtexinfo,
+		mod->numsurfaces, mod->numsurfedges, mod->numclipnodes, mod->nummarksurfaces, mod->numtextures );
+	// world.wadlist/wadcount are deliberately absent: Mod_LoadEntities keeps
+	// only the worldspawn WADs that exist on disk (:2263-2279), so a
+	// directory holding the archive and no WADs legitimately reports 0
+	// where the retail directory reports 4 - the first differential run
+	// showed exactly that, and nothing but WAD texture lookup reads the list.
+	FS_Printf( f, "world: flags=0x%x version=%u visbytes=%u fatbytes=%u", world.flags, world.version, (uint)world.visbytes, (uint)world.fatbytes );
+	Mod_DumpVec3( f, "mins", world.mins );
+	Mod_DumpVec3( f, "maxs", world.maxs );
+	Mod_DumpVec3( f, "size", world.size );
+	FS_Printf( f, "\n" );
+	FS_Printf( f, "message: %s\n", world.message ? world.message : "" );
+	FS_Printf( f, "compiler: %s\n", world.compiler ? world.compiler : "" );
+	FS_Printf( f, "generator: %s\n", world.generator ? world.generator : "" );
+	FS_Printf( f, "entities: len=%u crc=%08x\n", mod->entities ? (uint)Q_strlen( mod->entities ) : 0, mod->entities ? Mod_DumpCRC( mod->entities, Q_strlen( mod->entities )) : 0 );
+
+	Mod_DumpModelSummary( f, mod, mod );
+
+	for( int i = 0; i < mod->numsubmodels; i++ )
+	{
+		const dmodel_t *bm = &mod->submodels[i];
+
+		FS_Printf( f, "submodel %d: headnode=%d,%d,%d,%d visleafs=%d firstface=%d numfaces=%d",
+			i, bm->headnode[0], bm->headnode[1], bm->headnode[2], bm->headnode[3], bm->visleafs, bm->firstface, bm->numfaces );
+		Mod_DumpVec3( f, "mins", bm->mins );
+		Mod_DumpVec3( f, "maxs", bm->maxs );
+		Mod_DumpVec3( f, "origin", bm->origin );
+		FS_Printf( f, "\n" );
+	}
+
+	for( int i = 0; i < mod->numplanes; i++ )
+	{
+		FS_Printf( f, "plane %d:", i );
+		Mod_DumpPlane( f, &mod->planes[i] );
+		FS_Printf( f, "\n" );
+	}
+
+	for( int i = 0; i < mod->numvertexes; i++ )
+	{
+		FS_Printf( f, "vertex %d:", i );
+		Mod_DumpVec3( f, "p", mod->vertexes[i].position );
+		FS_Printf( f, "\n" );
+	}
+
+	for( int i = 0; i < mod->numedges; i++ )
+	{
+		if( qbsp2 )
+			FS_Printf( f, "edge %d: %u %u\n", i, mod->edges32[i].v[0], mod->edges32[i].v[1] );
+		else
+			FS_Printf( f, "edge %d: %u %u\n", i, mod->edges16[i].v[0], mod->edges16[i].v[1] );
+	}
+
+	for( int i = 0; i < mod->numsurfedges; i++ )
+		FS_Printf( f, "surfedge %d: %d\n", i, mod->surfedges[i] );
+
+	for( int i = 0; i < mod->numtexinfo; i++ )
+	{
+		const mtexinfo_t *ti = &mod->texinfo[i];
+		int tex = -1;
+
+		for( int j = 0; j < mod->numtextures; j++ )
+		{
+			if( mod->textures[j] == ti->texture )
+			{
+				tex = j;
+				break;
+			}
+		}
+
+		FS_Printf( f, "texinfo %d: s=%.9g,%.9g,%.9g,%.9g t=%.9g,%.9g,%.9g,%.9g texture=%d flags=0x%x faceinfo=%d\n", i,
+			ti->vecs[0][0], ti->vecs[0][1], ti->vecs[0][2], ti->vecs[0][3],
+			ti->vecs[1][0], ti->vecs[1][1], ti->vecs[1][2], ti->vecs[1][3],
+			tex, ti->flags, ti->faceinfo != NULL );
+	}
+
+	for( int i = 0; i < mod->numtextures; i++ )
+	{
+		const texture_t *tx = mod->textures[i];
+		int next = -1, alt = -1;
+
+		if( !tx )
+		{
+			FS_Printf( f, "texture %d: NULL\n", i );
+			continue;
+		}
+
+		for( int j = 0; j < mod->numtextures; j++ )
+		{
+			if( tx->anim_next && mod->textures[j] == tx->anim_next ) next = j;
+			if( tx->alternate_anims && mod->textures[j] == tx->alternate_anims ) alt = j;
+		}
+
+		FS_Printf( f, "texture %d: name=%s width=%u height=%u anim_total=%d anim_min=%d anim_max=%d anim_next=%d alternate_anims=%d\n",
+			i, tx->name, tx->width, tx->height, tx->anim_total, tx->anim_min, tx->anim_max, next, alt );
+	}
+
+	for( int i = 0; i < mod->numsurfaces; i++ )
+	{
+		const msurface_t   *surf = &mod->surfaces[i];
+		const mextrasurf_t *info = surf->info;
+		int nstyles = 0;
+
+		while( nstyles < MAXLIGHTMAPS && surf->styles[nstyles] != 255 )
+			nstyles++;
+
+		FS_Printf( f, "surface %d: flags=0x%x plane=%d firstedge=%d numedges=%d texturemins=%d,%d extents=%d,%d texinfo=%d styles=%d,%d,%d,%d samples=%d",
+			i, surf->flags, Mod_DumpIndex( surf->plane, mod->planes, sizeof( mplane_t )), surf->firstedge, surf->numedges,
+			surf->texturemins[0], surf->texturemins[1], surf->extents[0], surf->extents[1],
+			Mod_DumpIndex( surf->texinfo, mod->texinfo, sizeof( mtexinfo_t )),
+			surf->styles[0], surf->styles[1], surf->styles[2], surf->styles[3],
+			Mod_DumpIndex( surf->samples, mod->lightdata, sizeof( color24 )));
+
+		// the lighting bytes the server and both renderers read for this
+		// face: smax*tmax samples per style, exactly as SV_RecursiveLightPoint
+		// sizes them (sv_world.c:1549-1558)
+		if( surf->samples && info && !FBitSet( surf->flags, SURF_DRAWTILED ) && nstyles > 0 )
+		{
+			int sample_size = Mod_SampleSizeForFace( surf );
+			int smax = ( info->lightextents[0] / sample_size ) + 1;
+			int tmax = ( info->lightextents[1] / sample_size ) + 1;
+			size_t bytes = (size_t)smax * tmax * nstyles * sizeof( color24 );
+
+			FS_Printf( f, " lightbytes=%u lightcrc=%08x", (uint)bytes, Mod_DumpCRC( surf->samples, bytes ));
+		}
+
+		if( info )
+		{
+			Mod_DumpVec3( f, "mins", info->mins );
+			Mod_DumpVec3( f, "maxs", info->maxs );
+			Mod_DumpVec3( f, "origin", info->origin );
+			FS_Printf( f, " lightmapmins=%d,%d lightextents=%d,%d lmvecs=%.9g,%.9g,%.9g,%.9g/%.9g,%.9g,%.9g,%.9g",
+				info->lightmapmins[0], info->lightmapmins[1], info->lightextents[0], info->lightextents[1],
+				info->lmvecs[0][0], info->lmvecs[0][1], info->lmvecs[0][2], info->lmvecs[0][3],
+				info->lmvecs[1][0], info->lmvecs[1][1], info->lmvecs[1][2], info->lmvecs[1][3] );
+
+			if( info->bevel )
+			{
+				const mfacebevel_t *bevel = info->bevel;
+
+				FS_Printf( f, " bevel: numedges=%d radius=%.9g contents=%d", bevel->numedges, bevel->radius, bevel->contents );
+				Mod_DumpVec3( f, "origin", bevel->origin );
+				for( int j = 0; j < bevel->numedges; j++ )
+				{
+					FS_Printf( f, " e%d:", j );
+					Mod_DumpPlane( f, &bevel->edges[j] );
+				}
+			}
+			else FS_Printf( f, " bevel: none" );
+		}
+		else FS_Printf( f, " info: none" );
+
+		FS_Printf( f, "\n" );
+	}
+
+	for( int i = 0; i < mod->nummarksurfaces; i++ )
+		FS_Printf( f, "marksurface %d: %d\n", i, Mod_DumpIndex( mod->marksurfaces[i], mod->surfaces, sizeof( msurface_t )));
+
+	pvs = world.visbytes ? Mem_Malloc( mod->mempool, world.visbytes ) : NULL;
+
+	// numleafs is the WORLD's visible leaf count once Mod_SetupSubmodels
+	// has run (:2145 sets it from dmodel_t::visleafs; com_model.h:354 "not
+	// counting 0") - not the array's size: the leaf array holds every leaf
+	// of the lump (bmod->numleafs at :3551-3552), the world's visleafs + 1
+	// first, then the submodels' leafs, all reached through node children.
+	// Found in review, twice: the first version stopped at numleafs and
+	// skipped the last visible leaf; the corrected "0 through numleafs"
+	// still skipped every submodel leaf (c1a3: 2384 in the lump, 1241
+	// world). The array size is not retained, so it is recovered from the
+	// nodes: every leaf a node points at is in range, and the array is
+	// contiguous, so the highest referenced index bounds it.
+	int leafcount = mod->numleafs + 1;
+	for( int i = 0; i < mod->numnodes; i++ )
+	{
+		for( int side = 0; side < 2; side++ )
+		{
+			const mnode_t *child = node_child( &mod->nodes[i], side, mod );
+
+			if( child && child->contents < 0 )
+			{
+				int idx = Mod_DumpIndex( child, mod->leafs, sizeof( mleaf_t ));
+				if( idx + 1 > leafcount ) leafcount = idx + 1;
+			}
+		}
+	}
+	FS_Printf( f, "leafarray: %d\n", leafcount );
+
+	for( int i = 0; i < leafcount; i++ )
+	{
+		const mleaf_t *leaf = &mod->leafs[i];
+
+		FS_Printf( f, "leaf %d: contents=%d parent=%d vis=%d firstmarksurface=%d nummarksurfaces=%d cluster=%d ambient=%d,%d,%d,%d minmaxs=%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+			i, leaf->contents, Mod_DumpIndex( leaf->parent, mod->nodes, sizeof( mnode_t )),
+			leaf->compressed_vis ? (int)( leaf->compressed_vis - mod->visdata ) : -1,
+			leaf->firstmarksurface ? (int)( leaf->firstmarksurface - mod->marksurfaces ) : -1, leaf->nummarksurfaces, leaf->cluster,
+			leaf->ambient_sound_level[0], leaf->ambient_sound_level[1], leaf->ambient_sound_level[2], leaf->ambient_sound_level[3],
+			leaf->minmaxs[0], leaf->minmaxs[1], leaf->minmaxs[2], leaf->minmaxs[3], leaf->minmaxs[4], leaf->minmaxs[5] );
+
+		// the PVS every consumer sees for this leaf (Mod_LeafPVS and friends
+		// decompress exactly this way, :1147)
+		if( pvs )
+		{
+			Mod_DecompressPVS( pvs, leaf->compressed_vis, world.visbytes );
+			FS_Printf( f, " pvscrc=%08x", Mod_DumpCRC( pvs, world.visbytes ));
+		}
+		FS_Printf( f, "\n" );
+	}
+
+	if( pvs ) Mem_Free( pvs );
+
+	for( int i = 0; i < mod->numnodes; i++ )
+	{
+		const mnode_t *node = &mod->nodes[i];
+
+		FS_Printf( f, "node %d: contents=%d parent=%d plane=%d firstsurface=%d numsurfaces=%d minmaxs=%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+			i, node->contents, Mod_DumpIndex( node->parent, mod->nodes, sizeof( mnode_t )),
+			Mod_DumpIndex( node->plane, mod->planes, sizeof( mplane_t )),
+			node_firstsurface( node, mod ), node_numsurfaces( node, mod ),
+			node->minmaxs[0], node->minmaxs[1], node->minmaxs[2], node->minmaxs[3], node->minmaxs[4], node->minmaxs[5] );
+
+		for( int side = 0; side < 2; side++ )
+		{
+			const mnode_t *child = node_child( node, side, mod );
+
+			if( !child )
+				FS_Printf( f, " c%d=none", side );
+			else if( child->contents < 0 )
+				FS_Printf( f, " c%d=L%d", side, Mod_DumpIndex( child, mod->leafs, sizeof( mleaf_t )));
+			else
+				FS_Printf( f, " c%d=N%d", side, Mod_DumpIndex( child, mod->nodes, sizeof( mnode_t )));
+		}
+		FS_Printf( f, "\n" );
+	}
+
+	// hull 0 is built from the nodes (Mod_MakeHull0 allocates exactly
+	// numnodes records, :1911); hulls 1..3 of the world share one array of
+	// the map's clipnodes (:1983-2007). Found in review: the first version
+	// sized hull 0 as lastclipnode - firstclipnode + 1, but after
+	// Mod_SetupSubmodels lastclipnode is the count of nodes reachable from
+	// the model's headnode (:2126, one increment per node at :1791), not
+	// an index - one record past the allocation for a world-only map, and
+	// short of the shared array for any map with inline brush models.
+	if( mod->hulls[0].clipnodes16 )
+		Mod_DumpClipnodes( f, "hull0node", &mod->hulls[0], mod->numnodes, qbsp2 );
+	if( mod->hulls[1].clipnodes16 )
+		Mod_DumpClipnodes( f, "clipnode", &mod->hulls[1], mod->numclipnodes, qbsp2 );
+
+	for( int i = 1; i < mod->numsubmodels; i++ )
+	{
+		const model_t *sub = Mod_FindName( va( "*%i", i ), false );
+
+		if( sub ) Mod_DumpModelSummary( f, sub, mod );
+		else FS_Printf( f, "model *%i: missing\n", i );
+	}
+
+	FS_Printf( f, "end\n" );
+	FS_Close( f );
+
+	Con_Printf( "test_dumpworld: %s -> %s (%d surfaces, %d leafs, %d textures)\n", mod->name, Cmd_Argv( 2 ), mod->numsurfaces, mod->numleafs, mod->numtextures );
+}
+#endif // XASH_ENGINE_TESTS

@@ -5,6 +5,112 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X2 W3: the .bsp-vs-.mpak differential (test_dumpworld, tools/mpak-diff.sh)
+
+"The engine loads a map from .mpak" is now measured, not asserted
+(docs/r3d/mpak-loading-design.md, section 8). `test_dumpworld <map>
+<outfile>` (engine/common/mod_bmodel.c, test builds only, registered in
+Mod_Init) loads the map through the ordinary Mod_LoadWorld path and
+writes every structure the loaders built - counts, planes, vertexes,
+edges, surfedges, texinfo, textures with their animation links, every
+surface with its extents, lightmap matrix, bevel planes and a CRC of the
+lighting bytes the server reads for it, marksurfaces, every leaf with a
+CRC of its decompressed PVS, nodes, clipnodes, hulls, submodels - with
+pointers turned into indices. tools/mpak-diff.sh bakes each map in the
+core profile, dumps it from the retail directory (reached read-only via
+-rodir) and from a directory whose only map source is the archive
+(gameinfo with basedir == gamedir, so no valve/ hierarchy is mounted
+underneath), and requires the two dumps to be byte-identical; a control
+run per map removes the archive and must produce no dump at all.
+
+Results: c1a3 and crossfire load from .mpak into byte-identical state
+(5,897,085 and 5,143,563 bytes of dumped structures, every leaf of the
+lump included - see the review round below); the control run
+logs "Could not load model maps/c1a3.bsp from disk"; a flipped lighting
+byte in the archive is caught at the first surface's lightcrc. W2 - "the
+engine needs no change" - is therefore measured too: the archive went
+through SV-side validation, Mod_LoadModel's version switch and the
+unmodified Mod_LoadBmodelLumps with no engine diff. Divergence #27.
+
+Two things the first differential run taught, both environmental, both
+now handled in the tool and recorded for W4:
+
+- A dedicated boot that loads a map needs exactly three files besides
+  the archive: gfx.wad (Host_InitCommon Sys_Errors without gfx/conchars,
+  host.c:1137 - and on a win32 dedicated build Sys_Error then waits on
+  the console window forever), dlls/hl.dll (hulls 1..3 of every brush
+  model take their bounds from host.player_mins, which only the game
+  library's pfnGetHullBounds fills, sv_pmove.c:449 - without it the
+  world loads with three empty hulls), and delta.lst (net_encode.c:854,
+  reached once the library is loaded). Grep-confirmed those are the only
+  file-dependent Sys_Error sites at startup; everything else missing
+  only warns. So "a directory holding only the .mpak" is really "the
+  archive plus that floor".
+- world.wadlist differs legitimately: Mod_LoadEntities keeps only the
+  WADs present on disk (mod_bmodel.c:2263-2279), so it is left out of
+  the dump; nothing but WAD texture lookup reads it.
+
+What the dedicated differential does not cover: texture pixels
+(Mod_LoadTextureData is client-side, mod_bmodel.c:2855) - names and
+dimensions are compared, the embedded miptex bytes rest on the baker's
+own --verify until the client run.
+
+### Fixed — first Codex review round on the mpak-diff-tool branch
+
+Two findings, both real, plus what the requested negative control found
+on top:
+
+- The leaf loop ran to model_t::numleafs, which after Mod_SetupSubmodels
+  is the world's VISIBLE leaf count (mod_bmodel.c:2145, from
+  dmodel_t::visleafs), so the last visible leaf was never dumped. Codex's
+  fix - 0 through numleafs, as the PHS builder walks it (:3655) - was
+  applied and then measured with the control it asked for: flipping the
+  last leaf's ambient byte in the archive. That control flipped the last
+  leaf of the LUMP (c1a3: index 2383 of 2384) and was NOT detected,
+  because the array holds every leaf of the lump - the world's 1241,
+  then the submodels' leafs, all reached through node children - and
+  numleafs + 1 covers only the world's. The array size is not retained
+  in model_t, so the dumper now recovers it from the nodes (the highest
+  leaf index any node child points at; the array is contiguous) and
+  dumps all of them: 2384 for c1a3, 1856 for crossfire. Both controls
+  now detect: leaf 1240 (the last world leaf) and leaf 2383 (the last in
+  the array).
+
+- tools/mpak-diff.sh accepted any two non-empty dumps, so two runs dying
+  at the same point would have compared equal prefixes and passed. The
+  positive runs now require the engine to exit 0 through +quit and the
+  dump to end with the dumper's "end" marker; the control run must not
+  only produce no dump but log the expected "Could not load model
+  maps/<map>.bsp from disk" - an absent dump alone also describes a run
+  that died earlier for an unrelated reason.
+
+### Fixed — second Codex review round on the mpak-diff-tool branch
+
+One finding, real: the hull-0 clipnode dump was sized
+lastclipnode - firstclipnode + 1, but after Mod_SetupSubmodels
+lastclipnode is the COUNT of nodes reachable from the model's headnode
+(mod_bmodel.c:2126, one increment per node at :1791), not an index - one
+record past Mod_MakeHull0's numnodes allocation (:1911) on a world-only
+map, and short of the shared array on any map with inline brush models.
+It now dumps numnodes records, matching the allocation. Measured: c1a3
+dumps 3447 hull-0 records for numnodes 3447 where the old bound gave
+2212; crossfire 2982 for 2982 where the old bound gave 2468. Both maps
+still compare identical (5,947,048 / 5,164,230 bytes).
+
+### Fixed — the dedicated debug build never linked on MSVC
+
+`xash_tests_dedicated.exe` (and the dedicated `xash.exe`) failed with
+"unresolved external symbol _Platform_Minimize_f referenced in function
+_Host_Main" on this tree's `-T debug --dedicated` configuration - the
+prerequisite gap section 8 of the design doc recorded. Host_Main
+registers "minimize" in the else of `if( Host_IsDedicated( ))`; under
+XASH_DEDICATED that is the constant true (common.h:99), the else is dead,
+no dedicated win32 build defines Platform_Minimize_f, and MSVC at /Od
+keeps the reference where GCC folds it away. The else is now under
+`#if !XASH_DEDICATED` (divergence #26, an upstream candidate). With the
+binary linking, the stock engine tests run on this configuration for the
+first time: `-runtests` reports 1011 passed, 0 failed.
+
 ### Changed — X2 W1: MPAK v7 - a BSP30 file with a classic core, in two profiles
 
 The archive format change docs/r3d/mpak-loading-design.md defined (F1-F7,
