@@ -16,16 +16,23 @@ the Steam "Half-Life" install.
 
 Lightstyles: 41,031 of 613,358 lit faces (6.69%) across all 125 retail
 maps carry a second/third/fourth lightstyle the baker currently drops;
-82 of 125 maps (66%) have at least one. Not a negligible edge case - an
-accepted loss would be a visible regression on two-thirds of the game's
-maps, ruling that option out; the choice is now between per-style pages
-combined at runtime and a baked "on" state with binary switching.
+82 of 125 maps (66%) have at least one - `rocket_frenzy` alone carries
+6,223, then a real drop to `disposal` (2,759) and the game's own opening
+map `c0a0c` (1,399). Not a negligible edge case - an accepted loss would
+be a visible regression on two-thirds of the game's maps and its own
+opening level, ruling that option out; the choice is now between
+per-style pages combined at runtime and a baked "on" state with binary
+switching.
 
-Bones: of 598 submodels across 296 real studio models, only 3 exceed the
-~50-bone VP20 palette budget - `controller.mdl` (64), `nihilanth.mdl`
-(59), `stukabat.mdl` (51), all boss/special enemies. The opposite shape
-from lightstyles: bone-subset partitioning code is needed, but as a
-small, targeted fix for three named models, not a systemic redesign.
+Bones: measures per-mesh (walking each mesh's real triangle command
+stream, not the whole submodel - a submodel is not one draw; see
+docs/r3d/fork-plan.md's XB section for what round 1 of review caught
+here). Of 598 submodels across 296 real studio models, only 3 exceed the
+~50-bone VP20 palette estimate - `controller.mdl` (64), `nihilanth.mdl`
+(59), `stukabat.mdl` (51), all boss/special enemies; four more sit within
+10 of it. The opposite shape from lightstyles: bone-subset partitioning
+code is needed, but as a small, targeted fix for a handful of named
+enemy models, not a systemic redesign.
 
 Both results are written into `docs/r3d/fork-plan.md`'s XB section,
 replacing "the number ... decides the rest" with the actual numbers.

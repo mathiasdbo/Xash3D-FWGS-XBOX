@@ -1583,29 +1583,61 @@ real baker uses, run against the real Steam "Half-Life" install):
   flickers on Xbox. **Not a negligible edge case**: across all 125 retail
   maps, 643,971 faces total, 613,358 lit — **41,031 of those lit faces
   (6.69%) carry at least one extra lightstyle, and 82 of the 125 maps (66%)
-  have at least one such face**. The worst maps are far above the average:
-  `c1a2c` (46 of 3,816 faces), `c1a2b` (43 of 7,917), `c0a0e` (21 of 1,945,
-  including light switching a player would notice immediately at the game's
-  own opening). An accepted loss would be a visible regression on two-thirds
-  of the game's maps, not a rare corner case — this rules that option out.
-  Per-style pages combined at runtime, or a baked *on* state with binary
-  switching, are both live options; the census does not pick between them,
-  only closes off the third.
-- **Bones.** Which retail models reference more bones per submodel (a
-  `mstudiomodel_t` — the real per-draw bone set; GoldSrc rigs each vertex to
-  exactly one bone via `vertinfoindex`, `deps/hlsdk/engine/studio.h`, not a
-  weighted multi-bone skin) than a VP20 palette holds — 192 constants
-  (`deps/nxdk/tools/vp20compiler/config.h:11`), three per bone, roughly 50
-  after the view-projection and light constants, against `MAXSTUDIOBONES
-  128`. **The opposite shape from lightstyles — a rare, sharply-bounded
-  edge case**: of 598 submodels across 296 real studio model files (323
-  `.mdl` on disk, 27 texture-only/sequence-group files correctly excluded),
-  only **3 submodels in 3 models** exceed the budget — `controller.mdl` (64
-  distinct bones), `nihilanth.mdl` (59), `stukabat.mdl` (51). All three are
-  special/boss enemies (the Nihilanth is the game's final boss), not player,
-  weapon, or common NPC models. Bone-subset partitioning code needs to
-  exist, but as a small, targeted fix for three named models, not a
-  systemic redesign the whole asset pipeline has to carry.
+  have at least one such face**. The distribution is heavily skewed, not
+  uniform: `rocket_frenzy` alone carries 6,223 of the 41,031 (a Half-Life
+  add-on map, almost entirely dynamic lighting by design), then a real
+  drop to `disposal` (2,759), `contamination` (2,194), `c0a0c` (1,399,
+  the game's own opening map — a player would notice this in the first
+  five minutes) and a long tail down to zero. **Corrected in review,
+  round 1: the first version of this row named `c1a2c`/`c1a2b`/`c0a0e`
+  (46/43/21 faces) as "the worst maps" — those are real rows from the
+  census output, but nowhere near the top of a table the census itself
+  sorts descending; a `tail -60` on 125 sorted rows only ever showed the
+  bottom of it. `tools/asset-studio/tools/census_lightstyles.cpp` itself
+  needed no fix — the tool's own output was correct throughout; this was
+  a review-of-the-output mistake, worth recording as its own lesson.**
+  An accepted loss would still be a visible regression on two-thirds of
+  the game's maps and its own opening level, not a rare corner case —
+  that conclusion holds unchanged. Per-style pages combined at runtime,
+  or a baked *on* state with binary switching, are both live options; the
+  census does not pick between them, only closes off the third.
+- **Bones.** Which retail models reference more bones per DRAW than a VP20
+  palette holds — 192 constants (`deps/nxdk/tools/vp20compiler/
+  config.h:11`), three per bone, roughly 50 after the view-projection and
+  light constants (an ESTIMATE, not yet a verified exact cutoff — see
+  below), against `MAXSTUDIOBONES 128`. GoldSrc rigs each vertex to
+  exactly one bone via `vertinfoindex` (`deps/hlsdk/engine/studio.h`), not
+  a weighted multi-bone skin. **Corrected in review, round 1: the first
+  version measured distinct bones over a whole submodel (`mstudiomodel_t`)
+  and called that the "real per-draw bone set" — wrong, the reference
+  (`ref/gl/gl_studio.c`'s `R_StudioDrawPoints`, `:2078-2112`) submits each
+  `mstudiomesh_t` separately, and a mesh's own triangle command stream
+  only ever touches a subset of the submodel's vertices.**
+  `census_bones.cpp` now walks each mesh's real triangle command stream
+  (confirmed against `R_StudioBuildArrayNormalMesh`, `gl_studio.c:
+  1749-1777` — int16 run-length headers, four-int16 `{vertindex,
+  normindex, s, t}` entries, not guessed) and counts distinct vertex-bones
+  per mesh exactly; normal-bones are added per mesh from the WHOLE
+  submodel's normal array as a deliberate, documented over-approximation
+  (the reference's own two-loop pointer lifetime for mesh-local vs.
+  submodel-wide normal indexing was not resolved to full confidence
+  reading `gl_studio.c` in the time this census took, and this project
+  does not guess — see the tool's own header comment). **The opposite
+  shape from lightstyles — a rare, sharply-bounded edge case, unchanged by
+  the fix**: of 598 submodels across 296 real studio model files (323
+  `.mdl` on disk, 27 texture-only/sequence-group files correctly
+  excluded), still only **3 submodels in 3 models** exceed the ~50-bone
+  estimate — `controller.mdl` (peak 64 with the conservative normal
+  over-approximation, 13 on vertices alone), `nihilanth.mdl` (59 / 27),
+  `stukabat.mdl` (51 / 28). All three are special/boss enemies (the
+  Nihilanth is the game's final boss), not player, weapon, or common NPC
+  models. Four more sit within 10 of the estimate — `bullsquid.mdl` (49),
+  `zombie.mdl` (47), `islave.mdl` (44), `garg.mdl` (43) — worth
+  re-checking once a real VP20 shader constant layout narrows the budget
+  past an estimate (`--budget N` overrides it without a rebuild). Bone-
+  subset partitioning code needs to exist, but as a small, targeted fix
+  for a handful of named enemy models, not a systemic redesign the whole
+  asset pipeline has to carry.
 
 Then the format, decided once:
 
