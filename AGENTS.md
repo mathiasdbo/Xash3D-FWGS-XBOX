@@ -187,6 +187,36 @@ touches, and never ask permission first.
   even while the binary does nothing useful yet. The previous project's target
   accumulated six stale fields over seven months because nothing exercised it.
 - Smoke-test after deploying, do not just copy.
+- **Package real-hardware deliverables into `../XISOS/`.** When a bootable
+  Xbox XISO is ready for the user to try (on xemu or, preferably, real
+  hardware — see above), copy it into a new timestamped folder under
+  `../XISOS/` (sibling to this repo, outside git — these are binary build
+  artifacts, never committed). Each folder gets a `CHANGELOG.txt`: an
+  incrementing internal version number (v1, v2, ... — this project has no
+  formal release scheme yet), what the XISO contains, and what it verifies
+  or is still unverified. **The commit hash alone is not provenance here**:
+  this tree routinely builds with uncommitted, tooling-applied submodule
+  patches (`3rdparty/library_suffix`, `3rdparty/mainui`, `3rdparty/opusfile`
+  auto-patched by `tools/xbox-cc.sh`) and an untracked `deps/nxdk` checkout,
+  so two XISOs built from the identical commit can differ. Record, verbatim:
+  the commit hash, `git submodule status` (pins every submodule's own
+  commit, not just which ones show dirty), `git status --short` (the
+  dirty/untracked summary at build time), and a SHA-256 of the XISO file
+  itself, so the changelog is bound to the literal artifact bytes even when
+  the source tree can't be perfectly reconstructed from the hash alone.
+  **Deliberately not required**: byte-level diffs of the dirty submodule
+  content, or hashes of every untracked file under `deps/nxdk` (a whole
+  vendored SDK checkout, not something this repo's own git tracks at all).
+  That would be real, audit-grade reproducibility, but it is disproportionate
+  to what this convention is actually for — a human going back to roughly
+  what a given XISO was, not a cryptographic rebuild guarantee. The three
+  patched submodules are deterministic from the pinned commit anyway
+  (`tools/xbox-cc.sh` reapplies the same tracked `patches/*.patch` files
+  every run); a real reproducibility/audit effort for `deps/nxdk` itself
+  would be separate, larger work, not a change to this changelog step.
+  Never overwrite an
+  existing version folder — each one stays reachable so a specific build
+  can always be gone back to.
 
 ## Workflow
 
