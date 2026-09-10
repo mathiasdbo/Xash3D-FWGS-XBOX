@@ -1648,7 +1648,21 @@ Then the format, decided once:
 - **Draw lists per cluster, per material**, so runtime submission is a walk in
   baked order. Per leaf alone explodes the draw count, and on pbkit every
   submission is CPU time writing pushbuffer words into write-combined memory.
-- **Lightmap pages in RGB565**, with whatever the census decided.
+- **Lightmap pages in RGB565**, with whatever the census decided. **Data
+  side done, 2026-09-10 (MPAK v8).** The census ruled out dropping extra
+  lightstyles (66% of maps affected) and the user picked the
+  reference-matching option: bake every style a face uses, not just
+  style 0, and blend them at runtime the way `R_BuildLightMap` does.
+  `BspParser.cpp` now bakes a block per extra style, `MpakExtraLightBlock`
+  (a new sparse v8 section) records where each one landed - verified
+  against a real bake of `crossfire.bsp`: 127 blocks, matching the
+  census's own independently-computed count for that map exactly, plus a
+  real negative control (a corrupted byte in the new section is caught
+  and named specifically). **Not done**: the RGB565 conversion itself
+  (still RGBA8 in the atlas, matching every other lightmap page) and the
+  runtime blend - that consumer is `ref/nv2a`, which doesn't exist until
+  X9; this phase's own scope is baker-only (see this section's own
+  opening line).
 - **Bone partitioning** for the models the census named.
 - **DXT laid out linear by block row.** `swizzleNV2A`
   (`TextureOpt.cpp:110-132`) applies a Morton order to DXT blocks, which is

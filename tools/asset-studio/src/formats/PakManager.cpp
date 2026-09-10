@@ -376,8 +376,13 @@ namespace formats {
             return false;
         }
 
-        std::cout << "Successfully serialized and verified MPAKv7 archive (" << (nv2a ? "nv2a" : "core")
-                  << " profile) to " << outputPath << "\n";
+        // header.version, not a literal "v7"/"v8": found while adding v8 -
+        // this message had hardcoded "MPAKv7" through the v6->v7 bump too,
+        // silently stale the moment version bumped again. Reading it back
+        // from the struct that already carries it means this can't drift
+        // out of sync with a future version bump either.
+        std::cout << "Successfully serialized and verified MPAKv" << header.version << " archive ("
+                  << (nv2a ? "nv2a" : "core") << " profile) to " << outputPath << "\n";
         return true;
     }
 

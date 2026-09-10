@@ -5,6 +5,32 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — MPAK v8: bake per-style lightmap blocks for every extra lightstyle
+
+The lightstyle census (below) ruled out dropping the 6.69% of lit faces
+that carry a second, third, or fourth lightstyle - 66% of retail maps are
+affected, including the game's own opening map. This bakes the missing
+data: for every face using an extra style, `BspParser.cpp` now also
+allocates and writes an atlas block for it, recorded in a new sparse v8
+section (`MpakExtraLightBlock` - one entry per face per extra style, not
+a fixed 4-slot table, so the ~93% of faces that never need it cost
+nothing extra). `filesystem/mpak_layout.{h,c}` mirror the format change
+for the engine's own C-side reader, with new unit-test coverage matching
+every other lump's offset/divisibility/profile-gating checks.
+
+Verified against a real bake of `crossfire.bsp`: 127 extra-light blocks,
+exactly matching the census tool's own independently-computed count for
+that map (a completely separate code path agreeing on the same number);
+a real negative control (one corrupted byte in the new section) is
+caught and named specifically (`extra light blocks: byte 0 of 2540
+differs`), not silently accepted.
+
+Version bumped v7 -> v8 - every prior bump in this format's history has
+meant a full rebake, this one is no different. Scope: only the DATA side
+is done. RGB565 conversion (still RGBA8, matching every other lightmap
+page) and the runtime blend across active styles are `ref/nv2a`'s job
+(X9), which doesn't exist yet - this phase is baker-only.
+
 ### Added — XB's two censuses, run for real against the retail install
 
 `docs/r3d/fork-plan.md`'s XB section named two open questions as "one-minute

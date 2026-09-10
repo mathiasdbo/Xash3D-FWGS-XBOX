@@ -31,6 +31,8 @@ add_executable(census_lightstyles tools/census_lightstyles.cpp)
 target_link_libraries(census_lightstyles PRIVATE AssetStudioFormats)
 add_executable(census_bones tools/census_bones.cpp)
 target_link_libraries(census_bones PRIVATE AssetStudioFormats)
+add_executable(inspect_mpak tools/inspect_mpak.cpp)
+target_link_libraries(inspect_mpak PRIVATE AssetStudioFormats)
 
 # `ctest -C Release` from the build directory runs them; build-test-package.ps1
 # does not, on purpose - a bake is the integration test, these are the unit
