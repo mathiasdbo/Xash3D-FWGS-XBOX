@@ -187,6 +187,16 @@ touches, and never ask permission first.
   even while the binary does nothing useful yet. The previous project's target
   accumulated six stale fields over seven months because nothing exercised it.
 - Smoke-test after deploying, do not just copy.
+- **Package real-hardware deliverables into `../XISOS/`.** When a bootable
+  Xbox XISO is ready for the user to try (on xemu or, preferably, real
+  hardware — see above), copy it into a new timestamped folder under
+  `../XISOS/` (sibling to this repo, outside git — these are binary build
+  artifacts, never committed). Each folder gets a `CHANGELOG.txt`: an
+  incrementing internal version number (v1, v2, ... — this project has no
+  formal release scheme yet), the exact commit it was built from, what the
+  XISO contains, and what it verifies or is still unverified. Never
+  overwrite an existing version folder — each one stays reachable so a
+  specific build can always be gone back to.
 
 ## Workflow
 
