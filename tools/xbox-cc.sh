@@ -164,6 +164,22 @@ shift
 # module into the same by-name table the (genuinely stub) server/client
 # modules use, no new stub code needed for menu at all.
 #
+# filesystem_stdio: found booting X2 W5's dedicated target in xemu for the
+# first time (CHANGELOG's "a first real boot attempt") - Xbox_NetLogInit
+# wired into the boot path showed the real error the boot-animation hang
+# had been hiding: "FS_LoadProgs: can't load filesystem library
+# filesystem_stdio", looping (Sys_Error -> host shutdown -> BIOS reboots
+# -> same failure) exactly like the observed stuck animation. The same
+# gap as "menu" above, same fix: filesystem_engine.c:219
+# (#ifdef XASH_INTERNAL_GAMELIBS) names "filesystem_stdio" as the literal
+# library string COM_LoadLibrary gets, and filesystem/exports.txt
+# (GetFSAPI) already names the real entry point - filesystem/*.c is
+# already part of this build's own object set (engine and filesystem are
+# ordinarily two separate binaries upstream; the Xbox dedicated target
+# links them into one, so the real GetFSAPI is already sitting right
+# there needing only to be named in this table, exactly as real as menu's
+# fix, not a new stub.
+#
 # Found in review, 2026-09-09: checking only generated_library_tables.h's own
 # existence let a $GEN_DIR left behind by an older version of this script -
 # back when it generated that header with zero library names, before
@@ -171,15 +187,36 @@ shift
 # skip regenerating forever, even though the exports files this script
 # now also needs were never produced. Every expected output is checked now,
 # not just the first one written.
+# Found in review, 2026-09-10: existence alone is not freshness. Once
+# every generated_lib_*_exports.c existed, editing an exports.txt (e.g.
+# adding a third filesystem_stdio entry point after this one) would not
+# regenerate anything - the stale array would keep compiling and linking
+# clean, silently missing the new entry point at boot. Exactly the
+# runtime-only failure divergence #30 (this same commit) just fixed.
+# Each generated file's mtime is checked against its OWN exports.txt via
+# `-nt` (newer-than) - the existence checks above still run first so a
+# freshly-cloned tree with no $GEN_DIR at all still regenerates, rather
+# than every `-nt` test failing against a nonexistent left-hand file.
 GEN_DIR="$REPO/.sweep/gen"
+GEN_STALE=0
 if [ ! -f "$GEN_DIR/generated_library_tables.h" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_server_exports.c" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_client_exports.c" ] \
-	|| [ ! -f "$GEN_DIR/generated_lib_menu_exports.c" ]; then
+	|| [ ! -f "$GEN_DIR/generated_lib_menu_exports.c" ] \
+	|| [ ! -f "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ]; then
+	GEN_STALE=1
+elif [ "$REPO/stub_game/server/exports.txt" -nt "$GEN_DIR/generated_lib_server_exports.c" ] \
+	|| [ "$REPO/stub_game/client/exports.txt" -nt "$GEN_DIR/generated_lib_client_exports.c" ] \
+	|| [ "$REPO/3rdparty/mainui/exports.txt" -nt "$GEN_DIR/generated_lib_menu_exports.c" ] \
+	|| [ "$REPO/filesystem/exports.txt" -nt "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ]; then
+	GEN_STALE=1
+fi
+if [ "$GEN_STALE" = "1" ]; then
 	"$REPO/tools/gen-library-tables.sh" "$GEN_DIR" \
 		"server:$REPO/stub_game/server/exports.txt" \
 		"client:$REPO/stub_game/client/exports.txt" \
 		"menu:$REPO/3rdparty/mainui/exports.txt" \
+		"filesystem_stdio:$REPO/filesystem/exports.txt" \
 		> /dev/null
 fi
 
@@ -310,6 +347,22 @@ if [ "${XBOX_DEDICATED:-0}" = "1" ]; then
 	# target's file list by tools/xbox-dedicated-sweep.sh instead of
 	# colliding with launcher.c's own main() at link time).
 	ENGINE_DEFINES+=( -DXASH_ENABLE_MAIN=1 )
+fi
+
+# XBOX_ENGINE_TESTS=1 (env, opt-in, independent of XBOX_DEDICATED): the
+# same boundary XASH_ENGINE_TESTS already draws elsewhere in this tree
+# (test_dumpworld, test_mapprobe) - test/debug-only instrumentation,
+# never in a real build. Xbox_NetLogInit() (engine/common/host.c, X2 W5
+# follow-up) is gated behind this specifically because it is genuinely
+# blocking (~10s DHCP wait with no cable/server) and must not cost every
+# real, shipped boot that delay just to enable a diagnostic UDP log
+# channel - found in review after the first version called it
+# unconditionally on every Xbox boot. Pass XBOX_ENGINE_TESTS=1 when
+# debugging a real boot (the exact xemu+listener workflow the CHANGELOG
+# entry above describes); leave it unset for anything meant to represent
+# what a real deployment would do.
+if [ "${XBOX_ENGINE_TESTS:-0}" = "1" ]; then
+	ENGINE_DEFINES+=( -DXASH_ENGINE_TESTS=1 )
 fi
 
 OUT="${OUT:-/tmp/$(basename "${SRC%.c}").obj}"

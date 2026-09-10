@@ -5,6 +5,125 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — X2 W5 follow-up: filesystem_stdio wired into the static library table; X0.5's relative-searchpath problem confirmed by a real boot
+
+The previous entry's "first real boot attempt" left a genuine mystery -
+the boot animation not visibly progressing, consistent with but not
+proof of X0.5's own documented relative-path problem. Wiring
+`Xbox_NetLogInit()` into the dedicated boot path (before `Platform_Init`/
+`FS_Init`, after `Con_Init` has something to send - divergence #13's
+UDP log channel, unused until now) and running a real listener against
+the next boot resolved it in one step: the animation loop was
+`Sys_Error` -> "Issuing host shutdown" -> BIOS reboot -> same failure,
+repeating every ~9 seconds, and the log said exactly why each time.
+
+**First real error, a genuine bug, not X0.5 at all**: `FS_LoadProgs:
+can't load filesystem library filesystem_stdio`. `engine/platform/misc/
+lib_static.c`'s generated dispatch table (`tools/gen-library-tables.sh`,
+wired through `tools/xbox-cc.sh`) only ever registered `server`/
+`client`/`menu` - never `filesystem_stdio`, the literal string
+`engine/common/filesystem_engine.c:219` (`#ifdef XASH_INTERNAL_GAMELIBS`)
+passes to `COM_LoadLibrary`. Same fix as menu's own (divergence
+history): `filesystem/exports.txt` already named the real entry point
+(`GetFSAPI`) - `filesystem/*.c` is already part of this build's own
+object set (engine and filesystem link into one binary on Xbox), so
+this is a real fix, not a new stub. Registered in both
+`tools/xbox-cc.sh` (the table generator invocation) and both link
+scripts (`tools/xbox-link-check.sh`, `tools/xbox-dedicated-link-check.sh`).
+
+**Second, once the first was fixed**: `FS_LoadProgs: can't find
+CreateInterface entry point in filesystem_stdio` - the same table needs
+a second real entry point from the same module.
+`filesystem/VFileSystem009.cpp` already defines a real, `extern "C"
+CreateInterface`; added to `filesystem/exports.txt` and now compiles
+into the same table entry as `GetFSAPI`.
+
+**Fixing this surfaced a real, separate, pre-existing gap**:
+`tools/xbox-sweep.sh`'s file-discovery only ever globbed `*.c`, never
+`*.cpp` - `filesystem/VFileSystem009.cpp` (and `filesystem/tests/
+interface.cpp`) had never been attempted by the broad sweep at all, so
+registering `CreateInterface` there produced a real, new "33 undefined"
+regression against the tracked 32-symbol baseline, from a missing
+object rather than a missing declaration. Fixed at the source: the
+sweep now finds `*.cpp` too, and (since no library in this toolchain
+provides `__CxxFrameHandler3`/`__std_terminate` - the same finding as
+before) compiles every `.cpp` file with `-fno-exceptions -fno-rtti`,
+which is what let `VFileSystem009.cpp` compile clean the first time
+around. Re-verified end to end: compile 199/30 (up from 197/30 - the
+two newly-discovered `.cpp` files), link back to the tracked 0
+duplicate / 32 undefined exactly, symbol-identical.
+
+**Third error, once BOTH of the above were fixed - the confirmation
+this whole investigation was chasing**:
+
+```
+FS_SetCurrentDirectory: not implemented, ignoring...
+Error: game directory "valve" not exist
+Adding directory: ./
+Couldn't find game directory 'valve'
+```
+
+This is `docs/r3d/fork-plan.md`'s X0.5 section, empirically OBSERVED for
+the first time rather than inferred from reading the code: `FS_InitStdio`/
+`FS_AddGameHierarchy` build every real searchpath with relative paths
+(`"./"`, `"valve/"`), and nxdk's path APIs have no current-directory
+concept to resolve them against - even `"./"` alone fails, exactly as
+that section predicted. `FS_DetermineRootDirectory`'s `"D:\\"` fix (the
+previous entry) was necessary but, as already documented, not
+sufficient. **Neither of X0.5's own two proposed routes is fixed here** -
+this entry's job was narrowing "boot animation stuck, cause unknown" down
+to "this one, already-understood, already-scoped problem, confirmed",
+not solving it.
+
+Dedicated target re-verified after every fix above: 96/0 sweep, 0
+duplicate/0 undefined link, same 2,273,280-byte XBE. Booted three more
+times in xemu against a live UDP log listener to reach each error in
+turn.
+
+### Fixed — first Codex review round on the xbox-filesystem-stdio-static branch
+
+One finding, real: `Xbox_NetLogInit()` was called unconditionally on
+every `XASH_XBOX` boot. Its DHCP wait is genuinely blocking - up to
+~10s with no cable or DHCP server, `net_xbox_log.c`'s own comment - so a
+real, shipped, offline console would pay that delay on every single
+boot forever, for a diagnostic feature only a development session
+benefits from.
+
+Fixed: gated behind `XASH_ENGINE_TESTS` too (`#if XASH_XBOX &&
+XASH_ENGINE_TESTS`), the same "test/debug-only, never in a real build"
+boundary already drawn for `test_dumpworld`/`test_mapprobe` elsewhere in
+this file, reused rather than inventing a second mechanism for the same
+distinction. `tools/xbox-cc.sh` gained a matching `XBOX_ENGINE_TESTS=1`
+opt-in (env, independent of `XBOX_DEDICATED`) that defines it. Verified
+both shapes: the default dedicated sweep/link (no engine tests) stays
+96/0 sweep, 0 duplicate/0 undefined, the identical 2,273,280-byte XBE -
+a real deployment now never pays the DHCP wait; with
+`XBOX_ENGINE_TESTS=1` exported, the same target still sweeps and links
+clean, so the debugging workflow this whole investigation used remains
+available on request. Broad target re-verified unaffected (199/30
+compile, 0 duplicate/32 undefined, symbol-identical).
+
+### Fixed — second Codex review round on the xbox-filesystem-stdio-static branch
+
+One finding, real: `tools/xbox-cc.sh`'s generated-library-table
+preflight only checked whether each `generated_lib_*_exports.c`
+existed, never whether it was still current against its own
+`exports.txt`. Once generated, editing any `exports.txt` again (adding
+a third `filesystem_stdio` entry point, say) would silently keep
+compiling and linking the stale array - exactly the class of
+runtime-only, clean-measurement-but-wrong failure this same commit had
+just fixed for real.
+
+Fixed: each generated file's mtime is now checked against its own
+`exports.txt` with `-nt`, in addition to the existing existence checks
+(kept first, so a fresh clone with no `.sweep/gen` at all still
+regenerates rather than every `-nt` test failing against a nonexistent
+left-hand file). Verified with a real control: appended a third name to
+`filesystem/exports.txt`, touched it newer, recompiled - the generated
+array picked up the new entry. Reverted the test addition; rebuilt both
+targets clean (dedicated 96/0 sweep, 0 duplicate/0 undefined, same XBE;
+broad 199/30 compile, 0 duplicate/32 undefined, symbol-identical).
+
 ### Added — X2 W5: a real, dedicated Xbox target that links 0 duplicate / 0 undefined and calls Host_Main — a genuine XBE
 
 The X2 exit line on Xbox, "same as W4" (server frames tick from a real

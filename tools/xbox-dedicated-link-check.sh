@@ -88,7 +88,30 @@ if [ ! -f "$GEN_DIR/generated_library_tables.h" ]; then
 	exit 1
 fi
 
-STUB_GAME_OBJS=""
+# filesystem_stdio: found booting this exact target in xemu for the first
+# time - "FS_LoadProgs: can't load filesystem library filesystem_stdio",
+# looping the BIOS animation (Sys_Error -> host shutdown -> reboot -> same
+# failure). Real, not a stub: filesystem/*.c's own GetFSAPI is already
+# part of ENGINE_OBJS above (this target links engine and filesystem into
+# one binary), so this table entry is the only missing piece - required,
+# unlike menu below, since FS_Init runs unconditionally on every boot.
+GEN_FS_C="$GEN_DIR/generated_lib_filesystem_stdio_exports.c"
+if [ ! -f "$GEN_FS_C" ]; then
+	echo "xbox-dedicated-link-check: $GEN_FS_C does not exist." >&2
+	echo "  Run any tools/xbox-cc.sh compile first - it regenerates this" >&2
+	echo "  alongside generated_library_tables.h now that filesystem_stdio" >&2
+	echo "  is part of that table." >&2
+	exit 1
+fi
+GEN_FS_OBJ="$SCRATCH/gen_$(echo "$GEN_FS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
+if ! tools/xbox-cc.sh "$GEN_FS_C" -o "$GEN_FS_OBJ" 2>"$SCRATCH/stub-lasterr.txt"; then
+	echo "xbox-dedicated-link-check: generated_lib_filesystem_stdio_exports.c failed to compile:" >&2
+	cat "$SCRATCH/stub-lasterr.txt" >&2
+	exit 2
+fi
+echo "xbox-dedicated-link-check: filesystem_stdio registered in the static library table (real GetFSAPI)." >&2
+
+STUB_GAME_OBJS="$GEN_FS_OBJ"
 for f in stub_game/server/server_stub.c "$GEN_DIR/generated_lib_server_exports.c" "$GEN_DIR/generated_lib_client_exports.c"; do
 	if [ ! -f "$f" ]; then
 		echo "xbox-dedicated-link-check: $f does not exist." >&2

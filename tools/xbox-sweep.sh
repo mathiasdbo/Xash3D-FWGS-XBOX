@@ -89,12 +89,24 @@ for d in "$@"; do
 	d_fail=0
 
 	while IFS= read -r f; do
-		obj="$SCRATCH/$( echo "$f" | tr '/' '_' | sed 's/\.c$/.obj/' )"
+		obj="$SCRATCH/$( echo "$f" | tr '/' '_' | sed -E 's/\.(c|cpp)$/.obj/' )"
+		# Every .cpp file in this tree, unconditionally: nxdk-link has no C++
+		# exception-handling runtime at all (no deps/nxdk/lib/*.lib defines
+		# __CxxFrameHandler3/__std_terminate - grep-checked). A file that
+		# compiles clean without these flags but needs them at FINAL LINK
+		# (compiler-generated cleanup code for a non-trivial destructor, not
+		# necessarily an explicit try/catch in its own source) would report
+		# "ok" here and only fail much later, in a full link - found exactly
+		# this way with filesystem/VFileSystem009.cpp, X2 W5's follow-up.
+		cxxflags=()
+		case "$f" in
+			*.cpp) cxxflags=( -fno-exceptions -fno-rtti ) ;;
+		esac
 		# -o as an argument, not via the OUT env var: xbox-cc.sh appends "$@"
 		# after its own -o and clang takes the last one, whereas the env var was
 		# not reaching the child and every object silently landed on the same
 		# default path, overwriting each other.
-		out=$( "$REPO/tools/xbox-cc.sh" "$f" -o "$obj" 2>&1 )
+		out=$( "$REPO/tools/xbox-cc.sh" "$f" "${cxxflags[@]}" -o "$obj" 2>&1 )
 		status=$?
 
 		if [ "$status" -eq 0 ]; then
@@ -143,7 +155,7 @@ for d in "$@"; do
 				printf '%s\n' "$out" | grep 'error:' >> "$LOG"
 			fi
 		fi
-	done < <( find "$d" -name '*.c' | sort )
+	done < <( find "$d" \( -name '*.c' -o -name '*.cpp' \) | sort )
 
 	# Found in review, 2026-09-07: the guard below this loop only ever looked
 	# at the AGGREGATE ok+fail total across every directory on the command

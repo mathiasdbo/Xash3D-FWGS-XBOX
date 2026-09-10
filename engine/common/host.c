@@ -1083,6 +1083,38 @@ static void Host_InitCommon( int argc, char **argv, const char *progname, qboole
 	Sys_InitLog();
 	Con_Init(); // early console running to catch all the messages
 
+#if XASH_XBOX && XASH_ENGINE_TESTS
+	// X2 W5 follow-up: the first real xemu boot of the dedicated target
+	// (CHANGELOG's "a first real boot attempt") reached the BIOS animation
+	// and then produced no further observable signal - stuck, crashed, or
+	// genuinely still working were indistinguishable from outside the
+	// emulator. Wiring the network log channel here (divergence #13,
+	// unused until now - "nothing calls this function yet... that is
+	// X1/X2 work") is what actually answers which: DbgPrint alone is not
+	// enough on real hardware (no debugger attached) and xemu's own
+	// DbgPrint surfacing was not observed either in that attempt. Placed
+	// after Con_Init so Xbox_ConPrint already has something to send (the
+	// DbgPrint tier, per net_xbox_log.c's own doc comment: "not before"),
+	// and before Platform_Init/FS_Init so this covers exactly the range
+	// the CHANGELOG entry could not explain.
+	//
+	// Gated to XASH_ENGINE_TESTS, not unconditional on XASH_XBOX alone -
+	// found in review: Xbox_NetLogInit's DHCP wait is genuinely blocking
+	// (up to ~10s with no cable/DHCP server, net_xbox_log.c's own
+	// comment), and calling it on every boot would make a REAL, shipped
+	// Xbox build - offline console, no dev network anywhere nearby - pay
+	// that delay on every single boot forever, for a diagnostic feature
+	// only a development session like this one ever benefits from. This
+	// is exactly the same "test-only, never in a real build" boundary
+	// XASH_ENGINE_TESTS already draws for test_dumpworld/test_mapprobe
+	// elsewhere in this file - reused rather than inventing a second,
+	// narrower mechanism for what is the same actual distinction.
+	// Silent on failure by design: Xbox_ConPrint's network tier just
+	// stays inactive if this returns false, exactly as the DbgPrint tier
+	// already tolerates no debugger being attached.
+	Xbox_NetLogInit();
+#endif
+
 	XRcon_Init();
 
 	if( !Sys_CheckParm( "-noch" ))

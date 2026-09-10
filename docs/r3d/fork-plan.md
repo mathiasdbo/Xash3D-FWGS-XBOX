@@ -290,15 +290,24 @@ Neither is written yet.
 **Exit:** the engine finds its game directory on Xbox **and mounts it** —
 `FI.numgames > 0` and `pak0.pak` opens.
 
-**Partial progress, W5 (divergence #29), found by Codex review:**
-`FS_DetermineRootDirectory` now has a real `XASH_XBOX` branch returning
-`"D:\\"` (`automount_d_drive`, already linked, mounts `D:` to the running
-XBE's own directory before `main()`) instead of falling through to
-`compat/xbox`'s honest `getcwd` `ENOSYS` and `Sys_Error`ing. That is the
-"finding the root directory" half only - neither route below is written,
-and the relative-searchpath problem this section's own "NOT sufficient"
-finding describes is exactly as open as before. The exit line above is
-still unmet.
+**Partial progress, W5 (divergence #29):** `FS_DetermineRootDirectory`
+now has a real `XASH_XBOX` branch returning `"D:\\"` (`automount_d_drive`,
+already linked, mounts `D:` to the running XBE's own directory before
+`main()`) instead of falling through to `compat/xbox`'s honest `getcwd`
+`ENOSYS` and `Sys_Error`ing. That is the "finding the root directory"
+half only.
+
+**CONFIRMED by a real boot, W5 follow-up (divergence #30):** after fixing
+two unrelated static-linking bugs that were hiding it (`filesystem_stdio`
+never registered in `lib_static.c`'s table; see #30), a real xemu boot
+with the network log channel wired in reached this section's own
+predicted failure directly: `FS_SetCurrentDirectory: not implemented,
+ignoring...` then `Error: game directory "valve" not exist` /
+`Adding directory: ./` / `Couldn't find game directory 'valve'` - even
+`"./"` alone fails to resolve, exactly as "NOT sufficient" above
+predicted. This is no longer an inference from reading the code; it is
+what actually happens. Neither route below is written yet. The exit
+line above is still unmet.
 
 ## X1 — Static linking proven
 

@@ -363,7 +363,36 @@ fi
 # immediate, deliberately-introduced undefined symbol - there is no
 # meaningful "measure without the stub" configuration the way there is a
 # meaningful "measure without the menu module" one.
+# filesystem_stdio: found in X2 W5, booting the dedicated target in xemu
+# for the first time - "FS_LoadProgs: can't load filesystem library
+# filesystem_stdio", looping the boot animation forever (Sys_Error ->
+# host shutdown -> BIOS reboot -> same failure). This comment's own
+# "besides engine, filesystem and menu" phrasing above already assumed
+# filesystem was wired in; it never was - tools/gen-library-tables.sh's
+# invocation below only ever passed server/client/menu.
+# filesystem/exports.txt (GetFSAPI) already names the real entry point,
+# same as menu's GetMenuAPI/GetExtAPI - filesystem/*.c's own GetFSAPI is
+# already part of $ENGINE_OBJS (this build links engine and filesystem
+# into one binary), so this is a real fix, not a new stub, and required
+# unconditionally: unlike menu, FS_Init runs on every boot regardless of
+# dedicated/client.
 STUB_GAME_OBJS=""
+FS_EXPORTS_C="$SCRATCH/gen/generated_lib_filesystem_stdio_exports.c"
+if [ ! -f "$FS_EXPORTS_C" ]; then
+	echo "xbox-link-check: $FS_EXPORTS_C does not exist." >&2
+	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
+	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	exit 1
+fi
+FS_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$FS_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
+if ! tools/xbox-cc.sh "$FS_EXPORTS_C" -o "$FS_EXPORTS_OBJ" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+	echo "xbox-link-check: generated_lib_filesystem_stdio_exports.c failed to compile:" >&2
+	cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+	exit 2
+fi
+STUB_GAME_OBJS="$FS_EXPORTS_OBJ"
+echo "xbox-link-check: filesystem_stdio registered in the static library table (real GetFSAPI)." >&2
+
 for f in stub_game/server/server_stub.c "$SCRATCH/gen/generated_lib_server_exports.c" "$SCRATCH/gen/generated_lib_client_exports.c"; do
 	if [ ! -f "$f" ]; then
 		echo "xbox-link-check: $f does not exist." >&2
