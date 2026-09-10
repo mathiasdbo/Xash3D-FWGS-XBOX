@@ -31,6 +31,16 @@ is done. RGB565 conversion (still RGBA8, matching every other lightmap
 page) and the runtime blend across active styles are `ref/nv2a`'s job
 (X9), which doesn't exist yet - this phase is baker-only.
 
+Memory-budget risk (the extra blocks grow the same unbounded atlas-packer
+style 0 already uses, with bake-time enforcement deferred to X3) is
+backed by an exhaustive bake of all 125 retail maps for the Xbox target,
+not a sample: 110 land on 1 atlas page, 11 on 2, 0 on more than 2. See
+`docs/r3d/fork-plan.md`'s X5 section for the full breakdown.
+`inspect_mpak`, the small permanent diagnostic added alongside this
+change, now also validates that an archive's declared sections actually
+account for its real file size, catching truncation a header-only check
+would miss.
+
 ### Added — XB's two censuses, run for real against the retail install
 
 `docs/r3d/fork-plan.md`'s XB section named two open questions as "one-minute
