@@ -23,31 +23,38 @@
 // fan, magnitude = vertex count in that run, 0 terminates - each run's
 // entries four int16s {vertindex, normindex, s, t}, confirmed against
 // R_StudioBuildArrayNormalMesh, gl_studio.c:1749-1777, not guessed)
-// only ever touches a SUBSET of the submodel's vertices. Counting
-// distinct bones over the whole submodel can both overcount (combining
-// meshes that never actually share a draw) and, in principle, miss
-// bones a mesh's own normals reference that the census never looked
-// at. This tool now walks each mesh's real triangle command stream and
-// counts DISTINCT vertex-bones per mesh - the real per-draw figure for
-// the dominant cost (GoldSrc's own per-submodel CPU skinning transforms
-// every vertex up front regardless, so vertex-bone attribution is
-// exact here; whether ref/nv2a would keep that structure or move
-// skinning onto the GPU per mesh is unresolved and does not change what
-// this measures).
+// only ever touches a SUBSET of the submodel's vertices and normals.
+// Counting distinct bones over the whole submodel can both overcount
+// (combining meshes that never actually share a draw) and miscount
+// which normals belong to which mesh.
 //
-// Normals are deliberately NOT attributed per mesh: whether the
-// reference's own per-mesh submission loop reads a mesh-local or a
-// cumulatively-advanced normal-bone pointer across the whole submodel
-// was not resolved by reading gl_studio.c's two separate mesh loops
-// (lighting precompute vs. triangle submission) to full confidence in
-// the time this census took, and AGENTS.md's "do not guess" rule means
-// this tool does not pretend otherwise. Instead, every normal-bone in
-// the WHOLE submodel (mstudiomodel_t::norminfoindex/numnorms) is added
-// to every mesh's own count - a safe over-approximation for the
-// dominant vertex cost. If a submodel passes even under this
-// pessimistic assumption, it is real headroom; if it only fails
-// because of the over-approximation, that is visible in the reported
-// vertex-only figure printed alongside it.
+// Both vertex- and normal-bones are now attributed exactly, per mesh -
+// found in review, round 2: a first fix (still per-mesh for vertices)
+// stopped short and unioned every normal-bone in the WHOLE submodel into
+// every mesh as a "safe" over-approximation, unable to confirm from
+// reading gl_studio.c alone whether the per-entry normindex (ptricmds[1])
+// was mesh-local or already submodel-global. It is submodel-global,
+// confirmed directly: R_StudioSetColorArray (gl_studio.c:1431-1436) reads
+// `pstudionorms[ptricmds[1]]` and `g_studio.lightvalues[ptricmds[1]]`,
+// the latter populated by a running index accumulated across ALL meshes
+// in submodel order (the lighting-precompute loop just above it) - so a
+// compiled MDL's own per-entry normindex already addresses the
+// submodel's normal array directly, exactly parallel to how vertindex
+// addresses its vertex array. This tool now walks each mesh's own
+// triangle stream once and takes the union of (vertex-bones via
+// vertindex -> vertinfoindex) and (normal-bones via normindex ->
+// norminfoindex) for THAT mesh alone - the real, exact per-draw bone
+// set, no over-approximation (GoldSrc's own per-submodel CPU skinning
+// transforms every vertex/normal up front regardless of mesh boundaries;
+// whether ref/nv2a would keep that structure or move skinning onto the
+// GPU per mesh is unresolved and does not change what this measures -
+// the mesh IS the real draw boundary either way).
+//
+// A mesh whose triangle stream is truncated or malformed is reported as
+// UNANALYSED, not folded into the pass/fail counts as a low bone count -
+// found in review: a swallowed read failure silently looking like a
+// passing result is exactly the wrong direction for a census meant to
+// show over-budget models are rare.
 //
 // Usage: census_bones [--budget N] <models-dir> [<models-dir> ...]
 // --budget overrides the ~50 estimate (default 50) - found in review:
@@ -106,10 +113,28 @@ struct mstudiomesh_t {
 #pragma pack(pop)
 
 // Walks one mesh's real triangle command stream (see header comment for
-// the confirmed format) and inserts every referenced vertex index into
-// out. Bounds-checked against raw.size() at every read - a malformed or
-// truncated stream stops the walk rather than reading out of bounds.
-void collectMeshVertIndices(const std::vector<uint8_t>& raw, size_t triOff, std::set<uint16_t>& out) {
+// the confirmed format) and inserts every referenced vertex AND normal
+// index into the matching out-set. Both indices are used exactly as the
+// reference does - ptricmds[0] into the submodel's vertex array,
+// ptricmds[1] into its normal array, confirmed against
+// R_StudioSetColorArray (gl_studio.c:1431-1436: `pstudionorms[ptricmds[1]]`
+// and `g_studio.lightvalues[ptricmds[1]]`, the latter populated by a
+// cumulative, submodel-wide running index across all meshes in mesh
+// order - so a compiled MDL's own per-entry normal index already
+// addresses the submodel-wide array directly, the same way vertindex
+// does; no per-mesh remapping is needed, and no over-approximation - see
+// the header comment on this file for what round 1 of review left
+// unresolved here, closed by this exact reference read).
+//
+// Returns false (out sets left as-is, not necessarily complete) if the
+// stream is truncated or malformed - a bounds failure or a missing
+// terminator - so the caller can treat this mesh as UNANALYSED rather
+// than silently reporting a partial, misleadingly-low bone count as if
+// it were a real result. Found in review: the census exists to show
+// over-budget models are rare, so a swallowed read failure producing a
+// low count is exactly the wrong direction to fail in.
+bool collectMeshIndices(const std::vector<uint8_t>& raw, size_t triOff,
+                        std::set<uint16_t>& outVerts, std::set<uint16_t>& outNorms) {
     size_t pos = triOff;
     auto readI16 = [&](size_t off, int16_t& v) -> bool {
         if (off + sizeof(int16_t) > raw.size())
@@ -121,30 +146,26 @@ void collectMeshVertIndices(const std::vector<uint8_t>& raw, size_t triOff, std:
     for (;;) {
         int16_t header;
         if (!readI16(pos, header))
-            return; // truncated - stop rather than read out of bounds
+            return false; // truncated before a terminator - real failure
         pos += sizeof(int16_t);
         if (header == 0)
-            return; // real terminator
+            return true; // real terminator - a genuinely complete walk
         int count = header < 0 ? -header : header;
         for (int i = 0; i < count; ++i) {
             int16_t vertindex, normindex, s, t;
-            if (!readI16(pos, vertindex)) return;
-            if (!readI16(pos + 2, normindex)) return;
-            if (!readI16(pos + 4, s)) return;
-            if (!readI16(pos + 6, t)) return;
-            (void)normindex; (void)s; (void)t;
+            if (!readI16(pos, vertindex)) return false;
+            if (!readI16(pos + 2, normindex)) return false;
+            if (!readI16(pos + 4, s)) return false;
+            if (!readI16(pos + 6, t)) return false;
+            (void)s; (void)t;
             if (vertindex >= 0)
-                out.insert(static_cast<uint16_t>(vertindex));
+                outVerts.insert(static_cast<uint16_t>(vertindex));
+            if (normindex >= 0)
+                outNorms.insert(static_cast<uint16_t>(normindex));
             pos += 4 * sizeof(int16_t);
         }
     }
 }
-
-struct MeshResult {
-    int32_t meshIndex = 0;
-    int32_t vertexOnlyBones = 0;   // distinct bones among THIS mesh's own referenced vertices - exact
-    int32_t withNormalBones = 0;   // above, unioned with the WHOLE submodel's normal-bones - conservative upper bound
-};
 
 struct SubmodelResult {
     std::string modelFile;
@@ -152,8 +173,8 @@ struct SubmodelResult {
     std::string submodelName;
     int32_t numVerts = 0;
     int32_t numMeshes = 0;
-    int32_t peakVertexOnlyBones = 0; // max over meshes of vertexOnlyBones - the real, exact per-draw figure
-    int32_t peakWithNormalBones = 0; // max over meshes of withNormalBones - conservative upper bound
+    int32_t peakBones = 0;      // max over meshes of exact per-mesh (vertex-bones UNION normal-bones)
+    bool fullyAnalysed = true;  // false if ANY mesh's triangle stream failed to walk to its terminator
 };
 
 bool readWholeFile(const fs::path& p, std::vector<uint8_t>& out) {
@@ -200,18 +221,9 @@ bool censusOneModel(const fs::path& mdlPath, std::vector<SubmodelResult>& out) {
             size_t vertInfoOff = static_cast<size_t>(model.vertinfoindex);
             if (vertInfoOff + static_cast<size_t>(model.numverts) > raw.size())
                 continue;
-
-            // Every normal-bone in the whole submodel, added to every mesh's
-            // own count as a conservative over-approximation - see header
-            // comment for why this is not attributed per mesh.
-            std::set<uint8_t> submodelNormBones;
-            if (model.numnorms > 0) {
-                size_t normInfoOff = static_cast<size_t>(model.norminfoindex);
-                if (normInfoOff + static_cast<size_t>(model.numnorms) <= raw.size()) {
-                    for (int32_t n = 0; n < model.numnorms; ++n)
-                        submodelNormBones.insert(raw[normInfoOff + static_cast<size_t>(n)]);
-                }
-            }
+            size_t normInfoOff = static_cast<size_t>(model.norminfoindex);
+            bool normArrayInBounds = model.numnorms > 0 &&
+                normInfoOff + static_cast<size_t>(model.numnorms) <= raw.size();
 
             SubmodelResult sr;
             sr.modelFile = mdlPath.filename().string();
@@ -222,25 +234,35 @@ bool censusOneModel(const fs::path& mdlPath, std::vector<SubmodelResult>& out) {
 
             for (int32_t mi = 0; mi < model.nummesh; ++mi) {
                 size_t meshOff = static_cast<size_t>(model.meshindex) + mi * sizeof(mstudiomesh_t);
-                if (meshOff + sizeof(mstudiomesh_t) > raw.size())
+                if (meshOff + sizeof(mstudiomesh_t) > raw.size()) {
+                    sr.fullyAnalysed = false;
                     break;
+                }
                 mstudiomesh_t mesh;
                 std::memcpy(&mesh, raw.data() + meshOff, sizeof(mstudiomesh_t));
 
-                std::set<uint16_t> vertIndices;
-                collectMeshVertIndices(raw, static_cast<size_t>(mesh.triindex), vertIndices);
-
-                std::set<uint8_t> vertBones;
-                for (uint16_t vi : vertIndices) {
-                    if (static_cast<size_t>(vi) < static_cast<size_t>(model.numverts))
-                        vertBones.insert(raw[vertInfoOff + static_cast<size_t>(vi)]);
+                std::set<uint16_t> vertIndices, normIndices;
+                bool walkOk = collectMeshIndices(raw, static_cast<size_t>(mesh.triindex), vertIndices, normIndices);
+                if (!walkOk) {
+                    sr.fullyAnalysed = false;
+                    continue; // this mesh's own count is unreliable - skip it, but keep checking the rest
                 }
 
-                std::set<uint8_t> withNorms = vertBones;
-                withNorms.insert(submodelNormBones.begin(), submodelNormBones.end());
+                std::set<uint8_t> bones;
+                for (uint16_t vi : vertIndices) {
+                    if (static_cast<size_t>(vi) < static_cast<size_t>(model.numverts))
+                        bones.insert(raw[vertInfoOff + static_cast<size_t>(vi)]);
+                    else
+                        sr.fullyAnalysed = false; // out-of-range index the format shouldn't produce
+                }
+                for (uint16_t ni : normIndices) {
+                    if (normArrayInBounds && static_cast<size_t>(ni) < static_cast<size_t>(model.numnorms))
+                        bones.insert(raw[normInfoOff + static_cast<size_t>(ni)]);
+                    else
+                        sr.fullyAnalysed = false;
+                }
 
-                sr.peakVertexOnlyBones = std::max(sr.peakVertexOnlyBones, static_cast<int32_t>(vertBones.size()));
-                sr.peakWithNormalBones = std::max(sr.peakWithNormalBones, static_cast<int32_t>(withNorms.size()));
+                sr.peakBones = std::max(sr.peakBones, static_cast<int32_t>(bones.size()));
             }
 
             out.push_back(sr);
@@ -295,23 +317,44 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::sort(all.begin(), all.end(), [](const SubmodelResult& a, const SubmodelResult& b) {
-        return a.peakWithNormalBones > b.peakWithNormalBones;
+    // Failed-to-fully-analyse submodels are reported SEPARATELY, never
+    // silently folded into the pass/near/over counts below - found in
+    // review: a swallowed read failure producing a low bone count is
+    // exactly the wrong direction for a census meant to show over-budget
+    // models are rare.
+    std::vector<SubmodelResult> analysed, failed;
+    for (auto& r : all) {
+        if (r.fullyAnalysed) analysed.push_back(r);
+        else failed.push_back(r);
+    }
+
+    std::sort(analysed.begin(), analysed.end(), [](const SubmodelResult& a, const SubmodelResult& b) {
+        return a.peakBones > b.peakBones;
     });
 
     // Full near-threshold distribution, not just a binary pass/fail - found
     // in review: a hardcoded exact cutoff hid how close everything else was.
-    std::printf("%-28s %-16s %-20s %6s %6s %10s %10s\n", "model", "bodypart", "submodel",
-                "verts", "meshes", "peak-vert", "peak+norm");
-    size_t overBudget = 0, nearBudget = 0; // "near" = within 10 of budget, either measure
-    for (const auto& r : all) {
-        bool over = r.peakWithNormalBones > budget;
-        bool near = !over && (budget - r.peakWithNormalBones <= 10);
+    std::printf("%-28s %-16s %-20s %6s %6s %6s\n", "model", "bodypart", "submodel",
+                "verts", "meshes", "bones");
+    size_t overBudget = 0, nearBudget = 0; // "near" = within 10 of budget
+    for (const auto& r : analysed) {
+        bool over = r.peakBones > budget;
+        bool near = !over && (budget - r.peakBones <= 10);
         if (over || near) {
-            std::printf("%-28s %-16s %-20s %6d %6d %10d %10d%s\n", r.modelFile.c_str(),
+            std::printf("%-28s %-16s %-20s %6d %6d %6d%s\n", r.modelFile.c_str(),
                         r.bodypartName.c_str(), r.submodelName.c_str(), r.numVerts, r.numMeshes,
-                        r.peakVertexOnlyBones, r.peakWithNormalBones, over ? "  *** OVER ***" : "  (near)");
+                        r.peakBones, over ? "  *** OVER ***" : "  (near)");
             if (over) ++overBudget; else ++nearBudget;
+        }
+    }
+
+    if (!failed.empty()) {
+        std::printf("\n%zu submodel(s) could NOT be fully analysed (malformed/truncated triangle\n"
+                    "  stream or an out-of-range index) - excluded from the counts below, not\n"
+                    "  counted as passing:\n", failed.size());
+        for (const auto& r : failed) {
+            std::printf("  %s / %s / %s (partial peak seen before the failure: %d)\n",
+                        r.modelFile.c_str(), r.bodypartName.c_str(), r.submodelName.c_str(), r.peakBones);
         }
     }
 
@@ -319,16 +362,18 @@ int main(int argc, char** argv) {
                 "  ESTIMATE pending a real VP20 shader constant layout, not a verified exact cutoff)\n", budget);
     std::printf("%zu .mdl file(s) found, %zu were not a real body model (T.mdl/sequence-group/non-MDL, skipped)\n",
                 modelFiles, notStudioModel);
-    std::printf("%zu submodel(s) analysed across %zu real studio model file(s)\n", all.size(), modelFiles - notStudioModel);
-    std::printf("%zu submodel(s) exceed the budget (peak per-mesh bones, vertices + conservatively all submodel normals)\n",
+    std::printf("%zu submodel(s) fully analysed across %zu real studio model file(s) (%zu could not be)\n",
+                analysed.size(), modelFiles - notStudioModel, failed.size());
+    std::printf("%zu submodel(s) exceed the budget (exact per-mesh bones: the union of that mesh's own\n"
+                "  vertex- and normal-bone indices, both read directly from its triangle command stream)\n",
                 overBudget);
     std::printf("%zu more submodel(s) are within 10 bones of the budget - worth re-checking once the real shader\n"
                 "  constant layout narrows the estimate\n", nearBudget);
-    if (!all.empty()) {
-        std::printf("max peak bones in any single mesh (with conservative normal over-approximation): %d (%s / %s / %s)\n",
-                    all.front().peakWithNormalBones, all.front().modelFile.c_str(),
-                    all.front().bodypartName.c_str(), all.front().submodelName.c_str());
+    if (!analysed.empty()) {
+        std::printf("max exact bones in any single mesh: %d (%s / %s / %s)\n",
+                    analysed.front().peakBones, analysed.front().modelFile.c_str(),
+                    analysed.front().bodypartName.c_str(), analysed.front().submodelName.c_str());
     }
 
-    return 0;
+    return failed.empty() ? 0 : 1;
 }

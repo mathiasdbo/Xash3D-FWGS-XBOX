@@ -1607,37 +1607,38 @@ real baker uses, run against the real Steam "Half-Life" install):
   light constants (an ESTIMATE, not yet a verified exact cutoff — see
   below), against `MAXSTUDIOBONES 128`. GoldSrc rigs each vertex to
   exactly one bone via `vertinfoindex` (`deps/hlsdk/engine/studio.h`), not
-  a weighted multi-bone skin. **Corrected in review, round 1: the first
-  version measured distinct bones over a whole submodel (`mstudiomodel_t`)
-  and called that the "real per-draw bone set" — wrong, the reference
-  (`ref/gl/gl_studio.c`'s `R_StudioDrawPoints`, `:2078-2112`) submits each
-  `mstudiomesh_t` separately, and a mesh's own triangle command stream
-  only ever touches a subset of the submodel's vertices.**
-  `census_bones.cpp` now walks each mesh's real triangle command stream
-  (confirmed against `R_StudioBuildArrayNormalMesh`, `gl_studio.c:
-  1749-1777` — int16 run-length headers, four-int16 `{vertindex,
-  normindex, s, t}` entries, not guessed) and counts distinct vertex-bones
-  per mesh exactly; normal-bones are added per mesh from the WHOLE
-  submodel's normal array as a deliberate, documented over-approximation
-  (the reference's own two-loop pointer lifetime for mesh-local vs.
-  submodel-wide normal indexing was not resolved to full confidence
-  reading `gl_studio.c` in the time this census took, and this project
-  does not guess — see the tool's own header comment). **The opposite
-  shape from lightstyles — a rare, sharply-bounded edge case, unchanged by
-  the fix**: of 598 submodels across 296 real studio model files (323
-  `.mdl` on disk, 27 texture-only/sequence-group files correctly
-  excluded), still only **3 submodels in 3 models** exceed the ~50-bone
-  estimate — `controller.mdl` (peak 64 with the conservative normal
-  over-approximation, 13 on vertices alone), `nihilanth.mdl` (59 / 27),
-  `stukabat.mdl` (51 / 28). All three are special/boss enemies (the
-  Nihilanth is the game's final boss), not player, weapon, or common NPC
-  models. Four more sit within 10 of the estimate — `bullsquid.mdl` (49),
-  `zombie.mdl` (47), `islave.mdl` (44), `garg.mdl` (43) — worth
-  re-checking once a real VP20 shader constant layout narrows the budget
-  past an estimate (`--budget N` overrides it without a rebuild). Bone-
-  subset partitioning code needs to exist, but as a small, targeted fix
-  for a handful of named enemy models, not a systemic redesign the whole
-  asset pipeline has to carry.
+  a weighted multi-bone skin. **Two real mistakes, both found in Codex
+  review, both fixed — the second reverses the conclusion entirely.**
+  Round 1: the first version measured distinct bones over a whole
+  submodel (`mstudiomodel_t`), calling that the "real per-draw bone set"
+  — wrong, the reference (`ref/gl/gl_studio.c`'s `R_StudioDrawPoints`,
+  `:2078-2112`) submits each `mstudiomesh_t` separately, and a mesh's own
+  triangle command stream only touches a subset of the submodel's
+  vertices. Fixed to walk each mesh's real triangle command stream (int16
+  run-length headers, four-int16 `{vertindex, normindex, s, t}` entries,
+  confirmed against `R_StudioBuildArrayNormalMesh`, `gl_studio.c:
+  1749-1777`) for exact per-mesh vertex-bones — but round 1's fix still
+  added every normal-bone in the WHOLE submodel to every mesh as a
+  declared, deliberate over-approximation, unable to confirm from reading
+  `gl_studio.c` alone whether a triangle entry's own `normindex` was
+  mesh-local or already submodel-global. Round 2 resolved that for real:
+  `R_StudioSetColorArray` (`gl_studio.c:1431-1436`) reads
+  `pstudionorms[ptricmds[1]]` and `g_studio.lightvalues[ptricmds[1]]`, the
+  latter populated by a running index accumulated across every mesh in
+  submodel order — a compiled MDL's own per-entry `normindex` already
+  addresses the submodel's normal array directly, exactly parallel to
+  `vertindex`. Fixed to attribute normal-bones per mesh exactly too, no
+  over-approximation. **The corrected, exact measurement finds ZERO
+  submodels over budget** — the previous "3 models, all bosses" was
+  entirely an artifact of adding an unrelated mesh's normal-bones into
+  the count; the worst real case across all 598 submodels in 296 studio
+  models is `v_grenade.mdl`'s `grenade_hand` mesh at 35 bones, 15 under
+  even the conservative ~50 estimate. **Bone-subset partitioning code is
+  not needed for the retail Half-Life content at all** — this closes the
+  question rather than scoping a fix. (`--budget N` still exists to
+  re-check headroom once a real VP20 shader constant layout narrows the
+  ~50 estimate; nothing was close enough at review time for that number
+  to matter.)
 
 Then the format, decided once:
 

@@ -24,15 +24,15 @@ opening level, ruling that option out; the choice is now between
 per-style pages combined at runtime and a baked "on" state with binary
 switching.
 
-Bones: measures per-mesh (walking each mesh's real triangle command
-stream, not the whole submodel - a submodel is not one draw; see
-docs/r3d/fork-plan.md's XB section for what round 1 of review caught
-here). Of 598 submodels across 296 real studio models, only 3 exceed the
-~50-bone VP20 palette estimate - `controller.mdl` (64), `nihilanth.mdl`
-(59), `stukabat.mdl` (51), all boss/special enemies; four more sit within
-10 of it. The opposite shape from lightstyles: bone-subset partitioning
-code is needed, but as a small, targeted fix for a handful of named
-enemy models, not a systemic redesign.
+Bones: measures per-mesh, exactly - walking each mesh's real triangle
+command stream for both its own vertex- AND normal-bone indices, not the
+whole submodel (a submodel is not one draw) and not an over-approximation
+(see docs/r3d/fork-plan.md's XB section for two rounds of review finding
+real problems here, the second reversing the conclusion). Across all 598
+submodels in 296 real studio models, the exact measurement finds ZERO
+over the ~50-bone VP20 palette estimate - the worst case, `v_grenade.mdl`'s
+grenade_hand mesh, is 35. Bone-subset partitioning code is not needed for
+the retail Half-Life content at all.
 
 Both results are written into `docs/r3d/fork-plan.md`'s XB section,
 replacing "the number ... decides the rest" with the actual numbers.
