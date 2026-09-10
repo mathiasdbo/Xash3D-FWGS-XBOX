@@ -1649,11 +1649,23 @@ Then the format, decided once:
   baked order. Per leaf alone explodes the draw count, and on pbkit every
   submission is CPU time writing pushbuffer words into write-combined memory.
 - **Lightmap pages in RGB565**, with whatever the census decided.
-- ~~**Bone partitioning** for the models the census named.~~ **Not
-  needed — measured, 2026-09-10.** The census (above) found zero
-  submodels over the VP20 bone budget across the entire retail install;
-  no model needs partitioning. Struck rather than deleted so the
-  decision this line used to defer is visible as made, not just absent.
+- **Bone partitioning** for the models the census named. **Provisionally
+  not needed under the ~50-bone estimate, measured 2026-09-10 — NOT yet a
+  closed decision.** The census (above) found a worst-case peak of 35
+  bones across every submodel in the entire retail install, comfortably
+  under the ~50 estimate. But that estimate is explicitly unverified (see
+  above: "an ESTIMATE pending a real VP20 shader constant layout, not a
+  verified exact cutoff") — **found in review**: closing this line
+  outright would have removed partitioning from the format before the
+  thing the 50-bone number depends on exists, and the real shader could
+  plausibly reserve enough beyond the naive view-projection-and-light
+  guess to bring the usable palette under 35. **Gate: do not implement
+  bone-subset partitioning code unless a compiled VP20 shader's real
+  constant layout puts the usable palette below 35** (re-run
+  `census_bones --budget N` with that real number the moment it exists —
+  it is a CLI argument specifically so this recheck costs nothing). Until
+  then, treat this as "no partitioning work is scheduled," not "no
+  partitioning work will ever be needed."
 - **DXT laid out linear by block row.** `swizzleNV2A`
   (`TextureOpt.cpp:110-132`) applies a Morton order to DXT blocks, which is
   wrong for `D3DFMT_DXT1` on this hardware. Verified against a known-good
