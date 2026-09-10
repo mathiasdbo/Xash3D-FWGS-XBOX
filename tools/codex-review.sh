@@ -144,29 +144,55 @@ STATUS=$?
 STDERR_CONTENT=$(cat "$STDERR_FILE")
 rm -f "$STDERR_FILE"
 
-# A nonzero exit here is NOT proof the review failed: codex-companion.mjs
-# has been observed to propagate the inner Codex CLI's own process exit
-# status as its own, even on a run that completed a full turn and printed a
-# fully valid, parseable result (parseError: null, a non-null result
-# object). Treating STATUS alone as fatal is exactly the bug the node
-# parser below already guards against one layer down (see its own comment)
-# - just recreated one layer up. So: only hard-fail on STATUS here when
-# there is no stdout to even attempt parsing (a real crash-before-output
-# case). Otherwise fall through to the node parser and let payload.parseError
-# / payload.result be the actual authority, same as a STATUS-0 run - if
-# parsing also fails, that failure path reports STATUS for context.
-if [ "$STATUS" -ne 0 ] && [ -z "$RAW" ]; then
-	echo "codex-review: codex-companion.mjs exited $STATUS with no output -" >&2
-	echo "  Codex did not complete a review turn." >&2
+# REVERTED, found wrong in Codex review of this exact change (round 2):
+# an earlier version of this block let a nonzero STATUS through to the
+# node parser below whenever stdout still parsed as valid JSON, on the
+# theory that codex-companion.mjs's own exit code is not proof of failure
+# by itself. That theory has a real, confirmed hole: STATUS comes from
+# codex.mjs's buildResultStatus(), `turnState.finalTurn?.status ===
+# "completed" ? 0 : 1` - a genuine, whole-turn lifecycle signal - but the
+# JSON payload this script parses comes from turnState.lastAgentMessage,
+# which codex.mjs's captureTurn() overwrites on EVERY streamed
+# agentMessage item, not only ones with phase "final_answer" and
+# lifecycle "completed" (confirmed by reading codex.mjs directly, not
+# assumed). So a turn that emits a plausible, well-formed, schema-shaped
+# JSON message mid-stream and THEN fails for an unrelated reason (hit a
+# usage limit, cancelled, crashed) leaves exactly that interim message
+# behind as `finalMessage`, with parseError: null and a fully-populated
+# result - indistinguishable, from this script's side, from a genuinely
+# completed review. Codex's own round-2 review of the fall-through
+# version demonstrated this for real against a live run
+# (review-mtvmjvf7-28ydid): an interim "approve" message survived a turn
+# that then failed on the usage limit. codex-companion.mjs does not
+# currently expose the one field that would disambiguate this
+# (finalAnswerSeen) through the JSON this script consumes, so there is no
+# reliable way to trust a nonzero-STATUS result here. A gate that can be
+# satisfied by an interrupted turn's interim commentary is worse than no
+# gate, because it gets believed - the same principle tools/xbox-sweep.sh's
+# own header comment already states about a sweep that cannot fail.
+# Any nonzero STATUS is fatal, full stop, exactly like a STATUS-0 run's
+# own "distrust a clean-looking success" stance below - the previous
+# false-failure case this script hit (a valid "approve" on a nonzero
+# STATUS from a genuinely completed-looking turn) stays an unsolved,
+# separate problem: real, but not safely fixable from this side without
+# codex-companion.mjs exposing more turn-completion detail than it does
+# today.
+if [ "$STATUS" -ne 0 ]; then
+	echo "codex-review: codex-companion.mjs exited $STATUS - the turn did not" >&2
+	echo "  reach a completed lifecycle state, so its output (even if it looks" >&2
+	echo "  like a valid, complete review) cannot be trusted as a passing" >&2
+	echo "  gate - it may be interim commentary from a turn that was then" >&2
+	echo "  interrupted, not a genuine final answer. Not treated as blocking" >&2
+	echo "  findings needing fix/justify - just an incomplete review." >&2
 	if [ -n "$STDERR_CONTENT" ]; then
 		echo "--- stderr ---" >&2
 		printf '%s\n' "$STDERR_CONTENT" >&2
 	fi
+	if [ -n "$RAW" ]; then
+		echo "--- stdout (informational only, not a trusted result) ---" >&2
+		printf '%s\n' "$RAW" >&2
+	fi
 	exit 2
-fi
-if [ "$STATUS" -ne 0 ]; then
-	echo "codex-review: warning - codex-companion.mjs exited $STATUS but printed" >&2
-	echo "  output; checking whether it is a valid result before failing." >&2
 fi
 
 # A nonempty stderr on a "successful" (exit 0) run is not fatal by itself -
