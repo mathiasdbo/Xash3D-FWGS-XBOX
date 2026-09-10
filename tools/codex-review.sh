@@ -23,6 +23,21 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
 BASE="main"
+# gpt-5.6-sol, not the account's own configured default (gpt-5.6-terra,
+# ~/.codex/config.toml): sol's own model-cache entry advertises a lower
+# default reasoning effort (low vs terra's medium) for the same "everyday
+# work" tier, at a real cost this project has now hit directly - the
+# account's usage limit was exhausted mid-session running reviews with no
+# model pin at all. --model, not documented in codex-companion.mjs's own
+# --help banner for adversarial-review but present and load-bearing in its
+# arg parser (the same undocumented-but-real shape as --json, found
+# earlier in this project's own history with this script), is passed
+# straight through unaliased to the underlying `codex` CLI - so this needs
+# the real model slug (gpt-5.6-sol), not a short name; codex-companion.mjs
+# only knows one alias itself ("spark"), and it is not this one.
+# CODEX_REVIEW_MODEL overrides it, e.g. CODEX_REVIEW_MODEL=gpt-5.6-terra
+# for a harder review when sol's lighter reasoning misses something subtle.
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-5.6-sol}"
 EXTRA=()
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -91,7 +106,7 @@ if [ "${#EXTRA[@]}" -gt 0 ]; then
 Additional focus for this run: ${EXTRA[*]}"
 fi
 
-echo "codex-review: reviewing ${MERGE_BASE}..HEAD (base: $BASE)" >&2
+echo "codex-review: reviewing ${MERGE_BASE}..HEAD (base: $BASE), model $CODEX_REVIEW_MODEL" >&2
 echo "codex-review: this can take several minutes." >&2
 
 STDERR_FILE=$(mktemp)
@@ -124,7 +139,7 @@ STDERR_FILE=$(mktemp)
 # codex-companion.mjs's internal recomputation trivially resolve to the
 # same SHA, so there is exactly one source of truth for the range instead
 # of two that happen to usually agree.
-RAW=$(node "$COMPANION" adversarial-review --json --base "$MERGE_BASE" --cwd "$REPO" "$FOCUS" 2>"$STDERR_FILE")
+RAW=$(node "$COMPANION" adversarial-review --json --base "$MERGE_BASE" --model "$CODEX_REVIEW_MODEL" --cwd "$REPO" "$FOCUS" 2>"$STDERR_FILE")
 STATUS=$?
 STDERR_CONTENT=$(cat "$STDERR_FILE")
 rm -f "$STDERR_FILE"
