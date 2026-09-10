@@ -7,12 +7,39 @@
 // field, and re-deriving hand offsets each time is exactly the kind of
 // mistake this tool exists to avoid.
 //
+// Validates before printing - found in review: the first version read
+// whatever bytes were at MPAK_DESCRIPTOR_OFFSET and printed them
+// unconditionally, exiting 0 regardless, so a plain .bsp or a corrupted
+// archive produced a normal-looking report and a clean exit status,
+// indistinguishable from a real one to anything scripting this tool.
+// This checks magic/version/headerSize (the same invariants
+// filesystem/mpak_layout.c's Mpak_ValidateHeader enforces on the engine
+// side - re-checked here rather than shared, since this is a tiny,
+// standalone C++ tool and that function is C, gated behind a real
+// g_engfuncs the engine provides) and every lump's declared length
+// against a real record size where one applies, printing a clear error
+// and returning 1 on the first problem found.
+//
 // Usage: inspect_mpak <file.mpak>
 #include "formats/MpakHeader.h"
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 
 using namespace formats;
+
+namespace {
+
+bool CheckDivisible(const char* name, uint32_t len, size_t recordSize) {
+    if (recordSize > 0 && len % recordSize != 0) {
+        std::fprintf(stderr, "INVALID: %s length %u is not a multiple of its %zu-byte record size\n",
+            name, len, recordSize);
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) { std::fprintf(stderr, "usage: inspect_mpak <file.mpak>\n"); return 1; }
@@ -21,7 +48,32 @@ int main(int argc, char** argv) {
     f.seekg(MPAK_DESCRIPTOR_OFFSET);
     MpakHeader6 h{};
     f.read(reinterpret_cast<char*>(&h), sizeof(h));
-    if (!f) { std::fprintf(stderr, "short read - file too small to hold a descriptor\n"); return 1; }
+    if (!f) { std::fprintf(stderr, "INVALID: short read - file too small to hold a descriptor\n"); return 1; }
+
+    bool ok = true;
+    if (std::memcmp(h.magic, "MPAK", 4) != 0) {
+        std::fprintf(stderr, "INVALID: no MPAK magic at offset %u (this is not an MPAK archive)\n", MPAK_DESCRIPTOR_OFFSET);
+        ok = false;
+    }
+    // This tool is built alongside the writer, so MpakHeader6{}'s own
+    // default IS "the version this build's format currently is" - the
+    // same source of truth PakManager::verifyFile() already trusts
+    // (`desc.version != MpakHeader6{}.version`), not a hardcoded number
+    // that would silently go stale on the next bump.
+    if (h.version != MpakHeader6{}.version) {
+        std::fprintf(stderr, "INVALID: version %u, this build only knows version %u\n", h.version, MpakHeader6{}.version);
+        ok = false;
+    }
+    if (h.headerSize != sizeof(MpakHeader6)) {
+        std::fprintf(stderr, "INVALID: headerSize %u, this build's MpakHeader6 is %zu bytes\n", h.headerSize, sizeof(MpakHeader6));
+        ok = false;
+    }
+    ok &= CheckDivisible("lenFaceInfo", h.lenFaceInfo, sizeof(MpakFaceInfo));
+    ok &= CheckDivisible("lenExtraLightBlocks", h.lenExtraLightBlocks, sizeof(MpakExtraLightBlock));
+    if (!ok) {
+        std::fprintf(stderr, "%s is not a valid MPAK archive this build recognises\n", argv[1]);
+        return 1;
+    }
 
     std::printf("magic: %.4s\n", h.magic);
     std::printf("version: %u\n", h.version);
