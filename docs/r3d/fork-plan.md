@@ -1649,7 +1649,11 @@ Then the format, decided once:
   baked order. Per leaf alone explodes the draw count, and on pbkit every
   submission is CPU time writing pushbuffer words into write-combined memory.
 - **Lightmap pages in RGB565**, with whatever the census decided.
-- **Bone partitioning** for the models the census named.
+- ~~**Bone partitioning** for the models the census named.~~ **Not
+  needed — measured, 2026-09-10.** The census (above) found zero
+  submodels over the VP20 bone budget across the entire retail install;
+  no model needs partitioning. Struck rather than deleted so the
+  decision this line used to defer is visible as made, not just absent.
 - **DXT laid out linear by block row.** `swizzleNV2A`
   (`TextureOpt.cpp:110-132`) applies a Morton order to DXT blocks, which is
   wrong for `D3DFMT_DXT1` on this hardware. Verified against a known-good
