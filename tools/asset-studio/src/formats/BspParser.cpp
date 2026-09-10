@@ -230,7 +230,154 @@ namespace formats {
             }
             return flags;
         }
+
+        // The size of one embedded miptex entry the way the engine measures
+        // it: Mod_CalculateMipTexSize (mod_bmodel.c:664) - header, the four
+        // mips (w*h*85/64), and 770 more bytes (uint16 count + 256*3 palette)
+        // when Mod_CalcMipTexUsesCustomPalette (:673) finds room for them
+        // before the next entry's dataofs (or the lump's end).
+        size_t miptexPalettelessSize(const miptex_t& mt) {
+            return sizeof(miptex_t) + ((static_cast<size_t>(mt.width) * mt.height * 85) >> 6);
+        }
+
     } // namespace
+
+    // Rebuilds LUMP_TEXTURES as the embedded-miptex lump compilers emit for
+    // -nowadtextures, so the engine's unmodified Mod_LoadTextures path
+    // (Mod_GetMipTexForTexture :605, Mod_LoadTextureData's "internal texture"
+    // branch :2860-2868) loads names, dimensions and 8-bit pixels with no WAD
+    // on the console at all. Per miptex, in the source's own index order
+    // (texinfo.miptex indexes it), in the REFERENCE's own precedence -
+    // r_wadtextures defaults to 0 (model.c:32) and Mod_LoadTextureData only
+    // tries a WAD when that is set or the miptex has no pixels of its own
+    // (:2834-2835), found in review: the first version took the WAD first,
+    // which would have baked different pixels than the engine's default for
+    // a map carrying customised embedded art under a WAD texture's name:
+    //  - embedded pixels, complete: the embedded bytes, sized the engine's
+    //    way (Mod_CalculateMipTexSize :664 plus the palette iff
+    //    Mod_CalcMipTexUsesCustomPalette :673 would find room for it);
+    //  - otherwise, a same-named WAD lump: its raw bytes, verbatim (a WAD3
+    //    lump is exactly miptex_t + mips + count + palette);
+    //  - otherwise the 40-byte header alone, offsets zero - the engine keeps
+    //    the NAME and dimensions (Mod_LoadTexture :2953-2956) and falls back
+    //    to its default image (:2871-2874), exactly what a real .bsp with a
+    //    missing WAD gets. Names decide sky/water/conveyor/transparency flags
+    //    (:3354-3371), bevel contents (:1451) and animation linkage
+    //    (:3042-3055), so they are never substituted; an embedded payload the
+    //    lump is too short to hold lands here too, rather than as a short
+    //    copy the engine would then read past;
+    //  - no header at all (dataofs out of range): dataofs -1, the engine
+    //    creates its default texture (Mod_CreateDefaultTexture :722).
+    // Every offset is bounded by the input buffer (found in review: a later
+    // directory entry pointing past the lump used to become the copy limit).
+    // Unit-tested in tests/miptex_lump_test.cpp.
+    std::vector<uint8_t> buildEmbeddedMiptexLump(const std::vector<uint8_t>& texData,
+                                                 const std::unordered_map<std::string, const WadLump*>& externalWadTextures) {
+        std::vector<uint8_t> out;
+        if (texData.size() < sizeof(int32_t)) {
+            // No texture lump at all: an empty dmiptexlump_t (nummiptex 0)
+            // keeps Mod_LoadTextures on its "no textures" path (:3135).
+            out.resize(sizeof(int32_t), 0);
+            return out;
+        }
+
+        int32_t nummiptex = 0;
+        std::memcpy(&nummiptex, texData.data(), sizeof(int32_t));
+        const size_t dirBytes = sizeof(int32_t) + static_cast<size_t>(std::max(nummiptex, 0)) * sizeof(int32_t);
+        if (nummiptex <= 0 || dirBytes > texData.size()) {
+            out.resize(sizeof(int32_t), 0);
+            return out;
+        }
+
+        auto srcOfsAt = [&](int32_t i) {
+            int32_t v = -1;
+            std::memcpy(&v, texData.data() + sizeof(int32_t) + static_cast<size_t>(i) * sizeof(int32_t), sizeof(int32_t));
+            return v;
+        };
+        auto headerFits = [&](int32_t ofs) {
+            return ofs >= 0 && static_cast<size_t>(ofs) + sizeof(miptex_t) <= texData.size();
+        };
+
+        out.resize(dirBytes, 0);
+        std::memcpy(out.data(), &nummiptex, sizeof(int32_t));
+
+        for (int32_t i = 0; i < nummiptex; ++i) {
+            const int32_t offset = srcOfsAt(i);
+            if (!headerFits(offset)) {
+                int32_t none = -1;
+                std::memcpy(out.data() + sizeof(int32_t) + static_cast<size_t>(i) * sizeof(int32_t), &none, sizeof(int32_t));
+                continue;
+            }
+
+            const miptex_t* src = reinterpret_cast<const miptex_t*>(texData.data() + offset);
+            char cleanName[17] = {0};
+            std::memcpy(cleanName, src->name, 16);
+            std::string nameLower(cleanName);
+            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), [](unsigned char c){ return std::tolower(c); });
+
+            const uint8_t* entry = texData.data() + offset;
+            size_t entrySize = sizeof(miptex_t);
+            bool headerOnly = true;
+
+            if (src->offsets[0] >= sizeof(miptex_t)) {
+                // Embedded pixels. This entry's bytes end at the next VALID
+                // directory offset after it, or at the lump's end - never past
+                // the buffer, whatever the directory claims.
+                size_t limit = texData.size();
+                for (int32_t j = i + 1; j < nummiptex; ++j) {
+                    const int32_t ofsJ = srcOfsAt(j);
+                    if (ofsJ > offset && static_cast<size_t>(ofsJ) < limit)
+                        limit = static_cast<size_t>(ofsJ);
+                }
+                const size_t available = limit - static_cast<size_t>(offset);
+                const size_t need = miptexPalettelessSize(*src);
+                if (need <= available && static_cast<size_t>(src->offsets[0]) + static_cast<size_t>(src->width) * src->height <= available) {
+                    entrySize = need + ((available - need >= 770) ? 770 : 0);
+                    headerOnly = false;
+                }
+                // else: truncated - fall through to the WAD, then to header-only
+            }
+
+            if (headerOnly) {
+                auto it = externalWadTextures.find(nameLower);
+                if (it != externalWadTextures.end() && it->second->data.size() >= sizeof(miptex_t)) {
+                    entry = it->second->data.data();
+                    entrySize = it->second->data.size();
+                    headerOnly = false;
+                }
+            }
+
+            // 4-byte-align each entry; the engine reads mip_t via memcpy and
+            // pixels as bytes, so this is only tidiness, and any extra bytes
+            // before the next dataofs only ever make the palette-room test
+            // more permissive, never less.
+            while (out.size() % 4 != 0) out.push_back(0);
+            const int32_t entryOfs = static_cast<int32_t>(out.size());
+            out.insert(out.end(), entry, entry + entrySize);
+            std::memcpy(out.data() + sizeof(int32_t) + static_cast<size_t>(i) * sizeof(int32_t), &entryOfs, sizeof(int32_t));
+
+            if (headerOnly) {
+                // Whatever the source header's offsets said, this entry carries
+                // no pixels: zero them so Mod_LoadTextureData's
+                // `mipTex.offsets[0] > 0` internal-texture branch is not taken.
+                miptex_t* written = reinterpret_cast<miptex_t*>(out.data() + entryOfs);
+                std::memset(written->offsets, 0, sizeof(written->offsets));
+            }
+        }
+
+        return out;
+    }
+
+    void indexWadLumpsForCore(std::unordered_map<std::string, const WadLump*>& index,
+                              const std::vector<WadLump>& lumps) {
+        for (const auto& lump : lumps) {
+            char cleanName[17] = {0};
+            std::memcpy(cleanName, lump.name, 16);
+            std::string nameLower(cleanName);
+            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), [](unsigned char c){ return std::tolower(c); });
+            index[nameLower] = &lump;
+        }
+    }
 
     bool BspParser::load(const std::string& filePath) {
         std::ifstream file(filePath, std::ios::binary);
@@ -321,6 +468,7 @@ namespace formats {
                 }
             }
         }
+        const size_t listedWadsLoaded = loadedWads.size(); // everything after this index is unlisted
 
         for (const auto& entry : vfs.getEntries()) {
             std::filesystem::path p(entry.fileName);
@@ -337,6 +485,19 @@ namespace formats {
             }
         }
 
+        // loadedWads holds the worldspawn-listed WADs first, in list order,
+        // then every other WAD the VFS could see. The nv2a block's DXT path
+        // below resolves from ALL of them (its documented, X9-owned choice);
+        // the core miptex lump resolves ONLY from the listed ones, later
+        // listed overriding earlier, which is the reference's own precedence
+        // (Mod_LoadTextureFromWadList walks world.wadlist in reverse,
+        // mod_bmodel.c:619-655) - found in review: feeding it every WAD on
+        // disk let an unrelated WAD sharing a name bake its pixels into the
+        // map permanently.
+        std::unordered_map<std::string, const WadLump*> coreWadTextures;
+        for (size_t i = 0; i < listedWadsLoaded; ++i)
+            indexWadLumpsForCore(coreWadTextures, loadedWads[i].getLumps());
+
         for (const auto& wad : loadedWads) {
             for (const auto& lump : wad.getLumps()) {
                 char cleanName[17] = {0};
@@ -346,7 +507,8 @@ namespace formats {
                 externalWadTextures[nameLower] = &lump;
             }
         }
-        std::cout << "Total unique WAD texture lumps registered: " << externalWadTextures.size() << "\n";
+        std::cout << "Total unique WAD texture lumps registered: " << externalWadTextures.size()
+                  << " (" << coreWadTextures.size() << " from the " << listedWadsLoaded << " worldspawn-listed WAD(s), used for the core miptex lump)\n";
 
         const auto& faceData = getLumpData(LUMP_FACES);
         const auto& vertexData = getLumpData(LUMP_VERTICES);
@@ -364,6 +526,16 @@ namespace formats {
         const dtexinfo_t* texinfos = reinterpret_cast<const dtexinfo_t*>(texinfoData.data());
         size_t numTexinfos = texinfoData.size() / sizeof(dtexinfo_t);
 
+        // Everything from here to the lightmap atlas is the nv2a block:
+        // DXT-resolved textures, per-face baked Vertex/index/FaceDrawCmd/
+        // FaceInfo, the lightmap atlas. The core profile stores the original
+        // geometry lumps instead and never reads any of this - found in
+        // review: running it anyway meant addVertex's 65,536-vertex abort
+        // (PakManager.cpp) could refuse a core bake of a map whose expanded
+        // per-face vertex count exceeds a 16-bit index buffer the core
+        // archive does not even contain. Skipping it is also most of a core
+        // bake's time.
+        if (pak.isProfileNv2a()) {
         std::vector<TextureLocation> texLocations;
         // A distinct, unmistakable placeholder for any texture that fails to
         // resolve (WAD lookup miss, embedded decode failure, or no data
@@ -678,6 +850,11 @@ namespace formats {
                   << " skipped (sky/liquid/fullbright), " << lmRejected << " rejected (anomalous), "
                   << lmPacker.pageCount() << " page(s)\n";
 
+        uint32_t atlasHeight = 0;
+        std::vector<uint8_t> atlasRgba = lmPacker.flatten(atlasHeight);
+        pak.setLightmapAtlas(LM_PAGE_SIZE, atlasHeight, lmPacker.pageCount(), 0, std::move(atlasRgba));
+        } // nv2a block
+
         pak.setVisibilityData(getLumpData(LUMP_VISIBILITY));
         pak.setNodesData(getLumpData(LUMP_NODES));
         pak.setLeavesData(getLumpData(LUMP_LEAVES));
@@ -688,9 +865,18 @@ namespace formats {
         pak.setEntitiesData(getLumpData(LUMP_ENTITIES));
         pak.setTexinfoData(getLumpData(LUMP_TEXINFO));
 
-        uint32_t atlasHeight = 0;
-        std::vector<uint8_t> atlasRgba = lmPacker.flatten(atlasHeight);
-        pak.setLightmapAtlas(LM_PAGE_SIZE, atlasHeight, lmPacker.pageCount(), 0, std::move(atlasRgba));
+        // v7 classic core (MpakHeader.h's v6 -> v7 note): the raw lumps the
+        // engine's own loaders consume unchanged - ref/soft scan-converts from
+        // SURFEDGES/EDGES every frame, the server and both renderers rebuild
+        // lighting per lightstyle from LIGHTING samples - plus TEXTURES rebuilt
+        // as embedded miptex so texture names, dimensions and 8-bit pixels
+        // all reach the engine in the one shape it already parses.
+        pak.setVertexesData(vertexData);
+        pak.setEdgesData(edgeData);
+        pak.setSurfedgesData(surfedgeData);
+        pak.setFacesData(faceData);
+        pak.setLightingData(getLumpData(LUMP_LIGHTING));
+        pak.setMiptexData(buildEmbeddedMiptexLump(texData, coreWadTextures));
     }
 
 } // namespace formats

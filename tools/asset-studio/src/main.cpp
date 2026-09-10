@@ -246,6 +246,7 @@ int main(int argc, char *argv[]) {
     std::string soundsManifest;
     std::string spritesManifest;
     std::string modelsManifest;
+    std::string verifyPath;
     bool packUi = false;
     bool buildGlobal = false;
     formats::PakManager pak;
@@ -287,6 +288,23 @@ int main(int argc, char *argv[]) {
             if (target == "xbox") {
                 pak.setTargetXbox(true);
             }
+        } else if (arg == "--profile" && i + 1 < argc) {
+            // core (default): the classic lumps the engine's unmodified
+            // loaders consume - everything X2..X5 needs. nv2a: additionally
+            // the baked Vertex/index/DXT/lightmap-atlas block for the X9
+            // hardware renderer (docs/r3d/mpak-loading-design.md, §5-§6).
+            std::string profile = argv[++i];
+            if (profile != "core" && profile != "nv2a") {
+                std::cerr << "Invalid profile: " << profile << ". Must be 'core' or 'nv2a'.\n";
+                return 1;
+            }
+            pak.setProfileNv2a(profile == "nv2a");
+        } else if (arg == "--verify" && i + 1 < argc) {
+            // Bake the map in memory exactly as --output would, then instead
+            // of writing, byte-compare the given archive against those
+            // sources (PakManager::verifyFile). Exit 1 on any difference -
+            // this is how a corrupted copy is proven to be caught.
+            verifyPath = argv[++i];
         } else if (arg == "--pack-ui") {
             packUi = true;
         } else if (arg == "--global") {
@@ -459,6 +477,15 @@ int main(int argc, char *argv[]) {
 
     // buildGlobal never had BSP geometry to begin with (see the comment
     // above) - nothing left to save once the manifest above is written.
+    if (!buildGlobal && !verifyPath.empty()) {
+        if (!pak.verifyFile(verifyPath)) {
+            std::cerr << "Verification FAILED: " << verifyPath << " does not match a fresh bake of " << mapPath << "\n";
+            return 1;
+        }
+        std::cout << "Verified: " << verifyPath << " matches a fresh bake of " << mapPath << " lump for lump\n";
+        return 0;
+    }
+
     if (!buildGlobal && !pak.save(outputPath)) {
         std::cerr << "Failed to save MPAK archive: " << outputPath << "\n";
         return 1;

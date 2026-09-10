@@ -4,10 +4,31 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <unordered_map>
 #include "PakManager.h"
 #include "VfsIndexer.h"
+#include "WadParser.h"
 
 namespace formats {
+
+    // Rebuilds LUMP_TEXTURES as the embedded-miptex lump the engine's
+    // unmodified Mod_LoadTextures path parses (see the definition's own
+    // comment for the per-texture policy). Public so it can be unit-tested
+    // against hand-built lumps without a retail install.
+    std::vector<uint8_t> buildEmbeddedMiptexLump(const std::vector<uint8_t>& texData,
+                                                 const std::unordered_map<std::string, const WadLump*>& externalWadTextures);
+
+    // Indexes one WAD's lumps by lower-cased name into the lookup the core
+    // miptex builder consumes, later calls overriding earlier ones. Called
+    // ONLY for the WADs the map's worldspawn "wad" key lists, in list order,
+    // so the last listed WAD wins - the reference's own precedence
+    // (Mod_LoadTextureFromWadList walks world.wadlist in reverse,
+    // mod_bmodel.c:619-655). Unlisted WADs on disk must never reach this
+    // index: found in review, the first version fed every WAD the VFS
+    // could see, so an unrelated WAD sharing a name would have been baked
+    // into the map permanently.
+    void indexWadLumpsForCore(std::unordered_map<std::string, const WadLump*>& index,
+                              const std::vector<WadLump>& lumps);
 
     enum BspLumpType {
         LUMP_ENTITIES = 0,

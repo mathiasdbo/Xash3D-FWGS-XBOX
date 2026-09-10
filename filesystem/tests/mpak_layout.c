@@ -6,8 +6,7 @@
 // mpak.c itself computed).
 //
 // Standalone, unlike this directory's other tests: mpak_layout.c is meant
-// to be called directly from engine C code (mod_bmodel.c, eventually -
-// see mpak_layout.h's own header comment), not through the dynamic
+// to be called directly from engine C code, not through the dynamic
 // fs_api_t vtable filesystem_test_common.h's LoadFilesystem() loads, so
 // this links mpak_layout.c straight into the test binary instead. That
 // needs a real g_engfuncs definition (mpak_layout.c's Con_Reportf calls
@@ -41,51 +40,74 @@ static fs_offset_t RoundUpSector( fs_offset_t len )
 	return (( len + ( SECTOR - 1 )) / SECTOR ) * SECTOR;
 }
 
-// Builds a minimal, real (not degenerate) archive: 2 planes, a real
-// entity-lump string, a 4x4x1 RGBA8 lightmap layer, 1 texinfo entry - one
-// of every "must divide evenly" and "must match declared dimensions"
-// check mpak_layout.c performs, so a bug in any single check has
-// something real to catch it against. targetXbox selects which of the
-// two mutually exclusive texture branches gets exercised.
-static byte *BuildMinimalArchive( qboolean targetXbox, fs_offset_t *outSize )
+// Everything a valid v7 first sector must hold: the real dheader_t at 0
+// and the descriptor at MPAK_DESCRIPTOR_OFFSET. Filled by
+// BuildMinimalArchive from the same hand-computed offsets it lays the
+// lumps out with, so the test's own two tables agree by construction -
+// exactly the property Mpak_ValidateBspHeader checks on real archives.
+typedef struct
+{
+	dheader_t     bsp;
+	mpak_header_t desc;
+} first_sector_t;
+
+// Builds a minimal, real (not degenerate) v7 archive: 2 planes, a real
+// entity-lump string, 3 vertexes, 2 edges, 4 surfedges, 2 faces, a
+// small lighting blob, a tiny miptex lump, 1 texinfo entry, and - in the
+// nv2a profile only - a 4x4x1 RGBA8 lightmap layer plus a texture blob:
+// one of every "must divide evenly", "must match declared dimensions"
+// and "must agree with the dheader_t" check mpak_layout.c performs, so a
+// bug in any single check has something real to catch it against.
+static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_t *outSize, first_sector_t *outSector )
 {
 	static const char entityText[] = "{\n\"classname\" \"worldspawn\"\n}\n";
 	const uint32_t lenEntities = (uint32_t)sizeof( entityText ); // includes the NUL, real GoldSrc convention
 	const uint32_t lenPlanes = 2 * (uint32_t)sizeof( dplane_t );
 	const uint32_t lenTexinfo = 1 * (uint32_t)sizeof( dtexinfo_t );
-	const uint32_t lightmapW = 4, lightmapH = 4, lightmapLayers = 1;
-	const uint32_t lenLightmap = lightmapW * lightmapH * lightmapLayers * 4;
-	const uint32_t lenAtlas = targetXbox ? 128u : 0u;   // arbitrary, only needs to be > 0
-	const uint32_t lenArray256 = targetXbox ? 0u : 96u; // arbitrary, only needs to be > 0; exercises a non-first PC array
+	const uint32_t lenVertexes = 3 * (uint32_t)sizeof( dvertex_t );
+	const uint32_t lenEdges = 2 * (uint32_t)sizeof( dedge_t );
+	const uint32_t lenSurfedges = 4 * (uint32_t)sizeof( dsurfedge_t );
+	const uint32_t lenFaces = 2 * (uint32_t)sizeof( dface_t );
+	const uint32_t lenLighting = 48;
+	const uint32_t lenMiptex = 4 + 4 + 40; // dmiptexlump_t{1} + one header-only miptex entry
+	const uint32_t lightmapW = 4, lightmapH = 4, lightmapLayers = nv2a ? 1u : 0u;
+	const uint32_t lenLightmap = nv2a ? lightmapW * lightmapH * 4 : 0u;
+	const uint32_t lenAtlas = ( nv2a && targetXbox ) ? 128u : 0u;   // arbitrary, only needs to be > 0
+	const uint32_t lenArray256 = ( nv2a && !targetXbox ) ? 96u : 0u; // arbitrary; exercises a non-first PC array
 
-	mpak_header_t header;
+	first_sector_t sector;
 	fs_offset_t cursor;
 	fs_offset_t entitiesOffset, planesOffset, lightmapOffset, texinfoOffset, textureOffset;
+	fs_offset_t vertexesOffset, edgesOffset, surfedgesOffset, facesOffset, lightingOffset, miptexOffset;
 	byte *buf;
 
-	memset( &header, 0, sizeof( header ));
-	memcpy( header.magic, MPAK_LAYOUT_MAGIC, sizeof( header.magic ));
-	header.version = MPAK_LAYOUT_VERSION;
-	header.headerSize = (uint32_t)sizeof( mpak_header_t );
-	header.flags = targetXbox ? MPAK_TARGET_XBOX_FLAG : 0;
-	header.lenPlanes = lenPlanes;
-	header.lenEntities = lenEntities;
-	header.lightmapWidth = lightmapW;
-	header.lightmapHeight = lightmapH;
-	header.lightmapLayers = lightmapLayers;
-	header.lightmapFormat = 0; // RGBA8
-	header.lenLightmapAtlas = lenLightmap;
-	header.lenTexinfo = lenTexinfo;
-	if( targetXbox )
-		header.lenAtlas = lenAtlas;
-	else
-		header.lenArray256 = lenArray256;
+	memset( &sector, 0, sizeof( sector ));
+	memcpy( sector.desc.magic, MPAK_LAYOUT_MAGIC, sizeof( sector.desc.magic ));
+	sector.desc.version = MPAK_LAYOUT_VERSION;
+	sector.desc.headerSize = (uint32_t)sizeof( mpak_header_t );
+	sector.desc.flags = ( targetXbox ? MPAK_TARGET_XBOX_FLAG : 0 ) | ( nv2a ? MPAK_FLAG_NV2A_BLOCK : 0 );
+	sector.desc.lenPlanes = lenPlanes;
+	sector.desc.lenEntities = lenEntities;
+	sector.desc.lightmapWidth = nv2a ? lightmapW : 0;
+	sector.desc.lightmapHeight = nv2a ? lightmapH : 0;
+	sector.desc.lightmapLayers = lightmapLayers;
+	sector.desc.lightmapFormat = 0; // RGBA8
+	sector.desc.lenLightmapAtlas = lenLightmap;
+	sector.desc.lenTexinfo = lenTexinfo;
+	sector.desc.lenAtlas = lenAtlas;
+	sector.desc.lenArray256 = lenArray256;
+	sector.desc.lenVertexes = lenVertexes;
+	sector.desc.lenEdges = lenEdges;
+	sector.desc.lenSurfedges = lenSurfedges;
+	sector.desc.lenFaces = lenFaces;
+	sector.desc.lenLighting = lenLighting;
+	sector.desc.lenMiptex = lenMiptex;
 
 	// Independently walk the same section order mpak_layout.c documents
 	// (its own header comment, verified against PakManager.cpp's save()),
 	// computing each offset by hand rather than reusing anything from
 	// mpak_layout.c itself.
-	cursor = SECTOR; // header always occupies exactly one sector
+	cursor = SECTOR; // first sector: dheader_t + descriptor
 	cursor += RoundUpSector( 0 ); // vertices (vCount=0)
 	cursor += RoundUpSector( 0 ); // indices (iCount=0)
 	cursor += RoundUpSector( 0 ); // visibility
@@ -117,42 +139,96 @@ static byte *BuildMinimalArchive( qboolean targetXbox, fs_offset_t *outSize )
 	cursor += RoundUpSector( 0 ); // faceInfo
 	texinfoOffset = cursor;
 	cursor += RoundUpSector( lenTexinfo );
+	vertexesOffset = cursor;
+	cursor += RoundUpSector( lenVertexes );
+	edgesOffset = cursor;
+	cursor += RoundUpSector( lenEdges );
+	surfedgesOffset = cursor;
+	cursor += RoundUpSector( lenSurfedges );
+	facesOffset = cursor;
+	cursor += RoundUpSector( lenFaces );
+	lightingOffset = cursor;
+	cursor += RoundUpSector( lenLighting );
+	miptexOffset = cursor;
+	cursor += RoundUpSector( lenMiptex );
+
+	// The dheader_t: the same offsets, in bspfile.h's lump order.
+	sector.bsp.version = HLBSP_VERSION;
+#define LUMP( n, ofs, len ) do { sector.bsp.lumps[n].fileofs = (int)(ofs); sector.bsp.lumps[n].filelen = (int)(len); } while( 0 )
+	LUMP( LUMP_ENTITIES, entitiesOffset, lenEntities );
+	LUMP( LUMP_PLANES, planesOffset, lenPlanes );
+	LUMP( LUMP_TEXTURES, miptexOffset, lenMiptex );
+	LUMP( LUMP_VERTEXES, vertexesOffset, lenVertexes );
+	LUMP( LUMP_TEXINFO, texinfoOffset, lenTexinfo );
+	LUMP( LUMP_FACES, facesOffset, lenFaces );
+	LUMP( LUMP_LIGHTING, lightingOffset, lenLighting );
+	LUMP( LUMP_EDGES, edgesOffset, lenEdges );
+	LUMP( LUMP_SURFEDGES, surfedgesOffset, lenSurfedges );
+	// visibility/nodes/leafs/marksurfaces/clipnodes/models are empty here: {0, 0}
+#undef LUMP
 
 	buf = (byte *)calloc( 1, (size_t)cursor );
-	memcpy( buf, &header, sizeof( header ));
+	memcpy( buf, &sector.bsp, sizeof( sector.bsp ));
+	memcpy( buf + MPAK_DESCRIPTOR_OFFSET, &sector.desc, sizeof( sector.desc ));
 	memcpy( buf + planesOffset, "AAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBB", lenPlanes ); // 2x20 real bytes, content unchecked
 	memcpy( buf + entitiesOffset, entityText, lenEntities );
-	memset( buf + lightmapOffset, 0xAA, lenLightmap );
 	memset( buf + texinfoOffset, 0x11, lenTexinfo );
-	if( targetXbox )
-		memset( buf + textureOffset, 0x22, lenAtlas );
-	else
-		memset( buf + textureOffset + RoundUpSector( 0 ), 0x33, lenArray256 ); // skip the empty array64 slot
+	memset( buf + vertexesOffset, 0x44, lenVertexes );
+	memset( buf + edgesOffset, 0x55, lenEdges );
+	memset( buf + surfedgesOffset, 0x66, lenSurfedges );
+	memset( buf + facesOffset, 0x77, lenFaces );
+	memset( buf + lightingOffset, 0x88, lenLighting );
+	memcpy( buf + miptexOffset, "\x01\x00\x00\x00\x08\x00\x00\x00" "minimal_test\x00\x00\x00\x00", 8 + 16 ); // nummiptex 1, dataofs 8, name
+	if( nv2a )
+	{
+		memset( buf + lightmapOffset, 0xAA, lenLightmap );
+		if( targetXbox )
+			memset( buf + textureOffset, 0x22, lenAtlas );
+		else
+			memset( buf + textureOffset + RoundUpSector( 0 ), 0x33, lenArray256 ); // skip the empty array64 slot
+	}
 
 	*outSize = cursor;
+	if( outSector )
+		*outSector = sector;
 	return buf;
 }
 
-static qboolean TestValidArchive( qboolean targetXbox )
+static const char *Label( qboolean targetXbox, qboolean nv2a )
+{
+	if( nv2a )
+		return targetXbox ? "xbox/nv2a" : "pc/nv2a";
+	return targetXbox ? "xbox/core" : "pc/core";
+}
+
+static qboolean TestValidArchive( qboolean targetXbox, qboolean nv2a )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( targetXbox, &fileSize );
+	first_sector_t sector;
+	byte *buf = BuildMinimalArchive( targetXbox, nv2a, &fileSize, &sector );
 	mpak_header_t header;
 	mpak_layout_t layout;
 	qboolean ok = true;
 
-	memcpy( &header, buf, sizeof( header ));
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
 
 	if( !Mpak_ValidateHeader( &header ))
 	{
-		printf( "TestValidArchive(%s): ValidateHeader rejected a valid header\n", targetXbox ? "xbox" : "pc" );
+		printf( "TestValidArchive(%s): ValidateHeader rejected a valid header\n", Label( targetXbox, nv2a ));
 		ok = false;
 		goto done;
 	}
 
 	if( !Mpak_ComputeLayout( &header, fileSize, &layout ))
 	{
-		printf( "TestValidArchive(%s): ComputeLayout rejected a valid archive\n", targetXbox ? "xbox" : "pc" );
+		printf( "TestValidArchive(%s): ComputeLayout rejected a valid archive\n", Label( targetXbox, nv2a ));
+		ok = false;
+		goto done;
+	}
+
+	if( !Mpak_ValidateBspHeader( buf, &layout ))
+	{
+		printf( "TestValidArchive(%s): ValidateBspHeader rejected a consistent dheader_t\n", Label( targetXbox, nv2a ));
 		ok = false;
 		goto done;
 	}
@@ -160,39 +236,56 @@ static qboolean TestValidArchive( qboolean targetXbox )
 	if( layout.planes.length != header.lenPlanes ||
 		memcmp( buf + layout.planes.offset, "AAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBB", header.lenPlanes ) != 0 )
 	{
-		printf( "TestValidArchive(%s): planes lump resolved to the wrong bytes\n", targetXbox ? "xbox" : "pc" );
+		printf( "TestValidArchive(%s): planes lump resolved to the wrong bytes\n", Label( targetXbox, nv2a ));
 		ok = false;
 	}
 
 	if( layout.entities.length != header.lenEntities ||
 		strcmp( (const char *)( buf + layout.entities.offset ), "{\n\"classname\" \"worldspawn\"\n}\n" ) != 0 )
 	{
-		printf( "TestValidArchive(%s): entities lump did not resolve to real entity text\n", targetXbox ? "xbox" : "pc" );
+		printf( "TestValidArchive(%s): entities lump did not resolve to real entity text\n", Label( targetXbox, nv2a ));
 		ok = false;
 	}
 
 	if( layout.texinfo.length != header.lenTexinfo )
 	{
-		printf( "TestValidArchive(%s): texinfo lump length mismatch\n", targetXbox ? "xbox" : "pc" );
+		printf( "TestValidArchive(%s): texinfo lump length mismatch\n", Label( targetXbox, nv2a ));
 		ok = false;
 	}
 
-	if( targetXbox )
+	// The six v7 lumps, each resolved to the bytes this test wrote there.
+	if( layout.vertexes.length != header.lenVertexes || buf[layout.vertexes.offset] != 0x44 ||
+		layout.edges.length != header.lenEdges || buf[layout.edges.offset] != 0x55 ||
+		layout.surfedges.length != header.lenSurfedges || buf[layout.surfedges.offset] != 0x66 ||
+		layout.faces.length != header.lenFaces || buf[layout.faces.offset] != 0x77 ||
+		layout.lighting.length != header.lenLighting || buf[layout.lighting.offset] != 0x88 ||
+		layout.miptex.length != header.lenMiptex || memcmp( buf + layout.miptex.offset + 8, "minimal_test", 12 ) != 0 )
 	{
-		if( layout.atlas.length != header.lenAtlas || layout.array64.length != 0 ||
-			layout.array256.length != 0 || layout.array512.length != 0 )
+		printf( "TestValidArchive(%s): a v7 classic-core lump resolved to the wrong bytes\n", Label( targetXbox, nv2a ));
+		ok = false;
+	}
+
+	if( nv2a )
+	{
+		if( targetXbox )
 		{
-			printf( "TestValidArchive(xbox): texture branch populated the wrong fields\n" );
+			if( layout.atlas.length != header.lenAtlas || layout.array64.length != 0 ||
+				layout.array256.length != 0 || layout.array512.length != 0 )
+			{
+				printf( "TestValidArchive(xbox/nv2a): texture branch populated the wrong fields\n" );
+				ok = false;
+			}
+		}
+		else if( layout.array256.length != header.lenArray256 || layout.atlas.length != 0 )
+		{
+			printf( "TestValidArchive(pc/nv2a): texture branch populated the wrong fields\n" );
 			ok = false;
 		}
 	}
-	else
+	else if( layout.atlas.length != 0 || layout.array256.length != 0 || layout.lightmapAtlas.length != 0 )
 	{
-		if( layout.array256.length != header.lenArray256 || layout.atlas.length != 0 )
-		{
-			printf( "TestValidArchive(pc): texture branch populated the wrong fields\n" );
-			ok = false;
-		}
+		printf( "TestValidArchive(%s): core profile must carry no baked block\n", Label( targetXbox, nv2a ));
+		ok = false;
 	}
 
 done:
@@ -202,15 +295,15 @@ done:
 
 // Every corruption case below must be REJECTED - each mutates one real,
 // independently-verified-valid archive from BuildMinimalArchive() (PC
-// target) in exactly one way.
+// target, core profile) in exactly one way.
 static qboolean TestRejectsBadMagic( void )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( false, &fileSize );
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
 	mpak_header_t header;
 	qboolean rejected;
 
-	memcpy( &header, buf, sizeof( header ));
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
 	memcpy( header.magic, "XXXX", 4 );
 	rejected = !Mpak_ValidateHeader( &header );
 
@@ -222,11 +315,11 @@ static qboolean TestRejectsBadMagic( void )
 static qboolean TestRejectsBadVersion( void )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( false, &fileSize );
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
 	mpak_header_t header;
 	qboolean rejected;
 
-	memcpy( &header, buf, sizeof( header ));
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
 	header.version = 99;
 	rejected = !Mpak_ValidateHeader( &header );
 
@@ -238,11 +331,11 @@ static qboolean TestRejectsBadVersion( void )
 static qboolean TestRejectsHeaderSizeDrift( void )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( false, &fileSize );
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
 	mpak_header_t header;
 	qboolean rejected;
 
-	memcpy( &header, buf, sizeof( header ));
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
 	header.headerSize = (uint32_t)sizeof( header ) + 4; // simulate a drifted C++ struct
 	rejected = !Mpak_ValidateHeader( &header );
 
@@ -254,13 +347,13 @@ static qboolean TestRejectsHeaderSizeDrift( void )
 static qboolean TestRejectsTruncatedFile( void )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( false, &fileSize );
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
 	mpak_header_t header;
 	mpak_layout_t layout;
 	qboolean rejected;
 
-	memcpy( &header, buf, sizeof( header ));
-	// Chop off the last sector (the texinfo lump) - a real truncated download/copy.
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
+	// Chop off the last sector (the miptex lump) - a real truncated download/copy.
 	rejected = !Mpak_ComputeLayout( &header, fileSize - SECTOR, &layout );
 
 	free( buf );
@@ -271,12 +364,12 @@ static qboolean TestRejectsTruncatedFile( void )
 static qboolean TestRejectsNonDivisiblePlanesLength( void )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( false, &fileSize );
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
 	mpak_header_t header;
 	mpak_layout_t layout;
 	qboolean rejected;
 
-	memcpy( &header, buf, sizeof( header ));
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
 	header.lenPlanes += 1; // no longer a multiple of sizeof(dplane_t)
 	rejected = !Mpak_ComputeLayout( &header, fileSize, &layout );
 
@@ -285,15 +378,32 @@ static qboolean TestRejectsNonDivisiblePlanesLength( void )
 	return rejected;
 }
 
-static qboolean TestRejectsLightmapSizeMismatch( void )
+static qboolean TestRejectsNonDivisibleFacesLength( void )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( false, &fileSize );
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
 	mpak_header_t header;
 	mpak_layout_t layout;
 	qboolean rejected;
 
-	memcpy( &header, buf, sizeof( header ));
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
+	header.lenFaces += 1; // no longer a multiple of sizeof(dface_t) - a v7 lump's own check
+	rejected = !Mpak_ComputeLayout( &header, fileSize, &layout );
+
+	free( buf );
+	if( !rejected ) printf( "TestRejectsNonDivisibleFacesLength: accepted\n" );
+	return rejected;
+}
+
+static qboolean TestRejectsLightmapSizeMismatch( void )
+{
+	fs_offset_t fileSize;
+	byte *buf = BuildMinimalArchive( false, true, &fileSize, NULL );
+	mpak_header_t header;
+	mpak_layout_t layout;
+	qboolean rejected;
+
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
 	header.lightmapWidth += 1; // width*height*layers*4 no longer matches lenLightmapAtlas
 	rejected = !Mpak_ComputeLayout( &header, fileSize, &layout );
 
@@ -308,18 +418,17 @@ static qboolean TestRejectsLightmapSizeMismatch( void )
 // divisibility check to catch it another way) with a header-declared
 // length of 0xFFFFFFFF used to narrow straight to fs_offset_t, becoming
 // -1, which the old `length <= 0` check then treated as "empty, skip"
-// instead of rejecting - a corrupted ~4 GB lump silently vanishing
-// instead of failing loudly. Mpak_PlaceLump now takes a uint64_t length
+// instead of rejecting. Mpak_PlaceLump takes a uint64_t length
 // specifically so this case has nowhere to hide.
 static qboolean TestRejectsUint32MaxRawLumpLength( void )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( false, &fileSize );
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
 	mpak_header_t header;
 	mpak_layout_t layout;
 	qboolean rejected;
 
-	memcpy( &header, buf, sizeof( header ));
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
 	header.lenVisibility = 0xFFFFFFFFu; // recordSize == 0 for visibility - only the bounds check can catch this
 	rejected = !Mpak_ComputeLayout( &header, fileSize, &layout );
 
@@ -328,24 +437,19 @@ static qboolean TestRejectsUint32MaxRawLumpLength( void )
 	return rejected;
 }
 
-// Companion case for the geometry block specifically: vCount chosen so
-// vCount * sizeof(mpak_vertex_t) is exactly 2^32 (67108864 * 64) - a
-// value that wraps to precisely 0 in 32-bit arithmetic, not some other
-// nonzero garbage. The old `(fs_offset_t)header->vCount * sizeof(...)`
-// cast vCount to a 32-bit signed type BEFORE multiplying, so this
-// wraparound happened before Mpak_PlaceLump ever saw a length at all -
-// a claimed 67 million vertices reads back as "zero vertices, valid",
-// silently dropping the entire geometry block rather than rejecting a
-// claim the file can't possibly back up.
+// Companion case for the geometry block: vCount chosen so
+// vCount * sizeof(mpak_vertex_t) is exactly 2^32 (67108864 * 64), which
+// wraps to precisely 0 in 32-bit arithmetic - a claimed 67 million
+// vertices would read back as "zero vertices, valid".
 static qboolean TestRejectsOverflowingVertexCount( void )
 {
 	fs_offset_t fileSize;
-	byte *buf = BuildMinimalArchive( false, &fileSize );
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
 	mpak_header_t header;
 	mpak_layout_t layout;
 	qboolean rejected;
 
-	memcpy( &header, buf, sizeof( header ));
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
 	header.vCount = 67108864u; // * sizeof(mpak_vertex_t)=64 == 2^32 exactly
 	rejected = !Mpak_ComputeLayout( &header, fileSize, &layout );
 
@@ -354,15 +458,9 @@ static qboolean TestRejectsOverflowingVertexCount( void )
 	return rejected;
 }
 
-// Found in review (round 2): round 1's fix bounds-checked only the
-// UNPADDED length against fileSize; the sector-rounded advance could
-// still overflow a 32-bit signed fs_offset_t cursor even when the raw
-// length fit exactly. fileSize == INT32_MAX and length == INT32_MAX -
-// cursor (2048) both individually fit (cursor + length == fileSize,
-// exactly), but roundUp(length, 2048) lands one byte past INT32_MAX.
-// Header built directly rather than via BuildMinimalArchive - this is
-// about the header's own internal arithmetic, not about matching real
-// file bytes, and a real ~2 GB buffer isn't needed to exercise it.
+// Found in review (round 2): the unpadded length can fit exactly while
+// the sector-rounded advance overflows a 32-bit signed fs_offset_t
+// cursor (fileSize == INT32_MAX, length == INT32_MAX - 2048).
 static qboolean TestRejectsPaddedExtentOverflow( void )
 {
 	mpak_header_t header;
@@ -381,10 +479,9 @@ static qboolean TestRejectsPaddedExtentOverflow( void )
 	return rejected;
 }
 
-// Found in review (round 2): the lightmap cross-check's plain uint64_t
-// product can itself overflow and wrap - width=height=2^31, layers=1,
-// bytesPerPixel=4 makes the naive product exactly 2^64, wrapping to 0,
-// which would incorrectly match a declared lenLightmapAtlas of 0.
+// Found in review (round 2): width=height=2^31, layers=1, bytesPerPixel=4
+// makes the naive uint64_t product exactly 2^64, wrapping to 0, which
+// would incorrectly match a declared lenLightmapAtlas of 0.
 static qboolean TestRejectsLightmapDimensionOverflow( void )
 {
 	mpak_header_t header;
@@ -407,22 +504,90 @@ static qboolean TestRejectsLightmapDimensionOverflow( void )
 	return rejected;
 }
 
+// v7: the dheader_t at offset 0 and the descriptor describe the same
+// bytes twice. Each of these corrupts one half and must be caught.
+static qboolean TestRejectsBspVersion( void )
+{
+	fs_offset_t fileSize;
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
+	mpak_header_t header;
+	mpak_layout_t layout;
+	qboolean rejected = false;
+
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
+	if( Mpak_ComputeLayout( &header, fileSize, &layout ))
+	{
+		((dheader_t *)buf )->version = 29; // Q1BSP_VERSION - not what this archive claims to be
+		rejected = !Mpak_ValidateBspHeader( buf, &layout );
+	}
+
+	free( buf );
+	if( !rejected ) printf( "TestRejectsBspVersion: accepted\n" );
+	return rejected;
+}
+
+static qboolean TestRejectsDriftedLumpTable( void )
+{
+	fs_offset_t fileSize;
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
+	mpak_header_t header;
+	mpak_layout_t layout;
+	qboolean rejected = false;
+
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
+	if( Mpak_ComputeLayout( &header, fileSize, &layout ))
+	{
+		((dheader_t *)buf )->lumps[LUMP_LIGHTING].fileofs += SECTOR; // one sector off: what a writer/reader order drift looks like
+		rejected = !Mpak_ValidateBspHeader( buf, &layout );
+	}
+
+	free( buf );
+	if( !rejected ) printf( "TestRejectsDriftedLumpTable: accepted\n" );
+	return rejected;
+}
+
+static qboolean TestRejectsExtraHeaderProbeBytes( void )
+{
+	fs_offset_t fileSize;
+	byte *buf = BuildMinimalArchive( false, false, &fileSize, NULL );
+	mpak_header_t header;
+	mpak_layout_t layout;
+	qboolean rejected = false;
+
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
+	if( Mpak_ComputeLayout( &header, fileSize, &layout ))
+	{
+		memcpy( buf + sizeof( dheader_t ), "XASH", 4 ); // IDEXTRAHEADER-shaped garbage where the engine probes for it
+		rejected = !Mpak_ValidateBspHeader( buf, &layout );
+	}
+
+	free( buf );
+	if( !rejected ) printf( "TestRejectsExtraHeaderProbeBytes: accepted\n" );
+	return rejected;
+}
+
 int main( void )
 {
 	int ok = 1;
 
-	ok &= TestValidArchive( false );
-	ok &= TestValidArchive( true );
+	ok &= TestValidArchive( false, false );
+	ok &= TestValidArchive( true, false );
+	ok &= TestValidArchive( false, true );
+	ok &= TestValidArchive( true, true );
 	ok &= TestRejectsBadMagic();
 	ok &= TestRejectsBadVersion();
 	ok &= TestRejectsHeaderSizeDrift();
 	ok &= TestRejectsTruncatedFile();
 	ok &= TestRejectsNonDivisiblePlanesLength();
+	ok &= TestRejectsNonDivisibleFacesLength();
 	ok &= TestRejectsLightmapSizeMismatch();
 	ok &= TestRejectsUint32MaxRawLumpLength();
 	ok &= TestRejectsOverflowingVertexCount();
 	ok &= TestRejectsPaddedExtentOverflow();
 	ok &= TestRejectsLightmapDimensionOverflow();
+	ok &= TestRejectsBspVersion();
+	ok &= TestRejectsDriftedLumpTable();
+	ok &= TestRejectsExtraHeaderProbeBytes();
 
 	if( !ok )
 		return EXIT_FAILURE;

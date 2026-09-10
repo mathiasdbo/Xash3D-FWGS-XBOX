@@ -17,6 +17,7 @@ GNU General Public License for more details.
 */
 
 #include "build.h"
+#include <stddef.h>
 #include <string.h>
 #include "mpak_layout.h"
 // Con_Reportf is filesystem_internal.h's own macro forwarding through
@@ -304,6 +305,88 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 		return false;
 	if( !Mpak_PlaceLump( "texinfo", header->lenTexinfo, sizeof( dtexinfo_t ), fileSize, &cursor, &out->texinfo ))
 		return false;
+
+	// v7 classic core (MpakHeader.h's v6 -> v7 note), appended in this
+	// order. Real GoldSrc record sizes from common/bspfile.h; LIGHTING is a
+	// sample blob and the miptex lump is self-describing, so those two get
+	// no divisibility check.
+	if( !Mpak_PlaceLump( "vertexes", header->lenVertexes, sizeof( dvertex_t ), fileSize, &cursor, &out->vertexes ))
+		return false;
+	if( !Mpak_PlaceLump( "edges", header->lenEdges, sizeof( dedge_t ), fileSize, &cursor, &out->edges ))
+		return false;
+	if( !Mpak_PlaceLump( "surfedges", header->lenSurfedges, sizeof( dsurfedge_t ), fileSize, &cursor, &out->surfedges ))
+		return false;
+	if( !Mpak_PlaceLump( "faces", header->lenFaces, sizeof( dface_t ), fileSize, &cursor, &out->faces ))
+		return false;
+	if( !Mpak_PlaceLump( "lighting", header->lenLighting, 0, fileSize, &cursor, &out->lighting ))
+		return false;
+	if( !Mpak_PlaceLump( "miptex", header->lenMiptex, 0, fileSize, &cursor, &out->miptex ))
+		return false;
+
+	return true;
+}
+
+qboolean Mpak_ValidateBspHeader( const void *firstSector, const mpak_layout_t *layout )
+{
+	// dheader_t lump index -> the layout member holding the same bytes.
+	// LUMP_* values come from common/bspfile.h, the same table
+	// mod_bmodel.c's srclumps[] is built from.
+	static const struct
+	{
+		int         lump;
+		size_t      member;
+		const char *name;
+	} map[] =
+	{
+		{ LUMP_ENTITIES,     offsetof( mpak_layout_t, entities ),     "entities" },
+		{ LUMP_PLANES,       offsetof( mpak_layout_t, planes ),       "planes" },
+		{ LUMP_TEXTURES,     offsetof( mpak_layout_t, miptex ),       "textures" },
+		{ LUMP_VERTEXES,     offsetof( mpak_layout_t, vertexes ),     "vertexes" },
+		{ LUMP_VISIBILITY,   offsetof( mpak_layout_t, visibility ),   "visibility" },
+		{ LUMP_NODES,        offsetof( mpak_layout_t, nodes ),        "nodes" },
+		{ LUMP_TEXINFO,      offsetof( mpak_layout_t, texinfo ),      "texinfo" },
+		{ LUMP_FACES,        offsetof( mpak_layout_t, faces ),        "faces" },
+		{ LUMP_LIGHTING,     offsetof( mpak_layout_t, lighting ),     "lighting" },
+		{ LUMP_CLIPNODES,    offsetof( mpak_layout_t, clipnodes ),    "clipnodes" },
+		{ LUMP_LEAFS,        offsetof( mpak_layout_t, leaves ),       "leafs" },
+		{ LUMP_MARKSURFACES, offsetof( mpak_layout_t, marksurfaces ), "marksurfaces" },
+		{ LUMP_EDGES,        offsetof( mpak_layout_t, edges ),        "edges" },
+		{ LUMP_SURFEDGES,    offsetof( mpak_layout_t, surfedges ),    "surfedges" },
+		{ LUMP_MODELS,       offsetof( mpak_layout_t, models ),       "models" },
+	};
+	const dheader_t *bsp = (const dheader_t *)firstSector;
+	uint32_t extraProbe;
+
+	if( bsp->version != HLBSP_VERSION )
+	{
+		Con_Reportf( S_ERROR "Mpak_ValidateBspHeader: dheader_t version %i, expected %i\n", bsp->version, HLBSP_VERSION );
+		return false;
+	}
+
+	// Mod_LoadBmodelLumps/Mod_TestBmodelLumps probe a dextrahdr_t right
+	// after the dheader_t (mod_bmodel.c:4165, :4336) - its id word must not
+	// be IDEXTRAHEADER, and the writer guarantees it is zero.
+	memcpy( &extraProbe, (const byte *)firstSector + sizeof( dheader_t ), sizeof( extraProbe ));
+	if( extraProbe != 0 )
+	{
+		Con_Reportf( S_ERROR "Mpak_ValidateBspHeader: bytes after the dheader_t are not zero (0x%08x)\n", extraProbe );
+		return false;
+	}
+
+	for( size_t i = 0; i < sizeof( map ) / sizeof( map[0] ); i++ )
+	{
+		const mpak_lump_t *l = (const mpak_lump_t *)((const byte *)layout + map[i].member );
+		const dlump_t *d = &bsp->lumps[map[i].lump];
+		fs_offset_t expectedOfs = l->length > 0 ? l->offset : 0;
+
+		if( d->fileofs != expectedOfs || d->filelen != l->length )
+		{
+			Con_Reportf( S_ERROR "Mpak_ValidateBspHeader: %s lump is {%i, %i} in the dheader_t but "
+				"{%lld, %lld} by the descriptor - writer and reader have drifted\n",
+				map[i].name, d->fileofs, d->filelen, (long long)expectedOfs, (long long)l->length );
+			return false;
+		}
+	}
 
 	return true;
 }

@@ -49,9 +49,22 @@ extern "C" {
 #endif
 
 #define MPAK_LAYOUT_MAGIC   "MPAK"
-#define MPAK_LAYOUT_VERSION 6u
+#define MPAK_LAYOUT_VERSION 7u
 #define MPAK_SECTOR_SIZE    2048u
 #define MPAK_TARGET_XBOX_FLAG 1u  // MpakHeader6::flags bit 0 - 1 = Xbox, 0 = PC
+#define MPAK_FLAG_NV2A_BLOCK  2u  // flags bit 1 - the baked v6 block is populated (X9 profile)
+
+// v7: a map archive IS a BSP30 file. Offset 0 holds a real dheader_t
+// (common/bspfile.h) whose lump table points at the sector-aligned raw
+// lumps, because the engine validates a map FROM DISK before any loader
+// runs (SV_ValidateMap -> Mod_TestBmodelLumps, sv_game.c:823-853,
+// mod_bmodel.c:4323-4398; docs/r3d/mpak-loading-design.md, F7) and reads
+// exactly that struct. The mpak_header_t descriptor below lives at this
+// fixed offset inside the same 2048-byte sector; bytes 124..127 are zero
+// so the engine's dextrahdr_t probe at sizeof(dheader_t) never sees
+// IDEXTRAHEADER. Mirrors MPAK_DESCRIPTOR_OFFSET in
+// tools/asset-studio/src/formats/MpakHeader.h.
+#define MPAK_DESCRIPTOR_OFFSET 128u
 
 // Mirrors formats::MpakHeader6 (tools/asset-studio/src/formats/MpakHeader.h)
 // byte-for-byte, field for field, in the SAME order - must be updated in
@@ -102,6 +115,16 @@ typedef struct
 
 	uint32_t lenFaceInfo;
 	uint32_t lenTexinfo;
+
+	// v7 classic core - see MpakHeader.h's v6 -> v7 note. Raw source lumps
+	// the engine's own loaders consume unchanged, plus TEXTURES rebuilt as
+	// embedded miptex (names, dimensions, 8-bit mips, palette).
+	uint32_t lenVertexes;
+	uint32_t lenEdges;
+	uint32_t lenSurfedges;
+	uint32_t lenFaces;
+	uint32_t lenLighting;
+	uint32_t lenMiptex;
 } mpak_header_t;
 
 // Mirrors formats::Vertex (tools/asset-studio/src/formats/PakManager.h)
@@ -154,6 +177,13 @@ typedef struct
 	mpak_lump_t lightmapAtlas;
 	mpak_lump_t faceInfo;     // MpakFaceInfo[], 44 bytes each (MpakHeader.h's own static_assert)
 	mpak_lump_t texinfo;      // dtexinfo_t[], common/bspfile.h
+	// v7 classic core, in write order
+	mpak_lump_t vertexes;     // dvertex_t[]
+	mpak_lump_t edges;        // dedge_t[]
+	mpak_lump_t surfedges;    // dsurfedge_t[]
+	mpak_lump_t faces;        // dface_t[]
+	mpak_lump_t lighting;     // color24 samples, every lightstyle
+	mpak_lump_t miptex;       // dmiptexlump_t + miptex entries
 } mpak_layout_t;
 
 // Validates magic/version and returns true if header looks like a real,
@@ -169,6 +199,17 @@ qboolean Mpak_ValidateHeader( const mpak_header_t *header );
 // problem found, leaving *out partially written - callers must not use a
 // failed result.
 qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, mpak_layout_t *out );
+
+// Checks that the real dheader_t at the start of the archive's first
+// sector describes exactly the bytes a successful Mpak_ComputeLayout
+// derived from the descriptor: version HLBSP_VERSION, every one of the
+// fifteen classic lumps at the computed {offset, length} (a lump with no
+// bytes must be {0, 0} - Mod_LoadLump treats fileofs 0 as "absent"), and
+// the four bytes after the dheader_t zero. The writer fills both tables
+// from one cursor, so a mismatch is writer/reader drift and is rejected
+// the way a header-size mismatch is. firstSector must hold at least
+// MPAK_DESCRIPTOR_OFFSET bytes.
+qboolean Mpak_ValidateBspHeader( const void *firstSector, const mpak_layout_t *layout );
 
 #ifdef __cplusplus
 }

@@ -12,11 +12,51 @@ namespace formats {
     // revision than the one that shipped it. `version` alone can't catch
     // that; this can, by giving every rebake a distinguishable stamp even
     // when the on-disk *format* hasn't changed.
-    constexpr uint32_t MPAK_BAKER_BUILD_ID = 1;
+    constexpr uint32_t MPAK_BAKER_BUILD_ID = 2;
 
-    // MPAKv6 fixed-size header, written verbatim (2048-byte padded) at the start of
-    // every .mpak archive. PakManager (BSP maps) and UiPacker (menu backgrounds)
-    // serialize this same struct so the engine-side C reader
+    // MpakHeader6::flags bits.
+    constexpr uint32_t MPAK_FLAG_XBOX = 1;        // Xbox target: DXT atlas instead of PC texture arrays
+    constexpr uint32_t MPAK_FLAG_NV2A_BLOCK = 2;  // v7: the baked Vertex/index/FaceDrawCmd/FaceInfo/
+                                                  // DXT/lightmap-atlas block is populated (X9 profile);
+                                                  // clear = core profile, every one of those lengths is 0
+
+    // v7 first sector. A map archive IS a BSP30 file: offset 0 holds a real
+    // GoldSrc dheader_t (version 30, fifteen {offset, length} pairs pointing
+    // at the sector-aligned raw lumps below), because the engine validates a
+    // map FROM DISK before any model loader runs - SV_ValidateMap ->
+    // SV_ReadEntityScript -> Mod_TestBmodelLumps (sv_game.c:823-853,
+    // mod_bmodel.c:4323-4398), plus Mod_CheckLump/ReadLump/SaveLump and the
+    // map-list check in con_utils.c:93 - and every one of them reads the
+    // first bytes of "maps/<name>.bsp" expecting exactly this struct
+    // (docs/r3d/mpak-loading-design.md, F7). The MpakHeader6 descriptor
+    // (this tool's own header) moves to MPAK_DESCRIPTOR_OFFSET; bytes
+    // 124..127 stay zero so the engine's dextrahdr_t probe at
+    // sizeof(dheader_t) reads id == 0, never IDEXTRAHEADER. The rest of the
+    // sector is zero. filesystem/mpak.c probes both structs;
+    // filesystem/mpak_layout.c checks the two describe the same bytes.
+    constexpr uint32_t MPAK_DESCRIPTOR_OFFSET = 128;
+    constexpr uint32_t MPAK_BSP_VERSION = 30;       // HLBSP_VERSION, common/bspfile.h
+    constexpr uint32_t MPAK_BSP_LUMPS = 15;         // HEADER_LUMPS, common/bspfile.h
+
+    // Mirrors the engine's dheader_t/dlump_t (common/bspfile.h) byte for
+    // byte - int32 version, then HEADER_LUMPS {fileofs, filelen} pairs.
+    struct MpakBspLump {
+        int32_t fileofs = 0;
+        int32_t filelen = 0;
+    };
+    struct MpakBspHeader {
+        int32_t version = static_cast<int32_t>(MPAK_BSP_VERSION);
+        MpakBspLump lumps[MPAK_BSP_LUMPS];
+    };
+    static_assert(sizeof(MpakBspHeader) == 124, "must match the engine's dheader_t exactly");
+    static_assert(MPAK_DESCRIPTOR_OFFSET >= sizeof(MpakBspHeader) + 4, "descriptor must leave the dextrahdr_t probe bytes zero");
+
+    // MPAKv6 fixed-size header (the "descriptor"), written verbatim inside the
+    // first 2048-byte sector of every .mpak archive - for map archives at
+    // MPAK_DESCRIPTOR_OFFSET (see the v7 first-sector note above), for
+    // UiPacker's menu archives still at offset 0 (they are not maps and no
+    // engine path reads them yet). PakManager (BSP maps) and UiPacker (menu
+    // backgrounds) serialize this same struct so the engine-side C reader
     // (filesystem/mpak.c, X2 - see docs/r3d/fork-plan.md) only has to know
     // one layout.
     //
@@ -41,9 +81,33 @@ namespace formats {
     // IMPORTANT below) rather than removed, since removing a field is a
     // version bump this scope change does not otherwise need.
     //
-    // IMPORTANT: this format has no offset table - byte layout order IS the format,
-    // and the C reader hardcodes these offsets. New fields may only be appended
-    // after lenTexinfo; never reorder or remove existing fields.
+    // v6 -> v7, the "classic core" (docs/r3d/mpak-loading-design.md):
+    // auditing every real consumer of the runtime BSP structures showed
+    // that nothing before the X9 hardware renderer can use the baked
+    // Vertex/index/FaceDrawCmd/lightmap-atlas set at all - ref/soft
+    // scan-converts from LUMP_SURFEDGES/EDGES every frame (r_rast.c:444),
+    // the server and both renderers rebuild lighting per lightstyle and
+    // per dynamic light from per-face LUMP_LIGHTING samples
+    // (sv_world.c:1546-1571, r_surf.c:174-236), and pm_trace/sv_world need
+    // texture NAMES (pm_trace.c:835, sv_world.c:1436). So v7 appends raw
+    // LUMP_VERTEXES/EDGES/SURFEDGES/FACES/LIGHTING plus a TEXTURES lump in
+    // the embedded-miptex shape compilers emit for -nowadtextures (names,
+    // dims, 8-bit mips, palette - resolved from the WADs here at bake
+    // time), and the engine loads the whole archive through its
+    // UNMODIFIED Mod_LoadBmodelLumps by writing a synthetic dheader_t over
+    // this header's own sector. The baked v6 block becomes optional
+    // (MPAK_FLAG_NV2A_BLOCK) - present only in the X9 profile, every one of
+    // its lengths 0 otherwise. `lenLighting` returns after being removed
+    // in v6 as "dead weight": it was only dead while the atlas was assumed
+    // to be the sole lighting source, which the audit above disproved.
+    //
+    // IMPORTANT: this descriptor has no offset table - byte layout order IS the
+    // format, and the C reader (filesystem/mpak_layout.c) walks the sections in
+    // write order. New fields may only be appended at the end; never reorder
+    // or remove existing fields. (v7's dheader_t at offset 0 IS an offset
+    // table, but only for the fifteen classic lumps and only for the engine's
+    // benefit - the two are written from one cursor and the reader checks
+    // they agree; the descriptor stays the source of truth for the rest.)
     //
     // v5 -> v6: two real layout changes, which is why (unlike v4->v5) this bump
     // touches the header struct itself, not just what the bytes mean:
@@ -77,7 +141,7 @@ namespace formats {
     // are a second line of defense.
     struct MpakHeader6 {
         char magic[4] = {'M', 'P', 'A', 'K'};
-        uint32_t version = 6;
+        uint32_t version = 7;
         uint32_t headerSize = 0;      // sizeof(MpakHeader6); set in PakManager::save just before writing
         uint32_t bakerBuildId = MPAK_BAKER_BUILD_ID;
         uint32_t flags = 0; // 1 = Xbox, 0 = PC
@@ -119,6 +183,17 @@ namespace formats {
         // --- MPAKv6 additions (appended after lenLightmapAtlas; append-only from here) ---
         uint32_t lenFaceInfo = 0;       // MpakFaceInfo[numFaces], parallel to face_draw_cmds
         uint32_t lenTexinfo = 0;        // raw LUMP_TEXINFO, MpakFaceInfo::texinfo indexes into it
+
+        // --- MPAKv7 additions: the classic core (see the v6 -> v7 note above) ---
+        // Written in this order, after lenTexinfo, each sector-padded like
+        // every other section. filesystem/mpak_layout.c mirrors these
+        // exactly; change one, change the other.
+        uint32_t lenVertexes = 0;       // raw LUMP_VERTEXES (dvertex_t[])
+        uint32_t lenEdges = 0;          // raw LUMP_EDGES (dedge_t[])
+        uint32_t lenSurfedges = 0;      // raw LUMP_SURFEDGES (int32[])
+        uint32_t lenFaces = 0;          // raw LUMP_FACES (dface_t[], 20 bytes each)
+        uint32_t lenLighting = 0;       // raw LUMP_LIGHTING (color24, every lightstyle, dface_t::lightofs intact)
+        uint32_t lenMiptex = 0;         // embedded-miptex LUMP_TEXTURES: dmiptexlump_t + miptex_t + mips + palette
     };
 
     // GoldSrc BSP30 SURF_* flags (common/bspfile.h in the canonical Xash3D-FWGS

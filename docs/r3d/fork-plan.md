@@ -1232,8 +1232,10 @@ the cheapest rung of the divergence ladder — new files in our own tree,
 zero edits to upstream — instead of dozens of guards through a module
 upstream actively maintains.
 
-- `filesystem/mpak.c` as a `searchpath_t` (7 pointers, modelled on `pak.c`),
-  loading **per resource** through `pfnLoadFile`'s custom `pfnAlloc`/`pfnFree`.
+- `filesystem/mpak.c` as a `searchpath_t` (7 pointers, modelled on `pak.c`).
+  Done (#17). The original "loading per resource through `pfnLoadFile`"
+  wording predates the scope narrowing below and no longer applies — one
+  archive is one map, served whole.
 - Read from the Xbox HDD or a mounted ISO.
 - **[from PS3]** Headless mode: boot, mount, load a map's data, run server
   frames, no video at all. Asset-path bugs found here are found without a
@@ -1297,6 +1299,79 @@ tree references `dbspmodel_t`), so building runtime BSP structures from
 this layout has to live inside that file, not `filesystem/`. That's the
 next real step here, and it can now build on layout math already proven
 correct against real data instead of re-deriving it inline.
+
+**Loading the map: what the audit found.** `docs/r3d/mpak-loading-design.md`
+(2026-09-09) read the real loaders and every real consumer before any
+loader was written, and three things change the shape of the remaining
+work:
+
+1. There is no "structural half first, render half later". The reference
+   pipeline (`mod_bmodel.c:4229-4247`) is one ordered chain:
+   `Mod_LoadMarkSurfaces` indexes `mod->surfaces`, `Mod_LoadLeafs` indexes
+   marksurfaces, `Mod_LoadNodes` needs leafs, `Mod_MakeHull0` needs nodes —
+   `Mod_LoadSurfaces` has to run first, and it needs vertexes, edges,
+   surfedges, textures and texinfo to do so.
+2. Every consumer before X9 needs exactly what the v6 bake threw away.
+   `ref/soft` scan-converts from `surfedges`/`edges16` **every frame**
+   (`r_rast.c:444`, `r_bsp.c:386`); the server (`sv_world.c:1546-1571`),
+   `ref/soft` (`r_surf.c:174-236`) and `ref/gl` (`gl_rsurf.c:725`) all
+   rebuild lighting per lightstyle and per dynamic light from per-face
+   `samples`; `pm_trace.c:835`, `sv_world.c:1436`, `Mod_GetFaceContents`
+   and animated-texture sequencing need texture **names**. The v6 atlas is
+   lightstyle-0-only and 7× the lighting lump it replaced (4.19 MB vs
+   599 KB on `c1a3`); v6 stores no names or texture dimensions at all.
+3. Therefore the right engine change is not a rewrite of six loaders — it
+   is no engine change at all. Give the archive a **classic core** — raw
+   `VERTEXES`/`EDGES`/`SURFEDGES`/`FACES`/`LIGHTING` plus an embedded-
+   miptex `TEXTURES` lump resolved from the WADs at bake time — and make
+   the archive **a BSP30 file**: a real `dheader_t` at offset 0 whose
+   lump table points at the sector-aligned raw lumps, the MPAK descriptor
+   at a fixed offset inside the first sector. `Mod_LoadLump` only reads
+   lump extents from that header and stores pointers, never copies
+   (`:769`, `:925-928`); the six engine paths that validate a map from
+   disk before any loader runs (`SV_ValidateMap` → `Mod_TestBmodelLumps`,
+   `sv_game.c:823-853`, `mod_bmodel.c:4323-4398`; the lump utilities;
+   the map-list check — found in review of the design's first draft,
+   which had synthesised the header in memory and would have been refused
+   by `+map` before the loader ever ran) read exactly that header. So the
+   **unmodified** `Mod_LoadBmodelLumps` loads it, and renderers already
+   receive the raw buffer through `Mod_ProcessRenderData` (`model.c:381`)
+   to find the optional baked block. The baked `Vertex`/index/
+   `FaceDrawCmd`/`MpakFaceInfo`/DXT/atlas set becomes that X9-only block.
+   Honest consequence: on the X5 path an `.mpak` is "the BSP with its WAD
+   textures inlined, sector-aligned, one file per map, plus the manifest"
+   — still the I/O and precache win this phase wanted, just not a new
+   geometry encoding.
+
+**Work packages** (details, exit criteria and the field-by-field
+consumption contract for `msurface_t`/`mextrasurf_t`/`glpoly2_t` are in
+the design doc, §2 and §10):
+
+- **W1 — MPAK v7: BSP30 first sector, core lumps, profiles** — **done**
+  (`tools/asset-studio`, `filesystem/mpak.c` probe, `filesystem/mpak_layout.*`
+  + tests). A real `dheader_t` at offset 0, the descriptor at 128, six
+  appended lumps, a `core|nv2a` profile flag, embedded-miptex textures
+  with real names; `c1a3` core bake is 2,994,176 bytes (was 8.8 MB);
+  `--verify` byte-compares every classic lump against its source and was
+  proven against three single-byte negative controls; layout test at 18
+  cases including the `dheader_t` cross-check; real-bake end-offset
+  check exact for all three variants. See CHANGELOG.
+- **W2 — Engine: nothing**, kept as a checkpoint: `map c1a3` from a
+  directory holding only `c1a3.mpak` passes `SV_ValidateMap` and reaches
+  `Mod_LoadBrushModel` with no engine diff.
+- **W3 — Differential verification tool**: dump `model_t` from `.bsp` and
+  from `.mpak`, byte-compare every array, hull, PVS byte, per-surface
+  extents/bevels/samples offsets, per-texture name/dims/animation links.
+  W2 is measured with it, not asserted. Also fixes or routes around the
+  pre-existing `xash_tests_dedicated` link gap (`_Platform_Minimize_f`).
+- **W4 — Headless run** from a directory holding only `.mpak` + manifest
+  files, `+map c1a3` under `ref/null`/dedicated, server frames ticking.
+- **W5 — Xbox `Host_Main`**, the one part X1 deliberately stopped short of.
+
+W1 → W2 → W3 are ordered; W3's tool can be written against `.bsp` alone
+in parallel with W2. Decisions taken by recommendation in the design
+doc's §9 (atlas out of every profile until X9; DXT and the baked
+geometry X9-only; no texture manifest) stand unless overridden.
 
 **Exit:** the engine loads a map from `.mpak` and runs the server loop with
 `ref/null`.

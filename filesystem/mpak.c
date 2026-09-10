@@ -19,14 +19,16 @@ extension, so an .mpak archive answering to a ".bsp"-suffixed name is not
 a lie - it's the same indirection pak.c already relies on for every file
 it serves under a name that isn't its own.
 
-Scope note: this only gets a raw MPAK-magic buffer as far as
-FS_LoadFile/Mod_LoadModel - it does NOT teach the engine to parse
-MpakHeader6's lump layout into runtime mnode_t/mleaf_t/etc. structures.
-That's real, separate, larger work (a new case in Mod_LoadModel's switch
-plus a genuine brush-model port, mirroring Mod_LoadBrushModel) and is not
-this file's job. This file only proves the filesystem plumbing: that an
-.mpak archive sitting in a game directory is discovered, and that asking
-the VFS for the map name it represents returns its bytes back verbatim.
+Scope note, revised for MPAK v7: a map archive IS a BSP30 file - a real
+dheader_t leads its first sector and every classic lump is a raw,
+sector-aligned copy the engine's unmodified loaders consume
+(docs/r3d/mpak-loading-design.md). So what this file serves under
+"maps/<name>.bsp" is accepted as-is by SV_ValidateMap's from-disk
+validation, by Mod_LoadModel's version switch and by Mod_LoadBmodelLumps;
+no engine code knows the archive exists. This file's job is only the
+filesystem plumbing: discovering the archive in a game directory,
+probing that it really is one (dheader_t at 0 AND the MPAK descriptor at
+MPAK_DESCRIPTOR_OFFSET), and answering the one name it represents.
 
 Copyright (C) 2015-2023 Xash3D FWGS contributors (searchpath_t pattern,
 adapted from pak.c/wad.c in this same directory)
@@ -57,6 +59,8 @@ GNU General Public License for more details.
 #include "filesystem_internal.h"
 #include "crtlib.h"
 #include "common/com_strings.h"
+#include "bspfile.h"     // dheader_t, HLBSP_VERSION - common/bspfile.h (see mpak_layout.h's include note)
+#include "mpak_layout.h" // MPAK_LAYOUT_MAGIC/VERSION, MPAK_DESCRIPTOR_OFFSET
 
 /*
 ========================================================================
@@ -68,17 +72,27 @@ One archive, one map, one virtual name - see this file's header comment.
 
 // Mirrors formats::MpakHeader6's first two members byte-for-byte
 // (tools/asset-studio/src/formats/MpakHeader.h) - this reader only reads
-// enough of the header to validate the archive before serving it whole;
-// it does not need the rest of the lump layout (see the scope note
-// above).
+// enough of the descriptor to validate the archive before serving it
+// whole; it does not need the rest of the lump layout (see the scope
+// note above).
+//
+// v7: the descriptor no longer sits at offset 0. A map archive IS a BSP30
+// file - a real dheader_t leads the first sector, so every engine path
+// that validates a map from disk before any loader runs accepts it
+// unchanged (mpak_layout.h's MPAK_DESCRIPTOR_OFFSET note;
+// docs/r3d/mpak-loading-design.md, F7) - and the descriptor follows at
+// MPAK_DESCRIPTOR_OFFSET. The probe checks both: a plain .bsp renamed
+// .mpak has no descriptor, and UiPacker's menu archives (descriptor at
+// 0, no dheader_t) are not maps and are correctly no longer mounted as
+// "maps/menu.bsp".
 typedef struct
 {
 	char     magic[4];
 	uint32_t version;
 } mpak_probe_header_t;
 
-#define MPAK_MAGIC   "MPAK"
-#define MPAK_VERSION 6u
+#define MPAK_MAGIC   MPAK_LAYOUT_MAGIC
+#define MPAK_VERSION MPAK_LAYOUT_VERSION
 
 struct mpak_s
 {
@@ -110,16 +124,28 @@ static mpak_t *FS_LoadMpak( const char *mpakfile )
 		return NULL;
 	}
 
-	if( FS_Read( handle, &header, sizeof( header )) != sizeof( header ))
+	byte firstSector[MPAK_DESCRIPTOR_OFFSET + sizeof( mpak_probe_header_t )];
+	const dheader_t *bsp = (const dheader_t *)firstSector;
+
+	if( FS_Read( handle, firstSector, sizeof( firstSector )) != sizeof( firstSector ))
 	{
-		Con_Reportf( S_ERROR "%s is smaller than an MPAK header. Ignored.\n", mpakfile );
+		Con_Reportf( S_ERROR "%s is smaller than an MPAK first sector. Ignored.\n", mpakfile );
 		FS_Close( handle );
 		return NULL;
 	}
 
+	if( bsp->version != HLBSP_VERSION )
+	{
+		Con_Reportf( "%s does not start with a BSP30 header. Ignored.\n", mpakfile );
+		FS_Close( handle );
+		return NULL;
+	}
+
+	memcpy( &header, firstSector + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
+
 	if( memcmp( header.magic, MPAK_MAGIC, sizeof( header.magic )) != 0 )
 	{
-		Con_Reportf( "%s is not an MPAK file. Ignored.\n", mpakfile );
+		Con_Reportf( "%s has no MPAK descriptor at offset %u. Ignored.\n", mpakfile, MPAK_DESCRIPTOR_OFFSET );
 		FS_Close( handle );
 		return NULL;
 	}

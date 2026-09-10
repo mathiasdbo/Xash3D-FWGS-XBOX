@@ -73,6 +73,17 @@ namespace formats {
         void addFaceDrawCmd(uint32_t start_index, uint32_t index_count);
         void addFaceInfo(const MpakFaceInfo& info) { mFaceInfos.push_back(info); }
         bool save(const std::string& outputPath);
+
+        // Re-reads an archive and byte-compares every classic lump the file's
+        // own dheader_t points at against the in-memory source it was built
+        // from (docs/r3d/mpak-loading-design.md, §8 step 4) - independent of
+        // the writer: offsets come from the file, bytes from the sources.
+        // save() runs it on what it just wrote; main.cpp's --verify runs it
+        // against an existing archive after baking the same map in memory,
+        // which is what makes the negative controls (a flipped lighting,
+        // palette or index byte in a copy) possible. The nv2a block's bytes
+        // are outside this check - only its lengths are - see the doc.
+        bool verifyFile(const std::string& path) const;
         void addAsset(const std::string& name, const std::vector<uint8_t>& data);
 
         void setVisibilityData(const std::vector<uint8_t>& data) { mVisibilityData = data; }
@@ -85,6 +96,21 @@ namespace formats {
         void setEntitiesData(const std::vector<uint8_t>& data) { mEntitiesData = data; }
         // Raw LUMP_TEXINFO passthrough - MpakFaceInfo::texinfo indexes into this.
         void setTexinfoData(const std::vector<uint8_t>& data) { mTexinfoData = data; }
+
+        // v7 classic core (MpakHeader.h's v6 -> v7 note): raw passthroughs of
+        // the source lumps the engine's own loaders consume unchanged, plus
+        // the embedded-miptex TEXTURES lump BspParser rebuilds from the WADs.
+        void setVertexesData(const std::vector<uint8_t>& data) { mVertexesData = data; }
+        void setEdgesData(const std::vector<uint8_t>& data) { mEdgesData = data; }
+        void setSurfedgesData(const std::vector<uint8_t>& data) { mSurfedgesData = data; }
+        void setFacesData(const std::vector<uint8_t>& data) { mFacesData = data; }
+        void setLightingData(const std::vector<uint8_t>& data) { mLightingData = data; }
+        void setMiptexData(std::vector<uint8_t> data) { mMiptexData = std::move(data); }
+
+        // Profile: core (default) writes only the classic lumps; nv2a also
+        // writes the baked block and sets MPAK_FLAG_NV2A_BLOCK.
+        void setProfileNv2a(bool nv2a) { mProfileNv2a = nv2a; }
+        bool isProfileNv2a() const { return mProfileNv2a; }
 
         // rgba must be exactly width*height*4*layers bytes, layer-major (all of page 0,
         // then all of page 1, ...). format is an MpakHeader6::lightmapFormat value
@@ -122,6 +148,14 @@ namespace formats {
         std::vector<uint8_t> mModelsData;
         std::vector<uint8_t> mEntitiesData;
         std::vector<uint8_t> mTexinfoData;
+
+        std::vector<uint8_t> mVertexesData;
+        std::vector<uint8_t> mEdgesData;
+        std::vector<uint8_t> mSurfedgesData;
+        std::vector<uint8_t> mFacesData;
+        std::vector<uint8_t> mLightingData;
+        std::vector<uint8_t> mMiptexData;
+        bool mProfileNv2a = false;
 
         std::vector<uint8_t> mLightmapAtlasData;
         uint32_t mLightmapWidth = 0;

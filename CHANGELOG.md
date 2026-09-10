@@ -5,6 +5,213 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — X2 W1: MPAK v7 - a BSP30 file with a classic core, in two profiles
+
+The archive format change docs/r3d/mpak-loading-design.md defined (F1-F7,
+§5-§6), implemented in tools/asset-studio and filesystem/:
+
+- A map archive is now a BSP30 file: a real dheader_t at offset 0 whose
+  lump table points at the sector-aligned raw lumps, the MpakHeader6
+  descriptor at MPAK_DESCRIPTOR_OFFSET (128), bytes 124..127 zero so the
+  engine's dextrahdr_t probe never sees IDEXTRAHEADER. The lump table is
+  filled from the same cursor that lays the sections out
+  (PakManager::save is now two-pass), so it cannot disagree with the
+  descriptor by construction - and filesystem/mpak_layout.c's new
+  Mpak_ValidateBspHeader checks that it doesn't anyway.
+
+- Six appended lumps, the "classic core": raw VERTEXES, EDGES, SURFEDGES,
+  FACES, LIGHTING (every lightstyle, dface_t::lightofs intact - the
+  field v6 removed as "dead weight" returns, with the reason) and
+  TEXTURES rebuilt as embedded miptex from the WADs the baker already
+  resolves. Texture names, dimensions and 8-bit pixels reach the engine
+  in the one shape it already parses; an unresolved named texture keeps
+  its header (name, dimensions, zero offsets) so the engine keeps the
+  name and substitutes only the image, exactly as with a real .bsp and
+  a missing WAD.
+
+- Two profiles: core (default) writes only the classic lumps; nv2a
+  (--profile nv2a, MPAK_FLAG_NV2A_BLOCK) also writes the baked
+  Vertex/index/FaceDrawCmd/FaceInfo/DXT/lightmap-atlas block for the X9
+  renderer. Real c1a3 numbers: core 2,994,176 bytes (v6 was 8,767,488
+  Xbox / 9,256,960 PC) - miptex 1,467,172 (183 textures, all with
+  pixels), lighting 598,923, geometry 334,532; nv2a 11,173,888 Xbox /
+  11,663,360 PC.
+
+- The gate the design demanded: PakManager::verifyFile re-reads an
+  archive and byte-compares every classic lump the file's own dheader_t
+  points at against the in-memory source, independently of the writer
+  (offsets from the file, bytes from the sources). save() runs it on
+  what it just wrote; main.cpp's --verify <archive> bakes the map in
+  memory and checks an existing file, which is how corrupted copies are
+  proven to be caught. It caught a real bug on the very first core
+  bake: the PC texture-array lengths were still set in the core profile
+  (bytes correctly never written), so the descriptor claimed 2.3 MB of
+  arrays that didn't exist. Negative controls performed: one flipped
+  byte each in LIGHTING (lump byte 100), a palette (miptex byte 2141)
+  and a pixel index (miptex byte 781), lengths unchanged - --verify
+  fails on every one naming the exact byte, and passes on the pristine
+  archive.
+
+- filesystem/mpak.c's probe now requires both structs (version 30 at 0
+  AND MPAK/7 at 128): a plain .bsp renamed .mpak is ignored, and
+  UiPacker's menu archives (descriptor at 0, not maps) are correctly no
+  longer mounted as "maps/menu.bsp". filesystem/mpak_layout.{h,c} gain
+  the six lumps and the dheader_t cross-check; filesystem/tests/
+  mpak_layout.c grows to 18 cases (core/nv2a x pc/xbox layouts, a v7
+  lump divisibility check, and three dheader_t rejections: wrong BSP
+  version, a lump table one sector off, IDEXTRAHEADER-shaped bytes
+  after the header); filesystem/tests/mpak.c adds the no-dheader_t
+  rejection. All 6 filesystem test binaries pass. The real bakes check
+  out with the layout tool: descriptor, computed layout and dheader_t
+  agree and the padded end lands exactly on the file size for all three
+  variants.
+
+Engine change: none - W2 is a checkpoint, not code (design doc §10).
+
+### Fixed — first Codex review round on the mpak-v7-core branch
+
+Three findings, all real, all in the baker:
+
+- buildEmbeddedMiptexLump bounded an embedded texture's bytes by the
+  NEXT directory entry's dataofs without checking that offset against
+  the buffer - a damaged BSP whose second dataofs pointed past the lump
+  made the first entry copy up to 770 bytes beyond the input into the
+  archive (or crash). Every offset is now validated against the buffer,
+  only a valid later offset can bound an entry, and an embedded payload
+  the lump is too short to hold is demoted to header-only (name and
+  dimensions kept, offsets zero) rather than copied short for the
+  engine to read past.
+
+- It resolved a same-named WAD lump BEFORE the BSP's own embedded
+  pixels. The reference does the opposite by default: r_wadtextures is
+  "0" (model.c:32) and Mod_LoadTextureData only tries a WAD when that is
+  set or the miptex has no pixels of its own (mod_bmodel.c:2834-2835),
+  so a map with customised embedded art under a WAD texture's name
+  would have baked pixels the engine's default never shows - and
+  verifyFile could not see it, since the expected bytes already carried
+  the substitution. Precedence is now embedded-complete, then WAD, then
+  header-only. (The nv2a block's DXT path keeps its documented WAD-first
+  choice; retail maps embed no textures - c1a3 is 183 WAD references,
+  0 embedded - so the two never differ on retail data, and the block is
+  X9's to reconcile.)
+
+- verifyFile checked the classic lumps' bytes but nothing about the
+  baked block's counts and lengths, so an nv2a archive with vCount
+  rewritten to 67,108,864 - a 4 GiB vertex block the C reader rejects
+  (filesystem/mpak_layout.c) - verified clean. It now checks every
+  baked-block count/length against this bake, the profile and target
+  flags, and re-derives every section's offset from the descriptor in
+  write order exactly as filesystem/mpak_layout.c does: the fifteen
+  classic lumps must land where the file's dheader_t says, and the walk
+  must end exactly at the file's size. Any wrong length anywhere in the
+  walk shifts everything after it.
+
+The builder is now a public function with a real unit test
+(tools/asset-studio/tests/miptex_lump_test.cpp, `ctest -C Release`,
+built from a new AssetStudioFormats library the executable links too):
+embedded-beats-WAD, WAD resolves an external reference, unresolved keeps
+name/dimensions, absent stays -1, the out-of-range next-offset case,
+the truncated-payload case, and the empty lump. Negative controls
+re-run after the fixes: the three classic-lump byte flips still fail
+naming the exact byte, and two new ones - vCount rewritten to
+67,108,864, and the target flag flipped - fail on the descriptor
+checks; the pristine core and nv2a archives verify.
+
+### Fixed — second Codex review round on the mpak-v7-core branch
+
+Two findings, both real, both in the baker, plus one a negative control
+found while re-verifying the fixes:
+
+- The core miptex lump resolved external references from EVERY WAD the
+  VFS could see (the worldspawn-listed ones first, then every other
+  .wad on disk, later loads overwriting earlier names). The reference
+  looks only in world.wadlist, last listed first
+  (Mod_LoadTextureFromWadList, mod_bmodel.c:619-655), so an unrelated
+  WAD sharing a texture name could have had its pixels baked into the
+  map permanently - and since verifyFile compares against the same
+  in-memory bytes, it would have passed. exportToPak now builds a
+  separate lookup from the listed WADs only, in list order with later
+  overriding earlier (indexWadLumpsForCore), and the core builder
+  consumes that; the nv2a block's DXT path keeps its all-WADs lookup
+  (X9's documented choice). A unit-test case covers the precedence
+  (last listed wins, unique names from earlier WADs survive, an
+  external reference resolves through that index). On c1a3 the
+  distinction is 3628 listed-WAD lumps out of 3654 registered, and the
+  core archive is byte-identical in size (2,994,176).
+
+- The core profile still ran the whole nv2a face loop and only
+  suppressed its output, so PakManager::addVertex's 65,536-vertex abort
+  (a real limit for the 16-bit baked index buffer) could refuse a core
+  bake of a map whose per-face UV expansion exceeds it - a buffer the
+  core archive does not contain. The DXT resolution, face loop and
+  lightmap atlas now run only under isProfileNv2a(); the raw-lump
+  copies and the embedded-miptex construction stay unconditional. Every
+  retail valve map was baked in both profiles to check this: 125/125
+  bake and verify in core, while four (contamination, disposal,
+  pool_party, rocket_frenzy) still abort in nv2a at that limit - the
+  exact failure the finding predicted, now confined to the profile
+  that actually has the buffer.
+
+- Re-running the negative controls after the fixes showed verifyFile
+  passing an nv2a archive with a vertex byte flipped: it checked the
+  baked block's counts and lengths but not its bytes. The sections the
+  baker still holds after save - vertices, indices, face draw cmds,
+  lightmap atlas, face info - are now byte-compared at the offsets the
+  descriptor walk derives; the DXT arrays/atlas stay structural-only
+  (their bytes are produced inside save() and not retained). Controls
+  now: pristine core and nv2a verify; lighting, miptex and faces byte
+  flips, vCount 67,108,864, a flipped vertex byte, a flipped target
+  flag, and a core archive verified as nv2a all fail.
+
+### Changed — X2: the map-loading plan, after auditing what the engine actually needs
+
+docs/r3d/mpak-loading-design.md (new) audits every consumer of the
+runtime BSP structures before any loader is written - the server and
+pm_shared, ref/soft, ref/gl, ref/null - and the real baker, each claim
+cited by file:line. Three findings reshape the remaining X2 work:
+
+- There is no "structural half first, render half later". The reference
+  pipeline (mod_bmodel.c:4229-4247) is one ordered chain: MarkSurfaces
+  indexes mod->surfaces, Leafs indexes marksurfaces, Nodes needs leafs,
+  MakeHull0 needs nodes - Mod_LoadSurfaces has to run first.
+
+- Every consumer before X9 needs exactly what the v6 bake dropped.
+  ref/soft scan-converts from surfedges/edges16 every frame
+  (r_rast.c:444, r_bsp.c:386); the server (sv_world.c:1546-1571),
+  ref/soft (r_surf.c:174-236) and ref/gl (gl_rsurf.c:725) rebuild
+  lighting per lightstyle and per dynamic light from per-face samples;
+  pm_trace.c:835, sv_world.c:1436, Mod_GetFaceContents and
+  animated-texture sequencing need texture names. The v6 atlas is
+  lightstyle-0-only and 7x the lighting lump it replaced (4,194,304 vs
+  598,923 bytes on c1a3); v6 stores no texture names or dimensions.
+
+- So the right engine change is not a rewrite of six loaders - it is no
+  engine change. Give the archive a "classic core" (raw VERTEXES/EDGES/
+  SURFEDGES/FACES/LIGHTING plus embedded-miptex TEXTURES resolved from
+  the WADs at bake time) and make it a BSP30 file: a real dheader_t at
+  offset 0 whose lump table points at the sector-aligned raw lumps, the
+  MPAK descriptor at a fixed offset (128) inside the first sector.
+  Mod_LoadLump reads lump extents from that header and stores pointers,
+  never copies (:769, :925-928), and - found in Codex review of the
+  design's first draft, which had synthesised the header in memory
+  inside Mod_LoadBrushModel - six engine paths validate a map from disk
+  before any loader runs (SV_ValidateMap -> Mod_TestBmodelLumps,
+  sv_game.c:823-853 / mod_bmodel.c:4323-4398; Mod_CheckLump/ReadLump/
+  SaveLump; con_utils.c:93), so the header they expect has to be the
+  first bytes of the file. With it there, the unmodified
+  Mod_LoadBmodelLumps loads the archive and renderers already receive
+  the raw buffer via Mod_ProcessRenderData (model.c:381) to find the
+  optional baked block. That block (Vertex/index/FaceDrawCmd/
+  MpakFaceInfo/DXT/atlas) becomes X9-only.
+
+The design doc carries the field-by-field consumption contract for
+msurface_t/mextrasurf_t/glpoly2_t, the MPAK v7 packing spec, the
+step-by-step loading chain, a renderer-free differential verification
+plan (.bsp vs .mpak model_t dump), real c1a3 size numbers, the
+decisions taken by recommendation, and the work packages W1-W5.
+fork-plan.md's X2 section and divergences.md's anticipated
+mod_bmodel.c row are updated to match. No code changed.
+
 ### Added — X2: filesystem/mpak_layout.h/.c, the real MPAK offset math
 
 MpakHeader6 has no offset table - "byte layout order IS the format" -
