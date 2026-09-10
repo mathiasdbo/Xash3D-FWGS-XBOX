@@ -263,4 +263,80 @@ void Platform_ShellExecute( const char *path, const char *parms )
 	( void )parms;
 }
 
+#if XASH_DEDICATED
+/*
+====================
+Platform_GetMouseGrab / Platform_SetMouseGrab
+
+Found linking X2 W5's real dedicated target: only Sys_DebugBreak
+(engine/common/system.c) calls these, itself only reached if
+Sys_DebuggerPresent() is true - never on a console, so genuinely dead at
+runtime on Xbox exactly as Xbox_Init/Shutdown are, and for the same
+reason (a mouse grab is a windowing concept; Xbox has no window). No
+dispatcher declares them (same shape as Platform_SetStatus above) - the
+fix is to provide the symbol, not widen a guard.
+
+Guarded to XASH_DEDICATED specifically, unlike every other function in
+this file: the non-dedicated (full client) Xbox target already compiles
+engine/platform/sdl2/vid_sdl2.c, which defines these two for real
+(SDL-backed). Found in review of the broad sweep after adding these -
+compiling them unconditionally collided with vid_sdl2.c's own
+definitions (6 duplicate symbols, tools/xbox-link-check.sh). A dedicated
+build never compiles vid_sdl2.c at all (client-only), so there is no
+collision to guard against there.
+====================
+*/
+qboolean Platform_GetMouseGrab( void )
+{
+	return false;
+}
+
+void Platform_SetMouseGrab( qboolean enable )
+{
+	( void )enable;
+}
+
+/*
+====================
+SDLash_InitCursors / SDLash_FreeCursors / SDLash_InitSensors /
+SDLash_ShutdownSensors
+
+Found linking the same target: engine/platform/sdl2/sys_sdl2.c's own
+SDLash_Init/SDLash_Shutdown call all four UNCONDITIONALLY - no
+`#if !XASH_DEDICATED` guard, because no target before this one ever
+compiled sys_sdl2.c under XASH_DEDICATED at all (a real PC dedicated
+build never selects TIMER_SDL - see tools/xbox-dedicated-sweep.sh's own
+header comment - so sys_sdl2.c is not even in that build's file list).
+Xbox is the first to hit this combination, since tools/xbox-cc.sh forces
+XASH_SDL=2 unconditionally for the timer/thread primitives regardless of
+dedicated/client.
+
+Real definitions belong in vid_sdl2.c (cursors, SDL_CreateSystemCursor)
+and sensor_sdl2.c (sensors) - both client-only, and (see above) both
+still compiled and still define these for real in the non-dedicated
+Xbox target, which is why this whole block is XASH_DEDICATED-only.
+Gating the CALL SITES in sys_sdl2.c with `#if !XASH_DEDICATED` instead
+would be the more upstream-correct fix (it would also cover any future
+dedicated+SDL2-timer target, not just Xbox's) - not done here to keep
+this a local, Xbox-only touch; revisit if a second platform ever needs
+the same combination.
+====================
+*/
+void SDLash_InitCursors( void )
+{
+}
+
+void SDLash_FreeCursors( void )
+{
+}
+
+void SDLash_InitSensors( void )
+{
+}
+
+void SDLash_ShutdownSensors( void )
+{
+}
+#endif // XASH_DEDICATED
+
 #endif // XASH_XBOX

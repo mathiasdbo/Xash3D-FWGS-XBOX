@@ -5,6 +5,171 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X2 W5: a real, dedicated Xbox target that links 0 duplicate / 0 undefined and calls Host_Main — a genuine XBE
+
+The X2 exit line on Xbox, "same as W4" (server frames tick from a real
+boot), needs a target that actually reaches Host_Main. Investigating what
+that required turned up three real, tractable gaps - none of them the
+speculative video/SDL-ownership risk `docs/r3d/x0-probe-results.md`
+(2026-09-05) flagged as the hard part, because that analysis was for the
+eventual full CLIENT target. W5 is dedicated-only, matching W4's own PC
+shape, and `common/defaults.h`'s VIDEO/INPUT/SOUND selection is already
+`#if !XASH_DEDICATED`-gated - none of the SDL video-ownership question
+applies here at all.
+
+**Found: the 63 parked networking symbols were parked for the wrong
+reason.** They were never a "real Xbox has no BSD sockets" gap so much as
+`platform/stub/net_stub.h` (upstream's own `XASH_NO_NETWORK` stub, meant
+to make `net_ws.c`/`net_chan.c`/`xrcon.c`/the two `common/http/*.c` files
+compile without a real socket layer) being incomplete - written before
+those files gained IPv6 support, `getaddrinfo`, and `select()`'s `fd_set`
+family. Completed it with real, correctly-shaped types (RFC 3493
+`sockaddr_in6`/`in6_addr`/`sockaddr_storage`, a `getaddrinfo` that
+honestly reports `EAI_NONAME` since no resolver exists here, `fd_set`/
+`FD_ZERO`/`FD_SET`/`FD_ISSET` as an inert one-word bitset) - every
+function that would actually touch a socket is still the same
+always-fails macro this header already had. Verified by compiling: all
+five files now compile CLEAN, unmodified, from real upstream sources.
+`net_chan.c` needed nothing from this at all - its whole gap was one
+`#include <bzlib.h>` already spelled `#if !XASH_DEDICATED` (upstream's
+own "bzip2 compression is not supported for server" branch); Xbox just
+never defined that flag. `filesystem/VFileSystem009.cpp` needed
+`ALLOCA_H` (nxdk's `alloca` lives in `<malloc.h>`, not `<alloca.h>`,
+which does not exist here) and, since nxdk has no C++ exception-handling
+runtime at all (`__CxxFrameHandler3`/`__std_terminate` - grep-checked
+against every `deps/nxdk/lib/*.lib`), `-fno-exceptions -fno-rtti` (its
+only use of either is compiler-generated destructor cleanup code, not an
+explicit `try`/`catch`/`throw` in its own source).
+
+**tools/xbox-cc.sh**: `XBOX_DEDICATED=1` (env, opt-in - every other Xbox
+tool keeps the existing unconditional define set, matching the eventual
+full client+menu target those measurements already track) adds
+`-DXASH_DEDICATED=1` and `-DXASH_ENABLE_MAIN=1`. `-DALLOCA_H=<malloc.h>`
+is unconditional (harmless everywhere, needed by the one C++ file).
+
+**tools/xbox-dedicated-sweep.sh / tools/xbox-dedicated-link-check.sh**
+(new): compile and link the real dedicated source list -
+`engine/wscript`'s own "`# basic build: dedicated only`" set
+(`common/*.c`, `common/imagelib/*.c`, `common/soundlib/*.c`, `server/*.c`,
+`common/http/*.c`), verified against this repo's own
+`compile_commands.json` from a real, clean, from-scratch PC `--dedicated`
+build (109 files, zero under `engine/client/`) - with `platform/win32/*.c`
+swapped for `platform/xbox/*.c`, plus `compat/xbox/*.c` (real POSIX I/O)
+and `platform/misc/lib_static.c` (`COM_LoadLibrary`/`GetProcAddress`/
+`FreeLibrary`/`FunctionFromName`, mandatory under `XASH_STATIC_LIBS`).
+The real entry point is `engine/common/launcher.c`'s own `main()` -
+`Host_Main(argc, argv, "valve", 0, Sys_ChangeGame)`, the same
+statically-linked path PSVita/iOS already use - not
+`engine/platform/xbox/xbox_main.c`'s X1 placeholder (divergence #23,
+"deliberately not Host_Main"), which the dedicated file list now
+excludes to avoid a duplicate `main`.
+
+Two small, real gaps found only by attempting this exact combination
+(`XASH_DEDICATED` + Xbox's unconditional `XASH_SDL=2`, needed for
+`TIMER_SDL` since Xbox has no working `platform/win32/sys_win.c`): no
+target before this one ever compiled `engine/platform/sdl2/sys_sdl2.c`
+under `XASH_DEDICATED` (a real PC dedicated build never selects
+`TIMER_SDL` at all, so `sys_sdl2.c` is not even in its file list), so its
+unconditional calls to `SDLash_InitCursors/FreeCursors/InitSensors/
+ShutdownSensors` and `Platform_GetMouseGrab/SetMouseGrab` (real bodies
+only in the client-only `vid_sdl2.c`/sensor files) had never needed a
+definition anywhere. `engine/platform/xbox/con_xbox.c` gained honest
+no-ops for all six, under `#if XASH_DEDICATED` specifically - not
+unconditional, since the non-dedicated Xbox target still compiles
+`vid_sdl2.c` and already defines these for real; the first version of
+this fix skipped that guard and produced 6 duplicate symbols against the
+broad sweep, caught by re-running it.
+
+**Result: a full, clean, from-scratch dedicated build - 96 files, 0
+compile failures, 0 duplicate symbols, 0 undefined symbols - linked and
+converted to a real XBE (2,273,280 bytes, valid `XBEH` header).** Every
+symbol the real dedicated engine needs resolves; nothing is
+`-force:unresolved`'d the way the broad sweep's tracked parked set is.
+
+**Measured side effect on the existing broad (full-client) sweep and
+link baseline**, re-verified end to end after these changes: compile
+197 ok / 30 failing (was 193/34 - `net_ws.c`, `xrcon.c` and the two
+`common/http/*.c` files now compile clean there too, unconditionally;
+only `net_chan.c`, still gated on `XASH_DEDICATED`, and `cl_steam.c`
+remain); link-check 0 duplicate / 32 undefined (was 0/63 - the remaining
+32 are exactly `net_chan.c`'s own functions and globals plus
+`SteamBroker_*`, client-only and still excluded there).
+`docs/r3d/parked-undefined-symbols.txt` updated to the new, real 32-symbol
+set. Xbox `.xbe` (broad target) still produces a valid, `XBEH`-verified
+binary.
+
+### Fixed — first Codex review round on the xbox-dedicated-target branch
+
+One finding, real and severe: this entry originally claimed
+`compat/xbox/xbox_posix_io.c` "already had a real `getcwd`, quietly
+resolving" X0.5's `FS_DetermineRootDirectory` blocker. **False** - caught
+by seeing the function existed, not by reading its body. The real body is
+an honest `errno = ENOSYS; return NULL;` (the comment above it says so:
+"the Xbox has no per-process current directory... Tracked as X0.5"). With
+`getenv` also always NULL on Xbox (`pdclib`'s own stub) and
+`SDL_GetBasePath` also NULL (`SDL_FILESYSTEM_DUMMY`), `Host_Main` would
+have reached `FS_Init` and `Sys_Error`'d immediately - the dedicated
+target would link clean and never get past its first real call.
+
+Fixed: `FS_DetermineRootDirectory` (`engine/common/filesystem_engine.c`)
+gained a real `XASH_XBOX` branch returning `"D:\\"` directly - not
+guessed, guaranteed: `tools/xbox-dedicated-link-check.sh` already links
+`-include:_automount_d_drive` (`deps/nxdk/lib/nxdk/automount_d.c`), a
+CRT-init-array hook that runs BEFORE `main()` and mounts `D:` to the
+directory containing the running XBE, the standard convention every
+`deps/nxdk/samples/*` program relies on. Re-verified: dedicated sweep
+still 96/0, link still 0 duplicate/0 undefined, same 2,273,280-byte XBE.
+
+**This does not complete X0.5, and the docs below no longer claim it
+does.** `docs/r3d/fork-plan.md`'s own X0.5 section (written 2026-09-06,
+predating this session) already found that finding the root directory is
+only half the problem: `FS_InitStdio`/`FS_AddGameHierarchy` build every
+real searchpath with RELATIVE paths (`"./"`, `"valve/"`, ...), and
+nxdk's path APIs resolve everything against `ObDosDevicesDirectory()`
+with no current-directory concept at all - `opendir("./")` fails with
+`STATUS_OBJECT_NAME_NOT_FOUND`, not "current directory doesn't exist,
+try a real one". That doc's own two proposed routes (emulate a
+process-wide CWD in `r3d_native_path`, or rewrite `filesystem/` to
+prefix every searchpath with `fs_rootdir`) are both still unwritten.
+Fixing `FS_DetermineRootDirectory` moves the crash from immediate
+(`Sys_Error` in `FS_Init`) to later (the first relative `opendir`/
+`CreateFileA` in `FS_InitStdio`), which is real, measured-as-real
+progress against what Codex's review found, but is not "the engine
+finds its game directory and mounts it" - X0.5's own exit line, still
+unmet.
+
+### Fixed — second Codex review round on the xbox-dedicated-target branch
+
+One finding, real: tools/xbox-dedicated-sweep.sh reused its scratch
+directory across runs and never removed anything, so a source file later
+renamed, excluded or deleted left its last-successful object sitting
+there; tools/xbox-dedicated-link-check.sh's plain `ls *.obj` would still
+find and link it, reporting a clean link over a source set that no
+longer matched the checkout. Same failure shape tools/xbox-mainui-
+sweep.sh already guards against with its own manifest.txt (OK=/FAIL=/
+TOTAL=) - matched here: the sweep now clears its scratch directory
+before every run and writes the manifest only after a clean, non-empty
+pass; the link-check now requires that manifest, requires it clean, and
+cross-checks the object count on disk against it before linking.
+
+Verified with the control the review asked for: removed
+engine/platform/xbox/net_xbox_log.c after a successful build, re-ran the
+sweep without manually clearing anything - the stale object was gone
+(the sweep's own clearing step), the manifest correctly said OK=95, and
+the link-check failed honestly with "undefined symbol: _Xbox_NetLogPrint"
+instead of reporting clean. Restored the file; re-verified the real
+target: 96/0 sweep, 0 duplicate/0 undefined link, same 2,273,280-byte
+XBE.
+
+### UNVERIFIED beyond compiling and linking
+
+No xemu install and no hardware in this environment (the same caveat
+this project's own log-channel work already carries, `net_xbox_log.c`) -
+the dedicated XBE has never actually been booted, so the relative-path
+failure above is inferred from reading the real code paths, not
+observed. Still open, deliberately not attempted here: X0.5's own two
+routes, and running any of this.
+
 ### Added — X2 W4: the headless run from .mpak (test_mapprobe, tools/mpak-run.sh) — the X2 exit line on PC
 
 A dedicated server started with `+map c1a3` from a directory that holds

@@ -271,7 +271,30 @@ static qboolean FS_DetermineRootDirectory( char *out, size_t size )
 		return true;
 	}
 
-#if XASH_IOS
+#if XASH_XBOX
+	// Found in review, X2 W5 - Codex, round 1: getenv() above always
+	// returns NULL here (nxdk's pdclib getenv is a real, unconditional
+	// stub, deps/nxdk/lib/pdclib/platform/xbox/functions/stdlib/getenv.c),
+	// SDL_GetBasePath returns NULL (SDL_FILESYSTEM_DUMMY,
+	// SDL_config_xbox.h), and compat/xbox's getcwd is an honest ENOSYS
+	// stub (xbox_posix_io.c - "the Xbox has no per-process current
+	// directory"), so every case below Sys_Errors before FS_Init ever
+	// reaches content. The docs/CHANGELOG claim that getcwd already
+	// resolved this (X0.5) was checked by seeing the function existed, not
+	// by reading its body - wrong, corrected here and in those docs.
+	//
+	// The real fix: D:\ is not guessed, it is guaranteed. tools/xbox-
+	// dedicated-link-check.sh links `-include:_automount_d_drive`
+	// (deps/nxdk/lib/nxdk/automount_d.c), a CRT-init-array hook
+	// (`.CRT$XIT`) that runs BEFORE main() and mounts D: to the directory
+	// containing the running XBE if it is not already mounted - the
+	// standard nxdk convention every sample in deps/nxdk/samples relies
+	// on. By the time this function runs, D:\ is a real, valid,
+	// already-mounted absolute path to exactly where a deployed game's
+	// files live alongside its XBE.
+	Q_strncpy( out, "D:\\", size );
+	return true;
+#elif XASH_IOS
 	Q_strncpy( out, IOS_GetDocsDir(), size );
 	return true;
 #elif XASH_PSVITA

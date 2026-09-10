@@ -290,6 +290,16 @@ Neither is written yet.
 **Exit:** the engine finds its game directory on Xbox **and mounts it** —
 `FI.numgames > 0` and `pak0.pak` opens.
 
+**Partial progress, W5 (divergence #29), found by Codex review:**
+`FS_DetermineRootDirectory` now has a real `XASH_XBOX` branch returning
+`"D:\\"` (`automount_d_drive`, already linked, mounts `D:` to the running
+XBE's own directory before `main()`) instead of falling through to
+`compat/xbox`'s honest `getcwd` `ENOSYS` and `Sys_Error`ing. That is the
+"finding the root directory" half only - neither route below is written,
+and the relative-searchpath problem this section's own "NOT sufficient"
+finding describes is exactly as open as before. The exit line above is
+still unmet.
+
 ## X1 — Static linking proven
 
 ### MEASURED, 2026-09-06: ten duplicate symbols
@@ -1390,7 +1400,29 @@ the design doc, §2 and §10):
   measured but partial inventory (external sequence groups, client-only
   texture models and generic resources live elsewhere), so deployment
   still has to expand dependencies from it. See CHANGELOG.
-- **W5 — Xbox `Host_Main`**, the one part X1 deliberately stopped short of.
+- **W5 — Xbox `Host_Main`** — **linked, not yet run**: a real, dedicated
+  Xbox target (`tools/xbox-dedicated-sweep.sh`/`-link-check.sh`, divergence
+  #29) compiles the actual `engine/wscript` "dedicated only" file list
+  (verified against this repo's own `compile_commands.json` from a real
+  PC `--dedicated` build) with `platform/xbox/*.c` in place of
+  `platform/win32/*.c`, and links 0 duplicate / 0 undefined through
+  `engine/common/launcher.c`'s real `main()` → `Host_Main("valve", ...)` —
+  the same static-link path PSVita/iOS use. Produces a real, `XBEH`-valid
+  XBE (2,273,280 bytes). The 63 parked networking symbols turned out to be
+  an incomplete `platform/stub/net_stub.h` (predates `net_ws.c`/`xrcon.c`
+  gaining IPv6/`getaddrinfo`), not a real BSD-sockets gap — completing it
+  let `net_ws.c`/`xrcon.c`/both HTTP files compile unmodified, and also
+  improved the existing broad-sweep baseline (197/30 compile, 0/32 link,
+  both down from 34/63). **Codex review, round 1, found a real one: this
+  row first claimed `compat/xbox`'s `getcwd` already resolved X0.5 -
+  false, its real body is an honest `errno = ENOSYS`.** `FS_Determine
+  RootDirectory` now has a real `XASH_XBOX` branch returning `"D:\\"`
+  (guaranteed by the already-linked `automount_d_drive` CRT hook, not
+  guessed), which fixes the specific `Sys_Error` Codex found - but **does
+  not close X0.5 below**, whose own "not sufficient" finding (relative
+  searchpaths, no nxdk current-directory concept) this fix does not touch.
+  **Still open**: X0.5's own two routes, and running any of this - no
+  xemu/hardware in this environment. See CHANGELOG.
 
 W1 → W2 → W3 are ordered; W3's tool can be written against `.bsp` alone
 in parallel with W2. Decisions taken by recommendation in the design

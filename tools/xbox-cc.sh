@@ -263,12 +263,54 @@ ENGINE_DEFINES=(
 	                              # errno_t and localtime_s are still shimmed.
 	                              # _ftelli64/_fseeki64 are shimmed too, but
 	                              # for vorbis, not for miniz.
-	-DXASH_SDL=2                  # nxdk ships XboxDev/nxdk-sdl, SDL 2.0.9 with
+	-DALLOCA_H=\<malloc.h\>     # filesystem/VFileSystem009.cpp's only
+		                              # gap: nxdk's alloca() lives in
+		                              # xboxrt/libc_extensions/malloc.h
+		                              # (#define alloca(size) _alloca(size)),
+		                              # not <alloca.h> (does not exist here).
+		-DXASH_SDL=2                  # nxdk ships XboxDev/nxdk-sdl, SDL 2.0.9 with
 	                              # native src/video/xbox, src/audio/xbox and
 	                              # src/joystick/xbox drivers. common/defaults.h:33
 	                              # then selects VIDEO_SDL / INPUT_SDL / SOUND_SDL,
 	                              # which is why no new backend enum is needed.
 )
+
+# XBOX_DEDICATED=1 (env, opt-in): X2 W5's dedicated Xbox target -
+# engine/wscript's own "# basic build: dedicated only" source set
+# (common/*.c, common/imagelib/*.c, common/soundlib/*.c, server/*.c,
+# common/http/*.c), same as XASH_DEDICATED=1 already does for the PC
+# `xash`/`xash_tests_dedicated` targets (engine/wscript:229,244) - verified
+# by actually compiling the six files that used to be part of the parked
+# 63-undefined-symbol networking gap under this exact define plus the
+# platform/stub/net_stub.h additions below: net_chan.c, net_ws.c, xrcon.c,
+# net_http_tls.c and net_http_xash.c now compile CLEAN (net_chan.c's whole
+# gap was one #if !XASH_DEDICATED bzlib.h include it already carried;
+# net_ws.c/xrcon.c needed net_stub.h completed with real IPv6/fd_set/
+# getaddrinfo shapes, not a new define). cl_steam.c (client-only) is the
+# one pre-existing failure this does NOT fix and does not need to - a
+# dedicated build never compiles engine/client/*.c at all, matching
+# engine/wscript:169-194's own default source list before any `if
+# bld.env.CLIENT:` block runs.
+#
+# Deliberately NOT the default: every OTHER Xbox tool (xbox-sweep.sh's
+# broad multi-platform coverage sweep, xbox-mainui-sweep.sh, the
+# third-party compiles inside xbox-link-check.sh) wants the existing,
+# unconditional define set, matching the eventual full client+menu target
+# those measurements already track (divergences #20-23). Opt-in here keeps
+# every prior "N ok / M failing" and "0 duplicate / K undefined" baseline
+# meaning exactly what it always meant.
+if [ "${XBOX_DEDICATED:-0}" = "1" ]; then
+	ENGINE_DEFINES+=( -DXASH_DEDICATED=1 )
+	# engine/common/launcher.c's own main() (XASH_GAMEDIR defaults to
+	# "valve", matching every real bake this project has done so far) -
+	# the same statically-linked, no-dynamic-loading entry point PSVita
+	# and iOS already use, in place of engine/platform/xbox/xbox_main.c's
+	# placeholder (X1, divergence #23 - kept as-is for the broad,
+	# non-dedicated sweep this flag does not affect; excluded from THIS
+	# target's file list by tools/xbox-dedicated-sweep.sh instead of
+	# colliding with launcher.c's own main() at link time).
+	ENGINE_DEFINES+=( -DXASH_ENABLE_MAIN=1 )
+fi
 
 OUT="${OUT:-/tmp/$(basename "${SRC%.c}").obj}"
 
