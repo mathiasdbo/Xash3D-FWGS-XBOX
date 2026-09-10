@@ -476,3 +476,26 @@ inside the same syntactic context the bug lives in - a comment about a
 comment-breaking sequence, a string about a string-escaping bug, a shell
 line about a shell-quoting bug - and "obviously right" is exactly the
 state of mind the original bug was written in too.
+
+### NEVER read a truncated view of sorted or ranked output and report it as the extreme it isn't
+
+XB's lightstyle census (`tools/asset-studio/tools/census_lightstyles.cpp`)
+prints 125 maps sorted DESCENDING by affected-face count, then a totals
+line. The tool's own output was correct throughout. Checking it with
+`... | tail -60` on a 131-line result showed only the BOTTOM 60 rows - the
+smallest values in a descending sort - and those were written into
+`fork-plan.md` as "the worst maps" (46/43/21 faces), a claim confidently
+wrong by two orders of magnitude (the real worst map, `rocket_frenzy`,
+carries 6,223). Found in Codex review: the published per-map numbers
+couldn't add up to the published total across 125 rows, which is exactly
+the kind of check a human skimming the same truncated tail would not
+think to run.
+
+**Before reporting an extreme (worst/best/max/first) from a large tool
+output, either view the whole thing or grep/head for the actual extreme
+directly - never assume a `tail`/`head` truncation you chose for
+readability happens to land on the interesting end.** A sort direction is
+easy to get backwards in your own head even when the tool got it right;
+the fix is not "concentrate harder," it's "look at the row you're
+citing," or better, let the totals do a sanity check the truncated view
+can't (a printed max/sum a human can cross-check against what got quoted).

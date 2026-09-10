@@ -1571,19 +1571,74 @@ none of them had an owner.
 
 **Two censuses first, because they decide the rest.** Both are one-minute
 scripts over the retail assets, and both answer questions the plan had been
-carrying as opinions:
+carrying as opinions.
+
+**MEASURED, 2026-09-10** (`tools/asset-studio/tools/census_lightstyles.cpp`,
+`census_bones.cpp` — new, linked against the same `AssetStudioFormats` the
+real baker uses, run against the real Steam "Half-Life" install):
 
 - **Lightstyles.** How many faces per map carry `styles[1..3] != 255`. The
   baker bakes style 0 only (`BspParser.cpp:514-523`), so "RGB565 pages, no
   runtime conversion" currently means no light in the game switches or
-  flickers on Xbox. The number picks between per-style pages combined at
-  runtime, a baked *on* state with binary switching, or an accepted loss —
-  and the choice is written down here, not arrived at.
-- **Bones.** Which retail models reference more bones per mesh than a VP20
-  palette holds — 192 constants (`deps/nxdk/tools/vp20compiler/config.h:11`),
-  three per bone, roughly 50 after the view-projection and light constants,
-  against `MAXSTUDIOBONES 128`. Every model over the line needs partitioning
-  by bone subset; the code must exist for the ones that do.
+  flickers on Xbox. **Not a negligible edge case**: across all 125 retail
+  maps, 643,971 faces total, 613,358 lit — **41,031 of those lit faces
+  (6.69%) carry at least one extra lightstyle, and 82 of the 125 maps (66%)
+  have at least one such face**. The distribution is heavily skewed, not
+  uniform: `rocket_frenzy` alone carries 6,223 of the 41,031 (a Half-Life
+  add-on map, almost entirely dynamic lighting by design), then a real
+  drop to `disposal` (2,759), `contamination` (2,194), `c0a0c` (1,399,
+  the game's own opening map — a player would notice this in the first
+  five minutes) and a long tail down to zero. **Corrected in review,
+  round 1: the first version of this row named `c1a2c`/`c1a2b`/`c0a0e`
+  (46/43/21 faces) as "the worst maps" — those are real rows from the
+  census output, but nowhere near the top of a table the census itself
+  sorts descending; a `tail -60` on 125 sorted rows only ever showed the
+  bottom of it. `tools/asset-studio/tools/census_lightstyles.cpp` itself
+  needed no fix — the tool's own output was correct throughout; this was
+  a review-of-the-output mistake, worth recording as its own lesson.**
+  An accepted loss would still be a visible regression on two-thirds of
+  the game's maps and its own opening level, not a rare corner case —
+  that conclusion holds unchanged. Per-style pages combined at runtime,
+  or a baked *on* state with binary switching, are both live options; the
+  census does not pick between them, only closes off the third.
+- **Bones.** Which retail models reference more bones per DRAW than a VP20
+  palette holds — 192 constants (`deps/nxdk/tools/vp20compiler/
+  config.h:11`), three per bone, roughly 50 after the view-projection and
+  light constants (an ESTIMATE, not yet a verified exact cutoff — see
+  below), against `MAXSTUDIOBONES 128`. GoldSrc rigs each vertex to
+  exactly one bone via `vertinfoindex` (`deps/hlsdk/engine/studio.h`), not
+  a weighted multi-bone skin. **Two real mistakes, both found in Codex
+  review, both fixed — the second reverses the conclusion entirely.**
+  Round 1: the first version measured distinct bones over a whole
+  submodel (`mstudiomodel_t`), calling that the "real per-draw bone set"
+  — wrong, the reference (`ref/gl/gl_studio.c`'s `R_StudioDrawPoints`,
+  `:2078-2112`) submits each `mstudiomesh_t` separately, and a mesh's own
+  triangle command stream only touches a subset of the submodel's
+  vertices. Fixed to walk each mesh's real triangle command stream (int16
+  run-length headers, four-int16 `{vertindex, normindex, s, t}` entries,
+  confirmed against `R_StudioBuildArrayNormalMesh`, `gl_studio.c:
+  1749-1777`) for exact per-mesh vertex-bones — but round 1's fix still
+  added every normal-bone in the WHOLE submodel to every mesh as a
+  declared, deliberate over-approximation, unable to confirm from reading
+  `gl_studio.c` alone whether a triangle entry's own `normindex` was
+  mesh-local or already submodel-global. Round 2 resolved that for real:
+  `R_StudioSetColorArray` (`gl_studio.c:1431-1436`) reads
+  `pstudionorms[ptricmds[1]]` and `g_studio.lightvalues[ptricmds[1]]`, the
+  latter populated by a running index accumulated across every mesh in
+  submodel order — a compiled MDL's own per-entry `normindex` already
+  addresses the submodel's normal array directly, exactly parallel to
+  `vertindex`. Fixed to attribute normal-bones per mesh exactly too, no
+  over-approximation. **The corrected, exact measurement finds ZERO
+  submodels over budget** — the previous "3 models, all bosses" was
+  entirely an artifact of adding an unrelated mesh's normal-bones into
+  the count; the worst real case across all 598 submodels in 296 studio
+  models is `v_grenade.mdl`'s `grenade_hand` mesh at 35 bones, 15 under
+  even the conservative ~50 estimate. **Bone-subset partitioning code is
+  not needed for the retail Half-Life content at all** — this closes the
+  question rather than scoping a fix. (`--budget N` still exists to
+  re-check headroom once a real VP20 shader constant layout narrows the
+  ~50 estimate; nothing was close enough at review time for that number
+  to matter.)
 
 Then the format, decided once:
 
