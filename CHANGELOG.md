@@ -5,6 +5,44 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X0.5 route 1: an emulated CWD, so Xbox can resolve the relative searchpaths FS_InitStdio builds
+
+`docs/r3d/fork-plan.md`'s X0.5 section, confirmed by a real boot in the
+previous entry, named two ways out. Implements route 1, the smaller and
+reversible one: `compat/xbox/xbox_posix_io.c` gains a real, emulated
+process-wide current directory (`r3d_cwd`, defaulting to `"D:\\"` -
+guaranteed by `automount_d_drive`, already linked). `chdir()` sets it
+(after checking the target is really a directory, via
+`GetFileAttributesA`); `getcwd()` reads it; `r3d_native_path` - the one
+function every POSIX call in this file already routes through - resolves
+a relative path against it before the existing `/`→`\` conversion, and
+leaves an absolute path (drive-letter-colon prefixed) untouched exactly
+as before. The doc's own objection to this route was about `chdir()` as
+an API pretending to succeed at something real; on a single-process
+console nothing can observe an emulated CWD versus a real one, so it
+is not that.
+
+`filesystem/sys.c`'s `FS_SetCurrentDirectory` (divergence #6's "one
+place where 'compat/xbox supplies what that branch needs' is false")
+now routes Xbox through this real `chdir()` - `#elif XASH_POSIX ||
+XASH_XBOX`, not a new branch, since this file's own `XASH_POSIX` arm
+already has exactly the right contract (0/-1, `errno` set).
+
+Verified: both files compile clean for Xbox standalone; the full
+dedicated target (with and without `XBOX_ENGINE_TESTS=1`) rebuilds
+96/0 sweep, 0 duplicate/0 undefined link, unchanged XBE size.
+**UNVERIFIED at runtime**: a real xemu boot with a minimal synthetic
+`valve/gameinfo.txt` packaged into the XISO was attempted to confirm
+`FS_AddGameHierarchy` actually finds it now, but a Windows Firewall
+prompt silently dropped the UDP diagnostic channel's packets for the
+first attempts, and after allowing it the boot still had not produced
+a log line by the time this session's context ran out. The fix is
+reasoned from the same, now-confirmed failure mode the previous entry
+observed directly (`r3d_native_path` is the one place every failing
+call in that log - `FS_SetCurrentDirectory`, `opendir("./")` -
+ultimately goes through), but has not been watched succeed. Confirming
+it live is the natural first step of whatever continues this.
+
 ### Fixed — X2 W5 follow-up: filesystem_stdio wired into the static library table; X0.5's relative-searchpath problem confirmed by a real boot
 
 The previous entry's "first real boot attempt" left a genuine mystery -
