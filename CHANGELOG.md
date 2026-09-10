@@ -5,6 +5,96 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — X2 W4: the headless run from .mpak (test_mapprobe, tools/mpak-run.sh) — the X2 exit line on PC
+
+A dedicated server started with `+map c1a3` from a directory that holds
+the map's baked .mpak, the boot floor W3 measured (gfx.wad, dlls/hl.dll,
+delta.lst) and the manifest's loose files - and no maps/c1a3.bsp
+anywhere in its search path - spawns, ticks server frames, and answers
+the server-side consumers of the loaded world. `test_mapprobe [outfile]`
+(engine/server/sv_world.c, test builds only, registered in
+SV_InitOperatorCommands, divergence #28) stands at the sp_entity spawn
+and runs SV_PointContents, a player-hull SV_Move, SV_TraceTexture,
+SV_TraceSurface and SV_RecursiveLightPoint straight down - hull 0,
+hull 1's clipnodes, the embedded texture names, msurface_t flags, and
+the per-face lighting samples with lightstyles - printing every value
+and an OK/FAILED verdict. tools/mpak-run.sh bakes, assembles the
+directory (retail reached read-only via -rodir), runs `+map <map> +wait
+30 +test_mapprobe <map>.precache.txt +quit`, requires the OK line, and
+runs a control without the archive that must fail with "map <name>
+doesn't exist" and "no active server".
+
+Measured: c1a3 spawns from the archive, 34 server frames in 27 host
+frames, 379 entities, spawn at 24,1517,47 over `elev2_flr` (the
+elevator the map starts on), hull fraction 0.0131 stopping at z=36,
+light 33,33,32; crossfire: 254 entities, over `lab1_helpad`, light
+198,194,177. Both controls behave.
+
+One finding for the manifest design: the baker's <map>.assets.txt can
+only see entity keyvalues (12 files for c1a3, 2 for crossfire); the game
+library precaches most models and sounds from CODE - c1a3's server
+precaches 263 models and 282 sounds, 91 of the models not on disk in the
+archive-only directory (barney, headcrab, hgrunt, the gib models...). The
+server runs without them (the engine logs "Could not load model" per
+reference and carries on; a dedicated server never needed the
+geometry). With an outfile, test_mapprobe writes the server's precache
+tables - a measured, PARTIAL inventory of what the map needs on disk,
+not a deployment manifest: studio external sequence groups are loaded
+by name from the model and Host_Error if missing (mod_studio.c:602-609),
+companion texture models only on the client, and generic resources
+(sv_init.c:388, RES_FATALIFMISSING) sit in other tables. A deployment
+step still has to expand dependencies from it; what this run
+establishes is that the BSP-derived manifest is far short of even the
+server's own tables.
+
+### Fixed — first Codex review round on the headless-mpak-run branch
+
+Two findings, both real:
+
+- test_mapprobe's light check started from {1,1,1} and ignored
+  SV_RecursiveLightPoint's result, so a surface with no lighting samples
+  (the function returns true without touching the color, sv_world.c:
+  1546-1547) or a missed traversal (:1497-1498) still passed as "lit" -
+  a baker regression dropping LUMP_LIGHTING would have gone unnoticed.
+  The color now starts black and the verdict requires the traversal's
+  own true plus a non-black sum. Measured with the control the review
+  asked for: an archive whose dheader_t LIGHTING length is zeroed makes
+  the probe report lit=1 light=0,0,0 and FAILED, and the runner fails.
+
+- The precache export was described as "the complete answer" to what a
+  map needs on disk. It is the server's tables only: studio external
+  sequence groups are loaded by name from the model (mod_studio.c:
+  602-609, Host_Error if missing), companion texture models only on the
+  client, and generic resources / event scripts sit in other tables.
+  The generic (files_precache) and event tables are now exported too;
+  the model-internal dependencies remain outside, and every claim
+  (CHANGELOG, the design doc, the fork plan, the divergence row, the
+  script's own header) now says "partial inventory, expand before use".
+
+### Fixed — second Codex review round on the headless-mpak-run branch
+
+Two findings, both real, both false-pass paths in the verification:
+
+- tools/mpak-run.sh silently skipped staging when the manifest was
+  missing, and a failed mkdir/cp counted as nothing at all - the verdict
+  only looked at the probe, which does not care whether models exist. A
+  missing or unreadable manifest after the bake now fails the map; a
+  failed mkdir/cp is a staging error and fails the map; files the retail
+  install genuinely lacks stay the one measured, non-fatal count.
+
+- test_mapprobe printed "cannot write" and OK in the same breath when
+  the export destination could not be opened, ignored every write and
+  close result, and announced the list as written regardless. A
+  requested export is now part of the verdict: FS_Open, every FS_Printf
+  and FS_Close must succeed, the file ends with an "end" marker, and the
+  runner checks that marker before advertising the path. Control: an
+  export aimed at a directory (dlls) reports "cannot write dlls" and
+  FAILED. Not exercised by a control: a mkdir/cp failure and an
+  unreadable manifest - neither can be injected without a test hook in
+  the script (the work directory is emptied at start and the bake
+  writes the manifest itself); the paths are straight-line shell and
+  were reviewed, not measured.
+
 ### Added — X2 W3: the .bsp-vs-.mpak differential (test_dumpworld, tools/mpak-diff.sh)
 
 "The engine loads a map from .mpak" is now measured, not asserted

@@ -454,11 +454,33 @@ Not covered by the dedicated differential: texture pixels
 are compared; the embedded miptex bytes rest on the baker's `--verify`
 until the client run.
 
-Then the X2 exit run: `+map c1a3` under `ref/null`/dedicated from a
-directory holding `c1a3.mpak`, the boot floor above and the manifest's
-loose files, server frames ticking. On Xbox that additionally needs
-`Host_Main` wired (X1 stopped short of it on purpose — `engine/platform/
-xbox/xbox_main.c`); that is its own package and its own risks.
+Then the X2 exit run — **done as W4** (divergence #28): `tools/mpak-run.sh`
+starts a dedicated server with `+map <name>` from a directory holding
+`<name>.mpak`, the boot floor above and the manifest's loose files (no
+`.bsp` in its search path), waits thirty frames, and runs `test_mapprobe`
+(`engine/server/sv_world.c`, test builds): at the `sp_entity` spawn it
+calls `SV_PointContents` (hull 0), a player-hull `SV_Move` (hull 1's
+clipnodes), `SV_TraceTexture` (the embedded texture names — F5's
+consumer), `SV_TraceSurface` and `SV_RecursiveLightPoint` (F1/F2's
+per-face samples and lightstyles) straight down, and reports frames
+ticked since spawn. `c1a3`: 34 server frames, spawn over `elev2_flr`,
+hull stops at z=36, light 33,33,32; `crossfire`: over `lab1_helpad`,
+light 198,194,177. The control without the archive gets `map c1a3
+doesn't exist`. One finding: the baker's manifest (§9.4's "no texture
+manifest" stands, but the *asset* manifest) sees entity keyvalues only —
+the game library precaches most models and sounds from code (`c1a3`:
+263 models and 282 sounds precached, 91 models absent from the
+archive-only directory; the server runs regardless). `test_mapprobe
+<outfile>` writes the server's precache tables — a measured but
+*partial* inventory: studio external sequence groups are loaded by name
+from the model itself (`mod_studio.c:602-609`, `Host_Error` if missing),
+companion texture models only on the client, and generic resources
+(`sv_init.c:388`) live in other tables. Deployment has to expand
+dependencies from it, not ship it as-is.
+
+On Xbox that additionally needs `Host_Main` wired (X1 stopped short of
+it on purpose — `engine/platform/xbox/xbox_main.c`); that is W5, its
+own package and its own risks.
 
 ## 9. Decisions taken by recommendation (override here if wrong)
 
@@ -482,7 +504,7 @@ xbox/xbox_main.c`); that is its own package and its own risks.
 | W1 | **MPAK v7: BSP30 first sector, core lumps, profiles** | `tools/asset-studio`: `MpakHeader.h`, `PakManager.{h,cpp}`, `BspParser.cpp` (re-emit embedded miptex, copy 5 lumps), `main.cpp` (`--profile`); `filesystem/mpak.c` (probe at 0 and 128), `filesystem/mpak_layout.{h,c}` + tests (six lumps, descriptor offset, `dheader_t` cross-check) | Low — append-only past the first sector; layout test and real-bake cross-check already exist | v7 bakes of `c1a3` in both profiles; `test_mpak_layout` and `test_mpak` pass; end offset == file size for both; `dheader_t` table == computed layout; core `c1a3.mpak` ≤ 3 MB |
 | W2 | **Engine: nothing** — retained as a checkpoint | no files; the check is that `Mod_TestBmodelLumps` and `Mod_LoadBrushModel` accept a v7 archive as-is | — | `xash` / dedicated on PC: `map c1a3` from a directory holding only `c1a3.mpak` passes `SV_ValidateMap` and reaches `Mod_LoadBrushModel` (log lines), with no engine diff |
 | W3 | **Differential verification tool** — **done** | `test_dumpworld` in `engine/common/mod_bmodel.c` (test builds, #27) + `tools/mpak-diff.sh`; the `Platform_Minimize_f` link gap fixed in `host.c` (#26) | Low–medium | **met**: byte-identical dumps for `c1a3` and `crossfire` from `.bsp` and `.mpak`, control and negative control both behave (§8) |
-| W4 | **Headless run from `.mpak` + the boot floor** | game directory with `.mpak`, `gfx.wad`, `dlls/hl.dll`, `delta.lst` (§8's measured floor) + manifest files; `+map c1a3` under `ref/null`/dedicated | Medium | server frames tick; `SV_TraceTexture`/light-point exercised by a scripted trace; X2 exit line on PC |
+| W4 | **Headless run from `.mpak` + the boot floor** — **done** | `test_mapprobe` in `engine/server/sv_world.c` (test builds, #28) + `tools/mpak-run.sh`; directory = `.mpak` + `gfx.wad`, `dlls/hl.dll`, `delta.lst` + manifest files | Medium | **met** on `c1a3` and `crossfire`: frames tick, the scripted trace exercises `SV_TraceTexture`, `SV_Move`, `SV_PointContents` and `SV_RecursiveLightPoint` (§8); the X2 exit line on PC |
 | W5 | **Xbox `Host_Main`** | `engine/platform/xbox/xbox_main.c`, whatever boot measures reveal | High (unmeasured, per X1's own notes) | same as W4, on hardware/xemu |
 | X9 | `nv2a` consumes the optional block; decides atlas/`lu/lv` | later | — | — |
 

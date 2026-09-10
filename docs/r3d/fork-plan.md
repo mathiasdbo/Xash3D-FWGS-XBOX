@@ -1373,13 +1373,23 @@ the design doc, §2 and §10):
   (`_Platform_Minimize_f`) is fixed (divergence #26); the stock engine
   tests run on this configuration for the first time (1011 pass). See
   CHANGELOG.
-- **W4 — Headless run** from a directory holding `.mpak` + manifest files
-  **plus the measured boot floor** — `gfx.wad` (`host.c:1137`),
-  `dlls/hl.dll` (hull bounds come from `pfnGetHullBounds`,
-  `sv_pmove.c:449`) and `delta.lst` (`net_encode.c:854`); W3 found the
-  three by hitting each `Sys_Error` in turn and grep-confirmed there are
-  no others — `+map c1a3` under `ref/null`/dedicated, server frames
-  ticking.
+- **W4 — Headless run** — **done, the X2 exit line on PC**: `tools/mpak-run.sh`
+  starts a dedicated server with `+map <name>` from a directory holding
+  the `.mpak`, the boot floor W3 measured (`gfx.wad`, `dlls/hl.dll`,
+  `delta.lst`) and the manifest's loose files, no `.bsp` anywhere in its
+  search path; `test_mapprobe` (`engine/server/sv_world.c`, test builds,
+  divergence #28) then exercises `SV_PointContents`, a player-hull
+  `SV_Move`, `SV_TraceTexture`, `SV_TraceSurface` and
+  `SV_RecursiveLightPoint` at the spawn point. `c1a3`: 34 server frames,
+  spawn over `elev2_flr`, light 33,33,32; `crossfire`: over
+  `lab1_helpad`, light 198,194,177; without the archive `map` refuses.
+  Finding: the baker's manifest sees only entity keyvalues (12 files for
+  `c1a3`); the game library precaches 91 more models from code (263
+  models, 282 sounds in all). The server runs without them; the probe
+  writes the server's precache tables (`<map>.precache.txt`) — a
+  measured but partial inventory (external sequence groups, client-only
+  texture models and generic resources live elsewhere), so deployment
+  still has to expand dependencies from it. See CHANGELOG.
 - **W5 — Xbox `Host_Main`**, the one part X1 deliberately stopped short of.
 
 W1 → W2 → W3 are ordered; W3's tool can be written against `.bsp` alone
@@ -1388,7 +1398,7 @@ doc's §9 (atlas out of every profile until X9; DXT and the baked
 geometry X9-only; no texture manifest) stand unless overridden.
 
 **Exit:** the engine loads a map from `.mpak` and runs the server loop with
-`ref/null`.
+`ref/null` — **met on PC (dedicated) by W4**; on Xbox it waits on W5.
 
 ## X3 — Memory budget
 

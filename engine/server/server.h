@@ -699,6 +699,9 @@ int SV_TruePointContents( const vec3_t p );
 int SV_PointContents( const vec3_t p );
 void SV_SetLightStyle( int style, const char* s, float f );
 int SV_LightForEntity( edict_t *pEdict );
+#if XASH_ENGINE_TESTS
+void SV_MapProbe_f( void ); // test_mapprobe - see sv_world.c, tools/mpak-run.sh
+#endif
 
 //
 // sv_query.c

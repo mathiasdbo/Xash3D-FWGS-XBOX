@@ -1053,6 +1053,11 @@ void SV_InitOperatorCommands( void )
 	Cmd_AddCommand( "log", SV_ServerLog_f, "enables logging to file" );
 	Cmd_AddCommand( "str64stats", SV_PrintStr64Stats_f, "print engine pool string statistics" );
 	Cmd_AddCommand( "sv_list_messages", SV_ListMessages_f, "list registered user messages" );
+#if XASH_ENGINE_TESTS
+	// X2 W4 (docs/r3d/mpak-loading-design.md, section 8): the scripted trace
+	// tools/mpak-run.sh runs after +map on a headless server. Test builds only.
+	Cmd_AddCommand( "test_mapprobe", SV_MapProbe_f, "trace, texture, contents and light at the spawn point of the running map" );
+#endif
 
 	if( host.type == HOST_NORMAL )
 	{

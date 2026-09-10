@@ -396,3 +396,4 @@ build-test/
 *.stackdump
 .sweep/
 .mpak-diff/
+.mpak-run/

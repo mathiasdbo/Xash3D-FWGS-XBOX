@@ -1634,3 +1634,150 @@ int SV_LightForEntity( edict_t *pEdict )
 
 	return VectorAvg( point_color );
 }
+
+#if XASH_ENGINE_TESTS
+/*
+==================
+SV_MapProbe_f
+
+test_mapprobe (test builds only) - X2 W4's scripted trace
+(docs/r3d/mpak-loading-design.md, section 8): once "+map" has spawned a
+server, stand at the single-player spawn entity and exercise the real
+server-side consumers of the loaded world from there - SV_PointContents
+(hull 0), SV_Move with the player hull (clipnodes, hull 1),
+SV_TraceTexture (texture NAMES, the reason the core profile embeds
+miptex), SV_TraceSurface (msurface_t flags) and SV_RecursiveLightPoint
+(per-face LIGHTING samples and lightstyles) - and report whether server
+frames have ticked since spawn. Driven by tools/mpak-run.sh, which greps
+the summary line; every value is printed so a change shows, not just a
+verdict. Lives here because SV_RecursiveLightPoint is static.
+==================
+*/
+void SV_MapProbe_f( void )
+{
+	edict_t    *spawn = NULL;
+	vec3_t     start, end, color = { 0.0f, 0.0f, 0.0f };
+	const char *texture;
+	msurface_t *surf;
+	trace_t    trace;
+	int        contents;
+	qboolean   ok, lit;
+
+	if( sv.state != ss_active || !sv.worldmodel )
+	{
+		Con_Printf( S_ERROR "test_mapprobe: no active server (state %d)\n", sv.state );
+		return;
+	}
+
+	for( int i = 0; i < svgame.numEntities; i++ )
+	{
+		edict_t *ent = SV_EdictNum( i );
+
+		if( !SV_IsValidEdict( ent ))
+			continue;
+
+		if( !Q_strcmp( SV_GetString( ent->v.classname ), GI->sp_entity ))
+		{
+			spawn = ent;
+			break;
+		}
+	}
+
+	if( !spawn )
+	{
+		Con_Printf( S_ERROR "test_mapprobe: no %s entity in %s\n", GI->sp_entity, sv.name );
+		return;
+	}
+
+	VectorCopy( spawn->v.origin, start );
+	VectorCopy( start, end );
+	end[2] -= world.size[2]; // straight down through the whole map, as SV_LightForEntity does
+
+	contents = SV_PointContents( start );
+	texture = SV_TraceTexture( svgame.edicts, start, end );
+	surf = SV_TraceSurface( svgame.edicts, start, end );
+	trace = SV_Move( start, host.player_mins[0], host.player_maxs[0], end, MOVE_NORMAL, svgame.edicts, false );
+	// color starts BLACK and the traversal's own result is kept: found in
+	// review, {1,1,1} plus an ignored return let a surface with no lighting
+	// samples (SV_RecursiveLightPoint returns true untouched, :1546-1547)
+	// or a missed traversal (:1497-1498) pass as "lit"
+	lit = SV_RecursiveLightPoint( sv.worldmodel, sv.worldmodel->nodes, start, end, color );
+
+	Con_Printf( "test_mapprobe: map=%s world=%s state=%d time=%.3f svframes=%d hostframes=%d entities=%d\n",
+		sv.name, sv.worldmodel->name, sv.state, sv.time, sv.framecount, host.framecount, svgame.numEntities );
+	Con_Printf( "test_mapprobe: spawn=%s at %.1f,%.1f,%.1f contents=%d\n",
+		GI->sp_entity, start[0], start[1], start[2], contents );
+	Con_Printf( "test_mapprobe: floor texture=%s surfflags=0x%x hullfraction=%.4f endpos=%.1f,%.1f,%.1f lit=%d light=%.1f,%.1f,%.1f\n",
+		texture ? texture : "(none)", surf ? surf->flags : 0, trace.fraction, trace.endpos[0], trace.endpos[1], trace.endpos[2],
+		lit, color[0], color[1], color[2] );
+
+	// The server's precache tables - a PARTIAL inventory of what the map
+	// needs on disk beyond the archive. The baker's <map>.assets.txt can
+	// only see entity keyvalues; the game library precaches most models
+	// and sounds from code (c1a3: 91 models the manifest cannot know
+	// about). Partial, per review: studio external sequence groups are
+	// loaded by name from the model, not the table (mod_studio.c, a
+	// Host_Error if missing), companion texture models only on the client
+	// (mod_studio.c). The generic (files_precache) and event tables ARE
+	// written, so what stays outside is the model-internal set. With an
+	// outfile argument, write what the server did register.
+	int nummodels = 0, numsounds = 0, missing = 0;
+	for( int i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+	{
+		nummodels++;
+		if( sv.model_precache[i][0] != '*' && !sv.models[i] )
+			missing++;
+	}
+	for( int i = 1; i < MAX_SOUNDS && sv.sound_precache[i][0]; i++ )
+		numsounds++;
+	int numgeneric = 0, numevents = 0;
+	for( int i = 1; i < MAX_CUSTOM && sv.files_precache[i][0]; i++ )
+		numgeneric++;
+	for( int i = 1; i < MAX_EVENTS && sv.event_precache[i][0]; i++ )
+		numevents++;
+	Con_Printf( "test_mapprobe: precache models=%d (%d not loaded) sounds=%d generic=%d events=%d\n", nummodels, missing, numsounds, numgeneric, numevents );
+
+	// A requested export is part of the verdict: found in review, an
+	// unwritable destination printed an error and OK in the same breath,
+	// and write/close results were never looked at.
+	qboolean export_ok = true;
+	if( Cmd_Argc() > 1 )
+	{
+		file_t *f = FS_Open( Cmd_Argv( 1 ), "wb", false );
+
+		export_ok = false;
+		if( f )
+		{
+			int failures = 0;
+
+			for( int i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+				if( FS_Printf( f, "model %s%s\n", sv.model_precache[i], ( sv.model_precache[i][0] != '*' && !sv.models[i] ) ? " (not loaded)" : "" ) < 0 ) failures++;
+			for( int i = 1; i < MAX_SOUNDS && sv.sound_precache[i][0]; i++ )
+				if( FS_Printf( f, "sound %s\n", sv.sound_precache[i] ) < 0 ) failures++;
+			for( int i = 1; i < MAX_CUSTOM && sv.files_precache[i][0]; i++ )
+				if( FS_Printf( f, "generic %s\n", sv.files_precache[i] ) < 0 ) failures++;
+			for( int i = 1; i < MAX_EVENTS && sv.event_precache[i][0]; i++ )
+				if( FS_Printf( f, "event %s\n", sv.event_precache[i] ) < 0 ) failures++;
+			if( FS_Printf( f, "end\n" ) < 0 ) failures++;
+			if( FS_Close( f ) != 0 ) failures++;
+
+			if( failures == 0 )
+			{
+				export_ok = true;
+				Con_Printf( "test_mapprobe: precache list written to %s\n", Cmd_Argv( 1 ));
+			}
+			else Con_Printf( S_ERROR "test_mapprobe: %d write failure(s) on %s\n", failures, Cmd_Argv( 1 ));
+		}
+		else Con_Printf( S_ERROR "test_mapprobe: cannot write %s\n", Cmd_Argv( 1 ));
+	}
+
+	// frames ticked since SV_SpawnServer's sv.time = 1.0; the spawn point is
+	// in open space; the line down found a textured face; the player hull
+	// stopped on something; the light traversal found a surface AND its
+	// samples summed to something above black; the export, if asked for,
+	// was written in full
+	ok = sv.time > 1.0 && sv.framecount > 0 && contents == CONTENTS_EMPTY && texture != NULL
+		&& trace.fraction < 1.0f && lit && ( color[0] + color[1] + color[2] ) > 0.0f && export_ok;
+	Con_Printf( "test_mapprobe: %s\n", ok ? "OK" : "FAILED" );
+}
+#endif // XASH_ENGINE_TESTS
