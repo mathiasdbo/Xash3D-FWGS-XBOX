@@ -5,6 +5,24 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Removed — `.github/workflows/c-cpp.yml`, upstream's own CI
+
+Inherited wholesale from the Xash3D-FWGS fork base: a 15+ job OS/arch
+build matrix (Linux amd64/i386/arm64/armhf/riscv64/ppc64el, Android,
+Nintendo Switch, PS Vita, Windows amd64/i386, macOS arm64/amd64, iOS)
+plus a Flatpak build and a release job, firing on every `push` and every
+`pull_request`. None of it builds anything this fork's own workflow
+actually verifies - there is no Xbox/nxdk target in the matrix at all,
+and every real verification this project does (`tools/xbox-sweep.sh`,
+`tools/xbox-link-check.sh`, `tools/mpak-diff.sh`, `tools/mpak-run.sh`,
+xemu boots) already runs locally against the actual target platforms,
+not through this workflow. It was exhausting the account's Actions quota
+for zero benefit. `.github/FUNDING.yml` and `scripts/gha/*.sh` (the
+per-platform build scripts the workflow invoked) are left in place -
+this removes only the workflow that ran them on every push, not the
+scripts themselves, which stay as reference for how upstream's own
+targets build if that's ever needed again.
+
 ### Added — X0.5 route 1: an emulated CWD, so Xbox can resolve the relative searchpaths FS_InitStdio builds
 
 `docs/r3d/fork-plan.md`'s X0.5 section, confirmed by a real boot in the
