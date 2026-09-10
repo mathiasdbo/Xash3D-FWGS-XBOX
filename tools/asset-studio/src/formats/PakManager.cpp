@@ -255,6 +255,7 @@ namespace formats {
             header.lightmapFormat = mLightmapFormat;
             header.lenLightmapAtlas = static_cast<uint32_t>(mLightmapAtlasData.size());
             header.lenFaceInfo = static_cast<uint32_t>(mFaceInfos.size() * sizeof(MpakFaceInfo));
+            header.lenExtraLightBlocks = static_cast<uint32_t>(mExtraLightBlocks.size() * sizeof(MpakExtraLightBlock));
         }
         header.lenTexinfo = static_cast<uint32_t>(mTexinfoData.size());
 
@@ -351,6 +352,10 @@ namespace formats {
         if (header.lenFaces > 0) lump(LUMP_FACES, writePadded(mFacesData.data(), mFacesData.size()), header.lenFaces);
         if (header.lenLighting > 0) lump(LUMP_LIGHTING, writePadded(mLightingData.data(), mLightingData.size()), header.lenLighting);
         if (header.lenMiptex > 0) lump(LUMP_TEXTURES, writePadded(mMiptexData.data(), mMiptexData.size()), header.lenMiptex);
+
+        // MPAKv8 addition (MpakHeader.h's v7 -> v8 note) - not a classic BSP
+        // lump, same shape as lenFaceInfo/lenLightmapAtlas above.
+        if (header.lenExtraLightBlocks > 0) writePadded(mExtraLightBlocks.data(), mExtraLightBlocks.size() * sizeof(MpakExtraLightBlock));
 
         // Now the first sector, with every offset known.
         file.seekp(0);
@@ -482,13 +487,14 @@ namespace formats {
         if (!nv2a) {
             if (desc.vCount || desc.iCount || desc.lenFaceDrawCmds || desc.lenFaceInfo || desc.lenLightmapAtlas ||
                 desc.lenAtlas || desc.lenArray64 || desc.lenArray256 || desc.lenArray512 ||
-                desc.lightmapWidth || desc.lightmapHeight || desc.lightmapLayers)
+                desc.lightmapWidth || desc.lightmapHeight || desc.lightmapLayers || desc.lenExtraLightBlocks)
                 fail("core profile archive carries baked-block lengths");
         } else {
             if (desc.vCount != mVertices.size()) fail("vCount " + std::to_string(desc.vCount) + " != baked " + std::to_string(mVertices.size()));
             if (desc.iCount != mIndices.size()) fail("iCount " + std::to_string(desc.iCount) + " != baked " + std::to_string(mIndices.size()));
             if (desc.lenFaceDrawCmds != mFaceDrawCmds.size() * sizeof(FaceDrawCmd)) fail("lenFaceDrawCmds != baked");
             if (desc.lenFaceInfo != mFaceInfos.size() * sizeof(MpakFaceInfo)) fail("lenFaceInfo != baked");
+            if (desc.lenExtraLightBlocks != mExtraLightBlocks.size() * sizeof(MpakExtraLightBlock)) fail("lenExtraLightBlocks != baked");
             if (desc.lenLightmapAtlas != mLightmapAtlasData.size() || desc.lightmapWidth != mLightmapWidth ||
                 desc.lightmapHeight != mLightmapHeight || desc.lightmapLayers != mLightmapLayers ||
                 desc.lightmapFormat != mLightmapFormat)
@@ -538,6 +544,7 @@ namespace formats {
             at[LUMP_FACES] = place(desc.lenFaces);
             at[LUMP_LIGHTING] = place(desc.lenLighting);
             at[LUMP_TEXTURES] = place(desc.lenMiptex);
+            const uint64_t extraLightBlocksAt = place(desc.lenExtraLightBlocks);
 
             if (cursor != static_cast<uint64_t>(fileSize))
                 fail("descriptor sections end at " + std::to_string(cursor) + " but the file is " + std::to_string(fileSize) + " bytes");
@@ -575,6 +582,7 @@ namespace formats {
                 checkBaked("face draw cmds", drawCmdAt, mFaceDrawCmds.data(), static_cast<uint64_t>(mFaceDrawCmds.size()) * sizeof(FaceDrawCmd));
                 checkBaked("lightmap atlas", lightmapAt, mLightmapAtlasData.data(), mLightmapAtlasData.size());
                 checkBaked("face info", faceInfoAt, mFaceInfos.data(), static_cast<uint64_t>(mFaceInfos.size()) * sizeof(MpakFaceInfo));
+                checkBaked("extra light blocks", extraLightBlocksAt, mExtraLightBlocks.data(), static_cast<uint64_t>(mExtraLightBlocks.size()) * sizeof(MpakExtraLightBlock));
             }
         }
 

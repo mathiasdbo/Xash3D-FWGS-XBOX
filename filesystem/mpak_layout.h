@@ -49,7 +49,7 @@ extern "C" {
 #endif
 
 #define MPAK_LAYOUT_MAGIC   "MPAK"
-#define MPAK_LAYOUT_VERSION 7u
+#define MPAK_LAYOUT_VERSION 8u
 #define MPAK_SECTOR_SIZE    2048u
 #define MPAK_TARGET_XBOX_FLAG 1u  // MpakHeader6::flags bit 0 - 1 = Xbox, 0 = PC
 #define MPAK_FLAG_NV2A_BLOCK  2u  // flags bit 1 - the baked v6 block is populated (X9 profile)
@@ -125,6 +125,11 @@ typedef struct
 	uint32_t lenFaces;
 	uint32_t lenLighting;
 	uint32_t lenMiptex;
+
+	// v8 - see MpakHeader.h's v7 -> v8 note (docs/r3d/fork-plan.md's XB
+	// "Lightstyles" census). nv2a profile only; 0 in the core profile and
+	// whenever a real bake finds no face using a second lightstyle.
+	uint32_t lenExtraLightBlocks;
 } mpak_header_t;
 
 // Mirrors formats::Vertex (tools/asset-studio/src/formats/PakManager.h)
@@ -184,6 +189,14 @@ typedef struct
 	mpak_lump_t faces;        // dface_t[]
 	mpak_lump_t lighting;     // color24 samples, every lightstyle
 	mpak_lump_t miptex;       // dmiptexlump_t + miptex entries
+	// v8 - one entry per face per extra (non-style-0) lightstyle it uses,
+	// nv2a profile only. 20 bytes each (MpakHeader.h's MpakExtraLightBlock,
+	// own static_assert); see its doc comment there for the field shapes -
+	// mirrored to that struct only where SIZE matters (mpak_vertex_t's own
+	// precedent above), not here, since nothing yet walks this lump's
+	// records (this file's own header comment: content parsing is
+	// separate, later work).
+	mpak_lump_t extraLightBlocks;
 } mpak_layout_t;
 
 // Validates magic/version and returns true if header looks like a real,
