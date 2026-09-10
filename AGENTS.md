@@ -193,10 +193,18 @@ touches, and never ask permission first.
   `../XISOS/` (sibling to this repo, outside git — these are binary build
   artifacts, never committed). Each folder gets a `CHANGELOG.txt`: an
   incrementing internal version number (v1, v2, ... — this project has no
-  formal release scheme yet), the exact commit it was built from, what the
-  XISO contains, and what it verifies or is still unverified. Never
-  overwrite an existing version folder — each one stays reachable so a
-  specific build can always be gone back to.
+  formal release scheme yet), what the XISO contains, and what it verifies
+  or is still unverified. **The commit hash alone is not provenance here**:
+  this tree routinely builds with uncommitted, tooling-applied submodule
+  patches (`3rdparty/library_suffix`, `3rdparty/mainui`, `3rdparty/opusfile`
+  auto-patched by `tools/xbox-cc.sh`) and an untracked `deps/nxdk` checkout,
+  so two XISOs built from the identical commit can differ. Record, verbatim:
+  the commit hash, `git status --short` (captures the submodule/untracked
+  state at build time), and a SHA-256 of the XISO file itself, so the
+  changelog is bound to the literal artifact bytes even if the source tree
+  can't be perfectly reconstructed from the hash alone. Never overwrite an
+  existing version folder — each one stays reachable so a specific build
+  can always be gone back to.
 
 ## Workflow
 
