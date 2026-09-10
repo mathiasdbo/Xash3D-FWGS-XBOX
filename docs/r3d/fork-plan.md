@@ -1571,19 +1571,41 @@ none of them had an owner.
 
 **Two censuses first, because they decide the rest.** Both are one-minute
 scripts over the retail assets, and both answer questions the plan had been
-carrying as opinions:
+carrying as opinions.
+
+**MEASURED, 2026-09-10** (`tools/asset-studio/tools/census_lightstyles.cpp`,
+`census_bones.cpp` — new, linked against the same `AssetStudioFormats` the
+real baker uses, run against the real Steam "Half-Life" install):
 
 - **Lightstyles.** How many faces per map carry `styles[1..3] != 255`. The
   baker bakes style 0 only (`BspParser.cpp:514-523`), so "RGB565 pages, no
   runtime conversion" currently means no light in the game switches or
-  flickers on Xbox. The number picks between per-style pages combined at
-  runtime, a baked *on* state with binary switching, or an accepted loss —
-  and the choice is written down here, not arrived at.
-- **Bones.** Which retail models reference more bones per mesh than a VP20
-  palette holds — 192 constants (`deps/nxdk/tools/vp20compiler/config.h:11`),
-  three per bone, roughly 50 after the view-projection and light constants,
-  against `MAXSTUDIOBONES 128`. Every model over the line needs partitioning
-  by bone subset; the code must exist for the ones that do.
+  flickers on Xbox. **Not a negligible edge case**: across all 125 retail
+  maps, 643,971 faces total, 613,358 lit — **41,031 of those lit faces
+  (6.69%) carry at least one extra lightstyle, and 82 of the 125 maps (66%)
+  have at least one such face**. The worst maps are far above the average:
+  `c1a2c` (46 of 3,816 faces), `c1a2b` (43 of 7,917), `c0a0e` (21 of 1,945,
+  including light switching a player would notice immediately at the game's
+  own opening). An accepted loss would be a visible regression on two-thirds
+  of the game's maps, not a rare corner case — this rules that option out.
+  Per-style pages combined at runtime, or a baked *on* state with binary
+  switching, are both live options; the census does not pick between them,
+  only closes off the third.
+- **Bones.** Which retail models reference more bones per submodel (a
+  `mstudiomodel_t` — the real per-draw bone set; GoldSrc rigs each vertex to
+  exactly one bone via `vertinfoindex`, `deps/hlsdk/engine/studio.h`, not a
+  weighted multi-bone skin) than a VP20 palette holds — 192 constants
+  (`deps/nxdk/tools/vp20compiler/config.h:11`), three per bone, roughly 50
+  after the view-projection and light constants, against `MAXSTUDIOBONES
+  128`. **The opposite shape from lightstyles — a rare, sharply-bounded
+  edge case**: of 598 submodels across 296 real studio model files (323
+  `.mdl` on disk, 27 texture-only/sequence-group files correctly excluded),
+  only **3 submodels in 3 models** exceed the budget — `controller.mdl` (64
+  distinct bones), `nihilanth.mdl` (59), `stukabat.mdl` (51). All three are
+  special/boss enemies (the Nihilanth is the game's final boss), not player,
+  weapon, or common NPC models. Bone-subset partitioning code needs to
+  exist, but as a small, targeted fix for three named models, not a
+  systemic redesign the whole asset pipeline has to carry.
 
 Then the format, decided once:
 

@@ -23,6 +23,15 @@ target_include_directories(AssetStudioFormats PUBLIC src)
 add_executable(AssetStudio src/main.cpp)
 target_link_libraries(AssetStudio PRIVATE AssetStudioFormats)
 
+# XB's own "two censuses first" (docs/r3d/fork-plan.md): one-shot
+# measurement tools over a retail install, not part of the baking
+# pipeline - their own answers are meant to be read once and written
+# into the fork plan, not run on every build.
+add_executable(census_lightstyles tools/census_lightstyles.cpp)
+target_link_libraries(census_lightstyles PRIVATE AssetStudioFormats)
+add_executable(census_bones tools/census_bones.cpp)
+target_link_libraries(census_bones PRIVATE AssetStudioFormats)
+
 # `ctest -C Release` from the build directory runs them; build-test-package.ps1
 # does not, on purpose - a bake is the integration test, these are the unit
 # tests for the pieces that have no retail data to bake.

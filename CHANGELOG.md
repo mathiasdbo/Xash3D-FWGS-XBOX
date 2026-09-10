@@ -5,6 +5,31 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — XB's two censuses, run for real against the retail install
+
+`docs/r3d/fork-plan.md`'s XB section named two open questions as "one-minute
+scripts over the retail assets... answer questions the plan had been
+carrying as opinions" and never ran them. `tools/asset-studio/tools/
+census_lightstyles.cpp` and `census_bones.cpp` (new, linked against the
+same `AssetStudioFormats` the real baker uses) run them for real against
+the Steam "Half-Life" install.
+
+Lightstyles: 41,031 of 613,358 lit faces (6.69%) across all 125 retail
+maps carry a second/third/fourth lightstyle the baker currently drops;
+82 of 125 maps (66%) have at least one. Not a negligible edge case - an
+accepted loss would be a visible regression on two-thirds of the game's
+maps, ruling that option out; the choice is now between per-style pages
+combined at runtime and a baked "on" state with binary switching.
+
+Bones: of 598 submodels across 296 real studio models, only 3 exceed the
+~50-bone VP20 palette budget - `controller.mdl` (64), `nihilanth.mdl`
+(59), `stukabat.mdl` (51), all boss/special enemies. The opposite shape
+from lightstyles: bone-subset partitioning code is needed, but as a
+small, targeted fix for three named models, not a systemic redesign.
+
+Both results are written into `docs/r3d/fork-plan.md`'s XB section,
+replacing "the number ... decides the rest" with the actual numbers.
+
 ### Removed — `.github/workflows/c-cpp.yml`, upstream's own CI
 
 Inherited wholesale from the Xash3D-FWGS fork base: a 15+ job OS/arch
