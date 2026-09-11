@@ -5,6 +5,55 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Measured — X7.1b's server/client symbol-isolation design: PASSED against the real 384-object client link
+
+The prototype gate the X7 plan required before any other per-title work:
+compiled `deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh`
+(server defines, then `CLIENT_DLL`) and found 150 symbol names shared
+between the two compiled objects - virtual methods, vtables/RTTI, and
+plain global data (`g_engfuncs`, `gpGlobals`, each defined once per
+module). Applied the per-module allowlist (server keeps its entity
+classnames, client keeps nothing from this TU) via
+`llvm-objcopy --redefine-syms`, then linked against
+`tools/xbox-link-check.sh`'s OWN `.sweep/link-check-response.txt` - the
+exact 384-object list (engine, all third-party, stub game, generated
+tables) the real client XBE was just linked from, not a hand-assembled
+approximation: two earlier attempts at "the real engine" were each
+corrected by Codex review, the second one for missing 28 third-party
+objects a filename-glob approach couldn't reach. Appending the crossbow
+objects to a copy of that real response file and linking: `0` duplicate
+against the full 384-object set; the same pair unrenamed fails with the
+13 duplicates named (`_weapon_crossbow`, `_ammo_crossbow`, 11
+`CCrossbow::*` methods) - the required negative control, unchanged
+across all three attempts. Also corrected: renaming a symbol does NOT
+update the `.drectve` section's `/EXPORT:` string for it, and that is
+not harmless - a real, populated export table exists in every XBE this
+project already links, and the renamed-but-un-stripped client object
+produced export entries pointing at the linker's "unresolved" sentinel
+RVA (`0xFFFF0000`) for names that no longer existed. Fixed by reading
+each object's `/EXPORT:` directives (for `exports.txt`) BEFORE stripping
+the whole `.drectve` section, before the rename - re-verified with
+`llvm-readobj --coff-exports` on the TRUE full-object-set image: the 14
+legitimate pre-existing exports (7 engine, 7 `MultiEmulator`) and zero
+crossbow-related entries, zero sentinel RVAs. Full measurement in
+`docs/r3d/fork-plan.md` § X7.1b.
+
+The same review round found a second, unrelated gap in X7.2: one of the
+four hard-required server API exports, `GiveFnptrsToDll`, cannot be
+found by `/EXPORT:`-directive scanning at all - its defining file
+(`h_export.cpp`) redefines `DLLEXPORT` as `__stdcall` on `WIN32` instead
+of `__declspec(dllexport)`, so it emits no export directive, and its
+real compiled linker symbol is the `__stdcall`-decorated
+`_GiveFnptrsToDll@8`, not the plain `_GiveFnptrsToDll` a cdecl `extern`
+declaration would look for - both measured directly by compiling the
+real file. Fixed and verified end-to-end: the four API names are looked
+up in the compiled objects' full symbol table (`llvm-nm`, not just
+`--coff-directives`) in both cdecl and stdcall-decorated form, and a
+stdcall match is bound via an explicit linker-name override
+(`extern void GiveFnptrsToDll(void) asm("_GiveFnptrsToDll@8");`) rather
+than guessed - a real link against the compiled `h_export.obj` resolves
+it with zero related undefined-symbol warnings.
+
 ### Changed — fork-plan X7 rewritten as the per-title XBE plan
 
 Half-Life, Opposing Force and Blue Shift each ship as their own

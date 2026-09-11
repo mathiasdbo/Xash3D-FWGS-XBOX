@@ -1896,11 +1896,19 @@ the mechanism is proven.
 ### X7.1b — Module symbol isolation, prototyped before anything else
 
 Each module's object set is renamed so its internals cannot meet the
-other module's in the link. Mechanism, on this toolchain's own tools:
-`llvm-nm --defined-only --extern-only` over one module's objects produces
-the set of symbols it DEFINES; every one of them NOT on that module's
-public allowlist is written to a rename map `old new` with a `sv_`/`cl_`
-prefix, and `llvm-objcopy --redefine-syms <map>` (present:
+other module's in the link. Order matters and is fixed, not incidental
+(the second and third steps were found missing/wrong in Codex review -
+see the measurement below): (1) compile; (2) X7.2's generator reads each
+object's `/EXPORT:` directives (`llvm-readobj --coff-directives`) to
+build `exports.txt` - the LAST point these directives are ever read; (3)
+`llvm-objcopy --remove-section=.drectve` strips them, because this
+project's static-linking mechanism never consumes a PE export table and
+a stale `/EXPORT:` on a symbol the next step renames away corrupts the
+final image's export table instead of erroring (measured below); (4)
+`llvm-nm --defined-only --extern-only` over the stripped objects produces
+the set of symbols the module DEFINES; every one of them NOT on that
+module's public allowlist is written to a rename map `old new` with a
+`sv_`/`cl_` prefix, and `llvm-objcopy --redefine-syms <map>` (present:
 `/c/msys64/mingw64/bin/llvm-objcopy.exe`, COFF-capable) is applied to
 every object of that module. Renaming is consistent across definitions
 and references within the module because the map is derived from the
@@ -1972,14 +1980,117 @@ yields a non-standard symbol (`cl_?...`) that `lld-link` treats as an
 opaque identifier - fine for linking, but never feed those objects to a
 demangler and expect sense.
 
-**Prototype gate, before X7.1/X7.2 tooling is even written:** compile
-`deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh` (server
-defines, then `CLIENT_DLL`), plus the minimum each needs to resolve,
-apply the rename to the client side, link both with the engine object set
-through `tools/xbox-link-check.sh` and require `0 duplicate`; then the
-negative control - the same link WITHOUT the rename must report the
-duplicates, by name, or the gate has measured nothing. The generated
-export tables (X7.2) need no change: exports are excluded from the map, so
+**Prototype gate: PASSED, measured 2026-09-11, corrected 2026-09-11
+after Codex review round 1 caught two real gaps in the first pass (both
+below).** Compiled `deps/hlsdk/dlls/crossbow.cpp` twice with
+`tools/xbox-cxx.sh` - server side (`-DVALVE_DLL -DWIN32`,
+`dlls`/`common`/`engine`/`game_shared`/`pm_shared`/`public` on the
+include path) and client side (`-DCLIENT_DLL -DHL_DLL -DWIN32`,
+`cl_dll`/`cl_dll/hl`/`cl_dll/particleman`/`dlls`/`common`/`game_shared`/
+`public`/`pm_shared`/`engine`) - both compile clean (warnings only).
+`llvm-nm --defined-only --extern-only` found 267 defined externs
+server-side, 220 client-side, **150 shared names between them** before
+any rename: constructors/destructors/vtables/RTTI for
+`CCrossbow`/`CCrossbowAmmo`/`CBaseEntity`/..., every virtual method body,
+AND plain global data - `?g_engfuncs@@3Uenginefuncs_s@@A` and
+`?gpGlobals@@3PAUglobalvars_t@@A` are each defined once per module, not
+looked up from the engine, so the allowlist and the rename apply to data
+symbols exactly as to functions, not "functions" as a first draft might
+assume.
+
+**Gap 1, found in review, twice: the first pass linked only the two
+crossbow objects with `-force:unresolved`, never the real engine; the
+second pass's own "real engine" was still incomplete.** Round 1 of
+review: two isolated objects prove they don't collide with EACH OTHER,
+nothing about the 384 objects this XBE actually links. First correction
+used `ls .sweep/*.obj .sweep/gen/*.obj` plus `tools/xbox-link-check.sh`'s
+own filename filters - 178 objects, `0` duplicate on its own - and was
+STILL wrong: third-party objects live in `.sweep/3p/`, one directory
+level this glob never reached (`tools/xbox-link-check.sh:232-305` builds
+`THIRDPARTY_OBJS` there separately), so 206 real linked objects -
+including seven real `MultiEmulator` exports
+(`3rdparty/MultiEmulator/include/multi_emulator.h:25-31`) - were absent
+from what was "tested". Corrected properly this time: ran
+`tools/xbox-link-check.sh --client-main --xbe` for real (one clean
+invocation, not concurrent with anything else - lessons.md already
+documents what concurrent invocations of this script do to `.sweep/gen/`)
+and read back its own `.sweep/link-check-response.txt` - the EXACT
+384-object list (engine + all third-party + stub game + generated
+tables) the actual client XBE was just linked from, `0 duplicate, 0
+undefined` on its own. Appended the crossbow objects to a copy of that
+same response file rather than reconstructing any object list by hand,
+and ran the full link three ways:
+
+- **Clean baseline** (the real 384-object response file, unmodified, no
+  crossbow at all): exit 0, `0` duplicate.
+- **Positive control** (the same response file + the two RENAMED
+  crossbow objects appended): exit 0, `0` duplicate, a real 3.89 MB
+  linked image.
+- **Negative control** (the same response file + the two UNRENAMED
+  crossbow objects appended): exit 1, 13 duplicate-symbol errors, named:
+  `_weapon_crossbow`, `_ammo_crossbow`, and 11 `CCrossbow::*` virtual
+  methods (`Spawn`, `Precache`, `GetItemInfo`, `Deploy`, `Holster`,
+  `PrimaryAttack`, `FireSniperBolt`, `FireBolt`, `SecondaryAttack`,
+  `Reload`, `WeaponIdle`) - the SAME 13, exactly, as both earlier
+  (insufficient) tests, confirming those weren't wrong about the
+  collision itself, only about what they had actually linked it against.
+
+**Gap 2, found in review: `/EXPORT:` directives for a renamed-away
+symbol are NOT harmless.** The first pass claimed `lld-link` only
+consumes `/EXPORT:` for a `/DLL` link and is otherwise a no-op - false,
+measured directly: `llvm-readobj --coff-exports` on `.sweep/xbe-build.exe`
+(a real, already-built client XBE, no `/DLL` anywhere in `nxdk-link`,
+`deps/nxdk/bin/nxdk-link:7-13`) shows a real, populated export table
+(`CreateInterface`, `GetRefAPI`, `GetFSAPI`, ...) - **every EXE this
+project links already carries one.** Worse, linking the renamed CLIENT
+object as-is (rename applied, directives untouched) produced export
+entries for the renamed-away names (`?BoltTouch@CCrossbowBolt@@...`,
+`?BubbleThink@...`, `?SUB_CallUseToggle@CBaseEntity@@...`) with RVA
+`0xFFFF0000` - a linker sentinel for "could not resolve this", silently
+baked into the image as if it were real data, because the symbol the
+stale directive named no longer existed to resolve to.
+
+Root cause and fix: our static-linking mechanism (`lib_static.c`'s
+`Lib_Find`, populated by `gen-library-tables.sh`'s `extern void name` +
+address-of) never calls `GetProcAddress` on ourselves - it resolves
+allowlisted names by ordinary compile-time linkage, not through a PE
+export table at runtime. **The `/EXPORT:` directives are read exactly
+once, by X7.2's generator, before any rename - after that this project
+has no use for them at all**, so the fix is to strip the whole
+`.drectve` section (`llvm-objcopy --remove-section=.drectve`, confirmed
+to leave the defined-symbol set byte-identical) from EVERY module object
+immediately after the export list is read and before the rename step -
+not to try to selectively edit `/EXPORT:` lines out of the directive
+string. Re-ran the full positive control with this order (compile → read
+directives for X7.2 → strip `.drectve` → rename → link): `0` duplicate,
+same as before, and `llvm-readobj --coff-exports` on the TRUE
+full-object-set image shows exactly the 14 legitimate pre-existing
+exports - 7 engine (`CreateInterface`, `GetFSAPI`, `GetRefAPI`,
+`Host_Main`, `Host_Shutdown`, `pfnSPR_Frames`, `pfnSPR_Load`) and the 7
+`MultiEmulator` ones Gap 1 found missing the first time
+(`GenerateAVSMP`, `GenerateOldRevEmu`, `GenerateRevEmu`,
+`GenerateRevEmu2013`, `GenerateSC2009`, `GenerateSetti`,
+`GenerateSteamEmu`) - and zero crossbow-related entries, zero
+`0xFFFF0000` sentinels. `/INCLUDE:` directives (used
+elsewhere in this SDK to keep an otherwise-unreferenced static data
+member from being discarded, e.g. `?AmmoInfoArray@CBasePlayerItem@@...`
+on `crossbow.cpp` itself) are lost by a whole-section strip too; nothing
+in this project currently relies on one surviving past this point
+(`nxdk-link` does not dead-strip unreferenced globals by default), but a
+real implementation that ever needs to keep one should filter the
+section's text for `/EXPORT:` lines specifically rather than removing it
+outright - noted, not yet needed.
+
+Applied the allowlists from the corrected design above: server map
+excludes `_weapon_crossbow`/`_ammo_crossbow`/`_crossbow_bolt` (264 other
+symbols renamed `sv_*`); client map excludes nothing from this TU
+(`crossbow.cpp` exports no `cdll_exports` name - it is a weapon internal,
+not client-API surface), so all 220 defined symbols renamed `cl_*`,
+entity classnames included.
+
+The generated export tables (X7.2) need no change beyond the ordering
+above (read directives before stripping): each module's `exports.txt` is
+exactly its allowlist, and the allowlisted names are never renamed, so
 `gen-library-tables.sh`'s `extern void name` declarations still bind.
 Record the resulting build divergence in the ledger; it lives in
 `tools/`, form 1, touching no SDK source at all.
@@ -2011,17 +2122,79 @@ client and that X7.1b renames away. The
 generator fails nonzero when it finds fewer than the four server API
 exports or fewer than the 37 required client exports (`cl_game.c`'s
 `cdll_exports[]`), so a broken sweep cannot produce a plausible-looking
-half table - and, from the specialist review, it also REJECTS any
-`/EXPORT:?...` entry: a C++-mangled export means a `DLLEXPORT` without
-`extern "C"`, which the engine can never look up by its plain name, and
-counting it toward "37 found" would hide exactly that. Related
-C-linkage trap in the same review: `dlls/util.cpp:1780-1782` defines an
-`extern "C" _rotr` only `#ifndef WIN32` - the sweep must pass `WIN32`
-(the fork's "NXDK-proof" CMake already does; nxdk-cc does not on its
-own) or that symbol lands in the link uninvited. `xbox-cc.sh`'s staleness check gains these two files as inputs.
+half table.
+
+The specialist review flagged mangled `/EXPORT:?...` entries as a
+correctness risk (a `DLLEXPORT` without `extern "C"`, invisible to any
+by-name lookup) and an earlier draft of this plan over-corrected that
+into "the generator rejects any mangled export present" - wrong, and
+disproven by this plan's own X7.1b measurement: `crossbow.cpp`, real SDK
+source, exports several (`?BoltTouch@CCrossbowBolt@@...`,
+`?SUB_CallUseToggle@CBaseEntity@@...`) as ordinary, EXPECTED output of
+`EXPORT`-marked C++ methods (`common/Platform.h:66`'s
+`DLLEXPORT = __declspec(dllexport)`) - not a mistake, just not something
+the engine ever looks up by name. A generator that failed the build on
+their mere presence could never generate `client/exports.txt` at all.
+Corrected: the generator FILTERS every mangled `/EXPORT:` entry out of
+the written `exports.txt` silently (X7.1b already renames the underlying
+symbol away regardless, so it was never going to be reachable by that
+name past the rename step either) and validates the required-count
+thresholds - four server API exports, 37 client exports - against the
+UNMANGLED entries only. `dlls/util.cpp:1780-1782`'s `extern "C" _rotr`,
+compiled only `#ifndef WIN32`, is the reason `WIN32` must be passed to
+every SDK compile regardless (the fork's "NXDK-proof" CMake already does;
+`nxdk-cxx` does not on its own) - an unrelated C-linkage trap from the
+same review, not a mangled-export case. `xbox-cc.sh`'s staleness check
+gains these two files as inputs.
 Verification: the generated `server/exports.txt` for `hl` has 251 entity
 names + 4 API names, checked against `grep -c LINK_ENTITY_TO_CLASS` of the
 same tree - two independent counts that must agree.
+
+**Found in Codex review round 2 (the cap for this PR; verified directly
+rather than spent on a third automated round), and real: one of the four
+required server API names cannot be produced by `/EXPORT:`-directive
+scanning at all.** `h_export.cpp` - the file `GiveFnptrsToDll` is
+actually defined in - locally `#undef DLLEXPORT` and redefines it as
+`__stdcall` on `WIN32` (`h_export.cpp:28-35`), not
+`__declspec(dllexport)`; the real shared-DLL build exports it instead
+through a separate `hl.def` module-definition file
+(`GiveFnptrsToDll @1`). **Measured 2026-09-11, compiling the real file
+with `tools/xbox-cxx.sh`:** `GiveFnptrsToDll` produces NO `/EXPORT:`
+directive at all (the object's only two directives are unrelated mangled
+C++ methods from the same TU), and its actual linker symbol is
+`_GiveFnptrsToDll@8` - `__stdcall` name-decorated (`@` + byte-count of
+its two pointer arguments), not the plain `_GiveFnptrsToDll` a naive
+cdecl `extern void GiveFnptrsToDll(void);` (what `gen-library-tables.sh`
+currently emits) would look for. Directive-scanning alone would silently
+produce a `server/exports.txt` missing this hard-required name entirely
+(`SV_LoadProgs` fails immediately - `sv_game.c:5260-5266`,
+`"missing GiveFnptrsToDll export"`) even though the real compiled symbol
+is sitting right there under a different linker name.
+
+Fix, verified end-to-end 2026-09-11: the four API names are a FIXED,
+small set the ENGINE itself hard-requires by these exact strings
+(`sv_game.c`'s own `COM_GetProcAddress` calls) - not something to derive
+from SDK export directives at all, unlike the ~260 entity classnames
+which genuinely have no other source. The generator looks each of the
+four up directly in `llvm-nm --defined-only --extern-only` (not
+`--coff-directives`) against both its cdecl form (`_Name`) and its
+stdcall form (`_Name@N`, `N` = total argument bytes - `GiveFnptrsToDll`
+takes two 4-byte pointers, `@8`), and for a stdcall match emits the
+`extern` declaration with an explicit linker-name override rather than
+guessing a calling convention: `extern void GiveFnptrsToDll(void) asm(
+"_GiveFnptrsToDll@8");` - GNU/clang inline-asm symbol-renaming, binding
+the C name to the EXACT decorated symbol regardless of what convention
+produced it. Verified with a real link: a TU declaring `GiveFnptrsToDll`
+this way and taking its address, linked against the real compiled
+`h_export.obj` - `0` undefined-symbol warnings naming
+`_GiveFnptrsToDll@8` (the only warnings present are unrelated CRT/`memcpy`
+symbols missing from that minimal two-object test link, already proven
+present in the real engine link by every successful build so far). The
+other three API names (`GetEntityAPI`, `GetEntityAPI2`,
+`GetNewDLLFunctions`) ARE plain `extern "C" DLLEXPORT` in this SDK
+(`client.cpp`) and need no such override - the generator only reaches
+for `asm()` when a name's cdecl form is absent but a stdcall-decorated
+form of it exists.
 
 ### X7.3 — VGUI out of `cl_dll`, on the `resonance3d` branches
 
@@ -2050,9 +2223,23 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
 
 ### X7.4 — Half-Life first: server, then client, each a boot milestone
 
-0. **X7.1b's collision prototype passes, with its negative control.**
-   Nothing below starts until the two-object `crossbow.cpp` link shows
-   `0 duplicate` renamed and the named duplicates un-renamed.
+0. **X7.1b's collision prototype: PASSED, 2026-09-11, against the real
+   384-object client response file (see X7.1b for the full
+   measurement).** `0` duplicate with the renamed `crossbow.cpp` pair
+   added to `tools/xbox-link-check.sh`'s own `.sweep/link-check-response.txt`,
+   13 named duplicates with the same pair unrenamed, export table clean
+   (no corrupted entries from the stale-directive issue found and fixed
+   in the same pass). **X7.2's `GiveFnptrsToDll` gap, found in the same
+   review round and fixed and verified separately (X7.2): directive
+   scanning alone cannot produce this required export** (it's
+   `__stdcall`-only in `h_export.cpp`, no `/EXPORT:` directive at all,
+   real symbol `_GiveFnptrsToDll@8`) - the `asm()` linker-name-override
+   fix is verified against the real compiled `h_export.obj`, not yet
+   against a full server link (that is `hl_dll`/`dlls` -wide, X7.4 step 1
+   itself). The real `tools/` implementation (X7.1's TU manifests, the
+   allowlist generator with the API-name fallback, the strip-then-rename
+   step) is what X7.4 step 1 now needs; the design is de-risked on every
+   point two rounds of review found.
 1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
    generate `server/exports.txt`; link with `--client-main`. Exit gate is
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,
