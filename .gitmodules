@@ -49,12 +49,15 @@
 [submodule "deps/hlsdk"]
 	path = deps/hlsdk
 	url = git@github.com:mathiasdbo/halflife-updated-xash3d.git
+	branch = resonance3d
 [submodule "deps/hlsdk-opfor"]
 	path = deps/hlsdk-opfor
 	url = https://github.com/mathiasdbo/halflife-op4-updated.git
+	branch = resonance3d
 [submodule "deps/hlsdk-bshift"]
 	path = deps/hlsdk-bshift
 	url = https://github.com/mathiasdbo/halflife-bs-updated.git
+	branch = resonance3d
 [submodule "deps/nxdk"]
 	path = deps/nxdk
 	url = https://github.com/XboxDev/nxdk.git
