@@ -5,6 +5,78 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the Xbox client boot's silent hard freezes were NULL stub-module callbacks: `pfnGetHullBounds`/`pfnPM_Init` at load, `pfnSys_Error` on the fatal-error path (divergence #34)
+
+The first client boot to get past renderer selection did not hang or lose
+its log channel; it called through NULL function pointers the static stub
+game module had never filled, and on Xbox each of those is a kernel
+bugcheck (`KMODE_EXCEPTION_NOT_HANDLED` / `STATUS_ACCESS_VIOLATION`,
+exception address `0x00000000`) followed by `cli; hlt` — a freeze
+indistinguishable from a hang. Two of them, in order: `SV_LoadProgs` →
+`SV_InitClientMove` calls `pfnGetHullBounds` (and then `pfnPM_Init`),
+one call below the function the stub's original audit had read; and once
+that is past, `CL_LoadProgs("client")` fails — correctly, no client
+module exists at this phase — and `Host_Error` → `Sys_Error` →
+`SV_SysError` → `pfnSys_Error()` (guarded only by `svgame.hInstance !=
+NULL`) fires *before* `Sys_Print`, so "Host_ErrorInit: can't initialize
+client: missing essential exports" was fully formatted on the faulting
+thread's stack and never emitted anywhere. The stub now provides all
+three (each matching the HL SDK's own behaviour, cited in place), and
+`SV_SysError` returns early on a NULL member under `#if XASH_XBOX`, so the
+same class of miss on the error path reports a message instead of
+freezing the machine.
+
+Diagnosed, not guessed: read straight off the halted CPU with the new
+`tools/xemu-debug.py` (below) — each exception record, the trap frame's
+pushed return address (`SV_InitClientMove+0x88`, a `call eax` with
+`eax = 0`), the formatted message, and the `libs[]` table were all
+inspected in place. Every earlier "the crash is in `COM_LoadLibrary`"
+bisection step was really measuring whether `svgame.hInstance` was set,
+which is what gates the NULL calls.
+
+Verified on xemu, positively and negatively, with the same UDP listener
+on the network log channel (divergence #13): the pre-fix builds produced
+zero packets and the bugcheck register pair; the fixed build produced
+`Delta_InitFields: couldn't load file delta.lst` once per boot cycle -
+the first `Sys_Error` this port has ever actually reported - with the
+CPU in the kernel's idle-wait, not halted. That message is the honest
+next stop: `SV_LoadProgs` → `SV_InitClientMove` is now past, `Delta_Init`
+(the very next call) needs `valve/delta.lst`, which the minimal test disc
+(`gameinfo.txt`, `gfx.wad`, `video.cfg`) does not carry. With the retail
+`valve/` tree on the disc the expected next stop is `CL_Init`'s
+client-module load (seen on the pre-fix build's stack, not yet reached
+on a fixed build), which cannot pass until a client module exists - per
+the per-title plan, the first real Half-Life build (`deps/hlsdk`'s
+`dlls/` + `cl_dll/` statically linked), not a generic stub.
+
+### Added — `tools/xemu-debug.py`: live CPU/memory/GPU debugging of Xbox builds under xemu
+
+A stdlib-only Python client for xemu's built-in GDB remote stub, plus a
+passthrough to the QEMU monitor, so a build can be inspected without
+driving xemu's Monitor window through simulated input and screenshots:
+registers, virtual and physical memory dumps, stack, byte-pattern search,
+symbol resolution against a linker `.map`, NV2A register dumps and a
+framebuffer capture read through `PCRTC_START`. The search reports how
+much memory it actually inspected and exits nonzero when it could not
+read any of it - a scan that reads zero bytes must never look like a
+clean "no matches" (found in Codex review round 1), and the overlap
+carried between reads accumulates, so a pattern longer than the read
+chunk is still found (round 2 - previously a match spanning three or
+more reads was silently missed under a "complete" exit 0). Both failure
+paths are covered by `tools/test_xemu_debug.py`
+(`python -m unittest tools/test_xemu_debug.py`).
+Also published standalone
+as `github.com/mathiasdbo/xemu-debug-tools` for other projects and
+agents. Documents the facts that cost real time to learn (all read from
+the guest's own page tables via `info mem`/`info tlb`, not assumed): a
+title's addresses are XBE-virtual (`0x10000`-based, equal to the map's
+`Rva+Base`) and readable as such through the stub; the image is mapped
+page-by-page into physical RAM (mostly at `+0xB0000` for this build, but
+not uniformly - resolve through the page tables, never a constant); and
+the kernel's `0x80000000+` alias covers only the kernel itself, so a
+"cannot access memory" there is the alias ending, not evidence about the
+title.
+
 ### Added — `ref/null` registered as a real, loadable Xbox renderer module (X5 bring-up)
 
 `VID_Init()` had nothing to load at all: `R_Init()`'s renderer-selection

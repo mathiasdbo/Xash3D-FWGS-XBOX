@@ -97,7 +97,22 @@ void SV_SysError( const char *error_string )
 	Log_Printf( "FATAL ERROR (shutting down): %s\n", error_string );
 
 	if( svgame.hInstance != NULL )
+	{
+#if XASH_XBOX
+		// R3D divergence #34. Upstream trusts every loaded game module to
+		// fill this member (the HL SDK always does). Xbox links stub_game/
+		// statically, which fills only the members the boot path calls, and
+		// this one was missed once already (stub_game/server/server_stub.c's
+		// header). Sys_Error calls here BEFORE Sys_Print, so a NULL here does
+		// not print the error and then fail - it calls address 0, the kernel
+		// bugchecks, and the console halts with the message never emitted.
+		// Guarded rather than trusted: on this platform a silent hard freeze
+		// is the worst possible way to report "can't initialize client".
+		if( svgame.dllFuncs.pfnSys_Error == NULL )
+			return;
+#endif
 		svgame.dllFuncs.pfnSys_Error( error_string );
+	}
 }
 
 /*

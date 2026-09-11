@@ -585,3 +585,101 @@ crash/hang check via CPU time, or (better, not yet built) a channel that
 does not depend on a background DHCP negotiation that can silently fail
 once and never retry. A run that logged real messages five minutes ago
 proves the mechanism CAN work, not that it currently IS working.
+
+### The "silent" Xbox boot was a NULL callback on the fatal-error path, and every bisection step was measuring a side effect, not the fault
+
+Resolved 2026-09-11, see divergence #34. The whole picture, because each
+piece of it was a wrong turn that cost hours:
+
+**What actually happened - two NULL callbacks, one behind the other.**
+First: `SV_LoadProgs` calls `SV_InitClientMove` (`sv_game.c:5333`), which
+calls `svgame.dllFuncs.pfnGetHullBounds()` (`sv_pmove.c:449`, then
+`pfnPM_Init` at `:491`) - members the stub game module never filled. The
+trap frame's pushed return address was `SV_InitClientMove+0x88`: `call
+eax`, `eax = 0`. Second, once those existed: `CL_LoadProgs("client")`
+failed (correctly: no client module exists at this phase). `Host_Error`
+during init routes to `Sys_Error`; `Sys_Error` (`engine/common/system.c:411`)
+calls `SV_SysError` BEFORE `Sys_Print`; `SV_SysError` calls
+`svgame.dllFuncs.pfnSys_Error()` guarded only by `svgame.hInstance != NULL`
+- unfilled too, so the very first fatal error of the boot called address
+0. On this kernel each is a bugcheck (`KMODE_EXCEPTION_NOT_HANDLED`,
+`STATUS_ACCESS_VIOLATION`, `ExceptionAddress 0x00000000`) followed by
+`cli; hlt` - a total, silent freeze, with the fully formatted message
+"Host_ErrorInit: can't initialize client: missing essential exports"
+sitting on the faulting thread's stack, never emitted to any log tier.
+The network log channel was never broken.
+
+**The audit that missed them was one call too shallow.** The stub's
+header said "these three members, and only these three, are called
+synchronously - verified by reading the whole function". It had read
+`SV_LoadProgs`. `pfnGetHullBounds`/`pfnPM_Init` are called by a function
+`SV_LoadProgs` calls; `pfnSys_Error` by a path nothing in `SV_LoadProgs`
+mentions at all. **When a table of callbacks is deliberately left partly
+NULL, the audit has to start from the callback sites (`grep` every
+`dllFuncs.pfn` use) and walk UP to what reaches them before any frame
+runs - not start from one function and read down.**
+
+**Why the bisection pointed at the wrong line for hours.** Commenting
+calls out one at a time and rebooting "narrowed the crash" to the
+`COM_LoadLibrary("server")` call inside `SV_LoadProgs` - it reproduced
+with a hardcoded literal, `Mem_AllocPool`/`Mem_FreePool` around it were
+individually safe, the `libs[]` table was intact. It was never the fault
+site. It was the last statement whose SIDE EFFECT (`svgame.hInstance`
+becoming non-NULL) enabled the NULL call far downstream. Two things made
+that invisible: (1) every "crash" had the identical halt EIP, because
+every fatal path ends in the kernel's one `cli; hlt` loop - so "same EIP"
+carried zero information about WHICH fatal path was taken; (2) every
+"healthy" result (`HLT=0`, the kernel's idle-wait EIP, which the
+Counter-Strike retail XBE shows at the very same address) was really the
+engine erroring out CLEANLY to `Sys_Quit` - not running. **A bisection
+that compares "halted vs not halted" bisects the gate on the crash, not
+the crash. Read the exception record off the stack first; it names the
+fault in one line.**
+
+**Things that were confidently wrong along the way, so they are not
+repeated.** (a) Symbolising the halt EIP and the "return addresses"
+found near ESP against our own `.map` gave plausible-looking client
+functions (`CL_DemoStartPlayback`, `R_BeamRing`); they were kernel
+addresses. The title's own addresses are XBE-virtual, `0x10000`-based,
+equal to the map's `Rva+Base`, and readable as such (`info mem` shows the
+image at virtual `0x10000-0x103d000`); the kernel's `0x80000000+X` alias
+is physical X but covers only the kernel (`0x80010000-0x8003d000`), not
+RAM at large. Nearest-public-symbol lookup happily answers for any
+address, including ones outside the module. (b) "Cannot access memory"
+from the GDB stub's virtual reads at `0x80000000+`-alias addresses was
+taken as evidence of corrupted/unloaded code. It was the alias ending -
+`info mem`/`info tlb` show exactly what is mapped where, and the image is
+mapped page-by-page into physical RAM (mostly at `+0xB0000` in this build,
+found by searching physical RAM for `COM_LoadLibrary`'s own unrelocated
+bytes from the `.obj` and confirmed byte-for-byte including its relocated
+`lea`/`call` operands - but NOT uniformly, so never assume a constant
+delta; read through the page tables, or physically with `xp`). (c) `xemu
+-S` does not hold the machine paused, and
+neither software nor hardware breakpoints survive `system_reset` (the
+XBE is reloaded over them) - live catching of a sub-second boot path was
+never going to work; post-mortem reading is what does. (d) The one
+diagnostic that would have ended this in minutes - a working
+`Sys_Print` on the error path - was exactly the thing the bug disabled.
+When the error channel itself is a suspect, read memory, do not add
+prints.
+
+**Two build-tooling traps hit while shipping the fix, both self-inflicted.**
+(1) `tools/xbox-link-check.sh` compiles `stub_game/server/server_stub.c`
+itself AND sweeps every `.sweep/*.obj` into the engine object set
+(`:89`). Hand-compiling that file into `.sweep/` "just to check the
+symbols" therefore double-links it: `2 duplicate` (`_GetEntityAPI2`,
+`_GiveFnptrsToDll`) on the next link. Check symbols with `llvm-nm` on an
+object written ANYWHERE ELSE, or just read the link log's "stub game module
+included" line. (2) Two `tools/xbox-link-check.sh` runs in flight at once
+race on `.sweep/gen/` and the response file; the loser reports "STUB GAME
+MODULE FILE THAT WAS SUPPOSED TO COMPILE DID NOT" plus unrelated shell
+errors from `deps/nxdk/bin/activate`. One link at a time, and never trust
+an XBE from a run whose log says anything but `0 duplicate, 0 undefined`.
+
+**The tool that ended it.** `tools/xemu-debug.py` (and the standalone
+`github.com/mathiasdbo/xemu-debug-tools`): xemu's real GDB stub over TCP,
+`regs`/`mem`/`xp`/`stack`/`search`/`sym`/`mon`/`gpu`/`fbdump`. Start
+`gdbserver` in the Monitor after the freeze, `stack 1024`, look for
+`0xC0000005` - the exception record and the formatted message were both
+right there on the first dump, once the dump was read as an exception
+frame instead of as a call chain.

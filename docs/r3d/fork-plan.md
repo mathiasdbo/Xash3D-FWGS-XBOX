@@ -1329,7 +1329,10 @@ silently producing one over an unexpected object set.
 game module link into one XBE."** All five nouns are now literally
 true of this tree. Not a bootable, playable game — `main()` never
 calls into the real engine, `stub_game`'s server module would crash
-the instant any real gameplay function were invoked, and the 63 parked
+the instant any real gameplay function were invoked (and, found
+2026-09-11 once a client boot actually reached it: also the instant the
+ENGINE's own fatal-error path invoked `pfnSys_Error` — see X5's
+"RESOLVED" note and divergence #34), and the 63 parked
 networking symbols are load-time landmines for the day networking
 stops being deliberately deferred — but a real `.xbe`, produced by
 this project's own real toolchain, from this project's own real
@@ -1617,7 +1620,7 @@ for Xbox with zero warnings (genuinely portable code, only
 `xash3d_types.h`/`const.h`/`cvardef.h`/`xash3d_mathlib.h`/`ref_api.h`),
 `GetRefAPI` is a real, defined symbol, and the full client link stays at
 0 duplicate/0 undefined with `ref_null` correctly appearing in the
-generated static table. **NOT verified at runtime this session**: boot
+generated static table. **NOT verified at runtime that session**: boot
 attempts against this build stopped producing ANY network-log-channel
 output at all (not even messages from code paths well before renderer
 selection, that had printed successfully in earlier boots this same
@@ -1628,6 +1631,55 @@ documented DHCP-negotiation unreliability (`net_xbox_log.c`'s own
 comment: up to ~10s, not guaranteed to succeed) recurring nondeterministically,
 or a real, different problem. Documented honestly rather than claimed -
 see `docs/r3d/lessons.md` for the specific reproduction attempted.
+
+**RESOLVED, 2026-09-11 (divergence #34): it was a real, different
+problem, and the log channel was never at fault.** Read straight off the
+halted CPU with `tools/xemu-debug.py` (xemu's built-in GDB stub, no
+screenshots, no guessing): the boot DID get past renderer selection -
+`ref/null` loaded, `SV_Init` ran into `SV_LoadProgs` - and there the stub
+game module (divergence #22) called through NULL: `SV_InitClientMove`
+(`sv_game.c:5333` → `sv_pmove.c:449`) asks the module for
+`pfnGetHullBounds` (then `pfnPM_Init`), members the stub's own "only these
+three are called synchronously" audit had missed by reading `SV_LoadProgs`
+and stopping one call short (the trap frame's pushed return address,
+`SV_InitClientMove+0x88`, is a `call eax` with `eax = 0`). With those
+provided, the boot got further still: `CL_Init` ran, and
+`CL_LoadProgs("client")` failed, correctly, because no client module
+exists at this phase (`lib_client_exports` is an empty table in `.bss`;
+X7's job, exactly as the plan says for the server side). `Host_Error`
+during init routes to `Sys_Error`, and `Sys_Error` calls
+`SV_SysError` → `svgame.dllFuncs.pfnSys_Error()` BEFORE it ever calls
+`Sys_Print` - the third NULL member - so the first fatal error of the boot
+called address 0 too: kernel bugcheck (`KMODE_EXCEPTION_NOT_HANDLED`,
+`STATUS_ACCESS_VIOLATION`, `ExceptionAddress = 0x00000000`, all read from
+the faulting thread's stack), then `cli; hlt`. The message
+"Host_ErrorInit: can't initialize client: missing essential exports" was
+sitting fully formatted on that stack; it never reached any log tier
+because the NULL call came first. Fixed at the source (the stub now
+provides all three, each matching the HL SDK's own behaviour, cited in
+`server_stub.c`) and guarded in `SV_SysError` under `#if XASH_XBOX` so
+the same class of miss on the error path can never again turn a one-line
+error into a silent freeze. **Verified on the fixed build, with the
+network log channel as the independent signal (divergence #13, the very
+channel the earlier "went silent" note distrusted):** the first
+`Sys_Error` this port has ever reported arrived - `Delta_InitFields:
+couldn't load file delta.lst`, once per boot cycle - with the CPU in the
+kernel's idle-wait, not halted; the pre-fix builds under the same
+listener gave nothing and the bugcheck registers. **What this means for
+X5's status: the client-main boot now fails loudly and honestly, and the
+current stop is a content gap, not code** - `Delta_Init` (the call right
+after `SV_InitClientMove` in `SV_LoadProgs`) needs `valve/delta.lst`,
+which the minimal bring-up disc (`gameinfo.txt`, `gfx.wad`, `video.cfg`)
+does not carry. With the retail `valve/` tree the next stop is `CL_Init`'s
+client-module load (its message was read off the pre-fix build's stack,
+but a fixed build has not reached it yet), which cannot pass until a
+client module exists. Per the per-title direction set on 2026-09-11
+(each title its own statically-linked XBE/XISO, as the retail discs
+were), that is the first real Half-Life build - `deps/hlsdk`'s `dlls/` +
+`cl_dll/` statically linked - not a generic client stub; see X7. The
+earlier claim that `ref/null` "lets the rest of the client boot path
+(`SV_Init`, `CL_Init`, menu init, the frame loop) be verified" was too
+strong: `SV_Init` yes, `CL_Init` only up to its client-module load.
 
 **[from PS3]** The change their roadmap forced in this plan.
 
