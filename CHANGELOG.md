@@ -5,6 +5,55 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-manifest.sh`: a failed run could leave a stale manifest in place (Codex review round 2)
+
+Every validation in this script ran before the final output write, and
+the previous manifest was never removed - a run that failed midway left
+a prior successful run's manifest sitting at the fixed path a downstream
+sweep is designed to read from, so a later step could compile stale
+inputs while believing regeneration had happened. Fixed: the output
+path is resolved and any existing manifest removed immediately, before
+any parsing begins; the final write goes to a temp file in the same
+directory, renamed into place only once complete. Verified through the
+real script: a valid manifest written, the source SDK then mangled to
+force a failure, and the manifest from the first run confirmed gone
+after the second run correctly fails.
+
+### Fixed — `tools/xbox-game-manifest.sh`: missing transitive INTERFACE include directories (Codex review round 1)
+
+`client` links `vgui` and `SDL2` (`add_library(... IMPORTED)` targets
+`cl_dll/CMakeLists.txt` defines itself, each with its own INTERFACE
+include directory) - `SDL2`'s (`deps/hlsdk/external`) was never listed
+anywhere except via that transitive relationship, and `cdll_int.cpp`
+unconditionally includes `<SDL2/SDL_messagebox.h>` from it. Fixed by
+also scanning `target_link_libraries()` and pulling in any linked
+name's own `target_include_directories(NAME INTERFACE ...)` block.
+Fixed two more gaps found in the same pass: the CMAKE_CURRENT_SOURCE_DIR
+variable now also resolves when used as a path prefix, not just a bare
+whole token; and resolved include paths are normalized before deduping,
+since the same real directory could otherwise appear twice under two
+different spellings. Verified by compiling `cl_dll/cdll_int.cpp` with
+the manifest's exact defines/includes: without the fix, `SDL2/SDL_messagebox.h`
+fails `file not found`; with it, the header is found and compilation
+proceeds into a separate, real, pre-existing problem (SDL2's vendored
+headers use MSVC SAL annotations clang doesn't parse) - flagged, not
+fixed here, out of scope for this tool.
+
+### Added — `tools/xbox-game-manifest.sh`: derive include directories too, not just sources and defines (X7.1)
+
+Same derivation discipline the defines fix already established, applied
+before a sweep/compile step needs its own hand-typed `-I` list:
+`target_include_directories()` read from both the per-target CMakeLists
+and the shared `set_common_properties()`, with the two real CMake
+variable references it contains (`${CMAKE_CURRENT_SOURCE_DIR}`,
+`${CMAKE_BINARY_DIR}`) resolved deterministically rather than guessed -
+`${CMAKE_BINARY_DIR}` resolves to nothing after confirming (not
+assuming) that nothing in `deps/hlsdk` ever generates a header into a
+binary directory any `.cpp` includes. New `INCLUDE` manifest directive.
+Verified against the real files (server 6, client 10 include dirs, all
+confirmed to exist), plus a new end-to-end negative test for an
+unrecognized CMake variable reference.
+
 ### Fixed — `tools/xbox-game-manifest.sh`: a resolver failure inside a command substitution didn't actually fail the script (Codex review round 2)
 
 `resolve_define`'s hard-error path (an unrecognized generator expression)

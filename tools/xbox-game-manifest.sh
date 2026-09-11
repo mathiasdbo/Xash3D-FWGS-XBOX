@@ -71,6 +71,21 @@
 # whitespace inside a balanced `$<...>` does not end an unquoted argument)
 # is never torn apart by a naive word-split.
 #
+# Include directories are derived the same way and for the same reason as
+# defines: target_include_directories() from the target's own CMakeLists.txt,
+# plus set_common_properties()'s own `target_include_directories(TARGET_NAME
+# PRIVATE ${CMAKE_BINARY_DIR})`. ${CMAKE_CURRENT_SOURCE_DIR} (every target's
+# own directory) resolves deterministically to $SDK_DIR/$SUBDIR - not a
+# generator expression, an ordinary CMake variable with one fixed value per
+# CMakeLists.txt. ${CMAKE_BINARY_DIR} is different: checked (`grep
+# configure_file`) before deciding how to handle it, not assumed - nothing in
+# deps/hlsdk's CMakeLists.txt ever configure_file()s a real header into any
+# binary dir that a .cpp #includes (the two real configure_file() calls are
+# an install script and cl_dll's Linux-only vgui/.so copies) - so unlike a
+# real generated-header directory, adding a scratch path here would be
+# inventing a value nothing needs rather than deriving a real one. Omitted,
+# with this comment as the record of why, not a silent drop.
+#
 # Output: $SCRATCH/game-<title>/<target>.manifest (SCRATCH defaults to
 # .sweep, matching tools/xbox-link-check.sh's own default), one directive
 # per line, title/target recorded so a downstream consumer can refuse a
@@ -79,6 +94,7 @@
 #   TITLE <title>
 #   TARGET <server|client>
 #   DEFINE <name>
+#   INCLUDE <path, relative to the repo root>
 #   SOURCE <path, relative to the repo root>
 set -eu
 
@@ -147,6 +163,26 @@ COMMON_CMAKELISTS="$SDK_DIR/CMakeLists.txt"
 [ -f "$CMAKELISTS" ] || { echo "xbox-game-manifest: $CMAKELISTS does not exist" >&2; exit 1; }
 [ -f "$COMMON_CMAKELISTS" ] || { echo "xbox-game-manifest: $COMMON_CMAKELISTS does not exist" >&2; exit 1; }
 
+# Resolve the output path and invalidate any PREVIOUS manifest immediately
+# - before any parsing/validation below has even started, not after.
+# Found in Codex review: every check in this script runs (and can exit 1)
+# before the output write at the very end, and the old version never
+# touched $OUT until that final step - so a run that fails midway (an
+# unrecognized generator expression, a source/include that no longer
+# exists, anything) left a PRIOR successful run's manifest sitting at the
+# fixed path this project's own design (fork-plan.md's X7.1) has a
+# downstream sweep read from, exactly the false-clean failure mode this
+# project keeps getting burned by: the sweep would compile stale inputs,
+# unaware regeneration had actually failed. Removing it up front makes
+# "no manifest at $OUT" mean what the header comment and every negative
+# test already claim it means - regeneration failed, full stop - for
+# every failure path in this script, not just the ones written with that
+# in mind.
+OUT_DIR="$SCRATCH/game-$TITLE"
+mkdir -p "$OUT_DIR"
+OUT="$OUT_DIR/$TARGET.manifest"
+rm -f "$OUT"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -187,6 +223,20 @@ extract_block() {
 		exit 1
 	fi
 	printf '%s\n' "$out"
+}
+
+# try_extract_block FILE MARKER: like extract_block, but prints nothing
+# (does not error) when MARKER is absent - for calls that are genuinely
+# optional in this codebase (target_link_libraries: dlls/CMakeLists.txt
+# has none at all, cl_dll/CMakeLists.txt has one), unlike
+# target_sources()/target_compile_definitions()/target_include_directories(),
+# which are confirmed present in both per-target files and always required.
+try_extract_block() {
+	local file="$1" marker="$2"
+	if ! grep -qF -- "$marker" "$file"; then
+		return 0
+	fi
+	extract_block "$file" "$marker"
 }
 
 # split_cmake_args: reads block body text on stdin, emits one logical
@@ -296,6 +346,113 @@ resolve_define() {
 	esac
 }
 
+# resolve_include TOKEN: prints zero or one repo-relative directory for one
+# CMake list item from a target_include_directories() call.
+# ${CMAKE_CURRENT_SOURCE_DIR} resolves to this target's own directory
+# ($SDK_DIR/$SUBDIR). ${CMAKE_BINARY_DIR} resolves to nothing (see the
+# header comment - verified unused, not guessed). A `../x` entry resolves
+# to $SDK_DIR/x; a bare entry resolves to $SDK_DIR/$SUBDIR/x. Any OTHER
+# `${...}` CMake variable reference is a hard error, same posture as
+# resolve_define's unrecognized-genex path - this script only claims to
+# understand the two variable references actually present in the files it
+# reads.
+resolve_include() {
+	local tok="$1"
+	case "$tok" in
+	'${CMAKE_CURRENT_SOURCE_DIR}')
+		printf '%s\n' "$SDK_DIR/$SUBDIR"
+		return
+		;;
+	'${CMAKE_CURRENT_SOURCE_DIR}/'*)
+		# Found in Codex review: vgui/SDL2's own INTERFACE include dirs
+		# (cl_dll/CMakeLists.txt:14-15) use this as a PATH PREFIX
+		# (${CMAKE_CURRENT_SOURCE_DIR}/../utils/vgui/include), not as the
+		# whole token the case above matches - substitute the prefix and
+		# keep the rest. Resolves to $SDK_DIR/$SUBDIR because every real
+		# occurrence of this shape lives inside a per-target CMakeLists.txt
+		# (dlls/ or cl_dll/'s own); find_interface_includes guards the one
+		# place this assumption could silently be wrong (a match inside
+		# the ROOT CMakeLists.txt, where CMAKE_CURRENT_SOURCE_DIR would
+		# actually be $SDK_DIR, not $SDK_DIR/$SUBDIR) with a hard error
+		# rather than resolving this quietly wrong.
+		printf '%s\n' "$SDK_DIR/$SUBDIR/${tok#'${CMAKE_CURRENT_SOURCE_DIR}/'}"
+		return
+		;;
+	'${CMAKE_BINARY_DIR}')
+		return
+		;;
+	'${'*)
+		echo "xbox-game-manifest: unrecognized CMake variable in a" >&2
+		echo "  target_include_directories() block: '$tok' - this script only" >&2
+		echo "  resolves \${CMAKE_CURRENT_SOURCE_DIR} and \${CMAKE_BINARY_DIR}," >&2
+		echo "  the two actually present in these files; fix resolve_include()" >&2
+		echo "  rather than guessing this one's value." >&2
+		exit 1
+		;;
+	../*)
+		printf '%s\n' "$SDK_DIR/${tok#../}"
+		return
+		;;
+	*)
+		printf '%s\n' "$SDK_DIR/$SUBDIR/$tok"
+		return
+		;;
+	esac
+}
+
+# find_interface_includes NAME: appends to the (already-declared, global)
+# INCLUDES array every directory a `target_include_directories(NAME
+# INTERFACE ...)` call declares for the locally-defined CMake target NAME,
+# searching both the per-target and common (comment-stripped) files - a
+# consumer of NAME via target_link_libraries() inherits these
+# automatically under real CMake, and this script's own derivation would
+# otherwise silently miss them the same way it silently missed
+# set_common_properties()'s defines before Codex review round 1 caught
+# that. Found in Codex review, this same round: `client` links `vgui` and
+# `SDL2` (both `add_library(... IMPORTED)` targets cl_dll/CMakeLists.txt
+# defines itself, each with its own INTERFACE include dir -
+# `../utils/vgui/include` and `../external` respectively) - `../external`
+# is NEVER listed in `client`'s own `target_include_directories()` call,
+# only inherited this way, and `cdll_int.cpp` unconditionally `#include`s
+# `<SDL2/SDL_messagebox.h>` from it. A name with no matching
+# `target_include_directories(NAME INTERFACE ...)` anywhere (a raw system
+# library like `${CMAKE_DL_LIBS}`, or a Windows-only import library like
+# `delayimp`/`wsock32`) contributes nothing - not an error, since most
+# link-library names legitimately have no such block.
+find_interface_includes() {
+	local name="$1"
+	local marker="target_include_directories(${name} INTERFACE"
+	local file
+	for file in "$WORK/stripped.txt" "$WORK/common_stripped.txt"; do
+		if ! grep -qF -- "$marker" "$file"; then
+			continue
+		fi
+		local block body
+		block="$(extract_block "$file" "$marker")"
+		body="${block#"$marker"}"
+		body="$(printf '%s' "$body" | sed 's/)[[:space:]]*$//')"
+		if [ "$file" = "$WORK/common_stripped.txt" ] && printf '%s' "$body" | grep -qF 'CMAKE_CURRENT_SOURCE_DIR'; then
+			# resolve_include's ${CMAKE_CURRENT_SOURCE_DIR} resolution
+			# assumes the token came from a per-target CMakeLists.txt
+			# (dlls/ or cl_dll/'s own, where it means $SDK_DIR/$SUBDIR) -
+			# true for every real case today, but wrong for the ROOT
+			# CMakeLists.txt (where it would mean $SDK_DIR itself). No
+			# real case hits this yet; fail loud instead of resolving it
+			# quietly wrong if one ever does.
+			echo "xbox-game-manifest: $marker in $file uses" >&2
+			echo "  \${CMAKE_CURRENT_SOURCE_DIR} - resolve_include()'s resolution" >&2
+			echo "  for it assumes a per-target file, not the root CMakeLists.txt;" >&2
+			echo "  fix resolve_include() before trusting this case." >&2
+			exit 1
+		fi
+		while IFS= read -r tok; do
+			[ -z "$tok" ] && continue
+			resolved_output="$(resolve_include "$tok")" || exit 1
+			[ -n "$resolved_output" ] && INCLUDES+=("$resolved_output")
+		done <<< "$(printf '%s' "$body" | split_cmake_args)"
+	done
+}
+
 # Sources: target_sources(<cmake-target> PRIVATE <files...>)
 SRC_MARKER="target_sources(${CMAKE_TARGET} PRIVATE"
 SRC_BLOCK="$(extract_block "$WORK/stripped.txt" "$SRC_MARKER")"
@@ -389,9 +546,115 @@ if [ "${#DEFINES[@]}" -eq 0 ]; then
 	exit 1
 fi
 
-OUT_DIR="$SCRATCH/game-$TITLE"
-mkdir -p "$OUT_DIR"
-OUT="$OUT_DIR/$TARGET.manifest"
+# Includes: target_include_directories(<cmake-target> PRIVATE <dirs...>)
+# from the target's own CMakeLists.txt...
+INC_MARKER="target_include_directories(${CMAKE_TARGET} PRIVATE"
+INC_BLOCK="$(extract_block "$WORK/stripped.txt" "$INC_MARKER")"
+INC_BODY="${INC_BLOCK#"$INC_MARKER"}"
+INC_BODY="$(printf '%s' "$INC_BODY" | sed 's/)[[:space:]]*$//')"
+
+# ...and from the shared set_common_properties(TARGET_NAME) function - see
+# the header comment on ${CMAKE_BINARY_DIR}.
+COMMON_INC_MARKER='target_include_directories(${TARGET_NAME} PRIVATE'
+COMMON_INC_BLOCK="$(extract_block "$WORK/common_stripped.txt" "$COMMON_INC_MARKER")"
+COMMON_INC_BODY="${COMMON_INC_BLOCK#"$COMMON_INC_MARKER"}"
+COMMON_INC_BODY="$(printf '%s' "$COMMON_INC_BODY" | sed 's/)[[:space:]]*$//')"
+
+INCLUDES=()
+while IFS= read -r tok; do
+	[ -z "$tok" ] && continue
+	resolved_output="$(resolve_include "$tok")" || exit 1
+	[ -n "$resolved_output" ] && INCLUDES+=("$resolved_output")
+done <<< "$(printf '%s' "$INC_BODY" | split_cmake_args)"
+
+while IFS= read -r tok; do
+	[ -z "$tok" ] && continue
+	resolved_output="$(resolve_include "$tok")" || exit 1
+	[ -n "$resolved_output" ] && INCLUDES+=("$resolved_output")
+done <<< "$(printf '%s' "$COMMON_INC_BODY" | split_cmake_args)"
+
+# Transitive INTERFACE include directories from target_link_libraries() -
+# see find_interface_includes's own comment for why this is not optional
+# (SDL2/../external, cdll_int.cpp's <SDL2/SDL_messagebox.h>, found in
+# Codex review). target_link_libraries() itself is optional in this
+# codebase (dlls/CMakeLists.txt has none at all) - try_extract_block
+# tolerates its absence rather than erroring.
+LINK_MARKER="target_link_libraries(${CMAKE_TARGET} PRIVATE"
+LINK_BLOCK="$(try_extract_block "$WORK/stripped.txt" "$LINK_MARKER")"
+if [ -n "$LINK_BLOCK" ]; then
+	LINK_BODY="${LINK_BLOCK#"$LINK_MARKER"}"
+	LINK_BODY="$(printf '%s' "$LINK_BODY" | sed 's/)[[:space:]]*$//')"
+	while IFS= read -r tok; do
+		[ -z "$tok" ] && continue
+		case "$tok" in
+		'$<'*)
+			# Generator-expression-gated link-library names
+			# ($<$<PLATFORM_ID:Windows>:delayimp>,
+			# $<$<PLATFORM_ID:Windows>:wsock32> - the only two present)
+			# never have a target_include_directories(NAME INTERFACE ...)
+			# block anywhere in this SDK regardless of whether the genex
+			# itself would resolve true here - verified, not assumed -
+			# so there is nothing for find_interface_includes to find
+			# either way; skip resolving the genex itself.
+			continue
+			;;
+		esac
+		find_interface_includes "$tok"
+	done <<< "$(printf '%s' "$LINK_BODY" | split_cmake_args)"
+fi
+
+COMMON_LINK_MARKER='target_link_libraries(${TARGET_NAME} PRIVATE'
+COMMON_LINK_BLOCK="$(try_extract_block "$WORK/common_stripped.txt" "$COMMON_LINK_MARKER")"
+if [ -n "$COMMON_LINK_BLOCK" ]; then
+	COMMON_LINK_BODY="${COMMON_LINK_BLOCK#"$COMMON_LINK_MARKER"}"
+	COMMON_LINK_BODY="$(printf '%s' "$COMMON_LINK_BODY" | sed 's/)[[:space:]]*$//')"
+	while IFS= read -r tok; do
+		[ -z "$tok" ] && continue
+		case "$tok" in
+		'$<'*) continue ;;
+		esac
+		find_interface_includes "$tok"
+	done <<< "$(printf '%s' "$COMMON_LINK_BODY" | split_cmake_args)"
+fi
+
+if [ "${#INCLUDES[@]}" -eq 0 ]; then
+	echo "xbox-game-manifest: zero include directories parsed from $CMAKELISTS +" >&2
+	echo "  $COMMON_CMAKELISTS - refusing to write an empty manifest." >&2
+	exit 1
+fi
+
+# Normalize before dedup: vgui's INTERFACE include resolves via
+# ${CMAKE_CURRENT_SOURCE_DIR}/../utils/vgui/include
+# (deps/hlsdk/cl_dll/../utils/vgui/include, un-simplified) while client's
+# own target_include_directories() lists the same real directory as
+# ../utils/vgui/include (deps/hlsdk/utils/vgui/include) - the same
+# directory on disk, spelled two different ways, which a plain string
+# dedup would not catch. realpath -m (works on a path that may not
+# resolve through a real target yet, though every one here already does)
+# collapses both to one canonical spelling before counting/deduping.
+NORMALIZED=()
+for d in "${INCLUDES[@]}"; do
+	NORMALIZED+=("$(realpath -m --relative-to=. "$d")")
+done
+INCLUDES=("${NORMALIZED[@]}")
+
+# Dedup: the normalization above is exactly what turns vgui's two
+# spellings into one - without it, this manifest would report more
+# distinct include roots than it actually found.
+mapfile -t INCLUDES < <(printf '%s\n' "${INCLUDES[@]}" | awk '!seen[$0]++')
+
+for d in "${INCLUDES[@]}"; do
+	[ -d "$d" ] || { echo "xbox-game-manifest: derived include directory does not exist: $d" >&2; exit 1; }
+done
+
+# Atomic publish: write to a temp file in the SAME directory (so the final
+# rename is a same-filesystem, single-step replace, never a partial write
+# a concurrent reader could observe) and rename into place only once every
+# line has been written successfully. $OUT was already removed up front
+# (see above), so between here and the rename there is genuinely no
+# manifest at $OUT - not a stale one, not a truncated one.
+OUT_TMP="$(mktemp "$OUT_DIR/.manifest.XXXXXX")"
+trap 'rm -rf "$WORK" "$OUT_TMP"' EXIT
 
 {
 	echo "TITLE $TITLE"
@@ -399,10 +662,16 @@ OUT="$OUT_DIR/$TARGET.manifest"
 	for d in "${DEFINES[@]}"; do
 		echo "DEFINE $d"
 	done
+	for i in "${INCLUDES[@]}"; do
+		echo "INCLUDE $i"
+	done
 	for s in "${SOURCES[@]}"; do
 		echo "SOURCE $s"
 	done
-} > "$OUT"
+} > "$OUT_TMP"
 
-echo "xbox-game-manifest: wrote ${#SOURCES[@]} source(s), ${#DEFINES[@]} define(s) to $OUT" >&2
+mv -f "$OUT_TMP" "$OUT"
+
+echo "xbox-game-manifest: wrote ${#SOURCES[@]} source(s), ${#DEFINES[@]} define(s)," >&2
+echo "  ${#INCLUDES[@]} include dir(s) to $OUT" >&2
 echo "$OUT"
