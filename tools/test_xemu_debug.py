@@ -93,6 +93,22 @@ class ScanFailurePaths(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._scan(b"")
 
+    def test_non_positive_chunk_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._scan(b"\x01\x02", chunk=0)
+
+    def test_pattern_longer_than_chunk_is_found_across_many_reads(self):
+        # Codex review, round 2: with chunk < len(pattern) the overlap used to
+        # carry only the previous read, so a match spanning 3+ reads was never
+        # seen while the scan still claimed completeness and exited 0.
+        image = b"\x00" * 10 + b"\xde\xad\xbe\xef" + b"\x00" * 10
+        read = _mem_reader(image, 0x2000)
+        res = xd.scan(read, 0x2000, 0x2000 + len(image), 1, b"\xde\xad\xbe\xef", "test", log=self.log.append)
+        self.assertTrue(res.complete)
+        self.assertEqual(res.found, [0x2000 + 10], "a 4-byte pattern read 1 byte at a time must be found exactly once")
+        out = []
+        self.assertEqual(xd.report_scan(res, 0x2000, 0x2000 + len(image), "test", log=out.append), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

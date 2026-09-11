@@ -59,8 +59,12 @@ symbol resolution against a linker `.map`, NV2A register dumps and a
 framebuffer capture read through `PCRTC_START`. The search reports how
 much memory it actually inspected and exits nonzero when it could not
 read any of it - a scan that reads zero bytes must never look like a
-clean "no matches" (found in Codex review; failure paths are covered by
-`tools/test_xemu_debug.py`, `python -m unittest tools/test_xemu_debug.py`).
+clean "no matches" (found in Codex review round 1), and the overlap
+carried between reads accumulates, so a pattern longer than the read
+chunk is still found (round 2 - previously a match spanning three or
+more reads was silently missed under a "complete" exit 0). Both failure
+paths are covered by `tools/test_xemu_debug.py`
+(`python -m unittest tools/test_xemu_debug.py`).
 Also published standalone
 as `github.com/mathiasdbo/xemu-debug-tools` for other projects and
 agents. Documents the facts that cost real time to learn (all read from

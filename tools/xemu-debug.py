@@ -358,6 +358,8 @@ def scan(read, start, end, chunk, target, label, log=print):
     RuntimeError. Every failed read is recorded, never dropped."""
     if not target:
         raise ValueError("empty search pattern")
+    if chunk <= 0:
+        raise ValueError("chunk size must be positive")
     res = ScanResult()
     overlap = len(target) - 1
     prev_tail = b""
@@ -380,7 +382,11 @@ def scan(read, start, end, chunk, target, label, log=print):
             res.found.append(hit)
             log(f"MATCH at {hit:#010x} ({label})")
             idx = hay.find(target, idx + 1)
-        prev_tail = data[-overlap:] if overlap > 0 else b""
+        # Carry the last overlap bytes of the ACCUMULATED haystack, not of
+        # this read alone: with chunks smaller than the pattern, a match
+        # spanning three or more reads would otherwise never be seen while
+        # the scan still reported itself complete (Codex review, round 2).
+        prev_tail = hay[-overlap:] if overlap > 0 else b""
         addr += n
     return res
 
