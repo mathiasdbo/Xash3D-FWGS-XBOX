@@ -365,10 +365,20 @@ done <<< "$(printf '%s' "$DEF_BODY" | split_cmake_args)"
 
 while IFS= read -r tok; do
 	[ -z "$tok" ] && continue
+	# Found in Codex review: resolve_define runs inside a command
+	# substitution here, so its own `exit 1` (an unrecognized genex shape)
+	# only kills THAT subshell - under bash, a failing command
+	# substitution feeding a here-string does not, on its own, fail the
+	# surrounding `while`/`<<<`, so the loop would silently see zero
+	# resolved lines and continue as if this token had legitimately
+	# resolved to nothing. Capture first, check explicitly, THEN iterate -
+	# a resolver failure now aborts the whole script instead of quietly
+	# reducing the define set.
+	resolved_output="$(resolve_define "$tok")" || exit 1
 	while IFS= read -r resolved; do
 		[ -z "$resolved" ] && continue
 		DEFINES+=("$resolved")
-	done <<< "$(resolve_define "$tok")"
+	done <<< "$resolved_output"
 done <<< "$(printf '%s' "$COMMON_DEF_BODY" | split_cmake_args)"
 
 if [ "${#DEFINES[@]}" -eq 0 ]; then

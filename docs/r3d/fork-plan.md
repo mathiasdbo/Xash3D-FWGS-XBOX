@@ -1943,7 +1943,26 @@ the exact count (not just "it didn't crash"). Unit-tested `resolve_define`
 directly against all five real shapes plus one deliberately unknown genex
 (`$<$<COMPILE_LANGUAGE:CXX>:...>`, never present in this file, to prove
 the hard-error path fires rather than silently passing an unrecognized
-shape through). Not fixed here, out of this script's scope (a
+shape through).
+
+**Codex review round 2 (the cap) found the hard-error path above didn't
+actually reach the caller: `resolve_define` runs inside a command
+substitution feeding a here-string, and under bash that subshell's own
+`exit 1` does not fail the surrounding `while`/`<<<` on its own - a
+resolver failure would silently produce zero resolved lines for that
+token and the script would carry on, exactly the false-clean measurement
+this tool exists to prevent.** Fixed by capturing the resolver's output
+into a variable first and checking its exit status explicitly
+(`resolved_output="$(resolve_define "$tok")" || exit 1`) before ever
+iterating over it. Re-verified through the ACTUAL script end-to-end, not
+`resolve_define` in isolation (Codex's own stated bar): a scratch copy of
+the real SDK tree with a deliberately unrecognized generator expression
+injected into its root `CMakeLists.txt`, run through an unmodified copy
+of this script with only `SDK_DIR` repointed at the scratch copy - fails
+with exit 1, names the exact offending token, and writes no manifest
+file. The real, unmodified `deps/hlsdk` re-run afterward to confirm no
+regression: identical 107/5 and 85/6 source/define counts as before this
+fix. Not fixed here, out of this script's scope (a
 project-wide compiler-flag concern, not a per-title one, and this
 manifest format carries DEFINE/SOURCE only by design): `set_common_properties`
 also sets real `target_compile_options` (`-fpermissive

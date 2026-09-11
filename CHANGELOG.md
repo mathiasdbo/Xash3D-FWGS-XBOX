@@ -5,6 +5,20 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-manifest.sh`: a resolver failure inside a command substitution didn't actually fail the script (Codex review round 2)
+
+`resolve_define`'s hard-error path (an unrecognized generator expression)
+ran inside a command substitution feeding a here-string - under bash
+that subshell's own `exit 1` doesn't fail the surrounding loop on its
+own, so the failure would silently produce zero resolved defines for
+that token and the script would carry on. Fixed by capturing the
+resolver's output into a variable and checking its exit status
+explicitly before iterating. Re-verified through the actual script
+end-to-end (not the function in isolation): a scratch copy of the real
+SDK tree with an unrecognized generator expression injected fails with
+exit 1 and writes no manifest; the real `deps/hlsdk` re-run afterward
+confirms no regression in the source/define counts.
+
 ### Added — `tools/xbox-game-manifest.sh`: per-title TU list and defines read from the SDK's own CMakeLists (X7.1)
 
 Reads `target_sources()`/`target_compile_definitions()` straight out of
