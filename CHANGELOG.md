@@ -5,6 +5,36 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/xbox-game-manifest.sh`: per-title TU list and defines read from the SDK's own CMakeLists (X7.1)
+
+Reads `target_sources()`/`target_compile_definitions()` straight out of
+a title's `dlls/CMakeLists.txt`/`cl_dll/CMakeLists.txt` (comment-stripped,
+paren-matched, never approximated with a glob - `cl_dll/*.cpp` is not
+the real client TU set) and writes `$SCRATCH/game-<title>/<target>.manifest`.
+Only `hl` is supported for now: measured that `deps/hlsdk-opfor` and
+`deps/hlsdk-bshift` have no `CMakeLists.txt` at all, correcting an
+earlier planning assumption that they would "add their own" - both
+titles refuse outright with a clear reason rather than a guessed file
+list. Verified against the real, current `deps/hlsdk` CMakeLists: server
+107 sources/2 defines, client 85 sources/3 defines, every derived path
+confirmed to exist on disk, counts independently cross-checked.
+
+While building this, found and fixed three real problems in `deps/hlsdk`'s
+`resonance3d` branch CMakeLists (unedited since the branch was cut from
+`master`, X7.0): `_STATIC_ENGINE_LINK` was still unconditionally defined
+for the server target (the exact macro this project must never define);
+with it removed, `public/interface.cpp` needed restoring to the server's
+sources (its stock filesystem-loading path calls symbols only that file
+defines, and `master`'s CMakeLists drops it because its own
+`_STATIC_ENGINE_LINK` path never needs it); and the client target was
+missing `WIN32` in its defines, a fix the server side already had. Also
+found, not yet fixed (X7.4 scope): with `_STATIC_ENGINE_LINK` correctly
+undefined, `SV_InitServer()`'s stock filesystem load fails on Xbox
+(`Sys_LoadModule` is a raw `LoadLibrary()`, and nxdk's has no dynamic
+loading), and `GameDLLInit()` quits the game immediately as a result -
+a more severe, earlier boot blocker than the previously-known writable-
+rootdir gap.
+
 ### Fixed — `tools/xbox-gen-exports.sh`: completeness gate could mark a missing required name as found (X7.2, Codex review round 2)
 
 Two more real gaps, both in the `--require` completeness gate, found on
