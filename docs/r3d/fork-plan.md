@@ -1868,17 +1868,160 @@ in `cl_dll/hl/hl_weapons.cpp:892-901`, so a `cl_dll/*.cpp` sweep can never
 link. Per title and per target, `tools/xbox-game-manifest.sh <title>
 <server|client>` derives the expected TU list and the target's own
 defines from that title's `dlls/CMakeLists.txt` / `cl_dll/CMakeLists.txt`
-(`target_sources` + `target_compile_definitions`, read, not retyped -
-`op4` and `bshift` add their own), writes it to
-`$SCRATCH/game-<title>/<target>.manifest`, and the sweep compiles exactly
-that list with exactly those defines per TU (`CLIENT_DLL` on the client
-side, never on the server side, `_STATIC_ENGINE_LINK` on neither). The
-sweep's `manifest.txt` records OK/FAIL/TOTAL against the EXPECTED count
-and refuses to report clean on any mismatch in either direction - a
-missing TU and an unexpected extra TU are both failures, same guard shape
-as `xbox-link-check.sh:361-376` already enforces for mainui. VGUI sources
-are excluded by the X7.3 `USE_VGUI` rule inside that derivation, not by a
-hand-edited list.
+(`target_sources` + `target_compile_definitions`, read, not retyped),
+writes it to `$SCRATCH/game-<title>/<target>.manifest`, and the sweep
+compiles exactly that list with exactly those defines per TU (`CLIENT_DLL`
+on the client side, never on the server side, `_STATIC_ENGINE_LINK` on
+neither - see below). The sweep's `manifest.txt` records OK/FAIL/TOTAL
+against the EXPECTED count and refuses to report clean on any mismatch in
+either direction - a missing TU and an unexpected extra TU are both
+failures, same guard shape as `xbox-link-check.sh:361-376` already
+enforces for mainui. VGUI sources are excluded by the X7.3 `USE_VGUI` rule
+inside that derivation, not by a hand-edited list - concretely, this means
+`xbox-game-manifest.sh` needs zero VGUI-specific code at all: it reads
+`cl_dll/CMakeLists.txt`'s `target_sources()` verbatim, and once X7.3 edits
+that file to drop the 9 `vgui_*.cpp` entries, the tool stops emitting them
+with no change to the tool itself. Until X7.3 lands, the client manifest
+still includes them, accurately reflecting the file's current state.
+
+**Correction, measured 2026-09-11: `op4` and `bshift` do NOT "add their
+own" `CMakeLists.txt`.** The sentence above assumed they would; actually
+checking (`find deps/hlsdk-opfor deps/hlsdk-bshift -iname CMakeLists.txt`)
+found none in either tree - both ship only Visual Studio `.vcxproj`/`.sln`
+and Linux Makefile project files, nothing `target_sources`-shaped to read.
+`xbox-game-manifest.sh` therefore supports only `hl` for now and refuses
+`op4`/`bshift` outright with a clear error rather than guessing a file
+list for them (directive #6) - their own derivation mechanism is X7.6
+work, not invented here.
+
+**Built and verified end-to-end, 2026-09-11.** Ran against the real,
+current `deps/hlsdk` CMakeLists on both targets: server - 107 `.cpp`
+sources; client - 85 `.cpp` sources (VGUI still included, X7.3 not yet
+done). Every derived source path checked to actually exist on disk (a
+hard error otherwise); an independent comment-stripped recount from the
+raw file, run separately rather than trusting the tool's own arithmetic,
+matched both counts exactly. Negative tests: `op4` and `bshift` both
+correctly refuse with the no-CMakeLists explanation; an unrecognized
+token in a `target_sources()` block (neither `.cpp` nor `.h`) is a hard
+parse error naming the token, not a silent drop - verified against a
+deliberately mangled copy of the real file.
+
+**Codex review round 1 found the defines were incomplete: both targets
+also call `set_common_properties(TARGET_NAME)` (`deps/hlsdk/CMakeLists.txt`),
+whose own `target_compile_definitions()` this script's first version
+never read.** That block unconditionally adds `_CRT_SECURE_NO_WARNINGS`
+and `CLIENT_WEAPONS` - not cosmetic: `CLIENT_WEAPONS` changes a weapon
+save-field's type (`dlls/weapons.cpp:378-386`) and gates client-side
+weapon prediction (`cl_dll/hl/hl_weapons.cpp:910-915`), so a manifest
+missing it would compile and link a functioning-looking but materially
+wrong build - exactly the "clean sweep of the wrong configuration"
+failure mode this project has been burned by before. The block also
+contains real CMake generator expressions (`$<$<CONFIG:DEBUG>:_DEBUG>`,
+two `$<$<PLATFORM_ID:...>:...>` gates, and a `$<CONFIG>` value
+substitution inside `UNIFIED_SDK_CONFIG="$<CONFIG>"`) - resolved against
+a single, fixed, explicitly-chosen configuration (`RESOLVED_CONFIG=Release`,
+since this project's Xbox compile route has no real CMake configure step
+to inherit a Debug/Release choice from, and a shipped title would be
+Release; `RESOLVED_PLATFORM=Xbox`, deliberately neither `Linux` nor
+`Darwin`, the only two values this SDK's genexps ever test) rather than
+by actually running CMake. Every genex SHAPE the script resolves is a
+real one measured in the file; anything else is a hard parse error, never
+a guess. A second, real parsing bug found and fixed in the same pass,
+before ever running against real Codex feedback on it: a naive
+whitespace tokenizer would tear apart `$<$<PLATFORM_ID:Linux,
+Darwin>:POSIX _POSIX LINUX _LINUX GNUC>` (one CMake list item despite its
+internal spaces - legal CMake syntax, whitespace inside a balanced
+`$<...>` does not end an unquoted argument) into garbage tokens; fixed
+with an angle-bracket-depth-aware splitter used for every list this
+script tokenizes. Re-verified end to end against the real files: server -
+107 sources, 5 defines (`VALVE_DLL`, `WIN32`, `_CRT_SECURE_NO_WARNINGS`,
+`CLIENT_WEAPONS`, `UNIFIED_SDK_CONFIG="Release"`); client - 85 sources, 6
+defines (adds `CLIENT_DLL`, `HL_DLL` to the same common five). Both
+`$<$<PLATFORM_ID:...>:...>` gates and the `$<$<CONFIG:DEBUG>:_DEBUG>`
+gate correctly resolve to nothing on this configuration, confirmed by
+the exact count (not just "it didn't crash"). Unit-tested `resolve_define`
+directly against all five real shapes plus one deliberately unknown genex
+(`$<$<COMPILE_LANGUAGE:CXX>:...>`, never present in this file, to prove
+the hard-error path fires rather than silently passing an unrecognized
+shape through).
+
+**Codex review round 2 (the cap) found the hard-error path above didn't
+actually reach the caller: `resolve_define` runs inside a command
+substitution feeding a here-string, and under bash that subshell's own
+`exit 1` does not fail the surrounding `while`/`<<<` on its own - a
+resolver failure would silently produce zero resolved lines for that
+token and the script would carry on, exactly the false-clean measurement
+this tool exists to prevent.** Fixed by capturing the resolver's output
+into a variable first and checking its exit status explicitly
+(`resolved_output="$(resolve_define "$tok")" || exit 1`) before ever
+iterating over it. Re-verified through the ACTUAL script end-to-end, not
+`resolve_define` in isolation (Codex's own stated bar): a scratch copy of
+the real SDK tree with a deliberately unrecognized generator expression
+injected into its root `CMakeLists.txt`, run through an unmodified copy
+of this script with only `SDK_DIR` repointed at the scratch copy - fails
+with exit 1, names the exact offending token, and writes no manifest
+file. The real, unmodified `deps/hlsdk` re-run afterward to confirm no
+regression: identical 107/5 and 85/6 source/define counts as before this
+fix. Not fixed here, out of this script's scope (a
+project-wide compiler-flag concern, not a per-title one, and this
+manifest format carries DEFINE/SOURCE only by design): `set_common_properties`
+also sets real `target_compile_options` (`-fpermissive
+-fno-strict-aliasing -Wno-invalid-offsetof`, its own comment already
+noting nxdk-cc needs them too) that `tools/xbox-cxx.sh` does not
+currently pass - flagged for whoever builds the sweep/compile step to
+either bake into `xbox-cxx.sh` directly (these are project-wide, not
+per-title) or extend the manifest format for.
+
+**`deps/hlsdk`'s `resonance3d` branch CMakeLists fixed to actually match
+what this project needs, 2026-09-11 (recorded as divergence #35) - found
+while building the manifest tool above, not assumed going in.** The
+branch was cut from `master`
+(X7.0) and had not yet diverged from it, so it still carried three real
+problems specific to `master`'s own Ferrum56/Rust-port setup:
+
+- `dlls/CMakeLists.txt` unconditionally defined `_STATIC_ENGINE_LINK` in
+  `target_compile_definitions(hl PRIVATE ...)` - the exact macro this
+  project's own rules forbid ever defining (X7.1b already established
+  that leaving it undefined yields stock upstream behaviour on the .cpp
+  files themselves; the CMakeLists is where it would actually have been
+  turned on for a real build). Removed.
+- With it removed, `game_shared/filesystem_utils.cpp`'s stock (non-
+  `_STATIC_ENGINE_LINK`) `FileSystem_LoadFileSystem()` path calls
+  `Sys_LoadModule`/`Sys_GetFactory` (`public/interface.h`) at runtime -
+  but `master`'s `dlls/CMakeLists.txt` drops `public/interface.cpp` from
+  `target_sources()` entirely, correct for `master` (whose
+  `_STATIC_ENGINE_LINK` path never reaches those calls) and wrong for
+  `resonance3d` (an undefined-symbol link failure otherwise). Restored;
+  verified compiling clean with `tools/xbox-cxx.sh` (`-DWIN32`, warnings
+  only) and defining the exact mangled symbols
+  (`?Sys_LoadModule@@...`/`?Sys_GetFactory@@...`/`?Sys_UnloadModule@@...`/
+  `_CreateInterface`) `filesystem_utils.cpp` calls.
+- `cl_dll/CMakeLists.txt`'s client target never defined `WIN32` at all -
+  the server side already had this exact fix (nxdk-cc never defines it,
+  `Platform.h`'s `#ifdef WIN32` branch is needed on both sides), the
+  client side was simply missed. Added.
+
+**New, more severe X7.4 boot blocker found in the same pass, not yet
+fixed: `SV_InitServer()` (`dlls/game.cpp:461-476`) hard-fails at
+`GameDLLInit()` before any gameplay code runs.** With
+`_STATIC_ENGINE_LINK` correctly undefined, `FileSystem_LoadFileSystem()`
+takes its stock path: `Sys_LoadModule("filesystem_stdio.dll")` is a raw
+`LoadLibrary()` call (`public/interface.cpp:130-133`), and nxdk's
+`LoadLibraryExA` always returns `NULL` (no dynamic loading on Xbox -
+`deps/nxdk/lib/winapi/libloaderapi.c`) - so `FileSystem_LoadFileSystem()`
+returns `false`, and `dlls/game.cpp:490-496`'s `GameDLLInit()` responds
+with `SERVER_COMMAND("quit\n")` and returns immediately. This links
+cleanly (the fix above) but fails at the very first opportunity at
+runtime - ahead of the previously-known writable-rootdir gap, which only
+matters once a level transition/save is attempted. Not fixed here (real
+SDK source-behaviour work, X7.4 scope, not X7.1 tooling); the fix shape
+is already known and cheap to verify once X7.4 starts: route
+`FileSystem_LoadFileSystem`/`FileSystem_LoadFileIntoBuffer`/etc through
+`g_engfuncs.pfnLoadFileForMe`/`pfnFreeFile` (`engine/eiface.h:201-202` -
+real Xash3D-FWGS engine callbacks, present in this project's own engine,
+not a Rust-specific concept) behind a Resonance3D-specific guard, the
+same shape `_STATIC_ENGINE_LINK`'s own `FileSystem_LoadFileIntoBuffer`
+branch already takes for a different engine.
 
 Compile route: this project's own `tools/xbox-cxx.sh` per TU, not the
 SDK's CMake through `toolchain-nxdk.cmake`. Every other module in the XBE
