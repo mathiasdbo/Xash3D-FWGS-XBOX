@@ -1987,16 +1987,66 @@ header any `.cpp` `#include`s ever gets generated into a binary
 directory, so adding a scratch path here would invent a value nothing
 needs rather than derive a real one. Any other `${...}` reference is a
 hard parse error, same posture as an unrecognized generator expression.
-Verified against the real files: server - 6 include dirs (`dlls`,
-`common`, `engine`, `game_shared`, `pm_shared`, `public`); client - 10
-(`cl_dll`, `cl_dll/hl`, `cl_dll/particleman`, `dlls`, `common`,
-`game_shared`, `public`, `pm_shared`, `engine`, `utils/vgui/include`),
-every one confirmed to exist as a real directory on disk. Two new
-end-to-end negative tests through the real script (same scratch-SDK-copy
-technique as the generator-expression one above): an unrecognized
-`${...}` variable injected into the common include block fails with
-exit 1 and writes no manifest; the pre-existing generator-expression
-negative test re-run to confirm this change didn't regress it.
+Two new end-to-end negative tests through the real script (same
+scratch-SDK-copy technique as the generator-expression one above): an
+unrecognized `${...}` variable injected into the common include block
+fails with exit 1 and writes no manifest; the pre-existing
+generator-expression negative test re-run to confirm this change didn't
+regress it.
+
+**Codex review round 1 found the include set was still incomplete: neither
+`target_include_directories()` block sees a directory a linked library's
+own INTERFACE requirement adds.** `client` links `vgui` and `SDL2`
+(`cl_dll/CMakeLists.txt:59-63`, both `add_library(... IMPORTED)` targets
+the same file defines, each with its own
+`target_include_directories(NAME INTERFACE ...)` - `../utils/vgui/include`
+and `../external` respectively). `vgui`'s happens to also be listed
+directly in `client`'s own include block (redundant, not a bug), but
+`../external` is NEVER listed anywhere except via this transitive
+INTERFACE relationship, and `cdll_int.cpp:21` unconditionally
+`#include <SDL2/SDL_messagebox.h>`s from it - a real compile failure the
+old derivation would have produced. Fixed: `target_link_libraries()` (now
+also read from both the per-target and common CMakeLists - itself
+optional, `dlls/CMakeLists.txt` has none at all) is scanned for each
+linked name, and any name with a matching
+`target_include_directories(NAME INTERFACE ...)` block anywhere
+contributes its resolved directories too; a name with no such block
+(`${CMAKE_DL_LIBS}`, or a Windows-only import library like `delayimp`/
+`wsock32`, both genex-gated and skipped without evaluating the genex,
+since neither has such a block regardless) contributes nothing, which is
+correct, not an omission. A second, real parsing gap found and fixed in
+the same pass: `vgui`/`SDL2`'s own declarations use
+`${CMAKE_CURRENT_SOURCE_DIR}` as a PATH PREFIX
+(`${CMAKE_CURRENT_SOURCE_DIR}/../utils/vgui/include`), a shape the first
+version's variable resolution never handled (it only matched the bare,
+whole-token form) - fixed with a prefix-match case, guarded so a future
+match inside the ROOT CMakeLists.txt (where the same variable would mean
+something different) fails loudly instead of resolving silently wrong,
+since no real case hits that today. A third finding, self-caught while
+verifying the fix, not from Codex: the two derivations for `vgui`'s
+include now produce the SAME real directory spelled two different ways
+(`utils/vgui/include` vs `cl_dll/../utils/vgui/include`) - a plain string
+dedup does not catch that, so every resolved path is now normalized with
+`realpath -m` before deduping.
+
+Re-verified against the real files: server unaffected (`dlls/CMakeLists.txt`
+has no `target_link_libraries()` at all) - still 6 include dirs; client -
+11 (adds `external` to the prior 10, `vgui`'s duplicate spelling
+collapsed by the new normalization), every one confirmed to exist on
+disk. Verified Codex's own recommended check for real, not just at the
+derivation level: compiled `cl_dll/cdll_int.cpp` with `tools/xbox-cxx.sh`
+using exactly the manifest-derived defines and includes - WITHOUT
+`external` on the include path, `SDL2/SDL_messagebox.h` fails outright
+(`file not found`, the exact bug reported); WITH it (the fixed manifest's
+real output), that header is found and compilation proceeds much
+further, into a separate, real, PRE-EXISTING problem this fix does not
+claim to solve: `deps/hlsdk/external/SDL2/SDL_stdinc.h` uses MSVC SAL
+annotations (`SDL_INOUT_Z_CAP`, `_Scanf_format_string_impl_`) that don't
+parse under nxdk-cc's clang - a genuinely new, separate finding, not
+this task's scope, flagged here for whoever next attempts a full client
+compile (X7.3/X7.4 territory: `SDL2` is only linked for `vgui` and
+`inputw32.cpp`'s gamepad support, both already slated for X7.3-adjacent
+rework, not core gameplay).
 
 **`deps/hlsdk`'s `resonance3d` branch CMakeLists fixed to actually match
 what this project needs, 2026-09-11 (recorded as divergence #35) - found
