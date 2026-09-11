@@ -71,6 +71,21 @@
 # whitespace inside a balanced `$<...>` does not end an unquoted argument)
 # is never torn apart by a naive word-split.
 #
+# Include directories are derived the same way and for the same reason as
+# defines: target_include_directories() from the target's own CMakeLists.txt,
+# plus set_common_properties()'s own `target_include_directories(TARGET_NAME
+# PRIVATE ${CMAKE_BINARY_DIR})`. ${CMAKE_CURRENT_SOURCE_DIR} (every target's
+# own directory) resolves deterministically to $SDK_DIR/$SUBDIR - not a
+# generator expression, an ordinary CMake variable with one fixed value per
+# CMakeLists.txt. ${CMAKE_BINARY_DIR} is different: checked (`grep
+# configure_file`) before deciding how to handle it, not assumed - nothing in
+# deps/hlsdk's CMakeLists.txt ever configure_file()s a real header into any
+# binary dir that a .cpp #includes (the two real configure_file() calls are
+# an install script and cl_dll's Linux-only vgui/.so copies) - so unlike a
+# real generated-header directory, adding a scratch path here would be
+# inventing a value nothing needs rather than deriving a real one. Omitted,
+# with this comment as the record of why, not a silent drop.
+#
 # Output: $SCRATCH/game-<title>/<target>.manifest (SCRATCH defaults to
 # .sweep, matching tools/xbox-link-check.sh's own default), one directive
 # per line, title/target recorded so a downstream consumer can refuse a
@@ -79,6 +94,7 @@
 #   TITLE <title>
 #   TARGET <server|client>
 #   DEFINE <name>
+#   INCLUDE <path, relative to the repo root>
 #   SOURCE <path, relative to the repo root>
 set -eu
 
@@ -296,6 +312,45 @@ resolve_define() {
 	esac
 }
 
+# resolve_include TOKEN: prints zero or one repo-relative directory for one
+# CMake list item from a target_include_directories() call.
+# ${CMAKE_CURRENT_SOURCE_DIR} resolves to this target's own directory
+# ($SDK_DIR/$SUBDIR). ${CMAKE_BINARY_DIR} resolves to nothing (see the
+# header comment - verified unused, not guessed). A `../x` entry resolves
+# to $SDK_DIR/x; a bare entry resolves to $SDK_DIR/$SUBDIR/x. Any OTHER
+# `${...}` CMake variable reference is a hard error, same posture as
+# resolve_define's unrecognized-genex path - this script only claims to
+# understand the two variable references actually present in the files it
+# reads.
+resolve_include() {
+	local tok="$1"
+	case "$tok" in
+	'${CMAKE_CURRENT_SOURCE_DIR}')
+		printf '%s\n' "$SDK_DIR/$SUBDIR"
+		return
+		;;
+	'${CMAKE_BINARY_DIR}')
+		return
+		;;
+	'${'*)
+		echo "xbox-game-manifest: unrecognized CMake variable in a" >&2
+		echo "  target_include_directories() block: '$tok' - this script only" >&2
+		echo "  resolves \${CMAKE_CURRENT_SOURCE_DIR} and \${CMAKE_BINARY_DIR}," >&2
+		echo "  the two actually present in these files; fix resolve_include()" >&2
+		echo "  rather than guessing this one's value." >&2
+		exit 1
+		;;
+	../*)
+		printf '%s\n' "$SDK_DIR/${tok#../}"
+		return
+		;;
+	*)
+		printf '%s\n' "$SDK_DIR/$SUBDIR/$tok"
+		return
+		;;
+	esac
+}
+
 # Sources: target_sources(<cmake-target> PRIVATE <files...>)
 SRC_MARKER="target_sources(${CMAKE_TARGET} PRIVATE"
 SRC_BLOCK="$(extract_block "$WORK/stripped.txt" "$SRC_MARKER")"
@@ -389,6 +444,43 @@ if [ "${#DEFINES[@]}" -eq 0 ]; then
 	exit 1
 fi
 
+# Includes: target_include_directories(<cmake-target> PRIVATE <dirs...>)
+# from the target's own CMakeLists.txt...
+INC_MARKER="target_include_directories(${CMAKE_TARGET} PRIVATE"
+INC_BLOCK="$(extract_block "$WORK/stripped.txt" "$INC_MARKER")"
+INC_BODY="${INC_BLOCK#"$INC_MARKER"}"
+INC_BODY="$(printf '%s' "$INC_BODY" | sed 's/)[[:space:]]*$//')"
+
+# ...and from the shared set_common_properties(TARGET_NAME) function - see
+# the header comment on ${CMAKE_BINARY_DIR}.
+COMMON_INC_MARKER='target_include_directories(${TARGET_NAME} PRIVATE'
+COMMON_INC_BLOCK="$(extract_block "$WORK/common_stripped.txt" "$COMMON_INC_MARKER")"
+COMMON_INC_BODY="${COMMON_INC_BLOCK#"$COMMON_INC_MARKER"}"
+COMMON_INC_BODY="$(printf '%s' "$COMMON_INC_BODY" | sed 's/)[[:space:]]*$//')"
+
+INCLUDES=()
+while IFS= read -r tok; do
+	[ -z "$tok" ] && continue
+	resolved_output="$(resolve_include "$tok")" || exit 1
+	[ -n "$resolved_output" ] && INCLUDES+=("$resolved_output")
+done <<< "$(printf '%s' "$INC_BODY" | split_cmake_args)"
+
+while IFS= read -r tok; do
+	[ -z "$tok" ] && continue
+	resolved_output="$(resolve_include "$tok")" || exit 1
+	[ -n "$resolved_output" ] && INCLUDES+=("$resolved_output")
+done <<< "$(printf '%s' "$COMMON_INC_BODY" | split_cmake_args)"
+
+if [ "${#INCLUDES[@]}" -eq 0 ]; then
+	echo "xbox-game-manifest: zero include directories parsed from $CMAKELISTS +" >&2
+	echo "  $COMMON_CMAKELISTS - refusing to write an empty manifest." >&2
+	exit 1
+fi
+
+for d in "${INCLUDES[@]}"; do
+	[ -d "$d" ] || { echo "xbox-game-manifest: derived include directory does not exist: $d" >&2; exit 1; }
+done
+
 OUT_DIR="$SCRATCH/game-$TITLE"
 mkdir -p "$OUT_DIR"
 OUT="$OUT_DIR/$TARGET.manifest"
@@ -399,10 +491,14 @@ OUT="$OUT_DIR/$TARGET.manifest"
 	for d in "${DEFINES[@]}"; do
 		echo "DEFINE $d"
 	done
+	for i in "${INCLUDES[@]}"; do
+		echo "INCLUDE $i"
+	done
 	for s in "${SOURCES[@]}"; do
 		echo "SOURCE $s"
 	done
 } > "$OUT"
 
-echo "xbox-game-manifest: wrote ${#SOURCES[@]} source(s), ${#DEFINES[@]} define(s) to $OUT" >&2
+echo "xbox-game-manifest: wrote ${#SOURCES[@]} source(s), ${#DEFINES[@]} define(s)," >&2
+echo "  ${#INCLUDES[@]} include dir(s) to $OUT" >&2
 echo "$OUT"

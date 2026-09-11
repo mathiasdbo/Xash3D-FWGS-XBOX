@@ -1963,14 +1963,40 @@ with exit 1, names the exact offending token, and writes no manifest
 file. The real, unmodified `deps/hlsdk` re-run afterward to confirm no
 regression: identical 107/5 and 85/6 source/define counts as before this
 fix. Not fixed here, out of this script's scope (a
-project-wide compiler-flag concern, not a per-title one, and this
-manifest format carries DEFINE/SOURCE only by design): `set_common_properties`
+project-wide compiler-flag concern, not a per-title one): `set_common_properties`
 also sets real `target_compile_options` (`-fpermissive
 -fno-strict-aliasing -Wno-invalid-offsetof`, its own comment already
 noting nxdk-cc needs them too) that `tools/xbox-cxx.sh` does not
 currently pass - flagged for whoever builds the sweep/compile step to
 either bake into `xbox-cxx.sh` directly (these are project-wide, not
 per-title) or extend the manifest format for.
+
+**Include directories added to the manifest format (`INCLUDE`), 2026-09-11
+- same derivation discipline as defines, applied before writing the
+compile/sweep step that would otherwise need its own hand-typed `-I`
+list.** `target_include_directories()` read from both the per-target
+CMakeLists.txt and `set_common_properties()`, same two-source pattern as
+defines. Two real CMake variable references appear, resolved
+deterministically rather than guessed: `${CMAKE_CURRENT_SOURCE_DIR}` (each
+target's own directory - one fixed value per CMakeLists.txt, not a
+generator expression) resolves to `$SDK_DIR/$SUBDIR`; `${CMAKE_BINARY_DIR}`
+(from `set_common_properties`) resolves to nothing - checked, not assumed:
+`grep configure_file` across every `deps/hlsdk` CMakeLists.txt found only
+an install script and `cl_dll`'s Linux-only vgui/SDL2 `.so` copies, no
+header any `.cpp` `#include`s ever gets generated into a binary
+directory, so adding a scratch path here would invent a value nothing
+needs rather than derive a real one. Any other `${...}` reference is a
+hard parse error, same posture as an unrecognized generator expression.
+Verified against the real files: server - 6 include dirs (`dlls`,
+`common`, `engine`, `game_shared`, `pm_shared`, `public`); client - 10
+(`cl_dll`, `cl_dll/hl`, `cl_dll/particleman`, `dlls`, `common`,
+`game_shared`, `public`, `pm_shared`, `engine`, `utils/vgui/include`),
+every one confirmed to exist as a real directory on disk. Two new
+end-to-end negative tests through the real script (same scratch-SDK-copy
+technique as the generator-expression one above): an unrecognized
+`${...}` variable injected into the common include block fails with
+exit 1 and writes no manifest; the pre-existing generator-expression
+negative test re-run to confirm this change didn't regress it.
 
 **`deps/hlsdk`'s `resonance3d` branch CMakeLists fixed to actually match
 what this project needs, 2026-09-11 (recorded as divergence #35) - found

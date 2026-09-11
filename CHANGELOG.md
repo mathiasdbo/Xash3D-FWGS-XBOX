@@ -5,6 +5,21 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/xbox-game-manifest.sh`: derive include directories too, not just sources and defines (X7.1)
+
+Same derivation discipline the defines fix already established, applied
+before a sweep/compile step needs its own hand-typed `-I` list:
+`target_include_directories()` read from both the per-target CMakeLists
+and the shared `set_common_properties()`, with the two real CMake
+variable references it contains (`${CMAKE_CURRENT_SOURCE_DIR}`,
+`${CMAKE_BINARY_DIR}`) resolved deterministically rather than guessed -
+`${CMAKE_BINARY_DIR}` resolves to nothing after confirming (not
+assuming) that nothing in `deps/hlsdk` ever generates a header into a
+binary directory any `.cpp` includes. New `INCLUDE` manifest directive.
+Verified against the real files (server 6, client 10 include dirs, all
+confirmed to exist), plus a new end-to-end negative test for an
+unrecognized CMake variable reference.
+
 ### Fixed — `tools/xbox-game-manifest.sh`: a resolver failure inside a command substitution didn't actually fail the script (Codex review round 2)
 
 `resolve_define`'s hard-error path (an unrecognized generator expression)
