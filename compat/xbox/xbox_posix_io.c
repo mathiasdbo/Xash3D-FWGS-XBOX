@@ -158,6 +158,31 @@ static const char *r3d_native_path( const char *path, char *out, size_t out_size
 
 	if( !r3d_path_is_absolute( path ))
 	{
+		// A leading "./" (one or more, though this codebase never
+		// actually stacks them) names the current directory itself -
+		// GoldSrc's own convention of always spelling "here" out rather
+		// than passing an empty string, used constantly
+		// (filesystem/searchpath.c:675,703's "./", "Adding directory: ./",
+		// and every file later opened relative to that searchpath's own
+		// "./" prefix - filesystem/dir.c:468-474 concatenates it with
+		// each requested filename, so "./valve/gameinfo.txt" is a real,
+		// live shape this sees, not just the bare "./" opendir() case).
+		// Left as literal text, "." becomes a real path COMPONENT - "D:\"
+		// + "." + "\" = "D:\.\", not "D:\" - and unlike a real Win32
+		// CreateFile/FindFirstFileA (whose kernel32 layer canonicalises
+		// "\.\" mid-path before ever calling NtCreateFile), nxdk's
+		// FindFirstFileA (compat/xbox/opendir above) hands the object
+		// manager this exact string unresolved: "." is not a name any
+		// real object in `\??\D:\` namespace has. Stripped here, before
+		// the CWD join below, so every caller downstream of this
+		// function - not just opendir() on the bare "./" case a first,
+		// narrower version of this fix only handled (found in review) -
+		// sees the same, correctly resolving path.
+		while( path[0] == '.' && path[1] == '/' )
+			path += 2;
+		if( path[0] == '.' && path[1] == '\0' )
+			path += 1;
+
 		for( ; i < out_size - 1 && r3d_cwd[i]; i++ )
 			out[i] = r3d_cwd[i];
 
@@ -169,31 +194,6 @@ static const char *r3d_native_path( const char *path, char *out, size_t out_size
 			if( i >= out_size - 1 )
 				return NULL;
 			out[i++] = '\\';
-		}
-
-		// "." / "./" name the current directory itself - the whole reason
-		// FS_ValidateDirectories/FS_AddDir_Fullpath/opendir's own callers
-		// (filesystem/searchpath.c:675,703, "Adding directory: ./") use
-		// it constantly, per GoldSrc's own convention of always spelling
-		// "here" out rather than passing an empty string. Left as literal
-		// text, this loop would append it onto r3d_cwd as a real path
-		// component - out[i] finishes "D:\" + "." + "\" = "D:\.\", not
-		// "D:\" - and unlike a real Win32 CreateFile/FindFirstFileA (whose
-		// kernel32 layer canonicalises "\.\" mid-path before ever calling
-		// NtCreateFile), nxdk's FindFirstFileA (compat/xbox/opendir above)
-		// hands the object manager this exact string unresolved: "." is
-		// not a name any real object in `\??\D:\` namespace has, and
-		// ObDosDevicesDirectory()-relative lookups have no built-in
-		// "current directory" shorthand the way a POSIX or DOS shell
-		// does. Skipping straight to the terminator below when path IS
-		// exactly "." or "./" (not merely PREFIXED with one - "./valve"
-		// still needs the copy loop) leaves `out` as the CWD alone,
-		// already correctly '\'-terminated by the block above - the same
-		// path chdir("D:\") itself already proved resolves.
-		if( path[0] == '.' && ( path[1] == '\0' || ( path[1] == '/' && path[2] == '\0' )))
-		{
-			out[i] = '\0';
-			return out;
 		}
 	}
 

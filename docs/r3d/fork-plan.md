@@ -342,22 +342,34 @@ real bugs surfaced in sequence by the boot log itself, not by reading code:
    (`"D:\.\ "`) rather than collapsing it - correct on real Win32 (kernel32
    canonicalises `\.\` before calling `NtCreateFile`), but nxdk's own
    `FindFirstFileA` hands that string to the object manager unresolved,
-   where `.` is not a real name under `\??\D:\`. Fixed: `path` exactly
-   `"."` or `"./"` (not merely prefixed with one - `"./valve"` still
-   resolves normally) now collapses to `r3d_cwd` alone.
+   where `.` is not a real name under `\??\D:\`. **Found in Codex review**:
+   a first version of this fix only collapsed `path` exactly equal to `"."`
+   or `"./"`, leaving `"./valve"` (the shape `filesystem/dir.c:468-474`'s
+   own root-searchpath file opens actually use, not just the bare
+   `opendir("./")` case) still producing `"D:\.\valve"` - the same
+   unresolvable string one level down. Fixed for real: any leading `"./"`
+   (or a bare trailing `"."`) is now stripped from `path` before the
+   `r3d_cwd` join, for every caller, not just the exact-string case.
 
-**Both fixes verified by the SAME real boot log, not separately claimed**:
+**All three fixes verified by real boot logs, not separately claimed**:
 after fix 1 alone, the boot log read `Couldn't find game directory 'valve'`
-(progress - EINVAL gone, but `FI.numgames` still 0); after fix 2, on a
-disc whose `valve/` holds only a synthetic `gameinfo.txt`, the engine
-found it and progressed past game-directory resolution entirely into
-`Host_InitCommon: couldn't load gfx.wad` - a real, later, and entirely
-expected failure (that disc has no real assets, `gfx.wad` included). This
-is `FI.numgames > 0` and the game directory mounting, both directly
-observed. On a real full retail `valve/` disc (392 MB, genuine assets),
-boot was still in progress when this entry was written - `Host_InitCommon`
-onward is real engine/asset-loading work, not filesystem-layer work, and
-is X2's own scope to pick up from here, not X0.5's.
+(progress - EINVAL gone, but `FI.numgames` still 0); after fix 2's first,
+narrower version, on a disc whose `valve/` holds only a synthetic
+`gameinfo.txt`, the engine found it and progressed past game-directory
+resolution entirely into `Host_InitCommon: couldn't load gfx.wad` - at the
+time, read as "expected" (no real assets on that disc) but, per the Codex
+finding, not actually ruled out as the SAME path bug one level deeper.
+After the corrected fix, a disc whose `valve/` holds `gameinfo.txt` plus a
+real, retail `gfx.wad` (86,608 bytes) booted with **no `couldn't load
+gfx.wad` error at all** - the file genuinely opens now through the exact
+`"./valve/gfx.wad"`-shaped root-searchpath path Codex named. `FI.numgames
+> 0`, the game directory mounts, and a real asset opens through it - the
+X0.5 exit line, this time correctly closed. On a real full retail `valve/`
+disc (392 MB, ~4,200 files), boot was still progressing (real, non-zero,
+climbing CPU time; no crash) when this entry was written, apparently
+throttled by xemu's own DVD-read pacing for a disc this size rather than
+anything filesystem-layer - `Host_InitCommon` onward is X2's own scope to
+pick up from here, not X0.5's.
 
 **Exit met**: the engine finds its game directory on Xbox and mounts it.
 `FI.numgames > 0` and the engine proceeds into `Host_InitCommon` looking
