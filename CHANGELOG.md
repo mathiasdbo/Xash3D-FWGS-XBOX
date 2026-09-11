@@ -5,6 +5,49 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — X0.5 confirmed by a real boot: the client engine finds and mounts `valve/`
+
+The network log channel (divergence #13) finally reached the host this
+session - the earlier "Windows Firewall silently dropped it" block
+documented in divergence #31 was a tooling bug, not a network one:
+`XBOX_ENGINE_TESTS=1`, exported in this dev shell and passed to an
+explicit `/c/msys64/usr/bin/bash script.sh` invocation (the form these
+scripts' own usage comments document as canonical), never actually
+reached the compiler - that specific `bash` binary resets its environment
+on start and drops custom exports, silently, with the build reporting a
+completely normal "96/96 compile" the whole time. See
+`docs/r3d/lessons.md`'s new entry for the full reproduction; the fix is
+invoking these scripts bare (`tools/xbox-cc.sh <args>`, relying on their
+own shebang and their own internal `PATH` fix-up) instead.
+
+With the log channel genuinely live, a real xemu boot found two more real
+bugs in `compat/xbox/xbox_posix_io.c`'s CWD emulation (divergence #31),
+fixed the same session: a bare `chdir("D:")` failing `EINVAL` (the `D:`
+DOS-device symlink object is a different NT path from `D:\`, its target
+directory), and `r3d_native_path` appending a literal `"./"` path
+component instead of collapsing it (nxdk's `FindFirstFileA` does not
+canonicalise `\.\` the way real Win32 does). Both fixed, both verified by
+the same boot log: `FI.numgames > 0`, `valve/gameinfo.txt` found and
+mounted, boot proceeding into `Host_InitCommon` looking for real assets -
+X0.5's own exit line, finally observed rather than inferred.
+
+Reaching that boot at all needed the CLIENT target to call `Host_Main`
+for the first time ever (divergence #32): a new `XBOX_CLIENT_MAIN=1`
+opt-in swaps `engine/platform/xbox/xbox_main.c`'s placeholder `main()`
+(X1, #23 - never actually referenced `Host_Main`) for
+`engine/common/launcher.c`'s real one, the same entry point the dedicated
+target and PSVita/iOS already use. That surfaced the client's real,
+previously-never-linked symbol graph: `engine/common/net_chan.c` needed a
+real bzip2 (built from its own `CMakeLists.txt`-named 7-file source list,
+not a stub - `BZ2_bzBuffToBuffCompress`/`Decompress` are genuinely called
+for file-fragment compression), and `engine/client/cl_steam.c` needed
+`getsockopt`/`SOL_SOCKET`/`SO_ERROR` added to
+`engine/platform/stub/net_stub.h` (a real gap - every other BSD socket
+call was already stubbed there). Result: a complete client link - engine,
+filesystem, the real menu module, a stub game module, real SDL2, real
+(if `XASH_NO_NETWORK=1`-stubbed) networking - 0 duplicate, 0 undefined, a
+real, valid XBE.
+
 ### Added — MPAK v8: bake per-style lightmap blocks for every extra lightstyle
 
 The lightstyle census (below) ruled out dropping the 6.69% of lit faces
