@@ -203,12 +203,14 @@ if [ ! -f "$GEN_DIR/generated_library_tables.h" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_server_exports.c" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_client_exports.c" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_menu_exports.c" ] \
-	|| [ ! -f "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ]; then
+	|| [ ! -f "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ] \
+	|| [ ! -f "$GEN_DIR/generated_lib_ref_null_exports.c" ]; then
 	GEN_STALE=1
 elif [ "$REPO/stub_game/server/exports.txt" -nt "$GEN_DIR/generated_lib_server_exports.c" ] \
 	|| [ "$REPO/stub_game/client/exports.txt" -nt "$GEN_DIR/generated_lib_client_exports.c" ] \
 	|| [ "$REPO/3rdparty/mainui/exports.txt" -nt "$GEN_DIR/generated_lib_menu_exports.c" ] \
-	|| [ "$REPO/filesystem/exports.txt" -nt "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ]; then
+	|| [ "$REPO/filesystem/exports.txt" -nt "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ] \
+	|| [ "$REPO/ref/null/exports.txt" -nt "$GEN_DIR/generated_lib_ref_null_exports.c" ]; then
 	GEN_STALE=1
 fi
 if [ "$GEN_STALE" = "1" ]; then
@@ -217,6 +219,7 @@ if [ "$GEN_STALE" = "1" ]; then
 		"client:$REPO/stub_game/client/exports.txt" \
 		"menu:$REPO/3rdparty/mainui/exports.txt" \
 		"filesystem_stdio:$REPO/filesystem/exports.txt" \
+		"ref_null:$REPO/ref/null/exports.txt" \
 		> /dev/null
 fi
 
