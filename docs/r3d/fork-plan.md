@@ -1998,32 +1998,42 @@ looked up from the engine, so the allowlist and the rename apply to data
 symbols exactly as to functions, not "functions" as a first draft might
 assume.
 
-**Gap 1, found in review: the first pass linked only the two crossbow
-objects with `-force:unresolved`, never the real engine.** That proves
-the two objects don't collide with EACH OTHER; it says nothing about
-colliding with the 178 real engine/third-party/stub objects this XBE
-actually links. Corrected: took the properly-filtered engine object set
-`tools/xbox-link-check.sh` itself would produce (`ls .sweep/*.obj
-.sweep/gen/*.obj`, then its own two filters - `grep -vE
-'_platform_(android|apple|dos|ios|irix|linux|nswitch|posix|psvita|sdl1|
-sdl3|stub|win32)_'` and `grep -vE '_tests_'`, plus the `--client-main`
-exclusion of `xbox_main.obj` - `:89-111`; a raw unfiltered `ls .sweep/*.obj`
-was tried first and found 26 unrelated pre-existing duplicates from stray
-test-harness objects (`_tests_*.obj`) and the placeholder `_main` - a
-methodology bug in the test, not a real project problem, and gone the
-moment the real script's own filter was applied: 178 objects, `0`
-duplicate on its own). Ran the full link three ways:
+**Gap 1, found in review, twice: the first pass linked only the two
+crossbow objects with `-force:unresolved`, never the real engine; the
+second pass's own "real engine" was still incomplete.** Round 1 of
+review: two isolated objects prove they don't collide with EACH OTHER,
+nothing about the 384 objects this XBE actually links. First correction
+used `ls .sweep/*.obj .sweep/gen/*.obj` plus `tools/xbox-link-check.sh`'s
+own filename filters - 178 objects, `0` duplicate on its own - and was
+STILL wrong: third-party objects live in `.sweep/3p/`, one directory
+level this glob never reached (`tools/xbox-link-check.sh:232-305` builds
+`THIRDPARTY_OBJS` there separately), so 206 real linked objects -
+including seven real `MultiEmulator` exports
+(`3rdparty/MultiEmulator/include/multi_emulator.h:25-31`) - were absent
+from what was "tested". Corrected properly this time: ran
+`tools/xbox-link-check.sh --client-main --xbe` for real (one clean
+invocation, not concurrent with anything else - lessons.md already
+documents what concurrent invocations of this script do to `.sweep/gen/`)
+and read back its own `.sweep/link-check-response.txt` - the EXACT
+384-object list (engine + all third-party + stub game + generated
+tables) the actual client XBE was just linked from, `0 duplicate, 0
+undefined` on its own. Appended the crossbow objects to a copy of that
+same response file rather than reconstructing any object list by hand,
+and ran the full link three ways:
 
-- **Clean baseline** (178 real objects, no crossbow at all): exit 0, `0` duplicate.
-- **Positive control** (178 real objects + the two RENAMED crossbow
-  objects): exit 0, `0` duplicate, a real 1.77 MB linked image.
-- **Negative control** (178 real objects + the two UNRENAMED crossbow
-  objects): exit 1, 13 duplicate-symbol errors, named: `_weapon_crossbow`,
-  `_ammo_crossbow`, and 11 `CCrossbow::*` virtual methods (`Spawn`,
-  `Precache`, `GetItemInfo`, `Deploy`, `Holster`, `PrimaryAttack`,
-  `FireSniperBolt`, `FireBolt`, `SecondaryAttack`, `Reload`,
-  `WeaponIdle`) - the SAME 13, exactly, as the isolated two-object test,
-  confirming the isolated test wasn't wrong, only insufficient on its own.
+- **Clean baseline** (the real 384-object response file, unmodified, no
+  crossbow at all): exit 0, `0` duplicate.
+- **Positive control** (the same response file + the two RENAMED
+  crossbow objects appended): exit 0, `0` duplicate, a real 3.89 MB
+  linked image.
+- **Negative control** (the same response file + the two UNRENAMED
+  crossbow objects appended): exit 1, 13 duplicate-symbol errors, named:
+  `_weapon_crossbow`, `_ammo_crossbow`, and 11 `CCrossbow::*` virtual
+  methods (`Spawn`, `Precache`, `GetItemInfo`, `Deploy`, `Holster`,
+  `PrimaryAttack`, `FireSniperBolt`, `FireBolt`, `SecondaryAttack`,
+  `Reload`, `WeaponIdle`) - the SAME 13, exactly, as both earlier
+  (insufficient) tests, confirming those weren't wrong about the
+  collision itself, only about what they had actually linked it against.
 
 **Gap 2, found in review: `/EXPORT:` directives for a renamed-away
 symbol are NOT harmless.** The first pass claimed `lld-link` only
@@ -2053,11 +2063,15 @@ immediately after the export list is read and before the rename step -
 not to try to selectively edit `/EXPORT:` lines out of the directive
 string. Re-ran the full positive control with this order (compile → read
 directives for X7.2 → strip `.drectve` → rename → link): `0` duplicate,
-same as before, and `llvm-readobj --coff-exports` on the resulting image
-shows exactly the 7 legitimate pre-existing engine exports
-(`CreateInterface`, `GetFSAPI`, `GetRefAPI`, `Host_Main`,
-`Host_Shutdown`, `pfnSPR_Frames`, `pfnSPR_Load`) and zero crossbow-related
-entries, zero `0xFFFF0000` sentinels. `/INCLUDE:` directives (used
+same as before, and `llvm-readobj --coff-exports` on the TRUE
+full-object-set image shows exactly the 14 legitimate pre-existing
+exports - 7 engine (`CreateInterface`, `GetFSAPI`, `GetRefAPI`,
+`Host_Main`, `Host_Shutdown`, `pfnSPR_Frames`, `pfnSPR_Load`) and the 7
+`MultiEmulator` ones Gap 1 found missing the first time
+(`GenerateAVSMP`, `GenerateOldRevEmu`, `GenerateRevEmu`,
+`GenerateRevEmu2013`, `GenerateSC2009`, `GenerateSetti`,
+`GenerateSteamEmu`) - and zero crossbow-related entries, zero
+`0xFFFF0000` sentinels. `/INCLUDE:` directives (used
 elsewhere in this SDK to keep an otherwise-unreferenced static data
 member from being discarded, e.g. `?AmmoInfoArray@CBasePlayerItem@@...`
 on `crossbow.cpp` itself) are lost by a whole-section strip too; nothing
@@ -2108,14 +2122,30 @@ client and that X7.1b renames away. The
 generator fails nonzero when it finds fewer than the four server API
 exports or fewer than the 37 required client exports (`cl_game.c`'s
 `cdll_exports[]`), so a broken sweep cannot produce a plausible-looking
-half table - and, from the specialist review, it also REJECTS any
-`/EXPORT:?...` entry: a C++-mangled export means a `DLLEXPORT` without
-`extern "C"`, which the engine can never look up by its plain name, and
-counting it toward "37 found" would hide exactly that. Related
-C-linkage trap in the same review: `dlls/util.cpp:1780-1782` defines an
-`extern "C" _rotr` only `#ifndef WIN32` - the sweep must pass `WIN32`
-(the fork's "NXDK-proof" CMake already does; nxdk-cc does not on its
-own) or that symbol lands in the link uninvited. `xbox-cc.sh`'s staleness check gains these two files as inputs.
+half table.
+
+The specialist review flagged mangled `/EXPORT:?...` entries as a
+correctness risk (a `DLLEXPORT` without `extern "C"`, invisible to any
+by-name lookup) and an earlier draft of this plan over-corrected that
+into "the generator rejects any mangled export present" - wrong, and
+disproven by this plan's own X7.1b measurement: `crossbow.cpp`, real SDK
+source, exports several (`?BoltTouch@CCrossbowBolt@@...`,
+`?SUB_CallUseToggle@CBaseEntity@@...`) as ordinary, EXPECTED output of
+`EXPORT`-marked C++ methods (`common/Platform.h:66`'s
+`DLLEXPORT = __declspec(dllexport)`) - not a mistake, just not something
+the engine ever looks up by name. A generator that failed the build on
+their mere presence could never generate `client/exports.txt` at all.
+Corrected: the generator FILTERS every mangled `/EXPORT:` entry out of
+the written `exports.txt` silently (X7.1b already renames the underlying
+symbol away regardless, so it was never going to be reachable by that
+name past the rename step either) and validates the required-count
+thresholds - four server API exports, 37 client exports - against the
+UNMANGLED entries only. `dlls/util.cpp:1780-1782`'s `extern "C" _rotr`,
+compiled only `#ifndef WIN32`, is the reason `WIN32` must be passed to
+every SDK compile regardless (the fork's "NXDK-proof" CMake already does;
+`nxdk-cxx` does not on its own) - an unrelated C-linkage trap from the
+same review, not a mangled-export case. `xbox-cc.sh`'s staleness check
+gains these two files as inputs.
 Verification: the generated `server/exports.txt` for `hl` has 251 entity
 names + 4 API names, checked against `grep -c LINK_ENTITY_TO_CLASS` of the
 same tree - two independent counts that must agree.
