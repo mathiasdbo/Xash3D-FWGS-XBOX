@@ -489,6 +489,44 @@ fi
 STUB_GAME_OBJS="$FS_EXPORTS_OBJ"
 echo "xbox-link-check: filesystem_stdio registered in the static library table (real GetFSAPI)." >&2
 
+# ref_null: X5 bring-up. R_Init()'s own renderer-selection loop
+# (engine/client/dll_int/ref_common.c) only auto-tries names gated by a
+# compile-time XASH_REF_*_ENABLED define, none of which exist for Xbox
+# yet (no vid_xbox.c/ref_soft port written) - without SOME renderer
+# registered, VID_Init() cannot succeed at all, blocking client boot
+# before it reaches the main loop. ref/null (upstream's own "run full
+# client in hazardous^Wheadless environments" module, ref/null/r_context.c's
+# own comment) is a real, complete ref_interface_t of no-op stubs -
+# genuinely useful on its own merits here, not a placeholder invented for
+# this project: it lets the REST of the client boot path (SV_Init,
+# CL_Init, menu init, the frame loop) be verified independently of the
+# harder problem of porting a real rasterizer to the NV2A. Selected at
+# runtime via a `r_refdll "null"` line in a disc's video.cfg (executed by
+# R_Init() itself, upstream's own designated renderer-choice mechanism -
+# no engine code changes needed for selection), not compiled in as the
+# default.
+REF_NULL_EXPORTS_C="$SCRATCH/gen/generated_lib_ref_null_exports.c"
+if [ ! -f "$REF_NULL_EXPORTS_C" ]; then
+	echo "xbox-link-check: $REF_NULL_EXPORTS_C does not exist." >&2
+	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
+	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	exit 1
+fi
+REF_NULL_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$REF_NULL_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
+if ! tools/xbox-cc.sh "$REF_NULL_EXPORTS_C" -o "$REF_NULL_EXPORTS_OBJ" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+	echo "xbox-link-check: generated_lib_ref_null_exports.c failed to compile:" >&2
+	cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+	exit 2
+fi
+REF_NULL_OBJ="$SCRATCH/ref_null_r_context.obj"
+if ! tools/xbox-cc.sh ref/null/r_context.c -Iref/common -o "$REF_NULL_OBJ" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+	echo "xbox-link-check: ref/null/r_context.c failed to compile:" >&2
+	cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+	exit 2
+fi
+STUB_GAME_OBJS="$STUB_GAME_OBJS $REF_NULL_EXPORTS_OBJ $REF_NULL_OBJ"
+echo "xbox-link-check: ref_null registered in the static library table (real GetRefAPI)." >&2
+
 for f in stub_game/server/server_stub.c "$SCRATCH/gen/generated_lib_server_exports.c" "$SCRATCH/gen/generated_lib_client_exports.c"; do
 	if [ ! -f "$f" ]; then
 		echo "xbox-link-check: $f does not exist." >&2
