@@ -1898,24 +1898,60 @@ the mechanism is proven.
 Each module's object set is renamed so its internals cannot meet the
 other module's in the link. Mechanism, on this toolchain's own tools:
 `llvm-nm --defined-only --extern-only` over one module's objects produces
-the set of symbols it DEFINES; every one of them except that module's own
-export list (X7.2's generated `exports.txt`, plus the C-linkage names the
-engine itself resolves by name - the four server API exports, the client
-`cdll_exports`, `pm_shared`'s entry points) is written to a rename map
-`old new` with a `sv_`/`cl_` prefix, and `llvm-objcopy --redefine-syms
-<map>` (present: `/c/msys64/mingw64/bin/llvm-objcopy.exe`, COFF-capable)
-is applied to every object of that module. Renaming is consistent across
-definitions and references within the module because the map is derived
-from the module's own definitions, and references to symbols the module
-does NOT define (CRT, libc++, nothing from the engine - the SDK reaches
-the engine only through `gEngfuncs`) are untouched because they are not
-in the map. This is `xshlib.py`'s `objcopy -G` localisation done by
-renaming instead of by a relocatable pre-link, since `lld-link` has no
-COFF `-r` (measured: `lld-link /?` lists only `/incremental`, no
-relocatable or partial-link option). Applied to BOTH modules, not just
-one: it also removes the COMDAT silent-merge hazard (a renamed vtable
-cannot be merged with the other side's) and any libc-helper collision
-with the engine.
+the set of symbols it DEFINES; every one of them NOT on that module's
+public allowlist is written to a rename map `old new` with a `sv_`/`cl_`
+prefix, and `llvm-objcopy --redefine-syms <map>` (present:
+`/c/msys64/mingw64/bin/llvm-objcopy.exe`, COFF-capable) is applied to
+every object of that module. Renaming is consistent across definitions
+and references within the module because the map is derived from the
+module's own definitions, and references to symbols the module does NOT
+define (CRT, libc++, nothing from the engine - the SDK reaches the engine
+only through `gEngfuncs`) are untouched because they are not in the map.
+
+**The allowlist is the set of names the ENGINE resolves for THAT module,
+and nothing else** - corrected in Codex review round 2 of this plan. A
+first draft excluded "the module's own export list" from renaming, i.e.
+everything its objects mark `/EXPORT:`. That preserves the collision:
+the client compiles `crossbow.cpp` too, where `LINK_ENTITY_TO_CLASS`
+stays active (`deps/hlsdk/dlls/crossbow.cpp:224`, `:516`, macro
+`dlls/util.h:100-102`), so `weapon_crossbow`/`ammo_crossbow` are
+`/EXPORT:` C symbols on BOTH sides, and excluding them on both sides
+leaves them duplicated. The engine never asks the client for an entity
+classname, and never asks either module for `PM_*` by name (`sv_pmove.c:491`,
+`:956` go through `svgame.dllFuncs`). So:
+
+- server allowlist = the four API exports (`GetEntityAPI`, `GetEntityAPI2`,
+  `GetNewDLLFunctions`, `GiveFnptrsToDll`) + every entity classname, i.e.
+  exactly the server objects' `/EXPORT:` set;
+- client allowlist = `cl_game.c`'s `cdll_exports[]` (37) + `cdll_new_exports[]`
+  (12) names, and NOTHING from the client objects' `/EXPORT:` set beyond
+  those - client-side entity symbols are renamed like any other internal;
+- `PM_*` is on neither list and is renamed on both sides.
+
+This is `xshlib.py`'s `objcopy -G` localisation done by renaming instead
+of by a relocatable pre-link, since `lld-link` has no COFF `-r`
+(measured: `lld-link /?` lists only `/incremental`, no relocatable or
+partial-link option). Applied to BOTH modules, not just one: it also
+removes the COMDAT silent-merge hazard (a renamed vtable cannot be
+merged with the other side's) and any libc-helper collision with the
+engine.
+
+**Prototype gate, before X7.1/X7.2 tooling is even written:** compile
+`deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh` (server
+defines, then `CLIENT_DLL`), plus the minimum each needs to resolve.
+Apply the rename to BOTH sides with the allowlists above, then check the
+concrete symbols before any link: `llvm-nm` of the renamed client object
+must show `cl__weapon_crossbow`, `cl__ammo_crossbow` and a prefixed
+`?PrimaryAttack@CCrossbow@@...`, and of the renamed server object an
+unprefixed `_weapon_crossbow` with a prefixed `sv_?PrimaryAttack@...`.
+Only then link both with the engine object set through
+`tools/xbox-link-check.sh` and require `0 duplicate`; then the negative
+control - the same link with NO rename must report the duplicates, by
+name (`?PrimaryAttack@CCrossbow@@...`, `_weapon_crossbow`), or the gate
+has measured nothing. `gen-library-tables.sh` needs no change: the names
+it declares `extern void` are exactly the allowlisted, unrenamed ones.
+Record the resulting build divergence in the ledger; it lives in
+`tools/`, form 1, touching no SDK source at all.
 
 **Measured 2026-09-11 on real `tools/xbox-cxx.sh` objects, before this
 was written down as the design:** two TUs, one defining a C++ function
@@ -1965,7 +2001,13 @@ must be stripped (the same convention `gen-library-tables.sh` already
 assumes for its `extern void name` declarations). That is the
 exact set the real DLL would export, derived from the SDK's own source,
 regenerated on every build, and it includes every `LINK_ENTITY_TO_CLASS`
-name by construction (~260 server entries, the 37+12 client entries). The
+name by construction (~260 server entries). For the CLIENT the rule is
+the mirror of X7.1b's allowlist (Codex review round 2): `client/exports.txt`
+is `cl_game.c`'s `cdll_exports[]` + `cdll_new_exports[]` names FILTERED
+to those the client objects actually export - never the client's raw
+`/EXPORT:` set, which also carries the shared weapon sources' entity
+classnames (`weapon_crossbow`...) that the engine never looks up on the
+client and that X7.1b renames away. The
 generator fails nonzero when it finds fewer than the four server API
 exports or fewer than the 37 required client exports (`cl_game.c`'s
 `cdll_exports[]`), so a broken sweep cannot produce a plausible-looking
