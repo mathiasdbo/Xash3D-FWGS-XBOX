@@ -2150,6 +2150,52 @@ Verification: the generated `server/exports.txt` for `hl` has 251 entity
 names + 4 API names, checked against `grep -c LINK_ENTITY_TO_CLASS` of the
 same tree - two independent counts that must agree.
 
+**Found in Codex review round 2 (the cap for this PR; verified directly
+rather than spent on a third automated round), and real: one of the four
+required server API names cannot be produced by `/EXPORT:`-directive
+scanning at all.** `h_export.cpp` - the file `GiveFnptrsToDll` is
+actually defined in - locally `#undef DLLEXPORT` and redefines it as
+`__stdcall` on `WIN32` (`h_export.cpp:28-35`), not
+`__declspec(dllexport)`; the real shared-DLL build exports it instead
+through a separate `hl.def` module-definition file
+(`GiveFnptrsToDll @1`). **Measured 2026-09-11, compiling the real file
+with `tools/xbox-cxx.sh`:** `GiveFnptrsToDll` produces NO `/EXPORT:`
+directive at all (the object's only two directives are unrelated mangled
+C++ methods from the same TU), and its actual linker symbol is
+`_GiveFnptrsToDll@8` - `__stdcall` name-decorated (`@` + byte-count of
+its two pointer arguments), not the plain `_GiveFnptrsToDll` a naive
+cdecl `extern void GiveFnptrsToDll(void);` (what `gen-library-tables.sh`
+currently emits) would look for. Directive-scanning alone would silently
+produce a `server/exports.txt` missing this hard-required name entirely
+(`SV_LoadProgs` fails immediately - `sv_game.c:5260-5266`,
+`"missing GiveFnptrsToDll export"`) even though the real compiled symbol
+is sitting right there under a different linker name.
+
+Fix, verified end-to-end 2026-09-11: the four API names are a FIXED,
+small set the ENGINE itself hard-requires by these exact strings
+(`sv_game.c`'s own `COM_GetProcAddress` calls) - not something to derive
+from SDK export directives at all, unlike the ~260 entity classnames
+which genuinely have no other source. The generator looks each of the
+four up directly in `llvm-nm --defined-only --extern-only` (not
+`--coff-directives`) against both its cdecl form (`_Name`) and its
+stdcall form (`_Name@N`, `N` = total argument bytes - `GiveFnptrsToDll`
+takes two 4-byte pointers, `@8`), and for a stdcall match emits the
+`extern` declaration with an explicit linker-name override rather than
+guessing a calling convention: `extern void GiveFnptrsToDll(void) asm(
+"_GiveFnptrsToDll@8");` - GNU/clang inline-asm symbol-renaming, binding
+the C name to the EXACT decorated symbol regardless of what convention
+produced it. Verified with a real link: a TU declaring `GiveFnptrsToDll`
+this way and taking its address, linked against the real compiled
+`h_export.obj` - `0` undefined-symbol warnings naming
+`_GiveFnptrsToDll@8` (the only warnings present are unrelated CRT/`memcpy`
+symbols missing from that minimal two-object test link, already proven
+present in the real engine link by every successful build so far). The
+other three API names (`GetEntityAPI`, `GetEntityAPI2`,
+`GetNewDLLFunctions`) ARE plain `extern "C" DLLEXPORT` in this SDK
+(`client.cpp`) and need no such override - the generator only reaches
+for `asm()` when a name's cdecl form is absent but a stdcall-decorated
+form of it exists.
+
 ### X7.3 — VGUI out of `cl_dll`, on the `resonance3d` branches
 
 Port `hlsdk-portable`'s `USE_VGUI` discipline: exclude the 9 `vgui_*.cpp`
@@ -2177,12 +2223,23 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
 
 ### X7.4 — Half-Life first: server, then client, each a boot milestone
 
-0. **X7.1b's collision prototype: PASSED, 2026-09-11 (see X7.1b for the
-   full measurement).** `0` duplicate on the renamed two-object
-   `crossbow.cpp` link, 13 named duplicates on the same pair unrenamed.
-   The real `tools/` implementation (X7.1's TU manifests, the allowlist
-   generator, the rename step) is what X7.4 step 1 now needs; the design
-   itself is de-risked.
+0. **X7.1b's collision prototype: PASSED, 2026-09-11, against the real
+   384-object client response file (see X7.1b for the full
+   measurement).** `0` duplicate with the renamed `crossbow.cpp` pair
+   added to `tools/xbox-link-check.sh`'s own `.sweep/link-check-response.txt`,
+   13 named duplicates with the same pair unrenamed, export table clean
+   (no corrupted entries from the stale-directive issue found and fixed
+   in the same pass). **X7.2's `GiveFnptrsToDll` gap, found in the same
+   review round and fixed and verified separately (X7.2): directive
+   scanning alone cannot produce this required export** (it's
+   `__stdcall`-only in `h_export.cpp`, no `/EXPORT:` directive at all,
+   real symbol `_GiveFnptrsToDll@8`) - the `asm()` linker-name-override
+   fix is verified against the real compiled `h_export.obj`, not yet
+   against a full server link (that is `hl_dll`/`dlls` -wide, X7.4 step 1
+   itself). The real `tools/` implementation (X7.1's TU manifests, the
+   allowlist generator with the API-name fallback, the strip-then-rename
+   step) is what X7.4 step 1 now needs; the design is de-risked on every
+   point two rounds of review found.
 1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
    generate `server/exports.txt`; link with `--client-main`. Exit gate is
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,

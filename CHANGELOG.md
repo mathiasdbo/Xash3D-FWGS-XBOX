@@ -38,6 +38,22 @@ legitimate pre-existing exports (7 engine, 7 `MultiEmulator`) and zero
 crossbow-related entries, zero sentinel RVAs. Full measurement in
 `docs/r3d/fork-plan.md` § X7.1b.
 
+The same review round found a second, unrelated gap in X7.2: one of the
+four hard-required server API exports, `GiveFnptrsToDll`, cannot be
+found by `/EXPORT:`-directive scanning at all - its defining file
+(`h_export.cpp`) redefines `DLLEXPORT` as `__stdcall` on `WIN32` instead
+of `__declspec(dllexport)`, so it emits no export directive, and its
+real compiled linker symbol is the `__stdcall`-decorated
+`_GiveFnptrsToDll@8`, not the plain `_GiveFnptrsToDll` a cdecl `extern`
+declaration would look for - both measured directly by compiling the
+real file. Fixed and verified end-to-end: the four API names are looked
+up in the compiled objects' full symbol table (`llvm-nm`, not just
+`--coff-directives`) in both cdecl and stdcall-decorated form, and a
+stdcall match is bound via an explicit linker-name override
+(`extern void GiveFnptrsToDll(void) asm("_GiveFnptrsToDll@8");`) rather
+than guessed - a real link against the compiled `h_export.obj` resolves
+it with zero related undefined-symbol warnings.
+
 ### Changed — fork-plan X7 rewritten as the per-title XBE plan
 
 Half-Life, Opposing Force and Blue Shift each ship as their own
