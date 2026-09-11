@@ -1758,8 +1758,13 @@ not, and every hour spent on it is an hour not spent on Half-Life.
   `SV_AllocStringPool` sets `pStringBase` (`sv_game.c:3133`, 32-bit path),
   `pfnAlertMessage` is a real variadic C function, `pfnSzFromIndex` exists.
   With `_STATIC_ENGINE_LINK` UNDEFINED the fork is stock upstream plus one
-  harmless `extern "C"` on the `pm_shared` entry points (needed anyway:
-  `pm_shared.cpp` is C++ there, and `sv_pmove.c` looks the names up as C).
+  harmless `extern "C"` on the `pm_shared` entry points. Harmless, and
+  also unnecessary - corrected by the Xbox port specialist's review of
+  this plan: the engine never looks `PM_Init`/`PM_Move` up by name, it
+  reaches them through `svgame.dllFuncs` (`sv_pmove.c:491`, `:956`), and
+  the `op4`/`bshift` forks have no `extern "C"` there at all and need
+  none. It stays only because removing it would be a gratuitous
+  difference between the three `resonance3d` branches.
   The two non-gated changes are real fixes (`multiplay_gamerules.cpp` cast,
   CMake `TARGET_PDB_FILE` guard) and stay.
 - The C++ toolchain works: `tools/xbox-cxx.sh` compiles real C++ for Xbox
@@ -1786,11 +1791,16 @@ not, and every hour spent on it is an hour not spent on Half-Life.
   `CCrossbow::PrimaryAttack`; one static link sees both, as duplicate
   definitions - and, worse, for anything COMDAT (inline methods, vtables,
   RTTI) lld silently keeps ONE copy, so a class whose layout differs under
-  `CLIENT_DLL` would link clean and misbehave. This is precisely the
-  problem upstream's `xshlib.py` `objcopy -G`/`ld -r` step solves for
-  `--static-linking`, and the X1 section's "bypassed entirely" note is
-  where it was lost. It gets its own step, X7.1b, prototyped before any
-  other X7 work is accepted.
+  `CLIENT_DLL` would link clean and misbehave. The specialist review
+  named the sharpest case: `cl_dll/hl/hl_baseentity.cpp` defines 258
+  `CBaseEntity::*`/`CBaseMonster::*`/`CBasePlayerWeapon::*` methods as
+  client-side STUBS of the real server implementations in `dlls/`, same
+  mangled names, and `GetClassPtr<T>` instantiations are COMDAT - the
+  exact shape where lld would silently hand the server a client stub.
+  This is precisely the problem upstream's `xshlib.py:33-43` `ld -r` +
+  `objcopy -G lib_X_exports` step solves for `--static-linking`, and the
+  X1 section's "bypassed entirely" note is where it was lost. It gets its
+  own step, X7.1b, prototyped before any other X7 work is accepted.
 - **Entity classnames are exported symbols.** `LINK_ENTITY_TO_CLASS`
   (`deps/hlsdk/dlls/util.h:100`) expands to
   `extern "C" DLLEXPORT void <classname>(entvars_t*)`, and the engine spawns
@@ -1959,7 +1969,14 @@ name by construction (~260 server entries, the 37+12 client entries). The
 generator fails nonzero when it finds fewer than the four server API
 exports or fewer than the 37 required client exports (`cl_game.c`'s
 `cdll_exports[]`), so a broken sweep cannot produce a plausible-looking
-half table. `xbox-cc.sh`'s staleness check gains these two files as inputs.
+half table - and, from the specialist review, it also REJECTS any
+`/EXPORT:?...` entry: a C++-mangled export means a `DLLEXPORT` without
+`extern "C"`, which the engine can never look up by its plain name, and
+counting it toward "37 found" would hide exactly that. Related
+C-linkage trap in the same review: `dlls/util.cpp:1780-1782` defines an
+`extern "C" _rotr` only `#ifndef WIN32` - the sweep must pass `WIN32`
+(the fork's "NXDK-proof" CMake already does; nxdk-cc does not on its
+own) or that symbol lands in the link uninvited. `xbox-cc.sh`'s staleness check gains these two files as inputs.
 Verification: the generated `server/exports.txt` for `hl` has 251 entity
 names + 4 API names, checked against `grep -c LINK_ENTITY_TO_CLASS` of the
 same tree - two independent counts that must agree.
@@ -1980,6 +1997,15 @@ skips `gViewPort`, and the scoreboard/MOTD/class-menu paths compile out -
 document which `cdll` behaviour changes (multiplayer-only UI) and that
 single-player is untouched.
 
+One engine-side prerequisite the client module has that the stub never
+exercised, from the specialist review: `cl_dll/inputw32.cpp:31-33,148`
+drives the gamepad through `SDL_GameController`, so the engine's Xbox
+`SDL_Init` (`engine/platform/sdl2/sys_sdl2.c:151-152`, currently
+`SDL_INIT_TIMER | SDL_INIT_EVENTS` only) must add
+`SDL_INIT_GAMECONTROLLER` before `IN_Init` runs. X6's "gamepad is free"
+line is only true once that flag is there; without it the controller
+subsystem is simply absent and `IN_Init` finds no device, silently.
+
 ### X7.4 — Half-Life first: server, then client, each a boot milestone
 
 0. **X7.1b's collision prototype passes, with its negative control.**
@@ -1994,7 +2020,21 @@ single-player is untouched.
    `CL_Init` stops at "can't initialize client: missing essential exports"
    - now with the message ARRIVING on the log channel, since #34. That
    message is the milestone: it proves 100+ real server translation units
-   link and initialise on the console.
+   link and initialise on the console. **And the first memory number is
+   taken HERE, at entry, not after a map** (specialist review): the wall
+   is already built by the engine's own statics, not by the SDK.
+   `.sweep/xbe-buildfix.map` for the current client XBE: `.text` 3.37 MB,
+   `.bss` 13.1 MB - and lessons.md's `info mem` shows every XBE section
+   resident (`0x10000-0x103d000`), so that is 16.5 MB gone before
+   `main()`. Owners: `cl` 3.48 MB, `sv` 2.44 MB, `net` 1.64 MB,
+   `mod_known` 1.6 MB, `SV_WriteEntitiesToClient.frame_ents` 697 KB,
+   `s_knownSfx` 655 KB, two `gpMove` statics 325 KB each. Retail `hl.dll`
+   is ~648 KB text + 118 KB data, `client.dll` ~312 + 272 KB, `opfor.dll`
+   ~1.0 MB text; libc++ adds tens of KB for `<string>`/`<vector>`, not
+   MB. Measure with `MmQueryStatistics` (`deps/nxdk/lib/xboxkrnl/
+   xboxkrnl.h:3333`) printed over the log channel at `Host_InitCommon`
+   entry and again after `SV_LoadProgs`; those two numbers are X8's
+   opening brief.
 2. **`hl` client module links.** Sweep `cl_dll/` (no VGUI), generate
    `client/exports.txt`, link. Expected boot: `CL_Init` passes, `UI_LoadProgs`
    loads the menu (X6's `mainui`, already linking; its manifest must be
@@ -2002,16 +2042,45 @@ single-player is untouched.
    `tools/xemu-debug.py`: `regs` in the kernel idle-wait between frames,
    `mon "info registers"` `HLT=0`, and the log channel carrying `Con_Printf`
    traffic from the frame loop - three independent signals, not one.
-3. **A map loads.** `map c0a0` via `+map` in the disc's `video.cfg`/`config`
+3. **A writable rootdir exists before the first map loads** (specialist
+   review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
+   (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's
+   hardcoded cwd `D:\` (`deps/nxdk/lib/xboxrt/libc_extensions/direct.c:70-99`),
+   which is the disc: read-only. The very first level transition -
+   `c0a0` to `c0a0a`, the tram, minutes into step 4 - goes through
+   `SV_ChangeLevel` → `SaveGameState( true )` (`engine/server/sv_save.c:2065`),
+   which writes `.HL1`/`.HL2` under `<gamedir>/save/` and fails on a
+   read-only root. Upstream already has the mechanism: `-rodir <path>`
+   (`filesystem_engine.c:344`) splits a read-only game tree from a
+   writable root. So: mount a writable drive for the title (nxdk's
+   `nxMountDrive` onto the title's `E:\UDATA\<TitleID>` or the kernel's
+   `T:`/`U:` per-title partitions - decide by reading nxdk, not from
+   memory), make it the rootdir, and pass `-rodir D:\` through whatever
+   command-line mechanism the Xbox launcher gives `Sys_GetParmFromCmdLine`
+   today (`engine/common/system.c:228`; check what `xbox_main.c`/the
+   launcher actually feeds it before assuming a `+`/`-` line exists).
+   `gameinfo.txt`/`video.cfg` write failures (`filesystem/gameinfo.c:172-177`)
+   are log noise on a read-only root and stay that way; the save path is
+   the one that stops the game.
+4. **A map loads.** `map c0a0` via `+map` in the disc's `video.cfg`/`config`
    path (upstream's own startup-command mechanism, no engine change).
    Exit: `SV_SpawnServer` completes, `pfnServerActivate` runs, entities
    spawn (every classname resolves - the generated table's real test), the
    client receives the world, and it does so with `ref/null` (no picture,
-   headless). Memory is measured here, not guessed: `mon "info registers"`
-   plus the engine's own `Mem_PrintStats` over the log channel, before and
-   after the load - the 64 MB budget is X8/X9's problem but its first real
-   number comes from this step.
-4. **On screen** is X5 (`vid_xbox.c` + `ref_soft`), which this step
+   headless). Then the tram: `c0a0` → `c0a0a` through `SV_ChangeLevel`,
+   which is the real test of step 3. Memory again, via the same
+   `MmQueryStatistics` print, before and after the load. One more thing
+   to watch from the specialist review, because it fails silently: the
+   main thread has a 64 KB stack (`deps/nxdk/bin/nxdk-link:11`,
+   `-stack:65536`), the engine already had to make
+   `SV_PutClientInServer.msg_buf` (197 KB) static to survive it, and the
+   SDK was written against MSVC's 1 MB - `nodes.cpp` (node graph build on
+   first load of a map) and `CSave`/`CRestore` are the first suspects. If
+   a load dies with no message and `tools/xemu-debug.py` shows ESP below
+   the stack's base, that is what it is; raising `-stack:` in
+   `xbox-link-check.sh` is the cheap fix and must be measured, not
+   assumed adequate.
+5. **On screen** is X5 (`vid_xbox.c` + `ref_soft`), which this step
    unblocks: X5's exit line ("a recognisable map, in software") needs a
    game module to have something to draw.
 
@@ -2046,18 +2115,28 @@ own `startmap`.
 ### Risks carried into the ledger, not hidden
 
 - **Save format depends on link layout** (`XASH_STATIC_LIBS` implies
-  `XASH_ALLOW_SAVERESTORE_OFFSETS`, X1 note): each title's XBE must be
-  built reproducibly, and a save is only valid for the exact XBE that wrote
-  it. Fine for bring-up; a real fix (name-based function pointers in saves)
-  is its own item before any release.
+  `XASH_ALLOW_SAVERESTORE_OFFSETS`, X1 note): `COM_OffsetNameForFunction`
+  (`engine/common/lib_common.c:78`) writes function pointers as `ofs:N`
+  relative to `pfnGameInit` and `COM_FunctionFromName_SR` (`:41`) reverses
+  it - intra-image relative, so (specialist review) it is adequate for
+  bring-up and linker non-determinism only matters ACROSS XBEs: a save is
+  valid for the exact XBE that wrote it and no other. lld's default ICF
+  (no `-opt:` from `nxdk-link`) folds identical `Think` bodies to one
+  address, which is harmless under offset saves. A name-based scheme is
+  its own item before any release.
 - **Three `pm_shared`s, three sets of engine expectations**: the engine's
   `SV_InitClientMove` hull loop and `pmove` function table are per-link;
   no cross-title sharing, and nothing to get subtly wrong as long as a
   title never links another title's objects (the sweep's per-title scratch
   dir is the guard).
-- **Code size**: ~260 TUs of C++ per title on top of a 3.9 MB engine. The
-  number comes from the first link, not from here; if it matters, it
-  matters for X8's memory work, and the measurement is the deliverable.
+- **Memory is the engine's problem before it is the SDK's**: see X7.4
+  step 1 - 16.5 MB of XBE sections resident at entry today, `.bss` alone
+  13.1 MB, against ~1-1.3 MB the SDK will add. The SDK does not create
+  the wall; it walks up to one that is already there. X8 owns the fix
+  (`cl`/`sv`/`net`/`mod_known` static arrays sized for a PC), X7 owns
+  producing the two honest numbers that brief it. SDL2 is, separately,
+  the single largest `.text` contributor of the current XBE (764 KB) -
+  the X5 `vid_xbox.c` decision already exists for that.
 - **Linker non-determinism** (lessons.md): two links of identical source
   differed in layout. Combined with the save-format point above, the disc
   pipeline must record which link produced which XBE (the `.map` beside
