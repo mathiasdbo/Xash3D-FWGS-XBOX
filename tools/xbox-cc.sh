@@ -349,6 +349,27 @@ if [ "${XBOX_DEDICATED:-0}" = "1" ]; then
 	ENGINE_DEFINES+=( -DXASH_ENABLE_MAIN=1 )
 fi
 
+# XBOX_CLIENT_MAIN=1 (env, opt-in, independent of XBOX_DEDICATED): the
+# client-target equivalent of the block above - sets -DXASH_ENABLE_MAIN=1
+# so engine/common/launcher.c's main() calls Host_Main for real, but
+# WITHOUT -DXASH_DEDICATED=1, so common/defaults.h still selects
+# VIDEO_SDL/INPUT_SDL/SOUND_SDL (XASH_SDL=2, above) instead of the
+# dedicated-only source set. Needed because the two defines were
+# previously coupled together above - the dedicated target is the only
+# one that has ever called Host_Main for real, so this is the first time
+# the client's own boot path (CL_Init, video/sound/input bring-up, all of
+# it) is reachable from a linker's perspective at all. Before this,
+# engine/platform/xbox/xbox_main.c's placeholder main() (X1, divergence
+# #23) provided `_main` for the client link and never referenced
+# Host_Main, so X1's "63 undefined, 0 duplicate" result never actually
+# proved the client's real boot code links - only that the dead-code
+# scaffolding around it does. xbox_main.c must be excluded from this
+# target's file list, same as XBOX_DEDICATED already excludes it, to
+# avoid a duplicate `_main`.
+if [ "${XBOX_CLIENT_MAIN:-0}" = "1" ]; then
+	ENGINE_DEFINES+=( -DXASH_ENABLE_MAIN=1 )
+fi
+
 # XBOX_ENGINE_TESTS=1 (env, opt-in, independent of XBOX_DEDICATED): the
 # same boundary XASH_ENGINE_TESTS already draws elsewhere in this tree
 # (test_dumpworld, test_mapprobe) - test/debug-only instrumentation,

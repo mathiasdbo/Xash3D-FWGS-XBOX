@@ -129,8 +129,60 @@ static const char *r3d_native_path( const char *path, char *out, size_t out_size
 	if( !path || !out || out_size == 0 )
 		return NULL;
 
+	// A bare "X:" (drive letter, colon, nothing else) is a real, distinct
+	// NT object-manager path from "X:\" - confirmed by a live xemu boot,
+	// not inferred: engine/common/filesystem_engine.c's own
+	// COM_StripDirectorySlash strips r3d_cwd's default trailing '\' before
+	// its first real FS_SetCurrentDirectory("D:") call, and that call
+	// failed with EINVAL - GetFileAttributesA (deps/nxdk/lib/winapi/
+	// filemanip.c) resolves relative to ObDosDevicesDirectory() via
+	// NtQueryFullAttributesFile, and "D:" alone names the D: DEVICE
+	// SYMLINK OBJECT itself under `\??\`, not a directory - only "D:\"
+	// resolves THROUGH the symlink to the directory FATX actually mounts
+	// there. POSIX has no such distinction ("/foo" and "/foo/" are the
+	// same directory), which is exactly why this normalisation belongs
+	// here and not in the cross-platform caller. Every other in-tree
+	// caller of a drive-letter path already spells it with the trailing
+	// '\' (r3d_cwd's own default, "D:\" itself) - this exists only for
+	// the one case that does not, and for a matching future one.
+	if( r3d_path_is_absolute( path ) && path[2] == '\0' )
+	{
+		if( out_size < 4 )
+			return NULL;
+		out[0] = path[0];
+		out[1] = ':';
+		out[2] = '\\';
+		out[3] = '\0';
+		return out;
+	}
+
 	if( !r3d_path_is_absolute( path ))
 	{
+		// A leading "./" (one or more, though this codebase never
+		// actually stacks them) names the current directory itself -
+		// GoldSrc's own convention of always spelling "here" out rather
+		// than passing an empty string, used constantly
+		// (filesystem/searchpath.c:675,703's "./", "Adding directory: ./",
+		// and every file later opened relative to that searchpath's own
+		// "./" prefix - filesystem/dir.c:468-474 concatenates it with
+		// each requested filename, so "./valve/gameinfo.txt" is a real,
+		// live shape this sees, not just the bare "./" opendir() case).
+		// Left as literal text, "." becomes a real path COMPONENT - "D:\"
+		// + "." + "\" = "D:\.\", not "D:\" - and unlike a real Win32
+		// CreateFile/FindFirstFileA (whose kernel32 layer canonicalises
+		// "\.\" mid-path before ever calling NtCreateFile), nxdk's
+		// FindFirstFileA (compat/xbox/opendir above) hands the object
+		// manager this exact string unresolved: "." is not a name any
+		// real object in `\??\D:\` namespace has. Stripped here, before
+		// the CWD join below, so every caller downstream of this
+		// function - not just opendir() on the bare "./" case a first,
+		// narrower version of this fix only handled (found in review) -
+		// sees the same, correctly resolving path.
+		while( path[0] == '.' && path[1] == '/' )
+			path += 2;
+		if( path[0] == '.' && path[1] == '\0' )
+			path += 1;
+
 		for( ; i < out_size - 1 && r3d_cwd[i]; i++ )
 			out[i] = r3d_cwd[i];
 

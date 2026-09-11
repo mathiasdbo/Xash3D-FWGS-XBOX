@@ -51,6 +51,7 @@ export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
 
 EXPECT_UNDEFINED=""
 XBE_OUT=""
+CLIENT_MAIN=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--expect-undefined)
@@ -60,6 +61,20 @@ while [ $# -gt 0 ]; do
 		--xbe)
 			XBE_OUT="$2"
 			shift 2
+			;;
+		--client-main)
+			# Link engine/common/launcher.c's real main() (Host_Main - the
+			# same path the dedicated target already uses) instead of
+			# engine/platform/xbox/xbox_main.c's placeholder (X1,
+			# divergence #23). Requires launcher.obj to have been compiled
+			# with XBOX_CLIENT_MAIN=1 (tools/xbox-cc.sh) - this flag only
+			# changes which object this script SELECTS from $SCRATCH, it
+			# does not recompile anything. Without this flag, behaviour is
+			# byte-for-byte the X1-tracked default: xbox_main.obj included,
+			# launcher.obj's own XASH_ENABLE_MAIN-gated main() compiles to
+			# nothing and is link-inert either way.
+			CLIENT_MAIN=1
+			shift
 			;;
 		*)
 			echo "xbox-link-check: unrecognised argument: $1" >&2
@@ -80,6 +95,20 @@ if [ -z "$ENGINE_OBJS" ]; then
 	echo "  3rdparty/library_suffix/src first - this script links what that" >&2
 	echo "  sweep left behind, it does not compile the engine itself." >&2
 	exit 1
+fi
+
+if [ "$CLIENT_MAIN" -eq 1 ]; then
+	LAUNCHER_OBJ="$SCRATCH/engine_common_launcher.obj"
+	if [ ! -f "$LAUNCHER_OBJ" ]; then
+		echo "xbox-link-check: --client-main given but $LAUNCHER_OBJ does not exist." >&2
+		echo "  Compile it first: XBOX_CLIENT_MAIN=1 tools/xbox-cc.sh" >&2
+		echo "  engine/common/launcher.c -o $LAUNCHER_OBJ" >&2
+		exit 1
+	fi
+	# xbox_main.obj's own placeholder main() (X1, divergence #23) would
+	# collide with launcher.obj's real one at link time - both define
+	# `_main` once XBOX_CLIENT_MAIN=1 makes XASH_ENABLE_MAIN real.
+	ENGINE_OBJS=$(echo "$ENGINE_OBJS" | grep -v '_platform_xbox_xbox_main\.obj$')
 fi
 
 # Third-party scope: found compiling, X1, 2026-09-08. Each of these four
@@ -150,6 +179,14 @@ typedef int64_t ogg_int64_t;
 typedef uint64_t ogg_uint64_t;
 #endif
 OGGCONFIG
+
+# bz_version.h: bzip2's own CMake-generated header (bz_version.h.in -> a
+# single #define BZ_VERSION "..."), never committed for the same reason
+# libogg's config_types.h above is not - CMakeLists.txt's own
+# `project(bzip2 VERSION 1.1.0 ...)` names the real value, not guessed.
+mkdir -p "$SCRATCH/3p/bz-shadow"
+printf '#define BZ_VERSION "1.1.0"\n' > "$SCRATCH/3p/bz-shadow/bz_version.h"
+BZIP2_FLAGS=( -I"$SCRATCH/3p/bz-shadow" -I3rdparty/bzip2/bzip2 )
 
 OPUS_FLAGS=(
 	-Iopus -I3rdparty/opus/opus -I3rdparty/opus/opus/include
@@ -228,8 +265,67 @@ for name in info internal opusfile stream; do
 	obj=$(compile_3p "3rdparty/opusfile/opusfile/src/$name.c" "${OPUSFILE_FLAGS[@]}") || exit 2
 	THIRDPARTY_OBJS="$THIRDPARTY_OBJS $obj"
 done
+# bzip2: engine/common/net_chan.c's own `#if !XASH_DEDICATED #include
+# <bzlib.h> #endif` (file-fragment compression for the client's non-
+# dedicated path) is real, not a stub - CMakeLists.txt's own BZ2_SOURCES
+# names these 7 files (blocksort/huffman/crctable/randtable/compress/
+# decompress/bzlib.c), excluding the bzip2/bzip2recover/dlltest CLI and
+# test-only files under the same directory, same "each submodule's own
+# build file names the real list" rule the other three libraries above
+# follow. BZ_NO_STDIO on bzlib.c only: its file-stream wrapper API
+# (BZ2_bzopen et al, guarded by #ifndef BZ_NO_STDIO) calls setmode/fdopen,
+# neither of which nxdk's pdclib provides - net_chan.c only ever calls the
+# memory-buffer API (BZ2_bzBuffToBuffCompress/Decompress), which does not
+# need them; a real, upstream-documented define, not invented here.
+for name in blocksort huffman crctable randtable compress decompress; do
+	obj=$(compile_3p "3rdparty/bzip2/bzip2/$name.c" "${BZIP2_FLAGS[@]}") || exit 2
+	THIRDPARTY_OBJS="$THIRDPARTY_OBJS $obj"
+done
+obj=$(compile_3p "3rdparty/bzip2/bzip2/bzlib.c" "${BZIP2_FLAGS[@]}" -DBZ_NO_STDIO) || exit 2
+THIRDPARTY_OBJS="$THIRDPARTY_OBJS $obj"
+# BZ2_bz__AssertH__fail: bzlib.c's own definition (fprintf+exit) sits
+# INSIDE the same #ifndef BZ_NO_STDIO block that guards the setmode/fdopen
+# calls BZ_NO_STDIO exists to skip above - so defining BZ_NO_STDIO drops
+# this function's only definition too, even though bzlib_private.h's
+# AssertH() macro (blocksort.c/compress.c/decompress.c/huffman.c's own
+# internal consistency checks - upstream bzip2's ordinary self-checks, not
+# something this port added) calls it unconditionally. Real, not a no-op
+# stub: a genuine internal-consistency panic still needs to actually stop
+# execution, the same contract upstream's exit(3) provides, just without
+# the fprintf(stderr,...) call this platform's BZ_NO_STDIO path already
+# established has no target for.
+BZASSERT_C="$SCRATCH/3p/bz_assert_fail.c"
+{
+	echo '#include <stdlib.h>'
+	echo 'void BZ2_bz__AssertH__fail(int errcode) { (void)errcode; abort(); }'
+} > "$BZASSERT_C"
+obj=$(compile_3p "$BZASSERT_C" "${BZIP2_FLAGS[@]}") || exit 2
+THIRDPARTY_OBJS="$THIRDPARTY_OBJS $obj"
 
 echo "xbox-link-check: $(echo $THIRDPARTY_OBJS | wc -w) third-party objects compiled." >&2
+
+# net_chan.c itself: an ENGINE file, not third-party, but it needs bzlib.h
+# on its include path (above) to compile at all for the client (non-
+# dedicated) target - tools/xbox-sweep.sh's plain sweep has no per-file
+# extra-flags mechanism, so it fails there by design (one of the tracked
+# "30 failing" - not a bug in that script) and gets recompiled here
+# instead, the same way filesystem_stdio's generated exports file is
+# recompiled below rather than asked of the sweep. Not third-party
+# (net_chan.c is ours, matches upstream) so it goes into ENGINE_OBJS, not
+# THIRDPARTY_OBJS - and must replace whatever the plain sweep already
+# left in $SCRATCH for it (nothing, today, since it fails there - but a
+# future sweep of a from-scratch checkout could try and fail differently,
+# so exclude defensively rather than trust the sweep never produced one).
+NET_CHAN_OBJ="$SCRATCH/engine_common_net_chan.obj"
+if ! tools/xbox-cc.sh engine/common/net_chan.c "${BZIP2_FLAGS[@]}" -o "$NET_CHAN_OBJ" 2>"$SCRATCH/3p/lasterr.txt"; then
+	echo "xbox-link-check: engine/common/net_chan.c (with bzlib.h on the include path) failed to compile:" >&2
+	cat "$SCRATCH/3p/lasterr.txt" >&2
+	exit 2
+fi
+ENGINE_OBJS=$(echo "$ENGINE_OBJS" | grep -v '_common_net_chan\.obj$')
+ENGINE_OBJS="$ENGINE_OBJS
+$NET_CHAN_OBJ"
+echo "xbox-link-check: engine/common/net_chan.c compiled with bzlib.h on the include path." >&2
 
 # Menu module objects: optional, included only if present AND the sweep
 # that produced them says it was clean. Not compiled here (same "does not

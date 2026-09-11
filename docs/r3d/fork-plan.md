@@ -317,15 +317,102 @@ reads it back, and `r3d_native_path` — the one function every POSIX call in
 this file already routes through — resolves a relative path against it
 before the existing `/`→`\` conversion. `filesystem/sys.c`'s
 `FS_SetCurrentDirectory` now calls this real `chdir()` on Xbox instead of
-printing "not implemented, ignoring..." and returning true. Compiles and
-links clean (dedicated target: 96/0 sweep, 0 duplicate/0 undefined,
-unchanged XBE; broad sweep/link-check unaffected by the shared
-`filesystem/sys.c` edit). **Still not runtime-verified**: a live xemu
-re-boot to confirm `FI.numgames > 0` and `pak0.pak` actually opens was
-attempted with the network log channel (divergence #13) but a Windows
-Firewall prompt silently dropped the UDP listener across the attempts made
-this session — genuinely open, not inferred as done. The exit line above
-remains unmet until that boot is observed.
+printing "not implemented, ignoring..." and returning true.
+
+**CONFIRMED by a real xemu boot, 2026-09-11 (divergence #32) - not yet
+real-hardware-verified, see below.** The network log
+channel finally reached the guest - the earlier "Windows Firewall silently
+dropped it" block was a tooling bug, not a network one (see
+`docs/r3d/lessons.md`'s MSYS2 entry: `XBOX_ENGINE_TESTS=1` was never
+actually reaching the compiler in the attempts that produced that block,
+so the build genuinely never tried to open the socket). Fixed, then two
+real bugs surfaced in sequence by the boot log itself, not by reading code:
+
+1. `chdir("D:")` (the literal string `FS_SetCurrentDirectory` receives,
+   `engine/common/filesystem_engine.c`'s own `COM_StripDirectorySlash`
+   stripping `r3d_cwd`'s default trailing `\` first) failed `EINVAL`. A
+   bare `"D:"` names the `D:` device SYMLINK OBJECT in the NT object
+   manager namespace `GetFileAttributesA` resolves against; only `"D:\"`
+   resolves THROUGH the symlink to the directory FATX mounts there -
+   POSIX has no such distinction, which is exactly why this belongs in
+   `r3d_native_path`, not the shared caller. Fixed: a bare drive-letter
+   path now gets its trailing `\` appended before resolution.
+2. With that fixed, boot progressed to `listdirectory("./")` still
+   failing to find `valve` at all (`FI.numgames` stayed 0). `r3d_native_path`
+   was appending `"./"` onto `r3d_cwd` as a literal path component
+   (`"D:\.\ "`) rather than collapsing it - correct on real Win32 (kernel32
+   canonicalises `\.\` before calling `NtCreateFile`), but nxdk's own
+   `FindFirstFileA` hands that string to the object manager unresolved,
+   where `.` is not a real name under `\??\D:\`. **Found in Codex review**:
+   a first version of this fix only collapsed `path` exactly equal to `"."`
+   or `"./"`, leaving `"./valve"` (the shape `filesystem/dir.c:468-474`'s
+   own root-searchpath file opens actually use, not just the bare
+   `opendir("./")` case) still producing `"D:\.\valve"` - the same
+   unresolvable string one level down. Fixed for real: any leading `"./"`
+   (or a bare trailing `"."`) is now stripped from `path` before the
+   `r3d_cwd` join, for every caller, not just the exact-string case.
+
+**All three fixes verified by real boot logs, not separately claimed**:
+after fix 1 alone, the boot log read `Couldn't find game directory 'valve'`
+(progress - EINVAL gone, but `FI.numgames` still 0); after fix 2's first,
+narrower version, on a disc whose `valve/` holds only a synthetic
+`gameinfo.txt`, the engine found it and progressed past game-directory
+resolution entirely into `Host_InitCommon: couldn't load gfx.wad` - at the
+time, read as "expected" (no real assets on that disc) but, per the Codex
+finding, not actually ruled out as the SAME path bug one level deeper.
+After the corrected fix, a disc whose `valve/` holds `gameinfo.txt` plus a
+real, retail `gfx.wad` (86,608 bytes) booted with **no `couldn't load
+gfx.wad` error at all** - the file genuinely opens now through the exact
+`"./valve/gfx.wad"`-shaped root-searchpath path Codex named. `FI.numgames
+> 0`, the game directory mounts, and a real asset opens through it - the
+X0.5 exit line, this time correctly closed. On a real full retail `valve/`
+disc (392 MB, ~4,200 files), boot was still progressing (real, non-zero,
+climbing CPU time; no crash) when this entry was written, apparently
+throttled by xemu's own DVD-read pacing for a disc this size rather than
+anything filesystem-layer - `Host_InitCommon` onward is X2's own scope to
+pick up from here, not X0.5's.
+
+**Exit met on xemu - not yet closed.** The engine finds its game directory
+and mounts it (`FI.numgames > 0`, proceeding into `Host_InitCommon`
+looking for real game assets - the exact boundary this phase's own exit
+line named), but **AGENTS.md's own Verification section is explicit:
+"xemu is not validation... A phase does not close until it runs on a real
+Xbox."** DMA timing, the serial channel and real unified-memory behaviour
+are not faithfully emulated, and this phase's own fix (NT object-manager
+path resolution against a real FATX volume) is exactly the kind of thing
+an emulator's filesystem shim can paper over differently than real
+hardware would. **Found in Codex review, round 2** - do not read the
+paragraph above as X0.5 being done; a real-Xbox boot of the same fix,
+observing the same `FI.numgames > 0` and a real asset opening through
+`"./valve/..."`, is still the open step that actually closes this phase.
+A real-hardware-testable XISO is packaged per AGENTS.md's own convention
+(`../XISOS/`) specifically so that boot can happen.
+
+**What made this observable at all, this session:** the client (non-dedicated)
+target had never actually called `Host_Main` before now -
+`engine/platform/xbox/xbox_main.c`'s placeholder `main()` (X1, divergence
+#23) linked clean but never referenced it, so X1's own "63 undefined, 0
+duplicate" result never proved the client's real boot path links, only
+that the dead scaffolding around it does. A new `XBOX_CLIENT_MAIN=1`
+opt-in (`tools/xbox-cc.sh`, mirroring `XBOX_DEDICATED`'s existing shape)
+makes `engine/common/launcher.c`'s real `main()` (`Host_Main`, the same
+entry point PSVita/iOS and this project's own dedicated target already
+use) provide `_main` instead, and `tools/xbox-link-check.sh --client-main`
+selects it over `xbox_main.obj`. Reaching a real, complete client link (0
+duplicate, 0 undefined, real XBE) from there needed three more real fixes,
+each verified by compiling and linking, not assumed: `engine/common/net_chan.c`
+needed `bzlib.h` on its include path (bzip2 is a real, uncompiled submodule -
+now built from its own `CMakeLists.txt`-named 7-file source list, `BZ_NO_STDIO`
+on `bzlib.c` only since nxdk's pdclib has no `setmode`/`fdopen`, and a small
+generated `BZ2_bz__AssertH__fail` - upstream's own definition sits inside
+that same `BZ_NO_STDIO` guard, so defining it drops the one function
+`bzlib_private.h`'s `AssertH()` macro calls unconditionally); `engine/client/cl_steam.c`
+needed `getsockopt`/`SOL_SOCKET`/`SO_ERROR` added to
+`engine/platform/stub/net_stub.h` (every OTHER BSD socket call was already
+stubbed there - a real gap, not a deliberate omission, since `XASH_NO_NETWORK=1`
+is unconditional and every stub already just fails). None of this is
+speculative scaffolding: it is the real upstream client boot path, now
+provably reachable on Xbox for the first time.
 
 ## X1 — Static linking proven
 

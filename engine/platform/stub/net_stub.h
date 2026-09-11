@@ -91,6 +91,12 @@ static inline void freeaddrinfo( struct addrinfo *res ) { (void)res; }
 #define PF_INET6 AF_INET6
 #define INADDR_BROADCAST 0
 #define INADDR_ANY 0
+// cl_steam.c's own connect-in-progress poll: getsockopt(...SOL_SOCKET,
+// SO_ERROR...) right after a non-blocking connect(), which is already
+// (-1) above - these values only need to exist for that call to compile,
+// the always-failing getsockopt() macro above never reads them.
+#define SOL_SOCKET 0
+#define SO_ERROR 0
 #define IN6ADDR_ANY_INIT {{0}}
 // socket()'s own PF_INET6/SOCK_DGRAM path never runs (socket() is (-1)
 // below), so this only needs to exist as an all-zero bind address for
@@ -117,6 +123,7 @@ static const struct in6_addr in6addr_any;
 #define socket(...) (-1)
 #define ioctlsocket(...) (-1)
 #define setsockopt(...) (-1)
+#define getsockopt(...) (-1)
 #define bind(...) (-1)
 #define gethostname(...) (-1)
 #define getsockname(...) (-1)
