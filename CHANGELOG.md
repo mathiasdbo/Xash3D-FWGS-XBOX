@@ -25,11 +25,16 @@ bugs in `compat/xbox/xbox_posix_io.c`'s CWD emulation (divergence #31),
 fixed the same session: a bare `chdir("D:")` failing `EINVAL` (the `D:`
 DOS-device symlink object is a different NT path from `D:\`, its target
 directory), and `r3d_native_path` appending a literal `"./"` path
-component instead of collapsing it (nxdk's `FindFirstFileA` does not
-canonicalise `\.\` the way real Win32 does). Both fixed, both verified by
-the same boot log: `FI.numgames > 0`, `valve/gameinfo.txt` found and
-mounted, boot proceeding into `Host_InitCommon` looking for real assets -
-X0.5's own exit line, finally observed rather than inferred.
+component instead of stripping it (nxdk's `FindFirstFileA` does not
+canonicalise `\.\` the way real Win32 does) - found in Codex review, the
+first version of this second fix only handled `path` exactly equal to
+`"./"`, leaving the real `"./valve"`-shaped paths `filesystem/dir.c`'s own
+root-searchpath file opens use still broken one level down; fixed to
+strip the prefix for any path. All three verified by real boot logs:
+`FI.numgames > 0`, `valve/gameinfo.txt` found and mounted, and a real,
+retail `gfx.wad` (86,608 bytes) loading through `"./valve/gfx.wad"` with
+no load error at all - X0.5's own exit line, finally observed rather than
+inferred.
 
 Reaching that boot at all needed the CLIENT target to call `Host_Main`
 for the first time ever (divergence #32): a new `XBOX_CLIENT_MAIN=1`
