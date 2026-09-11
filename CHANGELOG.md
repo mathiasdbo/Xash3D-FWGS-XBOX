@@ -5,6 +5,37 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — fork-plan X7 rewritten as the per-title XBE plan
+
+Half-Life, Opposing Force and Blue Shift each ship as their own
+statically-linked XBE on their own XISO, as the retail Xbox discs were -
+the only shape a platform with no dynamic loading allows. The plan settles
+the SDK base (the vendored `halflife-updated` family, all three titles
+from one author), keeps this engine's SDK adaptations on a `resonance3d`
+branch per fork (the existing `master` heads carry the Rust port's
+`_STATIC_ENGINE_LINK` work, which this engine must never define), and
+specifies: an `XBOX_TITLE` selector through the sweep/link scripts,
+export tables GENERATED from each compiled module's `/EXPORT:` directives
+(every `LINK_ENTITY_TO_CLASS` classname is an exported symbol - 251 / 323
+/ 254 per title - so a hand-written list is exactly the hardcoded
+classname table the project forbids; measured on a real Xbox object that
+`llvm-readobj --coff-directives` yields them exactly), VGUI stripped from
+`cl_dll` on the `hlsdk-portable` `USE_VGUI` model, Half-Life first with
+three boot milestones, then the two expansions, one XISO per title from
+the Steam install. Reviewed twice by Codex and once by the Xbox port
+specialist before merging, and reshaped by it: the decisive collision is
+server-vs-client inside one XBE (`cl_dll` compiles the same weapon
+sources under `CLIENT_DLL`), solved by renaming each module's non-public
+symbols with `llvm-objcopy --redefine-syms` against an allowlist of what
+the engine resolves for that module - measured on real Xbox objects,
+prototyped on `crossbow.cpp` with a negative control before any other
+X7 work; translation-unit sets come from each title's CMake, not a glob;
+the title is a required argument, never an environment variable; a
+writable rootdir (`-rodir`) is a bring-up blocker for the first
+changelevel; and memory is measured at entry, where the engine's own
+`.bss` (13.1 MB resident) is already the wall the SDK walks up to. Each
+SDK fork now has a `resonance3d` branch, pinned in `.gitmodules`.
+
 ### Fixed — the Xbox client boot's silent hard freezes were NULL stub-module callbacks: `pfnGetHullBounds`/`pfnPM_Init` at load, `pfnSys_Error` on the fatal-error path (divergence #34)
 
 The first client boot to get past renderer selection did not hang or lose
