@@ -5,6 +5,20 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-manifest.sh`: a failed run could leave a stale manifest in place (Codex review round 2)
+
+Every validation in this script ran before the final output write, and
+the previous manifest was never removed - a run that failed midway left
+a prior successful run's manifest sitting at the fixed path a downstream
+sweep is designed to read from, so a later step could compile stale
+inputs while believing regeneration had happened. Fixed: the output
+path is resolved and any existing manifest removed immediately, before
+any parsing begins; the final write goes to a temp file in the same
+directory, renamed into place only once complete. Verified through the
+real script: a valid manifest written, the source SDK then mangled to
+force a failure, and the manifest from the first run confirmed gone
+after the second run correctly fails.
+
 ### Fixed — `tools/xbox-game-manifest.sh`: missing transitive INTERFACE include directories (Codex review round 1)
 
 `client` links `vgui` and `SDL2` (`add_library(... IMPORTED)` targets

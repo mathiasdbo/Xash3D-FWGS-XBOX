@@ -163,6 +163,26 @@ COMMON_CMAKELISTS="$SDK_DIR/CMakeLists.txt"
 [ -f "$CMAKELISTS" ] || { echo "xbox-game-manifest: $CMAKELISTS does not exist" >&2; exit 1; }
 [ -f "$COMMON_CMAKELISTS" ] || { echo "xbox-game-manifest: $COMMON_CMAKELISTS does not exist" >&2; exit 1; }
 
+# Resolve the output path and invalidate any PREVIOUS manifest immediately
+# - before any parsing/validation below has even started, not after.
+# Found in Codex review: every check in this script runs (and can exit 1)
+# before the output write at the very end, and the old version never
+# touched $OUT until that final step - so a run that fails midway (an
+# unrecognized generator expression, a source/include that no longer
+# exists, anything) left a PRIOR successful run's manifest sitting at the
+# fixed path this project's own design (fork-plan.md's X7.1) has a
+# downstream sweep read from, exactly the false-clean failure mode this
+# project keeps getting burned by: the sweep would compile stale inputs,
+# unaware regeneration had actually failed. Removing it up front makes
+# "no manifest at $OUT" mean what the header comment and every negative
+# test already claim it means - regeneration failed, full stop - for
+# every failure path in this script, not just the ones written with that
+# in mind.
+OUT_DIR="$SCRATCH/game-$TITLE"
+mkdir -p "$OUT_DIR"
+OUT="$OUT_DIR/$TARGET.manifest"
+rm -f "$OUT"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -627,9 +647,14 @@ for d in "${INCLUDES[@]}"; do
 	[ -d "$d" ] || { echo "xbox-game-manifest: derived include directory does not exist: $d" >&2; exit 1; }
 done
 
-OUT_DIR="$SCRATCH/game-$TITLE"
-mkdir -p "$OUT_DIR"
-OUT="$OUT_DIR/$TARGET.manifest"
+# Atomic publish: write to a temp file in the SAME directory (so the final
+# rename is a same-filesystem, single-step replace, never a partial write
+# a concurrent reader could observe) and rename into place only once every
+# line has been written successfully. $OUT was already removed up front
+# (see above), so between here and the rename there is genuinely no
+# manifest at $OUT - not a stale one, not a truncated one.
+OUT_TMP="$(mktemp "$OUT_DIR/.manifest.XXXXXX")"
+trap 'rm -rf "$WORK" "$OUT_TMP"' EXIT
 
 {
 	echo "TITLE $TITLE"
@@ -643,7 +668,9 @@ OUT="$OUT_DIR/$TARGET.manifest"
 	for s in "${SOURCES[@]}"; do
 		echo "SOURCE $s"
 	done
-} > "$OUT"
+} > "$OUT_TMP"
+
+mv -f "$OUT_TMP" "$OUT"
 
 echo "xbox-game-manifest: wrote ${#SOURCES[@]} source(s), ${#DEFINES[@]} define(s)," >&2
 echo "  ${#INCLUDES[@]} include dir(s) to $OUT" >&2

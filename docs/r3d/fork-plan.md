@@ -2048,6 +2048,29 @@ compile (X7.3/X7.4 territory: `SDL2` is only linked for `vgui` and
 `inputw32.cpp`'s gamepad support, both already slated for X7.3-adjacent
 rework, not core gameplay).
 
+**Codex review round 2 (the cap) found a stale-manifest hole: every
+validation in this script runs before the output write at the very end,
+so a run that FAILS midway (any of the checks above) left a PRIOR
+successful run's manifest untouched at the fixed path this project's own
+design has a downstream sweep read from.** A "no manifest" guarantee the
+header comment and every negative test above already claim, silently
+broken for the one case that matters most in practice: a real edit to
+`deps/hlsdk` that introduces a new parse failure would leave the LAST
+GOOD manifest in place, and a sweep reading it would compile stale
+inputs while believing regeneration had happened - the exact false-clean
+failure mode this project keeps finding and fixing. Fixed: the output
+path is resolved and any existing manifest removed immediately, before
+any CMakeLists parsing begins, and the final write goes to a temp file
+in the same directory, renamed into place only once every line is
+written - so between "removed" and "renamed" there is genuinely no
+manifest at the fixed path, not a stale one and not a truncated one.
+Verified exactly the scenario Codex asked for, through the real script:
+a valid manifest written from a scratch SDK copy; the same copy then
+mangled with an unrecognized generator expression; a second run
+correctly fails and the manifest that step 1 wrote is gone, not left in
+place. Full regression suite re-run clean against the real, unmodified
+`deps/hlsdk` afterward (unchanged 6/11 include counts).
+
 **`deps/hlsdk`'s `resonance3d` branch CMakeLists fixed to actually match
 what this project needs, 2026-09-11 (recorded as divergence #35) - found
 while building the manifest tool above, not assumed going in.** The
