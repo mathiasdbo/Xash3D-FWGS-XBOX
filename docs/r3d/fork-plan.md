@@ -1901,9 +1901,30 @@ does NOT define (CRT, libc++, nothing from the engine - the SDK reaches
 the engine only through `gEngfuncs`) are untouched because they are not
 in the map. This is `xshlib.py`'s `objcopy -G` localisation done by
 renaming instead of by a relocatable pre-link, since `lld-link` has no
-COFF `-r`. Applied to BOTH modules, not just one: it also removes the
-COMDAT silent-merge hazard (a renamed vtable cannot be merged with the
-other side's) and any libc-helper collision with the engine.
+COFF `-r` (measured: `lld-link /?` lists only `/incremental`, no
+relocatable or partial-link option). Applied to BOTH modules, not just
+one: it also removes the COMDAT silent-merge hazard (a renamed vtable
+cannot be merged with the other side's) and any libc-helper collision
+with the engine.
+
+**Measured 2026-09-11 on real `tools/xbox-cxx.sh` objects, before this
+was written down as the design:** two TUs, one defining a C++ function
+and two `extern "C" DLLEXPORT` functions, the other calling the C++ one.
+A rename map derived exactly as above (`llvm-nm --defined-only
+--extern-only` of the defining object, minus the two export names, each
+line `old cl_old`) applied with `llvm-objcopy --redefine-syms` to both
+objects gave: defining TU `T cl_?also_not_exported@@YAHXZ`, referencing
+TU `U cl_?also_not_exported@@YAHXZ` - definition and cross-TU reference
+renamed consistently - with the `/EXPORT:_monster_headcrab
+/EXPORT:_GetEntityAPI2` directives untouched. Two things the experiment
+taught that the design must respect: the map has to use the symbol
+names exactly as `llvm-nm` prints them (the MSVC-mangled
+`?name@@YAHXZ`, not a C-style guess - a first attempt with `_name`
+matched nothing and silently renamed nothing, which is why the negative
+control below is mandatory), and a prefix in front of a mangled name
+yields a non-standard symbol (`cl_?...`) that `lld-link` treats as an
+opaque identifier - fine for linking, but never feed those objects to a
+demangler and expect sense.
 
 **Prototype gate, before X7.1/X7.2 tooling is even written:** compile
 `deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh` (server
