@@ -5,6 +5,45 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/xbox-gen-exports.sh`: exports.txt generated from compiled objects, not typed by hand (X7.2)
+
+The first real piece of X7's `tools/` implementation. Reads a module's
+compiled objects and writes `tools/gen-library-tables.sh`'s input format:
+`--all` mode (server) includes every unmangled real `/EXPORT:` name found
+(the ~260 `LINK_ENTITY_TO_CLASS` entity names plus API exports, none of
+it known in advance - directive #6, never a hand-written classname list);
+`--allow <file>` mode (client) includes only names present in a given
+allowlist, so the shared weapon sources `cl_dll` also compiles never leak
+their entity classnames onto the client's public surface. `--require
+<file>` validates a completeness gate (`A|B` lines mean "at least one of
+these", matching `engine/server/sv_game.c:5235`'s own
+`GetEntityAPI`/`GetEntityAPI2` either-or) and, in `--all` mode, adds a
+required name found only via a stdcall-decorated symbol
+(`gen-library-tables.sh` gains a backward-compatible optional second
+column for exactly this - `name asm_symbol` - binding the generated
+`extern` to that exact linker symbol via an asm-label override instead of
+assuming cdecl). Two small, fixed input files ship with it,
+`tools/xbox-server-required-exports.txt` and
+`tools/xbox-client-allowed-exports.txt`, both literal transcriptions of
+`sv_game.c`'s and `cl_game.c`'s own lookups (the latter corrects a
+miscount from earlier X7 planning: `cdll_new_exports[]` has 11 entries,
+not 12).
+
+Verified against real SDK files, not synthetic ones, including the
+required negative control: `crossbow.cpp` + `h_export.cpp` alone
+(missing `GetEntityAPI`/`GetEntityAPI2`, which live in `cbase.cpp`)
+correctly fails and writes nothing; with `cbase.cpp` added, writes
+exactly the 4 API names (`GiveFnptrsToDll` with its asm override,
+verified via the stdcall fallback) and the 3 real entity classnames, zero
+of the many mangled C++ methods in the same objects. `--allow` mode
+against the client-compiled `crossbow.cpp` and the real 48-name
+allowlist: 0 entries, correctly, with a warning rather than a silent
+empty success. Full chain proven end to end: the generated
+`server/exports.txt` fed through the extended `gen-library-tables.sh`,
+compiled, and linked against the three real SDK objects - `0` duplicate,
+every name (including the asm-overridden one) resolved with no
+undefined-symbol warnings.
+
 ### Measured — X7.1b's server/client symbol-isolation design: PASSED against the real 384-object client link
 
 The prototype gate the X7 plan required before any other per-title work:

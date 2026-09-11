@@ -1932,7 +1932,8 @@ classname, and never asks either module for `PM_*` by name (`sv_pmove.c:491`,
   `GetNewDLLFunctions`, `GiveFnptrsToDll`) + every entity classname, i.e.
   exactly the server objects' `/EXPORT:` set;
 - client allowlist = `cl_game.c`'s `cdll_exports[]` (37) + `cdll_new_exports[]`
-  (12) names, and NOTHING from the client objects' `/EXPORT:` set beyond
+  (11 - corrected 2026-09-11, X7.2: an earlier grep miscounted this as 12)
+  names, and NOTHING from the client objects' `/EXPORT:` set beyond
   those - client-side entity symbols are renamed like any other internal;
 - `PM_*` is on neither list and is renamed on both sides.
 
@@ -2097,9 +2098,63 @@ Record the resulting build divergence in the ledger; it lives in
 
 ### X7.2 — Generated export tables, from the objects, not from a list
 
-`tools/gen-library-tables.sh` already takes `name:exports.txt`. What
-changes is where `exports.txt` comes from: a new `tools/xbox-gen-exports.sh
-<title> <server|client>` reads the COMPILED objects and writes the file.
+**Built and verified end-to-end, 2026-09-11 (`tools/xbox-gen-exports.sh`,
+`tools/gen-library-tables.sh` extended with a backward-compatible optional
+second column).** Real SDK files, not synthetic ones: compiled
+`crossbow.cpp` (server side), `h_export.cpp`, and `cbase.cpp` (the file
+`GetEntityAPI2`/`GetEntityAPI`/`GetNewDLLFunctions` actually live in) with
+`tools/xbox-cxx.sh`, ran `xbox-gen-exports.sh --all --require
+<GetEntityAPI|GetEntityAPI2 + GiveFnptrsToDll>` against the three
+objects. Negative control first: run against `crossbow.cpp` + `h_export.cpp`
+alone (no `cbase.cpp`) - correctly failed, naming
+`GetEntityAPI|GetEntityAPI2` as missing, nothing written. With
+`cbase.cpp` added: wrote exactly `GetEntityAPI`, `GetEntityAPI2`,
+`GetNewDLLFunctions`, `GiveFnptrsToDll _GiveFnptrsToDll@8` (the asm
+override, found via the stdcall fallback - the X7.2 gap Codex review
+round 2 caught, now exercised for real) and the three real entity
+classnames (`ammo_crossbow`, `crossbow_bolt`, `weapon_crossbow`) - zero
+mangled C++ methods leaked through, despite the same objects containing
+plenty (`CCrossbow::PrimaryAttack` and the rest, from the X7.1b
+prototype). `--allow` mode (the client case) tested separately against
+the client-compiled `crossbow.cpp`: a 3-name fake `cdll_exports`
+allowlist, none of them actually exported by this file, correctly wrote
+zero entries with a warning, not a silent empty success. Full chain
+proven, not just the generator in isolation: fed the generated
+`server/exports.txt` through the now-extended `gen-library-tables.sh`,
+compiled the result, and linked it against the three real compiled SDK
+objects - `0` duplicate, every one of the seven names (including the
+asm-overridden `GiveFnptrsToDll`) resolved with no undefined-symbol
+warnings naming it.
+
+`tools/gen-library-tables.sh` already took `name:exports.txt`; what
+changed is where `exports.txt` comes from and, for the one case that
+needs it, what each line carries: a new `tools/xbox-gen-exports.sh`
+reads the COMPILED objects and writes the file, using
+`gen-library-tables.sh`'s new optional second column
+(`name asm_symbol`) only for names whose real linker symbol is not the
+plain cdecl form - `GiveFnptrsToDll` today, nothing else measured so
+far. Every exports.txt written before this existed (`stub_game/`,
+`3rdparty/mainui`, `filesystem/`, `ref/null`) has zero lines with a
+space, so the extension is strictly backward-compatible, verified by
+regenerating `stub_game/server/exports.txt`'s table before and after the
+`gen-library-tables.sh` change and diffing byte-for-byte identical.
+Per-title, per-target invocation for X7.4: `tools/xbox-gen-exports.sh
+--all --require tools/xbox-server-required-exports.txt
+server/exports.txt <every compiled dlls/+pm_shared/ object>` and
+`tools/xbox-gen-exports.sh --allow tools/xbox-client-allowed-exports.txt
+client/exports.txt <every compiled cl_dll/ object>`. Both small, fixed
+input files are written and checked in: `tools/xbox-server-required-exports.txt`
+(the `GetEntityAPI|GetEntityAPI2` + `GiveFnptrsToDll` requirement) and
+`tools/xbox-client-allowed-exports.txt` (`cdll_exports`'s 37 names +
+`cdll_new_exports`'s 11, 48 total - re-read directly from
+`engine/client/dll_int/cl_game.c:57-111` while writing this, not reused
+from an earlier count in this same document that turned out to have one
+wrong: `12` for `cdll_new_exports` was a stray grep artifact, the real
+array has 11 entries). Both are literal transcriptions of
+`engine/server/sv_game.c`'s and `cl_game.c`'s own lookups - not new
+decisions, and not the ~260-entry entity/HUD lists themselves, which
+stay fully generated, never hand-written.
+
 Source of truth: `DLLEXPORT` is `__declspec(dllexport)`, which clang
 records in each COFF object's `.drectve` section as `/EXPORT:name`
 directives - `llvm-readobj --coff-directives` (present:
