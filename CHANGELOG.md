@@ -5,6 +5,26 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — fork-plan X7 rewritten as the per-title XBE plan
+
+Half-Life, Opposing Force and Blue Shift each ship as their own
+statically-linked XBE on their own XISO, as the retail Xbox discs were -
+the only shape a platform with no dynamic loading allows. The plan settles
+the SDK base (the vendored `halflife-updated` family, all three titles
+from one author), keeps this engine's SDK adaptations on a `resonance3d`
+branch per fork (the existing `master` heads carry the Rust port's
+`_STATIC_ENGINE_LINK` work, which this engine must never define), and
+specifies: an `XBOX_TITLE` selector through the sweep/link scripts,
+export tables GENERATED from each compiled module's `/EXPORT:` directives
+(every `LINK_ENTITY_TO_CLASS` classname is an exported symbol - 251 / 323
+/ 254 per title - so a hand-written list is exactly the hardcoded
+classname table the project forbids; measured on a real Xbox object that
+`llvm-readobj --coff-directives` yields them exactly), VGUI stripped from
+`cl_dll` on the `hlsdk-portable` `USE_VGUI` model, Half-Life first with
+three boot milestones, then the two expansions, one XISO per title from
+the Steam install. Risks carried explicitly: link-layout-dependent save
+format, linker non-determinism, unmeasured code size.
+
 ### Fixed — the Xbox client boot's silent hard freezes were NULL stub-module callbacks: `pfnGetHullBounds`/`pfnPM_Init` at load, `pfnSys_Error` on the fatal-error path (divergence #34)
 
 The first client boot to get past renderer selection did not hang or lose

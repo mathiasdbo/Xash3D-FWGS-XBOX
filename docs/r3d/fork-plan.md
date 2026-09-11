@@ -1723,15 +1723,261 @@ is faster" is an opinion.
 
 **Exit:** the menu is navigable with a controller.
 
-## X7 — Game code
+## X7 — Game code: one XBE per title
 
-The real game module statically linked, replacing X1's stub, on whichever SDK
-base X1 settled.
+**Direction set 2026-09-11.** Half-Life, Opposing Force and Blue Shift each
+ship as their own statically-linked XBE on their own XISO, exactly as the
+retail Xbox discs were. This is not a preference, it falls out of the
+platform: Xbox has no dynamic loading (`deps/nxdk/lib/winapi/libloaderapi.c`,
+`LoadLibraryExA` returns `NULL`; `engine/platform/misc/lib_static.c`'s
+`Lib_Find` is a compile-time table), so "one engine XBE that swaps game
+DLLs" cannot exist. Each title = engine + that title's `server` + `client`
+modules + its own generated export tables, linked once, plus its own
+`gameinfo.txt`/assets on disc. It also decides the open question left by
+divergence #34: the `CL_Init` stop ("can't initialize client: missing
+essential exports") is resolved by the FIRST REAL TITLE BUILD, not by a
+generic `client_stub` - a stub client would prove nothing a real one does
+not, and every hour spent on it is an hour not spent on Half-Life.
 
-`vgui_support` to a null stub: `engine/client/vgui/vgui.c:345` reports the
-load failure and continues, and single-player Half-Life does not use VGUI.
+### What is already true (measured, not assumed)
 
-**Exit:** a map playable in software rendering, with HUD and game logic.
+- All three SDKs are vendored: `deps/hlsdk` (this project's own
+  `halflife-updated-xash3d` fork of SamVanheer's `halflife-updated`),
+  `deps/hlsdk-opfor` (`halflife-op4-updated`), `deps/hlsdk-bshift`
+  (`halflife-bs-updated`) - one author, one code shape, so what is learned
+  on Half-Life transfers. Sizes: `dlls/` 103 / 135 / 103 `.cpp`, `cl_dll/`
+  49 / 53 / 49, `pm_shared/` 3 each. The SDK-base question the X1 section
+  left open ("`hlsdk-portable` compiles under nxdk, evidence not proof")
+  is settled by what is vendored and already partly adapted; `hlsdk-portable`
+  stays a reference for one thing only, its `USE_VGUI` switch (below).
+- `deps/hlsdk`'s extra commits over upstream are Ferrum56 (Rust engine)
+  work, ALL gated behind `_STATIC_ENGINE_LINK`: `STRING`/`MAKE_STRING`
+  rerouted through `pfnSzFromIndex`/`ALLOC_STRING`, `ALERT`/`CLIENT_COMMAND`
+  bridged through non-variadic `Ferrum_*` hooks, FileSystem bootstrap
+  neutralised. **None of that applies here.** This engine is real Xash3D:
+  `SV_AllocStringPool` sets `pStringBase` (`sv_game.c:3133`, 32-bit path),
+  `pfnAlertMessage` is a real variadic C function, `pfnSzFromIndex` exists.
+  With `_STATIC_ENGINE_LINK` UNDEFINED the fork is stock upstream plus one
+  harmless `extern "C"` on the `pm_shared` entry points (needed anyway:
+  `pm_shared.cpp` is C++ there, and `sv_pmove.c` looks the names up as C).
+  The two non-gated changes are real fixes (`multiplay_gamerules.cpp` cast,
+  CMake `TARGET_PDB_FILE` guard) and stay.
+- The C++ toolchain works: `tools/xbox-cxx.sh` compiles real C++ for Xbox
+  (X1 measured), `deps/nxdk/lib/libc++.lib` defines `new`/`delete`, and the
+  menu module (76 `.cpp`) has linked clean before. cmake (VS 18) and
+  `deps/nxdk/share/toolchain-nxdk.cmake` both exist; the fork's CMake is
+  already "NXDK-proof" (`-march=pentium3`, explicit `WIN32`). Two viable
+  compile routes, chosen below.
+- No export-name collisions between engine and SDK, checked by grep, not
+  hoped: the SDK's `extern "C"` names are the four server API exports
+  (`GetEntityAPI`, `GetEntityAPI2`, `GetNewDLLFunctions`, `GiveFnptrsToDll`),
+  the 37 client exports `cl_game.c`'s `cdll_exports[]` requires (`Initialize`,
+  `HUD_*`, `IN_*`, `V_CalcRefdef`, `CL_IsThirdPerson`, `CAM_Think`,
+  `KB_Find`, `Demo_ReadBuffer`...), `pm_shared`'s `PM_*`, and every entity
+  classname. The engine defines none of the first three groups in C, and
+  its own `PM_*` (`pm_trace.c`: `PM_HullForBsp`, `PM_RecursiveHullCheck`,
+  `PM_TraceLine`...) is disjoint from `pm_shared`'s (`PM_Move`, `PM_Init`,
+  `PM_Jump`...). Everything else in the SDK is C++-mangled and cannot
+  collide with C. What is NOT yet measured: libc-level helpers both sides
+  might define with C linkage - the link's own `0 duplicate` gate is the
+  test, and it is exactly the gate that already caught the double-linked
+  stub (lessons.md).
+- **Entity classnames are exported symbols.** `LINK_ENTITY_TO_CLASS`
+  (`deps/hlsdk/dlls/util.h:100`) expands to
+  `extern "C" DLLEXPORT void <classname>(entvars_t*)`, and the engine spawns
+  by `COM_GetProcAddress(svgame.hInstance, classname)` (`sv_game.c`, see
+  memory directive #6). Half-Life has 251 such exports, Opposing Force 323,
+  Blue Shift 254. So a title's `server/exports.txt` is a ~260-line table
+  that MUST be generated from the compiled module, never typed - a
+  hand-written list is a hardcoded classname list, the thing directive #6
+  forbids, and it would silently `SV_FreeEdict` every entity it missed.
+- Assets for all three titles exist on this machine: the Steam install at
+  `D:\SteamLibrary\steamapps\common\Half-Life` carries `valve/`, `gearbox/`,
+  `bshift/` (and their `_hd` variants). `valve/delta.lst` - the file the
+  fixed build stops on today - is there. The baked `ferrum56-build-test/`
+  folder has only `valve/` (11 entries, for the Rust port's `.mpak` flow)
+  and is not what a disc needs.
+- `cl_dll` pulls in VGUI1: 9 `vgui_*.cpp` files, 27 files including its
+  headers, linked against Valve's PREBUILT `utils/vgui/lib/win32_vc16/vgui.lib`
+  - a proprietary x86 Windows binary that cannot be linked into an XBE. This
+  SDK family has no `USE_VGUI` switch (0 `#ifdef USE_VGUI` in `cl_dll/`);
+  `hlsdk-portable` does, and is the model. Engine side is already fine:
+  `vgui_support` is not compiled for Xbox at all (nothing in
+  `tools/xbox-link-check.sh` references it) and `engine/client/vgui/vgui.c:345`
+  reports the load failure and continues. Single-player Half-Life does not
+  need it; the scoreboard/MOTD/class menus it draws are multiplayer UI.
+
+### X7.0 — A `resonance3d` branch per SDK (decided 2026-09-11)
+
+Each SDK fork gets a `resonance3d` branch that carries ONLY this engine's
+adaptations, and the submodules pin to it. `deps/hlsdk`'s current head
+stays the Ferrum56/Rust branch (`master`, `_STATIC_ENGINE_LINK` work);
+`resonance3d` branches from the last upstream-plus-fixes point (or from
+`master` with the gate left undefined - it costs nothing either way since
+the gate is off) and never defines `_STATIC_ENGINE_LINK`. `hlsdk-opfor`
+and `hlsdk-bshift` branch `resonance3d` from their current stock heads.
+`.gitmodules` gains `branch = resonance3d` for all three so `git submodule
+update --remote` tracks the right line. What goes on those branches, and
+only there: the `USE_VGUI` switch (X7.3), any `#if XASH_XBOX`/nxdk compile
+fixes the sweep finds, and nothing that changes gameplay - reference
+fidelity rules apply to the SDK exactly as to the engine (`AGENTS.md`),
+with `deps/hlsdk`'s upstream as the reference for `deps/hlsdk`, etc.
+Divergence ledger: one entry per branch, form 1 (our own forks).
+
+### X7.1 — Build mechanics: `XBOX_TITLE`, sweep the SDK like mainui
+
+One selector, three values: `XBOX_TITLE=hl|op4|bshift` (default `hl`),
+honoured by `tools/xbox-cc.sh`, `tools/xbox-cxx.sh`, `tools/xbox-link-check.sh`
+and a new `tools/xbox-game-sweep.sh` (the `tools/xbox-mainui-sweep.sh`
+shape: clear `$SCRATCH/game-<title>/`, compile every `dlls/*.cpp`,
+`pm_shared/*.cpp`, `cl_dll/*.cpp` (minus VGUI) with `tools/xbox-cxx.sh`,
+write `manifest.txt` with `OK=/FAIL=/TOTAL=`, and REFUSE to report clean
+on `TOTAL=0` - the same silent-success guard `xbox-link-check.sh:361-376`
+already enforces on the mainui manifest). Compile route: this project's own
+`tools/xbox-cxx.sh` per translation unit, not the SDK's CMake through
+`toolchain-nxdk.cmake`. Reason: every other module in the XBE goes through
+the sweep scripts and their `compat/xbox` include ordering and prelude, the
+manifest/staleness checks are already written for that shape, and mixing
+one CMake-built `.lib` into a link whose every other object came from the
+sweep would put the SDK outside the tooling that is supposed to catch
+exactly the mistakes that cost time so far. CMake stays the fallback if a
+compile flag turns out to be impossible to express per-TU. Per-title
+inputs: SDK dir (`deps/hlsdk` / `deps/hlsdk-opfor` / `deps/hlsdk-bshift`),
+the defines that title's own `dlls/CMakeLists.txt` and `cl_dll/CMakeLists.txt`
+set (`VALVE_DLL`/`CLIENT_DLL` for Half-Life; read the other two, do not
+guess - `op4` and `bshift` add their own), scratch dir, output XBE/XISO
+name, and the disc gamedir (`valve` / `gearbox` / `bshift`). `stub_game/`
+is retired the moment `hl` links: it exists to prove the mechanism, and
+the mechanism is proven.
+
+### X7.2 — Generated export tables, from the objects, not from a list
+
+`tools/gen-library-tables.sh` already takes `name:exports.txt`. What
+changes is where `exports.txt` comes from: a new `tools/xbox-gen-exports.sh
+<title> <server|client>` reads the COMPILED objects and writes the file.
+Source of truth: `DLLEXPORT` is `__declspec(dllexport)`, which clang
+records in each COFF object's `.drectve` section as `/EXPORT:name`
+directives - `llvm-readobj --coff-directives` (present:
+`/c/msys64/mingw64/bin/llvm-readobj.exe`) prints them verbatim. **Measured
+2026-09-11 on a real `tools/xbox-cxx.sh` object**: a TU with two
+`extern "C" DLLEXPORT` functions and two plain ones yields exactly
+`Directive(s): /EXPORT:_monster_headcrab /EXPORT:_GetEntityAPI2` - the
+non-exported functions are absent, and the i386 `_` prefix is present and
+must be stripped (the same convention `gen-library-tables.sh` already
+assumes for its `extern void name` declarations). That is the
+exact set the real DLL would export, derived from the SDK's own source,
+regenerated on every build, and it includes every `LINK_ENTITY_TO_CLASS`
+name by construction (~260 server entries, the 37+12 client entries). The
+generator fails nonzero when it finds fewer than the four server API
+exports or fewer than the 37 required client exports (`cl_game.c`'s
+`cdll_exports[]`), so a broken sweep cannot produce a plausible-looking
+half table. `xbox-cc.sh`'s staleness check gains these two files as inputs.
+Verification: the generated `server/exports.txt` for `hl` has 251 entity
+names + 4 API names, checked against `grep -c LINK_ENTITY_TO_CLASS` of the
+same tree - two independent counts that must agree.
+
+### X7.3 — VGUI out of `cl_dll`, on the `resonance3d` branches
+
+Port `hlsdk-portable`'s `USE_VGUI` discipline: exclude the 9 `vgui_*.cpp`
+from the sweep, and `#ifdef USE_VGUI` the call sites in the 27 files that
+include VGUI headers (`hud.cpp`, `cl_util.h`, `vgui_TeamFortressViewport`
+users, `vgui_int.cpp`'s `VGui_Startup`/`VGui_Shutdown`). Everything the
+single-player game draws (HUD, health, ammo, flashlight, messages, titles,
+train/tank overlays) is `cl_dll`'s own `CHud` code, not VGUI. This is the
+one SDK change of real size; it is done once on `deps/hlsdk`'s
+`resonance3d` branch, then replayed on the other two (same author, same
+files; `git cherry-pick` will mostly apply). Reference-fidelity note for
+the ledger: with `USE_VGUI` off, `VGui_*` become no-ops, `CHud::VidInit`
+skips `gViewPort`, and the scoreboard/MOTD/class-menu paths compile out -
+document which `cdll` behaviour changes (multiplayer-only UI) and that
+single-player is untouched.
+
+### X7.4 — Half-Life first: server, then client, each a boot milestone
+
+1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
+   generate `server/exports.txt`; link with `--client-main`. Exit gate is
+   the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,
+   the manifest clean. Expected boot (headless, `ref/null`, full `valve/`
+   on the disc so `delta.lst` exists): `SV_LoadProgs` completes against the
+   REAL `GetEntityAPI2` (every `DLL_FUNCTIONS` member real, the stub's six-of-forty gone), then
+   `CL_Init` stops at "can't initialize client: missing essential exports"
+   - now with the message ARRIVING on the log channel, since #34. That
+   message is the milestone: it proves 100+ real server translation units
+   link and initialise on the console.
+2. **`hl` client module links.** Sweep `cl_dll/` (no VGUI), generate
+   `client/exports.txt`, link. Expected boot: `CL_Init` passes, `UI_LoadProgs`
+   loads the menu (X6's `mainui`, already linking; its manifest must be
+   clean or the link refuses), `Host_Frame` runs. Verify with
+   `tools/xemu-debug.py`: `regs` in the kernel idle-wait between frames,
+   `mon "info registers"` `HLT=0`, and the log channel carrying `Con_Printf`
+   traffic from the frame loop - three independent signals, not one.
+3. **A map loads.** `map c0a0` via `+map` in the disc's `video.cfg`/`config`
+   path (upstream's own startup-command mechanism, no engine change).
+   Exit: `SV_SpawnServer` completes, `pfnServerActivate` runs, entities
+   spawn (every classname resolves - the generated table's real test), the
+   client receives the world, and it does so with `ref/null` (no picture,
+   headless). Memory is measured here, not guessed: `mon "info registers"`
+   plus the engine's own `Mem_PrintStats` over the log channel, before and
+   after the load - the 64 MB budget is X8/X9's problem but its first real
+   number comes from this step.
+4. **On screen** is X5 (`vid_xbox.c` + `ref_soft`), which this step
+   unblocks: X5's exit line ("a recognisable map, in software") needs a
+   game module to have something to draw.
+
+### X7.5 — Discs: one XISO per title
+
+`tools/xbox-xiso.sh <title>` (replacing the hand-rolled `extract-xiso`
+invocation used through X5 bring-up) builds `default.xbe` + the title's
+gamedir + `valve/` (the basedir all three fall back to) from the Steam
+install path given on the command line - never copied into the repo, none
+of it is ours to redistribute. `gameinfo.txt` per title as upstream
+generates it from `liblist.gam` (`gamedir`, `basedir`, `title`, `startmap`
+`c0a0`/`of0a0`/`ba_tram1`), `video.cfg` with `r_refdll` for the renderer
+in use. Disc-size and load-time work (`.mpak`, X8) is deliberately NOT
+here; a raw `valve/` tree is fine for bring-up and honest about what it
+costs.
+
+### X7.6 — Opposing Force and Blue Shift
+
+Same pipeline, `XBOX_TITLE=op4` / `bshift`, on their `resonance3d`
+branches: replay X7.3, sweep, generate tables (323 / 254 entities), link,
+disc. What is genuinely different and must be checked rather than
+assumed: Opposing Force's extra `dlls/` (135 vs 103 - new monsters,
+weapons, the `CTF` gamerules) and any `cl_dll` additions (53 vs 49);
+Blue Shift's `bshift` gamedir replaces `valve` content by name (its own
+`maps/`, `models/`) with `basedir valve` for the rest, and its Steam
+release uses standard BSP 30 (the old retail "BS BSP" variant is not a
+concern). Both expansions ship their own `pm_shared` copies - three
+`PM_Move`s in the tree, one per XBE, never in the same link. Exit per
+title: the same three boot milestones as X7.4, on its own disc, from its
+own `startmap`.
+
+### Risks carried into the ledger, not hidden
+
+- **Save format depends on link layout** (`XASH_STATIC_LIBS` implies
+  `XASH_ALLOW_SAVERESTORE_OFFSETS`, X1 note): each title's XBE must be
+  built reproducibly, and a save is only valid for the exact XBE that wrote
+  it. Fine for bring-up; a real fix (name-based function pointers in saves)
+  is its own item before any release.
+- **Three `pm_shared`s, three sets of engine expectations**: the engine's
+  `SV_InitClientMove` hull loop and `pmove` function table are per-link;
+  no cross-title sharing, and nothing to get subtly wrong as long as a
+  title never links another title's objects (the sweep's per-title scratch
+  dir is the guard).
+- **Code size**: ~260 TUs of C++ per title on top of a 3.9 MB engine. The
+  number comes from the first link, not from here; if it matters, it
+  matters for X8's memory work, and the measurement is the deliverable.
+- **Linker non-determinism** (lessons.md): two links of identical source
+  differed in layout. Combined with the save-format point above, the disc
+  pipeline must record which link produced which XBE (the `.map` beside
+  it), and never mix.
+
+**Exit for X7 as a whole:** each of the three titles boots from its own
+XISO to its own menu, loads its own first map headless with every entity
+classname resolving, with the run verified through `tools/xemu-debug.py`
+and the log channel, and with the `.map` + manifest of the link that
+produced each XBE checked in alongside the build log. "Playable on screen"
+is X5 + X7 together, and is measured there.
 
 ## X8 — Audio
 
