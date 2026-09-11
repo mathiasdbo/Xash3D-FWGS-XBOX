@@ -1768,20 +1768,29 @@ not, and every hour spent on it is an hour not spent on Half-Life.
   `deps/nxdk/share/toolchain-nxdk.cmake` both exist; the fork's CMake is
   already "NXDK-proof" (`-march=pentium3`, explicit `WIN32`). Two viable
   compile routes, chosen below.
-- No export-name collisions between engine and SDK, checked by grep, not
-  hoped: the SDK's `extern "C"` names are the four server API exports
-  (`GetEntityAPI`, `GetEntityAPI2`, `GetNewDLLFunctions`, `GiveFnptrsToDll`),
-  the 37 client exports `cl_game.c`'s `cdll_exports[]` requires (`Initialize`,
-  `HUD_*`, `IN_*`, `V_CalcRefdef`, `CL_IsThirdPerson`, `CAM_Think`,
-  `KB_Find`, `Demo_ReadBuffer`...), `pm_shared`'s `PM_*`, and every entity
-  classname. The engine defines none of the first three groups in C, and
-  its own `PM_*` (`pm_trace.c`: `PM_HullForBsp`, `PM_RecursiveHullCheck`,
-  `PM_TraceLine`...) is disjoint from `pm_shared`'s (`PM_Move`, `PM_Init`,
-  `PM_Jump`...). Everything else in the SDK is C++-mangled and cannot
-  collide with C. What is NOT yet measured: libc-level helpers both sides
-  might define with C linkage - the link's own `0 duplicate` gate is the
-  test, and it is exactly the gate that already caught the double-linked
-  stub (lessons.md).
+- Engine-vs-SDK export names do not collide, checked by grep: the SDK's
+  `extern "C"` names are the four server API exports (`GetEntityAPI`,
+  `GetEntityAPI2`, `GetNewDLLFunctions`, `GiveFnptrsToDll`), the 37 client
+  exports `cl_game.c`'s `cdll_exports[]` requires (`Initialize`, `HUD_*`,
+  `IN_*`, `V_CalcRefdef`, `CL_IsThirdPerson`, `CAM_Think`, `KB_Find`,
+  `Demo_ReadBuffer`...), `pm_shared`'s `PM_*`, and every entity classname;
+  the engine defines none of the first three in C, and its own `PM_*`
+  (`pm_trace.c`) is disjoint from `pm_shared`'s. **That check is
+  necessary and nowhere near sufficient - found in Codex review of this
+  plan, 2026-09-11. The collision that actually matters is SERVER versus
+  CLIENT inside one XBE.** `cl_dll`'s target compiles the SAME `dlls/*.cpp`
+  weapon sources the server does (`deps/hlsdk/cl_dll/CMakeLists.txt:129-143`
+  pulls `../dlls/crossbow.cpp` and its siblings), under `CLIENT_DLL`, with
+  genuinely different bodies (`deps/hlsdk/dlls/crossbow.cpp:293-300` vs
+  `:342-349`). Two separate DLLs never see each other's
+  `CCrossbow::PrimaryAttack`; one static link sees both, as duplicate
+  definitions - and, worse, for anything COMDAT (inline methods, vtables,
+  RTTI) lld silently keeps ONE copy, so a class whose layout differs under
+  `CLIENT_DLL` would link clean and misbehave. This is precisely the
+  problem upstream's `xshlib.py` `objcopy -G`/`ld -r` step solves for
+  `--static-linking`, and the X1 section's "bypassed entirely" note is
+  where it was lost. It gets its own step, X7.1b, prototyped before any
+  other X7 work is accepted.
 - **Entity classnames are exported symbols.** `LINK_ENTITY_TO_CLASS`
   (`deps/hlsdk/dlls/util.h:100`) expands to
   `extern "C" DLLEXPORT void <classname>(entvars_t*)`, and the engine spawns
@@ -1824,31 +1833,89 @@ fidelity rules apply to the SDK exactly as to the engine (`AGENTS.md`),
 with `deps/hlsdk`'s upstream as the reference for `deps/hlsdk`, etc.
 Divergence ledger: one entry per branch, form 1 (our own forks).
 
-### X7.1 — Build mechanics: `XBOX_TITLE`, sweep the SDK like mainui
+### X7.1 — Build mechanics: the title is a required argument, and the TU set comes from CMake
 
-One selector, three values: `XBOX_TITLE=hl|op4|bshift` (default `hl`),
-honoured by `tools/xbox-cc.sh`, `tools/xbox-cxx.sh`, `tools/xbox-link-check.sh`
-and a new `tools/xbox-game-sweep.sh` (the `tools/xbox-mainui-sweep.sh`
-shape: clear `$SCRATCH/game-<title>/`, compile every `dlls/*.cpp`,
-`pm_shared/*.cpp`, `cl_dll/*.cpp` (minus VGUI) with `tools/xbox-cxx.sh`,
-write `manifest.txt` with `OK=/FAIL=/TOTAL=`, and REFUSE to report clean
-on `TOTAL=0` - the same silent-success guard `xbox-link-check.sh:361-376`
-already enforces on the mainui manifest). Compile route: this project's own
-`tools/xbox-cxx.sh` per translation unit, not the SDK's CMake through
-`toolchain-nxdk.cmake`. Reason: every other module in the XBE goes through
-the sweep scripts and their `compat/xbox` include ordering and prelude, the
-manifest/staleness checks are already written for that shape, and mixing
-one CMake-built `.lib` into a link whose every other object came from the
-sweep would put the SDK outside the tooling that is supposed to catch
-exactly the mistakes that cost time so far. CMake stays the fallback if a
-compile flag turns out to be impossible to express per-TU. Per-title
-inputs: SDK dir (`deps/hlsdk` / `deps/hlsdk-opfor` / `deps/hlsdk-bshift`),
-the defines that title's own `dlls/CMakeLists.txt` and `cl_dll/CMakeLists.txt`
-set (`VALVE_DLL`/`CLIENT_DLL` for Half-Life; read the other two, do not
-guess - `op4` and `bshift` add their own), scratch dir, output XBE/XISO
-name, and the disc gamedir (`valve` / `gearbox` / `bshift`). `stub_game/`
+**The title is a positional argument, never an environment variable.**
+Every script in the chain - a new `tools/xbox-game-sweep.sh <title>`,
+`tools/xbox-link-check.sh --title <title>`, `tools/xbox-xiso.sh <title>` -
+takes `hl|op4|bshift` explicitly and refuses to run without it. Found in
+Codex review: an `XBOX_TITLE=` selector with a silent `hl` default is the
+exact failure lessons.md already records (`XBOX_*` exports vanish through
+the documented MSYS bash invocation, and the result was a clean, bootable
+artifact of the wrong configuration). So: no default, the title is written
+into the sweep's `manifest.txt`, and the link and XISO steps each re-read
+that manifest and compare title, SDK path, scratch dir, gamedir and output
+name against what they were asked for before producing anything. A
+mismatch is a hard error, not a warning.
+
+**The translation-unit set comes from each title's own CMake, not from a
+glob.** Found in Codex review: `cl_dll/*.cpp` is not the client. The real
+client target (`deps/hlsdk/cl_dll/CMakeLists.txt:116-159`) is `cl_dll/`
+plus `cl_dll/hl/` plus `cl_dll/particleman/` plus files from `common/`,
+`dlls/` (the shared weapon sources, under `CLIENT_DLL`), `game_shared/`
+and `public/` - and a hard-required export, `HUD_PostRunCmd`, is defined
+in `cl_dll/hl/hl_weapons.cpp:892-901`, so a `cl_dll/*.cpp` sweep can never
+link. Per title and per target, `tools/xbox-game-manifest.sh <title>
+<server|client>` derives the expected TU list and the target's own
+defines from that title's `dlls/CMakeLists.txt` / `cl_dll/CMakeLists.txt`
+(`target_sources` + `target_compile_definitions`, read, not retyped -
+`op4` and `bshift` add their own), writes it to
+`$SCRATCH/game-<title>/<target>.manifest`, and the sweep compiles exactly
+that list with exactly those defines per TU (`CLIENT_DLL` on the client
+side, never on the server side, `_STATIC_ENGINE_LINK` on neither). The
+sweep's `manifest.txt` records OK/FAIL/TOTAL against the EXPECTED count
+and refuses to report clean on any mismatch in either direction - a
+missing TU and an unexpected extra TU are both failures, same guard shape
+as `xbox-link-check.sh:361-376` already enforces for mainui. VGUI sources
+are excluded by the X7.3 `USE_VGUI` rule inside that derivation, not by a
+hand-edited list.
+
+Compile route: this project's own `tools/xbox-cxx.sh` per TU, not the
+SDK's CMake through `toolchain-nxdk.cmake`. Every other module in the XBE
+goes through the sweep scripts and their `compat/xbox` include ordering
+and prelude, the manifest/staleness checks are written for that shape,
+and a CMake-built `.lib` mixed into a sweep-built link would sit outside
+the tooling meant to catch exactly the mistakes that cost time so far.
+CMake stays the fallback if a per-TU flag proves impossible to express.
+Per-title inputs: SDK dir (`deps/hlsdk` / `deps/hlsdk-opfor` /
+`deps/hlsdk-bshift`), scratch dir `$SCRATCH/game-<title>/`, output
+XBE/XISO name, disc gamedir (`valve` / `gearbox` / `bshift`). `stub_game/`
 is retired the moment `hl` links: it exists to prove the mechanism, and
 the mechanism is proven.
+
+### X7.1b — Module symbol isolation, prototyped before anything else
+
+Each module's object set is renamed so its internals cannot meet the
+other module's in the link. Mechanism, on this toolchain's own tools:
+`llvm-nm --defined-only --extern-only` over one module's objects produces
+the set of symbols it DEFINES; every one of them except that module's own
+export list (X7.2's generated `exports.txt`, plus the C-linkage names the
+engine itself resolves by name - the four server API exports, the client
+`cdll_exports`, `pm_shared`'s entry points) is written to a rename map
+`old new` with a `sv_`/`cl_` prefix, and `llvm-objcopy --redefine-syms
+<map>` (present: `/c/msys64/mingw64/bin/llvm-objcopy.exe`, COFF-capable)
+is applied to every object of that module. Renaming is consistent across
+definitions and references within the module because the map is derived
+from the module's own definitions, and references to symbols the module
+does NOT define (CRT, libc++, nothing from the engine - the SDK reaches
+the engine only through `gEngfuncs`) are untouched because they are not
+in the map. This is `xshlib.py`'s `objcopy -G` localisation done by
+renaming instead of by a relocatable pre-link, since `lld-link` has no
+COFF `-r`. Applied to BOTH modules, not just one: it also removes the
+COMDAT silent-merge hazard (a renamed vtable cannot be merged with the
+other side's) and any libc-helper collision with the engine.
+
+**Prototype gate, before X7.1/X7.2 tooling is even written:** compile
+`deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh` (server
+defines, then `CLIENT_DLL`), plus the minimum each needs to resolve,
+apply the rename to the client side, link both with the engine object set
+through `tools/xbox-link-check.sh` and require `0 duplicate`; then the
+negative control - the same link WITHOUT the rename must report the
+duplicates, by name, or the gate has measured nothing. The generated
+export tables (X7.2) need no change: exports are excluded from the map, so
+`gen-library-tables.sh`'s `extern void name` declarations still bind.
+Record the resulting build divergence in the ledger; it lives in
+`tools/`, form 1, touching no SDK source at all.
 
 ### X7.2 — Generated export tables, from the objects, not from a list
 
@@ -1894,6 +1961,9 @@ single-player is untouched.
 
 ### X7.4 — Half-Life first: server, then client, each a boot milestone
 
+0. **X7.1b's collision prototype passes, with its negative control.**
+   Nothing below starts until the two-object `crossbow.cpp` link shows
+   `0 duplicate` renamed and the named duplicates un-renamed.
 1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
    generate `server/exports.txt`; link with `--client-main`. Exit gate is
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,
