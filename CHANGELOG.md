@@ -5,6 +5,84 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-gen-exports.sh`: completeness gate could mark a missing required name as found (X7.2, Codex review round 2)
+
+Two more real gaps, both in the `--require` completeness gate, found on
+the round-2 re-review. (1) In `--allow` mode, the gate accepted a
+required name found only in the object's raw, unfiltered export list -
+not the actually-written, allow-filtered table - so a required callback
+that is a genuine export of the object but missing from the allowlist
+would pass the gate while never appearing in the generated file. Fixed:
+the gate now checks only the table that actually gets written. (2) The
+zero-entries check ran after the gate's stdcall/raw-symbol fallback had
+already run, so an `--all` object set whose directive extraction found
+nothing could still end up with a small, fallback-only "passing" table
+(just the required names) while silently losing every real export.
+Fixed: a new pre-fallback check refuses to proceed past zero base
+entries (before `--require`'s fallback runs) unless `--allow-empty` is
+passed. Both re-verified against real compiled objects with dedicated
+negative tests, plus a full re-run of the prior round's tests.
+
+### Fixed — `tools/xbox-gen-exports.sh`: object-inspection failures no longer swallowed, client completeness gate enforced (X7.2, Codex review round 1)
+
+Two real gaps in the first version. (1) Both object-inspection loops
+discarded `llvm-readobj`/`llvm-nm`'s own exit status behind
+`2>/dev/null | ... || true`, so a crashed or unparseable object was
+indistinguishable from "exports nothing" and could silently drop real
+entity names from the table while the script still exited 0. Each
+object's inspector call is now checked individually before its output is
+processed; a failure names the tool and the offending object and exits
+nonzero. (2) A generated table with zero entries was only ever a
+warning, and the documented client invocation never passed `--require`,
+leaving the client's 37 hard-required `cdll_exports` names with no
+enforced floor. Zero entries is now a hard error by default (nothing is
+written), with a new `--allow-empty` opt-out for a genuinely empty
+module; a new `tools/xbox-client-required-exports.txt` (the 37
+`cdll_exports` names) is now passed via `--require` on the documented
+client invocation. All four behaviors (inspector-failure detection,
+zero-entries-without-opt-out, zero-entries-with-opt-out, the existing
+require-gate regression) re-verified against the real compiled
+crossbow.cpp/h_export.cpp/cbase.cpp objects used throughout X7.1b/X7.2.
+
+### Added — `tools/xbox-gen-exports.sh`: exports.txt generated from compiled objects, not typed by hand (X7.2)
+
+The first real piece of X7's `tools/` implementation. Reads a module's
+compiled objects and writes `tools/gen-library-tables.sh`'s input format:
+`--all` mode (server) includes every unmangled real `/EXPORT:` name found
+(the ~260 `LINK_ENTITY_TO_CLASS` entity names plus API exports, none of
+it known in advance - directive #6, never a hand-written classname list);
+`--allow <file>` mode (client) includes only names present in a given
+allowlist, so the shared weapon sources `cl_dll` also compiles never leak
+their entity classnames onto the client's public surface. `--require
+<file>` validates a completeness gate (`A|B` lines mean "at least one of
+these", matching `engine/server/sv_game.c:5235`'s own
+`GetEntityAPI`/`GetEntityAPI2` either-or) and, in `--all` mode, adds a
+required name found only via a stdcall-decorated symbol
+(`gen-library-tables.sh` gains a backward-compatible optional second
+column for exactly this - `name asm_symbol` - binding the generated
+`extern` to that exact linker symbol via an asm-label override instead of
+assuming cdecl). Two small, fixed input files ship with it,
+`tools/xbox-server-required-exports.txt` and
+`tools/xbox-client-allowed-exports.txt`, both literal transcriptions of
+`sv_game.c`'s and `cl_game.c`'s own lookups (the latter corrects a
+miscount from earlier X7 planning: `cdll_new_exports[]` has 11 entries,
+not 12).
+
+Verified against real SDK files, not synthetic ones, including the
+required negative control: `crossbow.cpp` + `h_export.cpp` alone
+(missing `GetEntityAPI`/`GetEntityAPI2`, which live in `cbase.cpp`)
+correctly fails and writes nothing; with `cbase.cpp` added, writes
+exactly the 4 API names (`GiveFnptrsToDll` with its asm override,
+verified via the stdcall fallback) and the 3 real entity classnames, zero
+of the many mangled C++ methods in the same objects. `--allow` mode
+against the client-compiled `crossbow.cpp` and the real 48-name
+allowlist: 0 entries, correctly, with a warning rather than a silent
+empty success. Full chain proven end to end: the generated
+`server/exports.txt` fed through the extended `gen-library-tables.sh`,
+compiled, and linked against the three real SDK objects - `0` duplicate,
+every name (including the asm-overridden one) resolved with no
+undefined-symbol warnings.
+
 ### Measured — X7.1b's server/client symbol-isolation design: PASSED against the real 384-object client link
 
 The prototype gate the X7 plan required before any other per-title work:

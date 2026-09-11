@@ -34,6 +34,25 @@
 # An exports.txt with zero lines (a real, deliberate "nothing exported yet"
 # state - not a placeholder) generates a valid, empty-but-terminated array,
 # same as upstream's own splitlines() would on an empty file.
+#
+# Each line is `name` or `name asm_symbol` (space-separated, second field
+# optional - every exports.txt written before this comment existed has zero
+# lines with a space in them, so this is a strictly backward-compatible
+# extension, not a format break). The second field exists for exactly one
+# real case so far, found compiling the HL SDK's own h_export.cpp (X7.2,
+# docs/r3d/fork-plan.md): GiveFnptrsToDll locally redefines DLLEXPORT as
+# `__stdcall` on WIN32 instead of `__declspec(dllexport)`, so clang never
+# emits a `/EXPORT:` directive for it and its real linker symbol is
+# `_GiveFnptrsToDll@8` (stdcall's `@`+argument-byte-count decoration), not
+# the plain cdecl name a bare `extern void name(void);` would look for.
+# Guessing a calling convention from a name alone is not possible in
+# general (the byte count depends on the real signature), so this script
+# does not try to - the caller (tools/xbox-gen-exports.sh) determines the
+# real symbol from the compiled object's own symbol table and writes it
+# here explicitly. With `asm_symbol` given, the generated declaration binds
+# to that exact linker symbol via GNU/clang's asm-label extension
+# regardless of what calling convention produced it; without it, behaviour
+# is unchanged from before this line existed.
 set -eu
 
 OUT_DIR="${1:?usage: gen-library-tables.sh <out-dir> [name[:exports.txt-path]...]}"
@@ -91,14 +110,18 @@ for arg in "$@"; do
 		echo "typedef struct {const char *name;void *func;} table_t;"
 		echo
 
-		while IFS= read -r fn || [ -n "$fn" ]; do
+		while IFS=' ' read -r fn asm_sym || [ -n "$fn" ]; do
 			[ -z "$fn" ] && continue
-			echo "extern void ${fn}(void);"
+			if [ -n "${asm_sym:-}" ]; then
+				echo "extern void ${fn}(void) asm(\"${asm_sym}\");"
+			else
+				echo "extern void ${fn}(void);"
+			fi
 		done < "$exports_txt"
 
 		echo
 		echo "table_t lib_${name}_exports[] = {"
-		while IFS= read -r fn || [ -n "$fn" ]; do
+		while IFS=' ' read -r fn asm_sym || [ -n "$fn" ]; do
 			[ -z "$fn" ] && continue
 			echo "{ \"${fn}\", &${fn} },"
 		done < "$exports_txt"

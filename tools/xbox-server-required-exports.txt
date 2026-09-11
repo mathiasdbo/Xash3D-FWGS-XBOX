@@ -1,0 +1,2 @@
+GetEntityAPI|GetEntityAPI2
+GiveFnptrsToDll
