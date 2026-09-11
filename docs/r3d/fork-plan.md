@@ -1896,20 +1896,67 @@ work, not invented here.
 
 **Built and verified end-to-end, 2026-09-11.** Ran against the real,
 current `deps/hlsdk` CMakeLists on both targets: server - 107 `.cpp`
-sources, 2 defines (`VALVE_DLL`, `WIN32`); client - 85 `.cpp` sources
-(VGUI still included, X7.3 not yet done), 3 defines (`CLIENT_DLL`,
-`HL_DLL`, `WIN32`). Every derived source path checked to actually exist
-on disk (a hard error otherwise); an independent comment-stripped
-recount from the raw file, run separately rather than trusting the
-tool's own arithmetic, matched both counts exactly. Negative tests: `op4`
-and `bshift` both correctly refuse with the no-CMakeLists explanation; an
-unrecognized token in a `target_sources()` block (neither `.cpp` nor
-`.h`) is a hard parse error naming the token, not a silent drop -
-verified against a deliberately mangled copy of the real file.
+sources; client - 85 `.cpp` sources (VGUI still included, X7.3 not yet
+done). Every derived source path checked to actually exist on disk (a
+hard error otherwise); an independent comment-stripped recount from the
+raw file, run separately rather than trusting the tool's own arithmetic,
+matched both counts exactly. Negative tests: `op4` and `bshift` both
+correctly refuse with the no-CMakeLists explanation; an unrecognized
+token in a `target_sources()` block (neither `.cpp` nor `.h`) is a hard
+parse error naming the token, not a silent drop - verified against a
+deliberately mangled copy of the real file.
+
+**Codex review round 1 found the defines were incomplete: both targets
+also call `set_common_properties(TARGET_NAME)` (`deps/hlsdk/CMakeLists.txt`),
+whose own `target_compile_definitions()` this script's first version
+never read.** That block unconditionally adds `_CRT_SECURE_NO_WARNINGS`
+and `CLIENT_WEAPONS` - not cosmetic: `CLIENT_WEAPONS` changes a weapon
+save-field's type (`dlls/weapons.cpp:378-386`) and gates client-side
+weapon prediction (`cl_dll/hl/hl_weapons.cpp:910-915`), so a manifest
+missing it would compile and link a functioning-looking but materially
+wrong build - exactly the "clean sweep of the wrong configuration"
+failure mode this project has been burned by before. The block also
+contains real CMake generator expressions (`$<$<CONFIG:DEBUG>:_DEBUG>`,
+two `$<$<PLATFORM_ID:...>:...>` gates, and a `$<CONFIG>` value
+substitution inside `UNIFIED_SDK_CONFIG="$<CONFIG>"`) - resolved against
+a single, fixed, explicitly-chosen configuration (`RESOLVED_CONFIG=Release`,
+since this project's Xbox compile route has no real CMake configure step
+to inherit a Debug/Release choice from, and a shipped title would be
+Release; `RESOLVED_PLATFORM=Xbox`, deliberately neither `Linux` nor
+`Darwin`, the only two values this SDK's genexps ever test) rather than
+by actually running CMake. Every genex SHAPE the script resolves is a
+real one measured in the file; anything else is a hard parse error, never
+a guess. A second, real parsing bug found and fixed in the same pass,
+before ever running against real Codex feedback on it: a naive
+whitespace tokenizer would tear apart `$<$<PLATFORM_ID:Linux,
+Darwin>:POSIX _POSIX LINUX _LINUX GNUC>` (one CMake list item despite its
+internal spaces - legal CMake syntax, whitespace inside a balanced
+`$<...>` does not end an unquoted argument) into garbage tokens; fixed
+with an angle-bracket-depth-aware splitter used for every list this
+script tokenizes. Re-verified end to end against the real files: server -
+107 sources, 5 defines (`VALVE_DLL`, `WIN32`, `_CRT_SECURE_NO_WARNINGS`,
+`CLIENT_WEAPONS`, `UNIFIED_SDK_CONFIG="Release"`); client - 85 sources, 6
+defines (adds `CLIENT_DLL`, `HL_DLL` to the same common five). Both
+`$<$<PLATFORM_ID:...>:...>` gates and the `$<$<CONFIG:DEBUG>:_DEBUG>`
+gate correctly resolve to nothing on this configuration, confirmed by
+the exact count (not just "it didn't crash"). Unit-tested `resolve_define`
+directly against all five real shapes plus one deliberately unknown genex
+(`$<$<COMPILE_LANGUAGE:CXX>:...>`, never present in this file, to prove
+the hard-error path fires rather than silently passing an unrecognized
+shape through). Not fixed here, out of this script's scope (a
+project-wide compiler-flag concern, not a per-title one, and this
+manifest format carries DEFINE/SOURCE only by design): `set_common_properties`
+also sets real `target_compile_options` (`-fpermissive
+-fno-strict-aliasing -Wno-invalid-offsetof`, its own comment already
+noting nxdk-cc needs them too) that `tools/xbox-cxx.sh` does not
+currently pass - flagged for whoever builds the sweep/compile step to
+either bake into `xbox-cxx.sh` directly (these are project-wide, not
+per-title) or extend the manifest format for.
 
 **`deps/hlsdk`'s `resonance3d` branch CMakeLists fixed to actually match
-what this project needs, 2026-09-11 - found while building the manifest
-tool above, not assumed going in.** The branch was cut from `master`
+what this project needs, 2026-09-11 (recorded as divergence #35) - found
+while building the manifest tool above, not assumed going in.** The
+branch was cut from `master`
 (X7.0) and had not yet diverged from it, so it still carried three real
 problems specific to `master`'s own Ferrum56/Rust-port setup:
 

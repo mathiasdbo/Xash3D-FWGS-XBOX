@@ -33,7 +33,7 @@ undefined, `SV_InitServer()`'s stock filesystem load fails on Xbox
 (`Sys_LoadModule` is a raw `LoadLibrary()`, and nxdk's has no dynamic
 loading), and `GameDLLInit()` quits the game immediately as a result -
 a more severe, earlier boot blocker than the previously-known writable-
-rootdir gap.
+rootdir gap. Recorded as divergence #35.
 
 ### Fixed — `tools/xbox-gen-exports.sh`: completeness gate could mark a missing required name as found (X7.2, Codex review round 2)
 
