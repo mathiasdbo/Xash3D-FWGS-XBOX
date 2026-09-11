@@ -55,12 +55,36 @@
 #           what --allow already wrote as a completeness gate). One
 #           requirement per line; a line may list alternatives separated by
 #           `|` (`GetEntityAPI|GetEntityAPI2` - engine/server/sv_game.c:5235
-#           only fails if BOTH are absent, not one). --require may be
-#           omitted (no completeness gate beyond --allow/--all themselves).
+#           only fails if BOTH are absent, not one). Found in Codex review:
+#           the documented client invocation had originally omitted this,
+#           which would let a wrong or incomplete client object set produce
+#           an empty (or partial) table and still exit 0 - `client/exports.txt`
+#           MUST be generated with `--require tools/xbox-client-required-exports.txt`
+#           (the 37 `cdll_exports` names `cl_game.c`'s own load path treats
+#           as fatal if any is missing, `cl_game.c:4059-4084`) in real use;
+#           `--require` staying technically optional here is for this
+#           script's own generality, not licence to skip it for a real
+#           module.
+# --allow-empty: without this, an <out.txt> with zero entries is an ERROR
+#           (exit 1), not just a warning - found in Codex review: a silent
+#           empty table passing the build is exactly the false-clean
+#           measurement this project's own tools have shipped before
+#           (docs/r3d/lessons.md). Pass this only for a module that is
+#           genuinely, deliberately empty (gen-library-tables.sh's own
+#           header comment already treats that as a real, intentional
+#           state, not a placeholder) - never as a way to silence this
+#           check.
 #
 # Requires llvm-readobj and llvm-nm (present at
 # /c/msys64/mingw64/bin/{llvm-readobj,llvm-nm}.exe, same toolchain
-# tools/xbox-cxx.sh already depends on).
+# tools/xbox-cxx.sh already depends on). A tool failing on any ONE object
+# (a truncated file, an object this build of llvm-readobj/-nm cannot parse)
+# is fatal, not silently skipped - found in Codex review: naive
+# `... 2>/dev/null | grep ... || true` swallows the INSPECTOR's own exit
+# code (the pipeline's exit code is grep's), so a crashed llvm-readobj on
+# one object looked identical to "this object legitimately exports
+# nothing" and the export list would just quietly lose that object's
+# names while the script still exited 0.
 set -eu
 
 READOBJ="/c/msys64/mingw64/bin/llvm-readobj.exe"
@@ -73,13 +97,14 @@ for t in "$READOBJ" "$NM"; do
 done
 
 usage() {
-	echo "usage: xbox-gen-exports.sh --all|--allow <file> [--require <file>] <out.txt> <obj>..." >&2
+	echo "usage: xbox-gen-exports.sh --all|--allow <file> [--require <file>] [--allow-empty] <out.txt> <obj>..." >&2
 	exit 1
 }
 
 MODE=""
 ALLOW_FILE=""
 REQUIRE_FILE=""
+ALLOW_EMPTY=0
 OUT=""
 OBJS=()
 
@@ -99,6 +124,10 @@ while [ $# -gt 0 ]; do
 	--require)
 		REQUIRE_FILE="${2:?--require needs a file}"
 		shift 2
+		;;
+	--allow-empty)
+		ALLOW_EMPTY=1
+		shift
 		;;
 	--)
 		shift
@@ -145,22 +174,39 @@ trap 'rm -rf "$WORK"' EXIT
 # defined - the caller is responsible for passing -DWIN32, same as
 # tools/xbox-cxx.sh's other SDK callers already must, per the h_export.cpp
 # _rotr trap documented in fork-plan.md's X7.2).
-: > "$WORK/directive_names.txt"
+: > "$WORK/directive_raw.txt"
 for o in "${OBJS[@]}"; do
-	"$READOBJ" --coff-directives "$o" 2>/dev/null \
-		| grep -o '/EXPORT:"[^"]*"\|/EXPORT:[^" ]*' \
-		| sed 's#^/EXPORT:##; s/^"//; s/"$//' \
-		|| true
-done | sed 's/^_//' | grep -v '^?' | sort -u > "$WORK/directive_names.txt"
+	if ! "$READOBJ" --coff-directives "$o" > "$WORK/readobj_out.txt" 2> "$WORK/readobj_err.txt"; then
+		echo "xbox-gen-exports: llvm-readobj failed on $o:" >&2
+		cat "$WORK/readobj_err.txt" >&2
+		exit 1
+	fi
+	cat "$WORK/readobj_out.txt" >> "$WORK/directive_raw.txt"
+done
+# A valid object with zero /EXPORT: directives is a legitimate, non-fatal
+# result (grep exits 1 on no match) - distinct from the loop above, where a
+# nonzero llvm-readobj exit already aborted the script for that object.
+grep -o '/EXPORT:"[^"]*"\|/EXPORT:[^" ]*' "$WORK/directive_raw.txt" \
+	| sed 's#^/EXPORT:##; s/^"//; s/"$//; s/^_//' \
+	| grep -v '^?' | sort -u > "$WORK/directive_names.txt" \
+	|| : > "$WORK/directive_names.txt"
 
 # --- 2. Full raw defined+extern symbol table across all objects (for the
 #        stdcall-fallback search only - never used to widen --all's output,
 #        since an arbitrary internal symbol is not "exported" by any
-#        definition this project uses). ---
-: > "$WORK/all_syms.txt"
+#        definition this project uses). A failed llvm-nm on any one object
+#        is fatal (see the header comment on tool-failure swallowing), not
+#        silently treated as "no symbols in this object". ---
+: > "$WORK/nm_raw.txt"
 for o in "${OBJS[@]}"; do
-	"$NM" --defined-only --extern-only "$o" 2>/dev/null | awk '{print $NF}'
-done | sort -u > "$WORK/all_syms.txt"
+	if ! "$NM" --defined-only --extern-only "$o" > "$WORK/nm_out.txt" 2> "$WORK/nm_err.txt"; then
+		echo "xbox-gen-exports: llvm-nm failed on $o:" >&2
+		cat "$WORK/nm_err.txt" >&2
+		exit 1
+	fi
+	cat "$WORK/nm_out.txt" >> "$WORK/nm_raw.txt"
+done
+awk '{print $NF}' "$WORK/nm_raw.txt" | sort -u > "$WORK/all_syms.txt"
 
 # find_symbol_for NAME: prints, on success, either NAME (plain cdecl form
 # present) or "NAME asm_symbol" (only a stdcall-decorated form is present -
@@ -238,11 +284,16 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
 	exit 1
 fi
 
-sort -u "$WORK/out_lines.txt" > "$OUT"
-COUNT=$(wc -l < "$OUT" | tr -d ' ')
-if [ "$COUNT" -eq 0 ]; then
-	echo "xbox-gen-exports: WARNING - $OUT was written with zero entries" >&2
+sort -u "$WORK/out_lines.txt" > "$WORK/final.txt"
+COUNT=$(wc -l < "$WORK/final.txt" | tr -d ' ')
+if [ "$COUNT" -eq 0 ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
+	echo "xbox-gen-exports: ERROR - refusing to write $OUT with zero entries" >&2
 	echo "  (no unmangled exports found in any of the ${#OBJS[@]} object(s) given)." >&2
+	echo "  Pass --allow-empty if this module's public surface is genuinely," >&2
+	echo "  deliberately empty; otherwise this means the wrong object set was" >&2
+	echo "  given, or the module's real exports were lost some other way." >&2
+	exit 1
 fi
+cp "$WORK/final.txt" "$OUT"
 echo "xbox-gen-exports: wrote $COUNT export(s) to $OUT" >&2
 echo "$OUT"

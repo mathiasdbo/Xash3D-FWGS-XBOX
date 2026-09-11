@@ -5,6 +5,27 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-gen-exports.sh`: object-inspection failures no longer swallowed, client completeness gate enforced (X7.2, Codex review round 1)
+
+Two real gaps in the first version. (1) Both object-inspection loops
+discarded `llvm-readobj`/`llvm-nm`'s own exit status behind
+`2>/dev/null | ... || true`, so a crashed or unparseable object was
+indistinguishable from "exports nothing" and could silently drop real
+entity names from the table while the script still exited 0. Each
+object's inspector call is now checked individually before its output is
+processed; a failure names the tool and the offending object and exits
+nonzero. (2) A generated table with zero entries was only ever a
+warning, and the documented client invocation never passed `--require`,
+leaving the client's 37 hard-required `cdll_exports` names with no
+enforced floor. Zero entries is now a hard error by default (nothing is
+written), with a new `--allow-empty` opt-out for a genuinely empty
+module; a new `tools/xbox-client-required-exports.txt` (the 37
+`cdll_exports` names) is now passed via `--require` on the documented
+client invocation. All four behaviors (inspector-failure detection,
+zero-entries-without-opt-out, zero-entries-with-opt-out, the existing
+require-gate regression) re-verified against the real compiled
+crossbow.cpp/h_export.cpp/cbase.cpp objects used throughout X7.1b/X7.2.
+
 ### Added — `tools/xbox-gen-exports.sh`: exports.txt generated from compiled objects, not typed by hand (X7.2)
 
 The first real piece of X7's `tools/` implementation. Reads a module's

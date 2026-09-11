@@ -2126,6 +2126,32 @@ objects - `0` duplicate, every one of the seven names (including the
 asm-overridden `GiveFnptrsToDll`) resolved with no undefined-symbol
 warnings naming it.
 
+**Codex review round 1 found two real gaps in that first version, both
+fixed and re-verified, 2026-09-11:** (1) both object-inspection loops
+piped `llvm-readobj`/`llvm-nm` through `2>/dev/null | ... || true`,
+which reports only the last pipeline stage's exit code - a crashed or
+unreadable object was indistinguishable from "genuinely exports
+nothing," so a bad object could silently drop its names from the table
+while the script still exited 0. Fixed: each object's inspector
+invocation is now checked individually, with stderr captured and the
+offending object named, before any grep/awk touches its output; a
+corrupt-object negative test (`llvm-readobj: ... not recognized as a
+valid object file`) now fails fast and names the object, verified for
+real. (2) the "zero entries" case above was only ever a warning, and the
+plan's own documented client invocation never passed `--require`,
+leaving no enforced floor under the client's 37 hard-required
+`cdll_exports` names (`cl_game.c:4059-4084` treats any one of them
+missing as fatal at load time). Fixed: zero entries is now a hard error
+by default (the output file is not written), with a new explicit
+`--allow-empty` opt-out for a module that is genuinely, deliberately
+empty; and a new checked-in `tools/xbox-client-required-exports.txt`
+(the 37 `cdll_exports` names, a literal subset of the 48-name allow-list)
+is now passed via `--require` on the documented client invocation below.
+Both fixes re-verified end-to-end against the same real compiled
+objects: the zero-entries gate (error without `--allow-empty`, success
+with it), and the corrupt-object gate, each with a positive and negative
+case.
+
 `tools/gen-library-tables.sh` already took `name:exports.txt`; what
 changed is where `exports.txt` comes from and, for the one case that
 needs it, what each line carries: a new `tools/xbox-gen-exports.sh`
@@ -2142,18 +2168,25 @@ Per-title, per-target invocation for X7.4: `tools/xbox-gen-exports.sh
 --all --require tools/xbox-server-required-exports.txt
 server/exports.txt <every compiled dlls/+pm_shared/ object>` and
 `tools/xbox-gen-exports.sh --allow tools/xbox-client-allowed-exports.txt
-client/exports.txt <every compiled cl_dll/ object>`. Both small, fixed
-input files are written and checked in: `tools/xbox-server-required-exports.txt`
-(the `GetEntityAPI|GetEntityAPI2` + `GiveFnptrsToDll` requirement) and
+--require tools/xbox-client-required-exports.txt client/exports.txt
+<every compiled cl_dll/ object>`. Three small, fixed input files are
+written and checked in: `tools/xbox-server-required-exports.txt`
+(the `GetEntityAPI|GetEntityAPI2` + `GiveFnptrsToDll` requirement),
 `tools/xbox-client-allowed-exports.txt` (`cdll_exports`'s 37 names +
 `cdll_new_exports`'s 11, 48 total - re-read directly from
 `engine/client/dll_int/cl_game.c:57-111` while writing this, not reused
 from an earlier count in this same document that turned out to have one
 wrong: `12` for `cdll_new_exports` was a stray grep artifact, the real
-array has 11 entries). Both are literal transcriptions of
+array has 11 entries), and `tools/xbox-client-required-exports.txt` (the
+first 37 of those - `cdll_exports` only, the legacy callbacks
+`CL_LoadProgs` treats as fatal if any is missing - added on Codex review
+round 1, see above). All three are literal transcriptions of
 `engine/server/sv_game.c`'s and `cl_game.c`'s own lookups - not new
 decisions, and not the ~260-entry entity/HUD lists themselves, which
-stay fully generated, never hand-written.
+stay fully generated, never hand-written. Neither invocation passes
+`--allow-empty`: a title module producing zero real exports is never a
+legitimate outcome for either side, so it must fail loudly, not warn and
+continue.
 
 Source of truth: `DLLEXPORT` is `__declspec(dllexport)`, which clang
 records in each COFF object's `.drectve` section as `/EXPORT:name`
