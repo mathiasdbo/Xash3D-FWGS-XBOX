@@ -56,7 +56,12 @@ passthrough to the QEMU monitor, so a build can be inspected without
 driving xemu's Monitor window through simulated input and screenshots:
 registers, virtual and physical memory dumps, stack, byte-pattern search,
 symbol resolution against a linker `.map`, NV2A register dumps and a
-framebuffer capture read through `PCRTC_START`. Also published standalone
+framebuffer capture read through `PCRTC_START`. The search reports how
+much memory it actually inspected and exits nonzero when it could not
+read any of it - a scan that reads zero bytes must never look like a
+clean "no matches" (found in Codex review; failure paths are covered by
+`tools/test_xemu_debug.py`, `python -m unittest tools/test_xemu_debug.py`).
+Also published standalone
 as `github.com/mathiasdbo/xemu-debug-tools` for other projects and
 agents. Documents the facts that cost real time to learn (all read from
 the guest's own page tables via `info mem`/`info tlb`, not assumed): a

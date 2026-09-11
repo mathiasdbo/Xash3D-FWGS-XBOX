@@ -62,10 +62,17 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
   search <hexbytes> [--phys] [--start A] [--end B] [--chunk N]
                                 Byte-pattern scan. Virtual (default,
                                  0x10000-0x400000) or physical (--phys,
-                                 0-0x4000000). Prints every match address.
+                                 0-0x4000000). Prints every match address
+                                 AND how much was actually inspected. Exit
+                                 0 = complete scan; 2 = some chunks were
+                                 unreadable (listed; "none" then does NOT
+                                 mean absent); 1 = nothing at all could be
+                                 read, no verdict. Failure paths are unit
+                                 tested: tools/test_xemu_debug.py.
   find-delta <hexbytes> <vaddr> Search PHYSICAL RAM for <hexbytes> and print
                                  physical-minus-<vaddr> for each hit - the
-                                 load delta of that one page.
+                                 load delta of that one page. Same coverage
+                                 reporting and exit codes as search.
   sym <addr> --map <file> [--delta D]
                                 Nearest preceding public .text symbol from an
                                  lld-link map, plus the next symbol (a large
@@ -318,9 +325,40 @@ def resolve_symbol(entries, target):
     return prev, nxt
 
 
-def scan(read, start, end, chunk, target, label):
-    """Generic overlapped scan; `read(addr, n)` returns bytes or raises."""
-    found = []
+class ScanResult:
+    """What a scan actually measured, not just what it found.
+
+    A scan over memory that is partly (or entirely) unreadable must never
+    look like a clean "no matches": this project has shipped tools that
+    reported success without measuring anything before (docs/r3d/lessons.md),
+    and "pattern absent" vs "zero bytes inspected" is exactly that mistake.
+    """
+
+    def __init__(self):
+        self.found = []
+        self.bytes_scanned = 0
+        self.ok_chunks = 0
+        self.failed_ranges = []   # (start, end, reason)
+
+    @property
+    def failed_chunks(self):
+        return len(self.failed_ranges)
+
+    @property
+    def complete(self):
+        return not self.failed_ranges
+
+    @property
+    def nothing_read(self):
+        return self.ok_chunks == 0
+
+
+def scan(read, start, end, chunk, target, label, log=print):
+    """Overlapped byte-pattern scan; `read(addr, n)` returns bytes or raises
+    RuntimeError. Every failed read is recorded, never dropped."""
+    if not target:
+        raise ValueError("empty search pattern")
+    res = ScanResult()
     overlap = len(target) - 1
     prev_tail = b""
     addr = start
@@ -328,20 +366,47 @@ def scan(read, start, end, chunk, target, label):
         n = min(chunk, end - addr)
         try:
             data = read(addr, n)
-        except RuntimeError:
+        except RuntimeError as e:
+            res.failed_ranges.append((addr, addr + n, str(e)))
             prev_tail = b""
             addr += n
             continue
+        res.ok_chunks += 1
+        res.bytes_scanned += len(data)
         hay = prev_tail + data
         idx = hay.find(target)
         while idx != -1:
             hit = addr - len(prev_tail) + idx
-            found.append(hit)
-            print(f"MATCH at {hit:#010x} ({label})")
+            res.found.append(hit)
+            log(f"MATCH at {hit:#010x} ({label})")
             idx = hay.find(target, idx + 1)
         prev_tail = data[-overlap:] if overlap > 0 else b""
         addr += n
-    return found
+    return res
+
+
+def report_scan(res, start, end, label, log=print):
+    """Print the scan's coverage honestly. Returns the process exit code:
+    0 only for a complete scan, 2 for a partial one, 1 if nothing was read."""
+    if res.nothing_read:
+        log(f"ERROR: scanned 0 bytes of {label} memory {start:#x}-{end:#x} - "
+            f"every one of {res.failed_chunks} chunk read(s) failed. "
+            f"'no matches' would be meaningless; nothing was inspected.")
+        if res.failed_ranges:
+            _, _, reason = res.failed_ranges[0]
+            log(f"  first failure: {reason}")
+        return 1
+    log(f"matches: {[hex(x) for x in res.found] if res.found else 'none'}")
+    log(f"scanned {res.bytes_scanned:#x} bytes in {res.ok_chunks} chunk(s)")
+    if not res.complete:
+        log(f"WARNING: INCOMPLETE scan - {res.failed_chunks} chunk(s) could not "
+            f"be read, so 'none' above does not mean absent. Unread ranges:")
+        for s, e, reason in res.failed_ranges[:12]:
+            log(f"  {s:#010x}-{e:#010x}: {reason.splitlines()[0][:100]}")
+        if res.failed_chunks > 12:
+            log(f"  ... and {res.failed_chunks - 12} more")
+        return 2
+    return 0
 
 
 def write_png(path, width, height, rgb_rows):
@@ -406,29 +471,37 @@ def cmd_search(a):
         start = parse_hex(a.start) if a.start else 0x0
         end = parse_hex(a.end) if a.end else 0x4000000
         chunk = a.chunk or 0x4000
-        found = scan(g.read_phys, start, end, chunk, target, "physical")
+        label = "physical"
+        res = scan(g.read_phys, start, end, chunk, target, label)
     else:
         start = parse_hex(a.start) if a.start else 0x10000
         end = parse_hex(a.end) if a.end else 0x400000
         chunk = a.chunk or 0x8000
-        found = scan(g.read_mem, start, end, chunk, target, "virtual")
-    print("matches:", [hex(x) for x in found] if found else "none")
+        label = "virtual"
+        res = scan(g.read_mem, start, end, chunk, target, label)
     g.close()
+    sys.exit(report_scan(res, start, end, label))
 
 
 def cmd_find_delta(a):
     g = GdbRemote(a.host, a.port)
     target = bytes.fromhex(a.pattern)
     vaddr = parse_hex(a.vaddr)
-    found = scan(g.read_phys, 0x0, 0x4000000, 0x4000, target, "physical")
-    if not found:
+    start, end = 0x0, 0x4000000
+    res = scan(g.read_phys, start, end, 0x4000, target, "physical")
+    g.close()
+    code = report_scan(res, start, end, "physical")
+    if code == 1:
+        sys.exit(1)
+    if not res.found:
         print("no physical match - is that the unrelocated prefix of a function "
               "actually in this build (llvm-objdump -d the .obj), before any "
-              "relocation-patched bytes?")
-    for hit in found:
+              "relocation-patched bytes?" + (" Note the scan above was "
+              "INCOMPLETE." if not res.complete else ""))
+    for hit in res.found:
         print(f"physical {hit:#010x} - virtual {vaddr:#010x} = delta {hit - vaddr:#x} "
               f"(valid for THIS page only; the image is mapped page-by-page)")
-    g.close()
+    sys.exit(code)
 
 
 def cmd_sym(a):
