@@ -5,7 +5,7 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
-### Fixed — X0.5 confirmed by a real boot: the client engine finds and mounts `valve/`
+### Fixed — X0.5 confirmed on xemu (not yet real-hardware-verified): the client engine finds and mounts `valve/`
 
 The network log channel (divergence #13) finally reached the host this
 session - the earlier "Windows Firewall silently dropped it" block
@@ -34,7 +34,10 @@ strip the prefix for any path. All three verified by real boot logs:
 `FI.numgames > 0`, `valve/gameinfo.txt` found and mounted, and a real,
 retail `gfx.wad` (86,608 bytes) loading through `"./valve/gfx.wad"` with
 no load error at all - X0.5's own exit line, finally observed rather than
-inferred.
+inferred, **on xemu**. Per AGENTS.md's own Verification section ("xemu is
+not validation... a phase does not close until it runs on a real Xbox"),
+X0.5 itself stays open until the same boot is confirmed on real hardware
+- a real-hardware-testable XISO is packaged for exactly that (see below).
 
 Reaching that boot at all needed the CLIENT target to call `Host_Main`
 for the first time ever (divergence #32): a new `XBOX_CLIENT_MAIN=1`

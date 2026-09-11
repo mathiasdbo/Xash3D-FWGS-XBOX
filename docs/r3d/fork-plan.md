@@ -319,7 +319,8 @@ before the existing `/`→`\` conversion. `filesystem/sys.c`'s
 `FS_SetCurrentDirectory` now calls this real `chdir()` on Xbox instead of
 printing "not implemented, ignoring..." and returning true.
 
-**CONFIRMED by a real boot, 2026-09-11 (divergence #32).** The network log
+**CONFIRMED by a real xemu boot, 2026-09-11 (divergence #32) - not yet
+real-hardware-verified, see below.** The network log
 channel finally reached the guest - the earlier "Windows Firewall silently
 dropped it" block was a tooling bug, not a network one (see
 `docs/r3d/lessons.md`'s MSYS2 entry: `XBOX_ENGINE_TESTS=1` was never
@@ -371,10 +372,21 @@ throttled by xemu's own DVD-read pacing for a disc this size rather than
 anything filesystem-layer - `Host_InitCommon` onward is X2's own scope to
 pick up from here, not X0.5's.
 
-**Exit met**: the engine finds its game directory on Xbox and mounts it.
-`FI.numgames > 0` and the engine proceeds into `Host_InitCommon` looking
-for real game assets - the exact boundary this phase's own exit line
-named.
+**Exit met on xemu - not yet closed.** The engine finds its game directory
+and mounts it (`FI.numgames > 0`, proceeding into `Host_InitCommon`
+looking for real game assets - the exact boundary this phase's own exit
+line named), but **AGENTS.md's own Verification section is explicit:
+"xemu is not validation... A phase does not close until it runs on a real
+Xbox."** DMA timing, the serial channel and real unified-memory behaviour
+are not faithfully emulated, and this phase's own fix (NT object-manager
+path resolution against a real FATX volume) is exactly the kind of thing
+an emulator's filesystem shim can paper over differently than real
+hardware would. **Found in Codex review, round 2** - do not read the
+paragraph above as X0.5 being done; a real-Xbox boot of the same fix,
+observing the same `FI.numgames > 0` and a real asset opening through
+`"./valve/..."`, is still the open step that actually closes this phase.
+A real-hardware-testable XISO is packaged per AGENTS.md's own convention
+(`../XISOS/`) specifically so that boot can happen.
 
 **What made this observable at all, this session:** the client (non-dedicated)
 target had never actually called `Host_Main` before now -
