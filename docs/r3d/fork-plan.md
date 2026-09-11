@@ -1972,17 +1972,59 @@ yields a non-standard symbol (`cl_?...`) that `lld-link` treats as an
 opaque identifier - fine for linking, but never feed those objects to a
 demangler and expect sense.
 
-**Prototype gate, before X7.1/X7.2 tooling is even written:** compile
-`deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh` (server
-defines, then `CLIENT_DLL`), plus the minimum each needs to resolve,
-apply the rename to the client side, link both with the engine object set
-through `tools/xbox-link-check.sh` and require `0 duplicate`; then the
-negative control - the same link WITHOUT the rename must report the
-duplicates, by name, or the gate has measured nothing. The generated
-export tables (X7.2) need no change: exports are excluded from the map, so
-`gen-library-tables.sh`'s `extern void name` declarations still bind.
-Record the resulting build divergence in the ledger; it lives in
-`tools/`, form 1, touching no SDK source at all.
+**Prototype gate: PASSED, measured 2026-09-11.** Compiled
+`deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh` - server
+side (`-DVALVE_DLL -DWIN32`, `dlls`/`common`/`engine`/`game_shared`/
+`pm_shared`/`public` on the include path) and client side (`-DCLIENT_DLL
+-DHL_DLL -DWIN32`, `cl_dll`/`cl_dll/hl`/`cl_dll/particleman`/`dlls`/
+`common`/`game_shared`/`public`/`pm_shared`/`engine`) - both compile
+clean (warnings only). `llvm-nm --defined-only --extern-only` found 267
+defined externs server-side, 220 client-side, **150 shared names between
+them** before any rename: constructors/destructors/vtables/RTTI for
+`CCrossbow`/`CCrossbowAmmo`/`CBaseEntity`/... , every virtual method body,
+AND plain global data - `?g_engfuncs@@3Uenginefuncs_s@@A` and
+`?gpGlobals@@3PAUglobalvars_t@@A` are each defined once per module, not
+looked up from the engine, so the allowlist and the rename apply to data
+symbols exactly as to functions, not "functions" as a first draft might
+assume.
+
+Applied the allowlists from the corrected design above: server map
+excludes `_weapon_crossbow`/`_ammo_crossbow`/`_crossbow_bolt` (264 other
+symbols renamed `sv_*`); client map excludes nothing from this TU
+(`crossbow.cpp` exports no `cdll_exports` name - it is a weapon internal,
+not client-API surface), so all 220 defined symbols renamed `cl_*`,
+entity classnames included. `llvm-objcopy --redefine-syms` on both
+objects, then:
+
+- **Positive control**: `nxdk-link -force:unresolved` on the two RENAMED
+  objects together - `0` duplicate-symbol errors, exit 0, a real linked
+  image produced.
+- **Negative control**: the same link on the two UNRENAMED objects -
+  exit 1, 13 duplicate-symbol errors, named: `_weapon_crossbow`,
+  `_ammo_crossbow`, and 11 `CCrossbow::*` virtual methods (`Spawn`,
+  `Precache`, `GetItemInfo`, `Deploy`, `Holster`, `PrimaryAttack`,
+  `FireSniperBolt`, `FireBolt`, `SecondaryAttack`, `Reload`,
+  `WeaponIdle`) - proving the gate measures something real, not just
+  "no errors because nothing was checked".
+
+One mechanical detail worth recording so the real tooling does not
+re-discover it: `llvm-objcopy --redefine-syms` renames the SYMBOL TABLE
+entry but does not touch the `.drectve` section's `/EXPORT:` directive
+strings - a renamed object's directives still name the OLD symbol
+(`llvm-readobj --coff-directives` on the renamed client object still
+prints `/EXPORT:_weapon_crossbow`, which no longer exists in its symbol
+table). Confirmed harmless for this project: `nxdk-link` never passes
+`/DLL` (every XBE is an EXE-shaped link), and `lld-link` only consumes
+`/EXPORT:` directives to build a DLL's export table - a direct EXE link
+of the stale-directive object produced 0 errors and 0 export-related
+warnings. Do not carry this assumption to any FUTURE link mode that
+might add `/DLL`.
+
+The generated export tables (X7.2) need no change: each module's
+`exports.txt` is exactly its allowlist, and the allowlisted names are
+never renamed, so `gen-library-tables.sh`'s `extern void name`
+declarations still bind. Record the resulting build divergence in the
+ledger; it lives in `tools/`, form 1, touching no SDK source at all.
 
 ### X7.2 — Generated export tables, from the objects, not from a list
 
@@ -2050,9 +2092,12 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
 
 ### X7.4 — Half-Life first: server, then client, each a boot milestone
 
-0. **X7.1b's collision prototype passes, with its negative control.**
-   Nothing below starts until the two-object `crossbow.cpp` link shows
-   `0 duplicate` renamed and the named duplicates un-renamed.
+0. **X7.1b's collision prototype: PASSED, 2026-09-11 (see X7.1b for the
+   full measurement).** `0` duplicate on the renamed two-object
+   `crossbow.cpp` link, 13 named duplicates on the same pair unrenamed.
+   The real `tools/` implementation (X7.1's TU manifests, the allowlist
+   generator, the rename step) is what X7.4 step 1 now needs; the design
+   itself is de-risked.
 1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
    generate `server/exports.txt`; link with `--client-main`. Exit gate is
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,

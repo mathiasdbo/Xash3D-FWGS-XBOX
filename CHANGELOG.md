@@ -5,6 +5,23 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Measured — X7.1b's server/client symbol-isolation design: PASSED
+
+The prototype gate the X7 plan required before any other per-title work:
+compiled `deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh`
+(server defines, then `CLIENT_DLL`) and found 150 symbol names shared
+between the two compiled objects - virtual methods, vtables/RTTI, and
+plain global data (`g_engfuncs`, `gpGlobals`, each defined once per
+module). Applied the per-module allowlist (server keeps its entity
+classnames, client keeps nothing from this TU) via
+`llvm-objcopy --redefine-syms`, then linked: the renamed pair links with
+`0 duplicate`; the same pair unrenamed fails with the 13 duplicates named
+(`_weapon_crossbow`, `_ammo_crossbow`, 11 `CCrossbow::*` methods) - the
+required negative control. One mechanical fact worth keeping: renaming a
+symbol does not update the `.drectve` section's `/EXPORT:` string for it,
+confirmed harmless only because this project's links are never `/DLL`.
+Full measurement in `docs/r3d/fork-plan.md` § X7.1b.
+
 ### Changed — fork-plan X7 rewritten as the per-title XBE plan
 
 Half-Life, Opposing Force and Blue Shift each ship as their own
