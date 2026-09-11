@@ -244,13 +244,46 @@ else
 	done < "$ALLOW_FILE"
 fi
 
+# --- 3b. Base-extraction sanity gate, BEFORE any --require fallback runs.
+#        Found in Codex review round 2: without this, an --all run whose
+#        /EXPORT: extraction found nothing (a genuinely empty object set,
+#        or the directive parser silently failing to match) could still
+#        exit 0 with a nonempty table, because the completeness gate below
+#        adds required names straight from the raw symbol table - so a
+#        server module could lose every real entity classname and still
+#        "pass" with just GetEntityAPI/GiveFnptrsToDll in it. Checking
+#        BASE_COUNT here, before step 4 ever runs, closes that: a run that
+#        would need the fallback to go from zero to nonzero is exactly the
+#        false-clean case, and is refused up front. ---
+BASE_COUNT=$(wc -l < "$WORK/out_lines.txt" | tr -d ' ')
+if [ "$BASE_COUNT" -eq 0 ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
+	if [ "$MODE" = "all" ]; then
+		echo "xbox-gen-exports: ERROR - zero /EXPORT: directives found across ${#OBJS[@]} object(s)," >&2
+	else
+		echo "xbox-gen-exports: ERROR - zero of the --allow list's names were found (as real exports) across ${#OBJS[@]} object(s)," >&2
+	fi
+	echo "  before applying any --require fallback. This usually means the wrong" >&2
+	echo "  object set was given, or the directive extraction itself silently" >&2
+	echo "  found nothing - never let a --require fallback paper over that." >&2
+	echo "  Pass --allow-empty if this module's public surface is genuinely," >&2
+	echo "  deliberately empty." >&2
+	exit 1
+fi
+
 # --- 4. Completeness gate: every --require line (OR-group on '|') must
-#        resolve to something already written, or be added via the
-#        stdcall fallback (--all mode only - --allow mode's whole point is
-#        that ONLY the allow-list's names are ever written, so a required
-#        name has to already be on that list to pass; this script does not
-#        silently widen an --allow module's public surface to satisfy a
-#        completeness check). ---
+#        resolve to something already WRITTEN to out_lines.txt, or be added
+#        via the stdcall fallback (--all mode only - --allow mode's whole
+#        point is that ONLY the allow-list's names are ever written, so a
+#        required name has to already be on that list to pass; this script
+#        does not silently widen an --allow module's public surface to
+#        satisfy a completeness check). Found in Codex review round 2:
+#        this used to also accept a name found in the OBJECT's raw,
+#        unfiltered directive list (directive_names.txt) even in --allow
+#        mode - so a required callback that is a real export of the
+#        object but absent from the allowlist (and therefore never written
+#        to out_lines.txt) would satisfy the gate while being missing from
+#        the actual generated table. out_lines.txt is the only thing that
+#        ends up in $OUT, so it is the only thing this gate may check. ---
 MISSING=()
 if [ -n "$REQUIRE_FILE" ]; then
 	while IFS= read -r group; do
@@ -258,8 +291,7 @@ if [ -n "$REQUIRE_FILE" ]; then
 		found=0
 		IFS='|' read -ra ALTS <<< "$group"
 		for alt in "${ALTS[@]}"; do
-			if grep -qx "$alt" "$WORK/directive_names.txt" 2>/dev/null \
-				|| grep -qE "^${alt}( |$)" "$WORK/out_lines.txt" 2>/dev/null; then
+			if grep -qE "^${alt}( |$)" "$WORK/out_lines.txt" 2>/dev/null; then
 				found=1
 				break
 			fi

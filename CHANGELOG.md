@@ -5,6 +5,24 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-gen-exports.sh`: completeness gate could mark a missing required name as found (X7.2, Codex review round 2)
+
+Two more real gaps, both in the `--require` completeness gate, found on
+the round-2 re-review. (1) In `--allow` mode, the gate accepted a
+required name found only in the object's raw, unfiltered export list -
+not the actually-written, allow-filtered table - so a required callback
+that is a genuine export of the object but missing from the allowlist
+would pass the gate while never appearing in the generated file. Fixed:
+the gate now checks only the table that actually gets written. (2) The
+zero-entries check ran after the gate's stdcall/raw-symbol fallback had
+already run, so an `--all` object set whose directive extraction found
+nothing could still end up with a small, fallback-only "passing" table
+(just the required names) while silently losing every real export.
+Fixed: a new pre-fallback check refuses to proceed past zero base
+entries (before `--require`'s fallback runs) unless `--allow-empty` is
+passed. Both re-verified against real compiled objects with dedicated
+negative tests, plus a full re-run of the prior round's tests.
+
 ### Fixed — `tools/xbox-gen-exports.sh`: object-inspection failures no longer swallowed, client completeness gate enforced (X7.2, Codex review round 1)
 
 Two real gaps in the first version. (1) Both object-inspection loops

@@ -2152,6 +2152,37 @@ objects: the zero-entries gate (error without `--allow-empty`, success
 with it), and the corrupt-object gate, each with a positive and negative
 case.
 
+**Codex review round 2 (the cap for this branch) found two more real
+gaps, both in the completeness gate itself, both fixed and re-verified,
+2026-09-11:** (1) the gate's "already satisfied" check looked at
+`directive_names.txt` (the object's full, UNFILTERED raw export list)
+as well as the actually-written `out_lines.txt` - correct for `--all`
+(where they start identical) but wrong for `--allow`: a required name
+that is a real export of the compiled object yet absent from the
+allowlist would satisfy the gate via the raw-directive check while never
+being written to the generated table at all. Verified with the real
+client-compiled `crossbow.cpp` object: allow-list containing only
+`ammo_crossbow`, `--require weapon_crossbow` (a real export of that same
+object, deliberately left off the allow-list) - before the fix this
+incorrectly passed; after, it correctly reports `weapon_crossbow` missing
+and writes nothing. Fixed by checking only `out_lines.txt`, the one
+thing that actually reaches `$OUT`. (2) the zero-entries check (above)
+ran on the FINAL table, after the completeness gate's stdcall/raw-symbol
+fallback had already run - so an `--all` object set whose `/EXPORT:`
+extraction found genuinely nothing (wrong objects, or a parser that
+stopped matching) could still end with a nonzero, "passing" table
+containing only the fallback-recovered required names, silently losing
+every real entity classname while exiting 0. Verified with `h_export.obj`
+alone (which the X7.1b/X7.2 work already established has zero
+`/EXPORT:` directives - `GiveFnptrsToDll` only resolves via the stdcall
+raw-symbol fallback) and `--require GiveFnptrsToDll`: before the fix
+this wrote a 1-line "clean" table; after, it correctly fails before the
+fallback ever runs, naming zero directives as the cause, with
+`--allow-empty` still available for a module that is genuinely meant to
+be that empty. Full regression suite (all six prior positive/negative
+cases, including the real 3-object end-to-end server build) re-run
+clean after both fixes.
+
 `tools/gen-library-tables.sh` already took `name:exports.txt`; what
 changed is where `exports.txt` comes from and, for the one case that
 needs it, what each line carries: a new `tools/xbox-gen-exports.sh`
