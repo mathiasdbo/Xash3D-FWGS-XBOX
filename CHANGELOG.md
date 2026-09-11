@@ -5,6 +5,31 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `ref/null` registered as a real, loadable Xbox renderer module (X5 bring-up)
+
+`VID_Init()` had nothing to load at all: `R_Init()`'s renderer-selection
+loop only auto-tries names gated by a compile-time `XASH_REF_*_ENABLED`
+define, none of which exist for Xbox yet (no `ref/soft`/`ref/gl` port
+written). Registered upstream's own `ref/null` (a real, complete
+`ref_interface_t` of no-op stubs, written for headless client testing)
+in the same static `COM_LoadLibrary` table menu/`filesystem_stdio`
+already use - a new `ref_null:ref/null/exports.txt` entry threaded
+through `tools/gen-library-tables.sh`/`tools/xbox-cc.sh`/
+`tools/xbox-link-check.sh`, selected at runtime via `r_refdll "null"` in
+a disc's `video.cfg` (no engine code changes needed for selection).
+Genuinely useful bring-up on its own: lets the rest of the client boot
+path (`SV_Init`, `CL_Init`, menu init, the frame loop) be verified
+independently of the harder rasterizer-port problem, and proves the
+registration mechanism a real renderer will need.
+
+Verified: compiles for Xbox with zero warnings, `GetRefAPI` is a real
+defined symbol, full client link stays 0 duplicate/0 undefined with
+`ref_null` in the generated table. **Not verified at runtime this
+session** - boot attempts stopped producing any network-log-channel
+output at all partway through, for reasons not resolved (see
+`docs/r3d/lessons.md`'s new entry); documented honestly rather than
+claimed.
+
 ### Fixed — X0.5 confirmed on xemu (not yet real-hardware-verified): the client engine finds and mounts `valve/`
 
 The network log channel (divergence #13) finally reached the host this

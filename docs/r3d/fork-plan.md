@@ -1578,6 +1578,57 @@ sitting.
 
 ## X5 — `ref/soft` on the framebuffer
 
+**Route decided, 2026-09-11 — reuses nxdk's SDL2 port, not `vid_xbox.c`.**
+X5's own plan below (written earlier) says "do not route this through
+SDL's window surface" for the real shipping path's sake - nxdk's SDL2
+software-2D layer costs a 1.2 MB shadow surface and a per-frame
+`SDL_ConvertPixels`. That is still the right call for the FINAL path, but
+the user chose the faster route for FIRST getting something on screen at
+all: link against nxdk's existing, already-working SDL2 video driver
+(`XASH_SDL=2`, already unconditional in `tools/xbox-cc.sh` for other
+reasons) rather than writing `vid_xbox.c` first. `vid_xbox.c` remains the
+real, planned final path below - this is a deliberately temporary
+detour, not a replacement of the plan.
+
+**Prerequisite found and fixed: `VID_Init()` had no renderer to load at
+all.** `R_Init()` (`engine/client/dll_int/ref_common.c`) only auto-tries
+renderer names gated by a compile-time `XASH_REF_*_ENABLED` define - none
+exist for Xbox (no `ref/soft` or `ref/gl` port written yet) - and with
+none available, `Sys_Error`s out before the client can even reach its
+main loop. Wired up `ref/null` instead of jumping straight to porting
+`ref/soft`: upstream's own real, complete `ref_interface_t` of no-op
+stubs (`ref/null/r_context.c`'s own comment: "made to be able to run
+full client in hazardous^Wheadless environments... might be a starting
+point for new renderers as well"), registered in the same static
+`COM_LoadLibrary` table menu/`filesystem_stdio` already use (a new
+`ref_null:ref/null/exports.txt` argument to `tools/gen-library-tables.sh`,
+threaded through `tools/xbox-cc.sh`/`tools/xbox-link-check.sh`), selected
+at runtime via `r_refdll "null"` in a disc's `video.cfg` - upstream's own
+designated renderer-choice mechanism, executed by `R_Init()` itself
+before renderer selection runs, so no engine code changes were needed
+for selection at all. This is real, useful groundwork on its own merits,
+not a throwaway stub: it lets the REST of the client boot path (`SV_Init`,
+`CL_Init`, menu init, the frame loop) be verified independently of the
+harder rasterizer-porting problem, and the exact registration mechanism
+a real `ref_soft`/`ref_sdl2` module will need later is now proven.
+
+**Verified: compiles and links clean** - `ref/null/r_context.c` compiles
+for Xbox with zero warnings (genuinely portable code, only
+`xash3d_types.h`/`const.h`/`cvardef.h`/`xash3d_mathlib.h`/`ref_api.h`),
+`GetRefAPI` is a real, defined symbol, and the full client link stays at
+0 duplicate/0 undefined with `ref_null` correctly appearing in the
+generated static table. **NOT verified at runtime this session**: boot
+attempts against this build stopped producing ANY network-log-channel
+output at all (not even messages from code paths well before renderer
+selection, that had printed successfully in earlier boots this same
+session) - self-tested the listener mechanism directly (a manual UDP
+packet was received correctly), ruling out the host-side tooling, but
+left genuinely unresolved whether this is the network log channel's own
+documented DHCP-negotiation unreliability (`net_xbox_log.c`'s own
+comment: up to ~10s, not guaranteed to succeed) recurring nondeterministically,
+or a real, different problem. Documented honestly rather than claimed -
+see `docs/r3d/lessons.md` for the specific reproduction attempted.
+
 **[from PS3]** The change their roadmap forced in this plan.
 
 **Do not route this through SDL's window surface.** Write

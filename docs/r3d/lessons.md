@@ -547,3 +547,41 @@ command identical. **After setting any of these flags, confirm the object
 file actually changed shape** (`llvm-nm the.obj | grep TheNewSymbol`) -
 "the script exited 0" was exactly the signal that looked fine here while
 being wrong.
+
+### The Xbox network log channel went silent for a whole session, with no root cause found - do not treat its absence of output as proof of anything
+
+Earlier the same session, the network log channel (divergence #13) was
+confirmed genuinely working: real, correct boot messages came through
+reliably across several rebuild-reboot cycles (`chdir("D:") failed:
+EINVAL`, `Couldn't find game directory 'valve'`, and - by the absence of
+a specific error - a real `gfx.wad` loading successfully). Then, starting
+with the very first added diagnostic `Con_Printf` in `engine/client/cl_main.c`
+(two lines, bracketing a `VID_Init()` call already known to run), every
+subsequent boot - eight or more attempts, several different builds,
+including ones that reverted back toward the last known-working shape -
+produced **zero** network output, including from `Con_Printf` calls
+positioned well before the new code, in functions that HAD printed
+successfully minutes earlier in the same session.
+
+Ruled out directly, not assumed: the listener itself (a manual UDP packet
+sent to `127.0.0.1:30865` was received correctly while a boot was
+producing nothing); a stale/cached build (`strings` on the actual linked
+`.obj` confirmed every new diagnostic string was really present); and a
+crash (xemu's own process stayed alive and responding, CPU time climbing
+throughout every silent attempt, no watchdog reboot loop). What was NOT
+resolved: whether `Xbox_NetLogInit()`'s own documented DHCP-negotiation
+retry (`net_xbox_log.c`'s own comment - up to ~10 real seconds, not
+guaranteed to succeed) was nondeterministically failing across these
+specific attempts, or something else entirely. `net_xbox_log.c`'s
+`s_net_log_attempted` guard means a single failed attempt disables the
+network tier for the rest of that boot, permanently and silently - if
+that guard is what triggered, every symptom above (real messages earlier,
+total silence later, no crash, no host-side explanation) is exactly what
+it would look like.
+
+**Do not read total silence from this channel as "the code never got
+there" without a second, independent signal** - a screenshot, a real
+crash/hang check via CPU time, or (better, not yet built) a channel that
+does not depend on a background DHCP negotiation that can silently fail
+once and never retry. A run that logged real messages five minutes ago
+proves the mechanism CAN work, not that it currently IS working.
