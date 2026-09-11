@@ -70,6 +70,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	const uint32_t lenFaces = 2 * (uint32_t)sizeof( dface_t );
 	const uint32_t lenLighting = 48;
 	const uint32_t lenMiptex = 4 + 4 + 40; // dmiptexlump_t{1} + one header-only miptex entry
+	const uint32_t lenExtraLightBlocks = nv2a ? 2 * 20u : 0u; // 2 MpakExtraLightBlock records
 	const uint32_t lightmapW = 4, lightmapH = 4, lightmapLayers = nv2a ? 1u : 0u;
 	const uint32_t lenLightmap = nv2a ? lightmapW * lightmapH * 4 : 0u;
 	const uint32_t lenAtlas = ( nv2a && targetXbox ) ? 128u : 0u;   // arbitrary, only needs to be > 0
@@ -79,6 +80,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	fs_offset_t cursor;
 	fs_offset_t entitiesOffset, planesOffset, lightmapOffset, texinfoOffset, textureOffset;
 	fs_offset_t vertexesOffset, edgesOffset, surfedgesOffset, facesOffset, lightingOffset, miptexOffset;
+	fs_offset_t extraLightBlocksOffset;
 	byte *buf;
 
 	memset( &sector, 0, sizeof( sector ));
@@ -102,6 +104,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	sector.desc.lenFaces = lenFaces;
 	sector.desc.lenLighting = lenLighting;
 	sector.desc.lenMiptex = lenMiptex;
+	sector.desc.lenExtraLightBlocks = lenExtraLightBlocks;
 
 	// Independently walk the same section order mpak_layout.c documents
 	// (its own header comment, verified against PakManager.cpp's save()),
@@ -151,6 +154,8 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	cursor += RoundUpSector( lenLighting );
 	miptexOffset = cursor;
 	cursor += RoundUpSector( lenMiptex );
+	extraLightBlocksOffset = cursor;
+	cursor += RoundUpSector( lenExtraLightBlocks );
 
 	// The dheader_t: the same offsets, in bspfile.h's lump order.
 	sector.bsp.version = HLBSP_VERSION;
@@ -186,6 +191,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 			memset( buf + textureOffset, 0x22, lenAtlas );
 		else
 			memset( buf + textureOffset + RoundUpSector( 0 ), 0x33, lenArray256 ); // skip the empty array64 slot
+		memset( buf + extraLightBlocksOffset, 0x99, lenExtraLightBlocks );
 	}
 
 	*outSize = cursor;
@@ -281,8 +287,16 @@ static qboolean TestValidArchive( qboolean targetXbox, qboolean nv2a )
 			printf( "TestValidArchive(pc/nv2a): texture branch populated the wrong fields\n" );
 			ok = false;
 		}
+
+		if( layout.extraLightBlocks.length != header.lenExtraLightBlocks ||
+			buf[layout.extraLightBlocks.offset] != 0x99 )
+		{
+			printf( "TestValidArchive(%s): extraLightBlocks lump resolved to the wrong bytes\n", Label( targetXbox, nv2a ));
+			ok = false;
+		}
 	}
-	else if( layout.atlas.length != 0 || layout.array256.length != 0 || layout.lightmapAtlas.length != 0 )
+	else if( layout.atlas.length != 0 || layout.array256.length != 0 || layout.lightmapAtlas.length != 0 ||
+		layout.extraLightBlocks.length != 0 )
 	{
 		printf( "TestValidArchive(%s): core profile must carry no baked block\n", Label( targetXbox, nv2a ));
 		ok = false;
@@ -392,6 +406,23 @@ static qboolean TestRejectsNonDivisibleFacesLength( void )
 
 	free( buf );
 	if( !rejected ) printf( "TestRejectsNonDivisibleFacesLength: accepted\n" );
+	return rejected;
+}
+
+static qboolean TestRejectsNonDivisibleExtraLightBlocksLength( void )
+{
+	fs_offset_t fileSize;
+	byte *buf = BuildMinimalArchive( false, true, &fileSize, NULL ); // nv2a - lenExtraLightBlocks is 0 otherwise
+	mpak_header_t header;
+	mpak_layout_t layout;
+	qboolean rejected;
+
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
+	header.lenExtraLightBlocks += 1; // no longer a multiple of MPAK_EXTRALIGHTBLOCK_SIZE (20)
+	rejected = !Mpak_ComputeLayout( &header, fileSize, &layout );
+
+	free( buf );
+	if( !rejected ) printf( "TestRejectsNonDivisibleExtraLightBlocksLength: accepted\n" );
 	return rejected;
 }
 
@@ -580,6 +611,7 @@ int main( void )
 	ok &= TestRejectsTruncatedFile();
 	ok &= TestRejectsNonDivisiblePlanesLength();
 	ok &= TestRejectsNonDivisibleFacesLength();
+	ok &= TestRejectsNonDivisibleExtraLightBlocksLength();
 	ok &= TestRejectsLightmapSizeMismatch();
 	ok &= TestRejectsUint32MaxRawLumpLength();
 	ok &= TestRejectsOverflowingVertexCount();

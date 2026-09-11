@@ -38,6 +38,10 @@ GNU General Public License for more details.
 // no reason to duplicate that struct just to learn its size.
 #define MPAK_FACEINFO_SIZE 44u
 
+// MpakExtraLightBlock (same header) - #pragma pack(push,1), own file
+// static_asserts sizeof == 20. Same "cited, not re-derived" reasoning.
+#define MPAK_EXTRALIGHTBLOCK_SIZE 20u
+
 // Multiplies a running product by another dimension, rejecting as soon as
 // the true (unbounded) product would exceed what any real uint32_t
 // lenLightmapAtlas could ever match - checked incrementally so three
@@ -321,6 +325,11 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 	if( !Mpak_PlaceLump( "lighting", header->lenLighting, 0, fileSize, &cursor, &out->lighting ))
 		return false;
 	if( !Mpak_PlaceLump( "miptex", header->lenMiptex, 0, fileSize, &cursor, &out->miptex ))
+		return false;
+
+	// v8 (MpakHeader.h's v7 -> v8 note), appended after the classic core.
+	if( !Mpak_PlaceLump( "extraLightBlocks", header->lenExtraLightBlocks, MPAK_EXTRALIGHTBLOCK_SIZE,
+			fileSize, &cursor, &out->extraLightBlocks ))
 		return false;
 
 	return true;

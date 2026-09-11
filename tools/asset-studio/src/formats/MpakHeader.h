@@ -81,6 +81,28 @@ namespace formats {
     // IMPORTANT below) rather than removed, since removing a field is a
     // version bump this scope change does not otherwise need.
     //
+    // v7 -> v8: multi-lightstyle NV2A atlas blocks (docs/r3d/fork-plan.md's
+    // XB section, "Lightstyles" census). BspParser.cpp's own baked atlas
+    // has only ever held ONE lightmap block per face (`dface_t::styles[0]`),
+    // even though `MpakFaceInfo::styles[4]` already carried all four style
+    // IDs verbatim from v6 onward and LUMP_LIGHTING (raw-passthrough since
+    // v7) has always held the samples for every one of them. Measured
+    // against the real retail install: 6.69% of lit faces across 82% of
+    // maps use a second style, so dropping them from the ONE renderer that
+    // reads the atlas (the future X9 `ref/nv2a`) is a real, visible
+    // regression, not an edge case - the census exists specifically to
+    // settle this rather than guess it. Nothing before X9 reads the atlas
+    // at all (classic-core-profile PC targets and the core-profile-only
+    // Xbox path use the same raw LUMP_LIGHTING passthrough `ref/gl` always
+    // has, unaffected either way), so this is a pure additive format
+    // change: one new field, one new sparse section, no existing field's
+    // meaning or layout disturbed. `MpakExtraLightBlock` below holds one
+    // entry per face PER EXTRA STYLE it uses (not a fixed 4-slot-per-face
+    // table) - most faces use zero, keeping the archive lean for the ~93%
+    // that don't need it. `lenExtraLightBlocks` (appended below, after
+    // `lenMiptex`, same append-only rule as every prior version) is 0 in
+    // the core profile and whenever a real bake finds no multi-style face.
+    //
     // v6 -> v7, the "classic core" (docs/r3d/mpak-loading-design.md):
     // auditing every real consumer of the runtime BSP structures showed
     // that nothing before the X9 hardware renderer can use the baked
@@ -141,7 +163,7 @@ namespace formats {
     // are a second line of defense.
     struct MpakHeader6 {
         char magic[4] = {'M', 'P', 'A', 'K'};
-        uint32_t version = 7;
+        uint32_t version = 8;
         uint32_t headerSize = 0;      // sizeof(MpakHeader6); set in PakManager::save just before writing
         uint32_t bakerBuildId = MPAK_BAKER_BUILD_ID;
         uint32_t flags = 0; // 1 = Xbox, 0 = PC
@@ -194,6 +216,9 @@ namespace formats {
         uint32_t lenFaces = 0;          // raw LUMP_FACES (dface_t[], 20 bytes each)
         uint32_t lenLighting = 0;       // raw LUMP_LIGHTING (color24, every lightstyle, dface_t::lightofs intact)
         uint32_t lenMiptex = 0;         // embedded-miptex LUMP_TEXTURES: dmiptexlump_t + miptex_t + mips + palette
+
+        // --- MPAKv8 addition (see the v7 -> v8 note above; nv2a profile only) ---
+        uint32_t lenExtraLightBlocks = 0; // MpakExtraLightBlock[], one per face per extra (non-style-0) lightstyle
     };
 
     // GoldSrc BSP30 SURF_* flags (common/bspfile.h in the canonical Xash3D-FWGS
@@ -229,6 +254,31 @@ namespace formats {
         uint32_t lightmapBlockY = 0;
     };
 #pragma pack(pop)
-    static_assert(sizeof(MpakFaceInfo) == 44, "MpakFaceInfo must stay a stable, tightly packed 44 bytes - the Rust reader computes numFaces from lenFaceInfo / 44");
+    static_assert(sizeof(MpakFaceInfo) == 44, "MpakFaceInfo must stay a stable, tightly packed 44 bytes - the C reader (filesystem/mpak_layout.c) computes numFaces from lenFaceInfo / 44");
+
+    // v8: one entry per face PER EXTRA (non-style-0) lightstyle it uses -
+    // see MpakHeader6's v7 -> v8 note above for why this is sparse rather
+    // than a fixed 4-slot table. `MpakFaceInfo::styles[styleSlot]` already
+    // names which real GoldSrc lightstyle ID this is; `style` here is that
+    // same byte, copied so a reader walking this table alone (without also
+    // cross-referencing MpakFaceInfo) still has it. `page`/`blockX`/
+    // `blockY` are in the SAME atlas `MpakFaceInfo::lightmapPage` etc.
+    // already describes for style 0 - X9's future consumer picks the
+    // matching block for whichever style(s) are currently active and
+    // blends them the way `R_BuildLightMap` does (`ref/gl/gl_rsurf.c:
+    // 725-789`: `r_blocklights += samples[styleSlot] * g_lightstylevalue[
+    // style]`), not a new blending rule invented here.
+#pragma pack(push, 1)
+    struct MpakExtraLightBlock {
+        uint32_t faceIndex = 0;  // index into MpakFaceInfo / face_draw_cmds, this archive's own face order
+        uint8_t styleSlot = 0;   // 1, 2, or 3 - which of MpakFaceInfo::styles[1..3] this block is for
+        uint8_t style = 255;     // MpakFaceInfo::styles[styleSlot] verbatim, 255 never appears (would mean unused)
+        uint8_t _pad[2] = {0, 0};
+        uint32_t page = 0;       // which atlas page (same page space as MpakFaceInfo::lightmapPage)
+        uint32_t blockX = 0;     // bordered block origin within that page (luxels)
+        uint32_t blockY = 0;
+    };
+#pragma pack(pop)
+    static_assert(sizeof(MpakExtraLightBlock) == 20, "MpakExtraLightBlock must stay a stable, tightly packed 20 bytes - the C reader computes count from lenExtraLightBlocks / 20");
 
 } // namespace formats

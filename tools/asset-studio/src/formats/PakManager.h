@@ -72,6 +72,9 @@ namespace formats {
         void addIndex(uint16_t idx);
         void addFaceDrawCmd(uint32_t start_index, uint32_t index_count);
         void addFaceInfo(const MpakFaceInfo& info) { mFaceInfos.push_back(info); }
+        // v8: one call per face per extra (non-style-0) lightstyle it uses -
+        // see MpakHeader.h's v7 -> v8 note. Most faces never call this.
+        void addExtraLightBlock(const MpakExtraLightBlock& block) { mExtraLightBlocks.push_back(block); }
         bool save(const std::string& outputPath);
 
         // Re-reads an archive and byte-compares every classic lump the file's
@@ -138,6 +141,7 @@ namespace formats {
         std::vector<uint16_t> mIndices;
         std::vector<FaceDrawCmd> mFaceDrawCmds;
         std::vector<MpakFaceInfo> mFaceInfos;
+        std::vector<MpakExtraLightBlock> mExtraLightBlocks;
 
         std::vector<uint8_t> mVisibilityData;
         std::vector<uint8_t> mNodesData;

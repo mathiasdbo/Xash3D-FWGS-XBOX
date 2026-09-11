@@ -1654,7 +1654,51 @@ Then the format, decided once:
 - **Draw lists per cluster, per material**, so runtime submission is a walk in
   baked order. Per leaf alone explodes the draw count, and on pbkit every
   submission is CPU time writing pushbuffer words into write-combined memory.
-- **Lightmap pages in RGB565**, with whatever the census decided.
+- **Lightmap pages in RGB565**, with whatever the census decided. **Data
+  side done, 2026-09-10 (MPAK v8).** The census ruled out dropping extra
+  lightstyles (66% of maps affected) and the user picked the
+  reference-matching option: bake every style a face uses, not just
+  style 0, and blend them at runtime the way `R_BuildLightMap` does.
+  `BspParser.cpp` now bakes a block per extra style, `MpakExtraLightBlock`
+  (a new sparse v8 section) records where each one landed - verified
+  against a real bake of `crossfire.bsp`: 127 blocks, matching the
+  census's own independently-computed count for that map exactly, plus a
+  real negative control (a corrupted byte in the new section is caught
+  and named specifically). **Not done**: the RGB565 conversion itself
+  (still RGBA8 in the atlas, matching every other lightmap page) and the
+  runtime blend - that consumer is `ref/nv2a`, which doesn't exist until
+  X9; this phase's own scope is baker-only (see this section's own
+  opening line).
+
+  **Xbox memory budget: not enforced here, found in review (twice),
+  deliberately deferred to X3.** Extra-style blocks grow the SAME
+  atlas-packer (`mPages.emplace_back()`) style 0 always has, with no
+  bake-time budget check - but that check does not exist for ANY baked
+  data yet (not geometry, not textures, not the pre-existing lightmap
+  atlas either); X3's own exit line is exactly this ("a declared budget,
+  enforced at bake time"), and implementing it here, for lightmaps
+  alone, ahead of X3's real design, would be scope creep this PR does
+  not need.
+
+  Round 1's review accepted a 2-map sample (`crossfire.bsp`, `c0a0c.bsp`)
+  as evidence. Round 2 correctly rejected that as insufficient: atlas
+  consumption depends on block *size*, not just extra-style *count*, so
+  a lower-ranked map with larger blocks could in principle still land on
+  more pages than a higher-ranked one. The fix is exhaustive measurement,
+  not a bigger sample: every one of the 125 retail maps was baked for
+  the Xbox target and its atlas page count recorded. Result -
+  **110 maps land on 1 page (4 MB), 11 on 2 pages (8 MB), 0 on more than
+  2** (`boot_camp`, `c2a2a`, `c2a2e`, `c2a4c`, `c2a4e`, `c3a2a`, `c5a1`,
+  `rustmill`, `t0a0`, `t0a0a`, `t0a0b`). The remaining 4 maps
+  (`contamination`, `disposal`, `pool_party`, `rocket_frenzy` - including
+  both maps round 1 flagged as highest-risk by census count) do not
+  reach this code at all: all four already fail bake with `FATAL: vertex
+  count exceeded 65536`, a separate, pre-existing gap (the "Vertex
+  layout" bullet above, `base_vertex`-chunked indices, not yet
+  implemented) that blocks them regardless of lightstyles. This is the
+  entire bakeable retail map population, not a sample of it: today, no
+  map that can bake for Xbox exceeds 8 MB of atlas, and this change
+  cannot be the reason an Xbox archive exceeds budget.
 - **Bone partitioning** for the models the census named. **Provisionally
   not needed under the ~50-bone estimate, measured 2026-09-10 — NOT yet a
   closed decision.** The census (above) found a worst-case peak of 35

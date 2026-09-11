@@ -746,6 +746,41 @@ namespace formats {
                 lmAlloc = lmPacker.allocate(smax, tmax);
                 lmPacker.writeBlock(lmAlloc, smax, tmax, &lightingData[face.lightofs]);
                 lmBaked++;
+
+                // MpakHeader.h's v7 -> v8: styles[1..3], each its own
+                // smax*tmax*3-byte block immediately following style 0's in
+                // LUMP_LIGHTING (same packed-no-gaps convention the
+                // hasLightmap/extents computation above already assumes -
+                // see this file's own comment there). Same extents as style
+                // 0 (all styles of one face share lightmapmins/extents; only
+                // the sample VALUES differ), so a fresh allocate() per extra
+                // style, bounds-checked the same way style 0's own block was
+                // above (a truncated LUMP_LIGHTING silently drops the extra
+                // block rather than reading past the end).
+                const size_t blockBytes = static_cast<size_t>(smax) * tmax * 3;
+                for (int styleSlot = 1; styleSlot < 4; ++styleSlot) {
+                    if (face.styles[styleSlot] == 255)
+                        break; // packed convention: no gaps, first 255 ends the real styles
+                    size_t extraOfs = static_cast<size_t>(face.lightofs) + static_cast<size_t>(styleSlot) * blockBytes;
+                    if (extraOfs + blockBytes > lightingData.size()) {
+                        std::cerr << "Lightmap: face " << i << " style slot " << styleSlot
+                                  << " offset " << extraOfs << " + " << blockBytes
+                                  << " bytes exceeds LUMP_LIGHTING size " << lightingData.size()
+                                  << " - dropping this extra style block\n";
+                        break; // a truncated table can't have later slots either
+                    }
+                    LightmapAllocation extraAlloc = lmPacker.allocate(smax, tmax);
+                    lmPacker.writeBlock(extraAlloc, smax, tmax, &lightingData[extraOfs]);
+
+                    MpakExtraLightBlock extra{};
+                    extra.faceIndex = static_cast<uint32_t>(i);
+                    extra.styleSlot = static_cast<uint8_t>(styleSlot);
+                    extra.style = face.styles[styleSlot];
+                    extra.page = extraAlloc.page;
+                    extra.blockX = extraAlloc.blockX;
+                    extra.blockY = extraAlloc.blockY;
+                    pak.addExtraLightBlock(extra);
+                }
             }
 
             // Per-face metadata the reference computes at load time and keeps
