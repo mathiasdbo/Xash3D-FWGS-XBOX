@@ -1896,11 +1896,19 @@ the mechanism is proven.
 ### X7.1b — Module symbol isolation, prototyped before anything else
 
 Each module's object set is renamed so its internals cannot meet the
-other module's in the link. Mechanism, on this toolchain's own tools:
-`llvm-nm --defined-only --extern-only` over one module's objects produces
-the set of symbols it DEFINES; every one of them NOT on that module's
-public allowlist is written to a rename map `old new` with a `sv_`/`cl_`
-prefix, and `llvm-objcopy --redefine-syms <map>` (present:
+other module's in the link. Order matters and is fixed, not incidental
+(the second and third steps were found missing/wrong in Codex review -
+see the measurement below): (1) compile; (2) X7.2's generator reads each
+object's `/EXPORT:` directives (`llvm-readobj --coff-directives`) to
+build `exports.txt` - the LAST point these directives are ever read; (3)
+`llvm-objcopy --remove-section=.drectve` strips them, because this
+project's static-linking mechanism never consumes a PE export table and
+a stale `/EXPORT:` on a symbol the next step renames away corrupts the
+final image's export table instead of erroring (measured below); (4)
+`llvm-nm --defined-only --extern-only` over the stripped objects produces
+the set of symbols the module DEFINES; every one of them NOT on that
+module's public allowlist is written to a rename map `old new` with a
+`sv_`/`cl_` prefix, and `llvm-objcopy --redefine-syms <map>` (present:
 `/c/msys64/mingw64/bin/llvm-objcopy.exe`, COFF-capable) is applied to
 every object of that module. Renaming is consistent across definitions
 and references within the module because the map is derived from the
@@ -1972,59 +1980,106 @@ yields a non-standard symbol (`cl_?...`) that `lld-link` treats as an
 opaque identifier - fine for linking, but never feed those objects to a
 demangler and expect sense.
 
-**Prototype gate: PASSED, measured 2026-09-11.** Compiled
-`deps/hlsdk/dlls/crossbow.cpp` twice with `tools/xbox-cxx.sh` - server
-side (`-DVALVE_DLL -DWIN32`, `dlls`/`common`/`engine`/`game_shared`/
-`pm_shared`/`public` on the include path) and client side (`-DCLIENT_DLL
--DHL_DLL -DWIN32`, `cl_dll`/`cl_dll/hl`/`cl_dll/particleman`/`dlls`/
-`common`/`game_shared`/`public`/`pm_shared`/`engine`) - both compile
-clean (warnings only). `llvm-nm --defined-only --extern-only` found 267
-defined externs server-side, 220 client-side, **150 shared names between
-them** before any rename: constructors/destructors/vtables/RTTI for
-`CCrossbow`/`CCrossbowAmmo`/`CBaseEntity`/... , every virtual method body,
+**Prototype gate: PASSED, measured 2026-09-11, corrected 2026-09-11
+after Codex review round 1 caught two real gaps in the first pass (both
+below).** Compiled `deps/hlsdk/dlls/crossbow.cpp` twice with
+`tools/xbox-cxx.sh` - server side (`-DVALVE_DLL -DWIN32`,
+`dlls`/`common`/`engine`/`game_shared`/`pm_shared`/`public` on the
+include path) and client side (`-DCLIENT_DLL -DHL_DLL -DWIN32`,
+`cl_dll`/`cl_dll/hl`/`cl_dll/particleman`/`dlls`/`common`/`game_shared`/
+`public`/`pm_shared`/`engine`) - both compile clean (warnings only).
+`llvm-nm --defined-only --extern-only` found 267 defined externs
+server-side, 220 client-side, **150 shared names between them** before
+any rename: constructors/destructors/vtables/RTTI for
+`CCrossbow`/`CCrossbowAmmo`/`CBaseEntity`/..., every virtual method body,
 AND plain global data - `?g_engfuncs@@3Uenginefuncs_s@@A` and
 `?gpGlobals@@3PAUglobalvars_t@@A` are each defined once per module, not
 looked up from the engine, so the allowlist and the rename apply to data
 symbols exactly as to functions, not "functions" as a first draft might
 assume.
 
+**Gap 1, found in review: the first pass linked only the two crossbow
+objects with `-force:unresolved`, never the real engine.** That proves
+the two objects don't collide with EACH OTHER; it says nothing about
+colliding with the 178 real engine/third-party/stub objects this XBE
+actually links. Corrected: took the properly-filtered engine object set
+`tools/xbox-link-check.sh` itself would produce (`ls .sweep/*.obj
+.sweep/gen/*.obj`, then its own two filters - `grep -vE
+'_platform_(android|apple|dos|ios|irix|linux|nswitch|posix|psvita|sdl1|
+sdl3|stub|win32)_'` and `grep -vE '_tests_'`, plus the `--client-main`
+exclusion of `xbox_main.obj` - `:89-111`; a raw unfiltered `ls .sweep/*.obj`
+was tried first and found 26 unrelated pre-existing duplicates from stray
+test-harness objects (`_tests_*.obj`) and the placeholder `_main` - a
+methodology bug in the test, not a real project problem, and gone the
+moment the real script's own filter was applied: 178 objects, `0`
+duplicate on its own). Ran the full link three ways:
+
+- **Clean baseline** (178 real objects, no crossbow at all): exit 0, `0` duplicate.
+- **Positive control** (178 real objects + the two RENAMED crossbow
+  objects): exit 0, `0` duplicate, a real 1.77 MB linked image.
+- **Negative control** (178 real objects + the two UNRENAMED crossbow
+  objects): exit 1, 13 duplicate-symbol errors, named: `_weapon_crossbow`,
+  `_ammo_crossbow`, and 11 `CCrossbow::*` virtual methods (`Spawn`,
+  `Precache`, `GetItemInfo`, `Deploy`, `Holster`, `PrimaryAttack`,
+  `FireSniperBolt`, `FireBolt`, `SecondaryAttack`, `Reload`,
+  `WeaponIdle`) - the SAME 13, exactly, as the isolated two-object test,
+  confirming the isolated test wasn't wrong, only insufficient on its own.
+
+**Gap 2, found in review: `/EXPORT:` directives for a renamed-away
+symbol are NOT harmless.** The first pass claimed `lld-link` only
+consumes `/EXPORT:` for a `/DLL` link and is otherwise a no-op - false,
+measured directly: `llvm-readobj --coff-exports` on `.sweep/xbe-build.exe`
+(a real, already-built client XBE, no `/DLL` anywhere in `nxdk-link`,
+`deps/nxdk/bin/nxdk-link:7-13`) shows a real, populated export table
+(`CreateInterface`, `GetRefAPI`, `GetFSAPI`, ...) - **every EXE this
+project links already carries one.** Worse, linking the renamed CLIENT
+object as-is (rename applied, directives untouched) produced export
+entries for the renamed-away names (`?BoltTouch@CCrossbowBolt@@...`,
+`?BubbleThink@...`, `?SUB_CallUseToggle@CBaseEntity@@...`) with RVA
+`0xFFFF0000` - a linker sentinel for "could not resolve this", silently
+baked into the image as if it were real data, because the symbol the
+stale directive named no longer existed to resolve to.
+
+Root cause and fix: our static-linking mechanism (`lib_static.c`'s
+`Lib_Find`, populated by `gen-library-tables.sh`'s `extern void name` +
+address-of) never calls `GetProcAddress` on ourselves - it resolves
+allowlisted names by ordinary compile-time linkage, not through a PE
+export table at runtime. **The `/EXPORT:` directives are read exactly
+once, by X7.2's generator, before any rename - after that this project
+has no use for them at all**, so the fix is to strip the whole
+`.drectve` section (`llvm-objcopy --remove-section=.drectve`, confirmed
+to leave the defined-symbol set byte-identical) from EVERY module object
+immediately after the export list is read and before the rename step -
+not to try to selectively edit `/EXPORT:` lines out of the directive
+string. Re-ran the full positive control with this order (compile → read
+directives for X7.2 → strip `.drectve` → rename → link): `0` duplicate,
+same as before, and `llvm-readobj --coff-exports` on the resulting image
+shows exactly the 7 legitimate pre-existing engine exports
+(`CreateInterface`, `GetFSAPI`, `GetRefAPI`, `Host_Main`,
+`Host_Shutdown`, `pfnSPR_Frames`, `pfnSPR_Load`) and zero crossbow-related
+entries, zero `0xFFFF0000` sentinels. `/INCLUDE:` directives (used
+elsewhere in this SDK to keep an otherwise-unreferenced static data
+member from being discarded, e.g. `?AmmoInfoArray@CBasePlayerItem@@...`
+on `crossbow.cpp` itself) are lost by a whole-section strip too; nothing
+in this project currently relies on one surviving past this point
+(`nxdk-link` does not dead-strip unreferenced globals by default), but a
+real implementation that ever needs to keep one should filter the
+section's text for `/EXPORT:` lines specifically rather than removing it
+outright - noted, not yet needed.
+
 Applied the allowlists from the corrected design above: server map
 excludes `_weapon_crossbow`/`_ammo_crossbow`/`_crossbow_bolt` (264 other
 symbols renamed `sv_*`); client map excludes nothing from this TU
 (`crossbow.cpp` exports no `cdll_exports` name - it is a weapon internal,
 not client-API surface), so all 220 defined symbols renamed `cl_*`,
-entity classnames included. `llvm-objcopy --redefine-syms` on both
-objects, then:
+entity classnames included.
 
-- **Positive control**: `nxdk-link -force:unresolved` on the two RENAMED
-  objects together - `0` duplicate-symbol errors, exit 0, a real linked
-  image produced.
-- **Negative control**: the same link on the two UNRENAMED objects -
-  exit 1, 13 duplicate-symbol errors, named: `_weapon_crossbow`,
-  `_ammo_crossbow`, and 11 `CCrossbow::*` virtual methods (`Spawn`,
-  `Precache`, `GetItemInfo`, `Deploy`, `Holster`, `PrimaryAttack`,
-  `FireSniperBolt`, `FireBolt`, `SecondaryAttack`, `Reload`,
-  `WeaponIdle`) - proving the gate measures something real, not just
-  "no errors because nothing was checked".
-
-One mechanical detail worth recording so the real tooling does not
-re-discover it: `llvm-objcopy --redefine-syms` renames the SYMBOL TABLE
-entry but does not touch the `.drectve` section's `/EXPORT:` directive
-strings - a renamed object's directives still name the OLD symbol
-(`llvm-readobj --coff-directives` on the renamed client object still
-prints `/EXPORT:_weapon_crossbow`, which no longer exists in its symbol
-table). Confirmed harmless for this project: `nxdk-link` never passes
-`/DLL` (every XBE is an EXE-shaped link), and `lld-link` only consumes
-`/EXPORT:` directives to build a DLL's export table - a direct EXE link
-of the stale-directive object produced 0 errors and 0 export-related
-warnings. Do not carry this assumption to any FUTURE link mode that
-might add `/DLL`.
-
-The generated export tables (X7.2) need no change: each module's
-`exports.txt` is exactly its allowlist, and the allowlisted names are
-never renamed, so `gen-library-tables.sh`'s `extern void name`
-declarations still bind. Record the resulting build divergence in the
-ledger; it lives in `tools/`, form 1, touching no SDK source at all.
+The generated export tables (X7.2) need no change beyond the ordering
+above (read directives before stripping): each module's `exports.txt` is
+exactly its allowlist, and the allowlisted names are never renamed, so
+`gen-library-tables.sh`'s `extern void name` declarations still bind.
+Record the resulting build divergence in the ledger; it lives in
+`tools/`, form 1, touching no SDK source at all.
 
 ### X7.2 — Generated export tables, from the objects, not from a list
 
