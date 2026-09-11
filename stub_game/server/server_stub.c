@@ -43,11 +43,40 @@ DLL_FUNCTIONS member genuinely is. :5338 does the same for
 pfnRegisterEncoders() right before SV_LoadProgs returns true. An entirely-
 zeroed DLL_FUNCTIONS would NULL-pointer-call all three the instant
 SV_LoadProgs succeeded - not a landmine deferred to a later phase, but one
-this exact load path would trip immediately. These three, and only these
-three, get real bodies below; the other ~37 members stay genuinely NULL,
-since nothing else in SV_LoadProgs's own synchronous load path touches
-them (verified by reading the whole function, not assumed from these three
-alone).
+this exact load path would trip immediately.
+
+**Corrected 2026-09-11, found by live-debugging the first client boot
+under xemu (docs/r3d/lessons.md, divergence #34): "these three, and only
+these three" was wrong by three.** The 2026-09-09 audit read
+SV_LoadProgs's own body and stopped at its call sites, one level too
+shallow. Three more members are called synchronously before any frame
+runs, each found by reading the actual fault off the halted CPU with
+tools/xemu-debug.py rather than by re-reading source:
+
+  - pfnGetHullBounds and pfnPM_Init: engine/server/sv_pmove.c:449 and
+    :491, inside SV_InitClientMove(), which SV_LoadProgs calls
+    unconditionally at engine/server/sv_game.c:5333 - one call deep, so a
+    read of SV_LoadProgs alone never sees them. GetHullBounds is called
+    first (in a loop over MAX_MAP_HULLS) and was the actual fault: `call
+    eax` with eax = 0, ExceptionAddress 0x00000000.
+  - pfnSys_Error: engine/common/system.c:411 (Sys_Error) -> SV_SysError
+    (engine/server/sv_game.c:99-100), guarded ONLY by `svgame.hInstance
+    != NULL`, which is set the moment SV_LoadProgs succeeds. It runs
+    BEFORE Sys_Print, so with this member NULL the first fatal error of
+    the boot (here: CL_Init's "can't initialize client: missing essential
+    exports", correct at this phase - no client module exists yet) printed
+    nothing and called address 0.
+
+On Xbox each of these is a kernel bugcheck (KMODE_EXCEPTION_NOT_HANDLED /
+STATUS_ACCESS_VIOLATION) followed by `cli; hlt`: a silent, total freeze
+that turned a one-line error message into a full session of bisection.
+Six members now get real bodies. The remaining ~34 stay NULL - every
+other DLL_FUNCTIONS call site under engine/server/ is reached only with an
+active server (`svs.initialized`/`sv.state`, i.e. after a map loads), which
+cannot happen before X7 provides the game code that would make loading a
+map possible. Audited with a search for every `dllFuncs.pfn` use across
+`engine/server/` and `engine/common/`, then walking each hit's callers up
+to SV_LoadProgs/Sys_Error - not by reading one function again.
 */
 
 #include "progdefs.h" /* globalvars_t - eiface.h's own comment (:32-33) says
@@ -76,6 +105,48 @@ static void Stub_RegisterEncoders( void )
 	 * not a gap, since there is no game data yet that would need one. */
 }
 
+/* Called by the engine's own Sys_Error path (see the file header) so the
+ * game module can react to a fatal engine error before shutdown. The real
+ * HL SDK's implementation (deps/hlsdk/dlls/client.cpp:1077-1080,
+ * Sys_Error: "Default case, do nothing") is a no-op too - it exists only
+ * so a mod author can plant a breakpoint - so a no-op is not a
+ * placeholder, it is the reference behaviour. The argument is deliberately
+ * unused. */
+static void Stub_SysError( const char *error_string )
+{
+	( void )error_string;
+}
+
+/* engine/server/sv_pmove.c:449 asks the game module for each player hull's
+ * bounds, in a loop, and stops at the first hull the module declines
+ * (returns 0). The reference (deps/hlsdk/dlls/client.cpp:2002 ->
+ * deps/hlsdk/pm_shared/pm_shared.cpp:3476, PM_GetHullBounds) answers for
+ * hulls 0-2 and returns false for anything else. Declining every hull is
+ * the honest answer here - there is no movement code to own a hull yet -
+ * and it is safe: Pmove_Init (engine/common/pm_trace.c:52) has already
+ * copied the engine's own pm_hullmins/pm_hullmaxs defaults into
+ * host.player_mins/maxs before this is ever called, and a 0 return leaves
+ * those in place, exactly as the engine treats a module with fewer hulls. */
+static int Stub_GetHullBounds( int hullnumber, float *mins, float *maxs )
+{
+	( void )hullnumber;
+	( void )mins;
+	( void )maxs;
+	return 0;
+}
+
+/* engine/server/sv_pmove.c:491 hands the game module the engine's
+ * playermove_t so pm_shared can keep a pointer to it. The reference
+ * (deps/hlsdk/pm_shared/pm_shared.cpp:3454, PM_Init) stores that pointer,
+ * builds its stuck-table and texture-type tables, and fills the hull
+ * tables via PM_GetHullBounds. None of that has a consumer until X7 links
+ * real pm_shared code, so nothing is stored - a no-op, not a placeholder
+ * that pretends otherwise. */
+static void Stub_PM_Init( struct playermove_s *ppmove )
+{
+	( void )ppmove;
+}
+
 int GetEntityAPI2( DLL_FUNCTIONS *pFunctionTable, int *interfaceVersion )
 {
 	if( !pFunctionTable || !interfaceVersion )
@@ -94,6 +165,9 @@ int GetEntityAPI2( DLL_FUNCTIONS *pFunctionTable, int *interfaceVersion )
 	pFunctionTable->pfnGetGameDescription = Stub_GetGameDescription;
 	pFunctionTable->pfnGameInit = Stub_GameInit;
 	pFunctionTable->pfnRegisterEncoders = Stub_RegisterEncoders;
+	pFunctionTable->pfnSys_Error = Stub_SysError;
+	pFunctionTable->pfnGetHullBounds = Stub_GetHullBounds;
+	pFunctionTable->pfnPM_Init = Stub_PM_Init;
 	return 1;
 }
 
