@@ -499,3 +499,51 @@ easy to get backwards in your own head even when the tool got it right;
 the fix is not "concentrate harder," it's "look at the row you're
 citing," or better, let the totals do a sanity check the truncated view
 can't (a printed max/sum a human can cross-check against what got quoted).
+
+### `export FOO=1` in this dev shell does not survive an explicit `/c/msys64/usr/bin/bash` invocation, or any invocation whose PATH puts msys64 ahead of this shell's own `bash`
+
+`tools/xbox-cc.sh`'s `XBOX_DEDICATED`/`XBOX_ENGINE_TESTS`/`XBOX_CLIENT_MAIN`
+opt-ins (and by extension anything built on top of them, like
+`tools/xbox-dedicated-sweep.sh`'s `export XBOX_DEDICATED=1`) all read
+`${VAR:-0}` from the environment. Exporting the var in this dev shell and
+then invoking the target script via `MSYSTEM=MINGW64 /c/msys64/usr/bin/bash
+script.sh` - the exact form these scripts' own header comments document as
+canonical - silently drops the export: `${VAR:-0}` reads back `0` inside
+the script every time, with no error, no warning, and (since every one of
+these flags is a silent, additive opt-in) a build that looks completely
+normal. Confirmed directly: `/c/msys64/usr/bin/bash -c 'export FOO=1; env'
+| grep FOO` prints nothing, even though `echo $FOO` inside that same `-c`
+string prints `1` - the variable is a live shell variable, visibly set,
+that this specific `bash` binary just does not forward into any
+subprocess's real environment block. The same drop happens indirectly:
+running any script via a `bash` that PATH happens to resolve to
+`/c/msys64/usr/bin/bash` (for instance after `export
+PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"`, which several of
+these scripts' own usage comments also show) hits the identical failure,
+even with no explicit absolute path anywhere in the command.
+
+Real cost paid for this, this session: a `tools/xbox-dedicated-sweep.sh`
+build run with `export XBOX_ENGINE_TESTS=1` reported a clean 96/96
+compile and produced a real, bootable XBE - and the resulting
+`engine_common_host.obj` contains no reference to `Xbox_NetLogInit` at
+all, meaning `XASH_ENGINE_TESTS` was never actually defined and the
+network log channel this whole exercise existed to enable was compiled
+out the entire time. A full session of xemu port-forwarding, Windows
+Firewall rules and UDP listener debugging chased a build that never
+attempted to open a socket, and nothing about the build's own "clean"
+report gave any reason to suspect it.
+
+**Every one of `tools/xbox-cc.sh`'s scripts finds `clang`/`nxdk-link`/etc.
+itself, via its own internal `export PATH=".../mingw64/bin:.../usr/bin:$PATH"`
+line** - the `MSYSTEM=MINGW64 /c/msys64/usr/bin/bash` prefix these scripts'
+own comments document is not actually load-bearing for that. Invoke them
+as `tools/xbox-cc.sh <args>` (bare, relying on their own `#!/usr/bin/env
+bash` shebang, with PATH left alone beforehand) instead, and any
+`XBOX_*=1` export made in this same dev shell survives correctly - checked
+directly by adding a temporary `env | grep XBOX` probe at the top of the
+script and confirming the flag was visible with the bare form and absent
+with the `/c/msys64/usr/bin/bash` form, holding every other part of the
+command identical. **After setting any of these flags, confirm the object
+file actually changed shape** (`llvm-nm the.obj | grep TheNewSymbol`) -
+"the script exited 0" was exactly the signal that looked fine here while
+being wrong.
