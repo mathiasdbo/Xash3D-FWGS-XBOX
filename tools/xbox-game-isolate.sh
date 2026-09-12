@@ -225,8 +225,25 @@ trap 'rm -rf "$WORK"' EXIT
 EXPORTS_OUT="$ISO_DIR/exports.txt"
 case "$TARGET" in
 server)
+	# --exclude tools/xbox-server-exclude-exports.txt: found running a
+	# real link for the first time (X7.4 step 1) - CreateInterface has a
+	# genuine /EXPORT: in this target (public/interface.cpp, restored for
+	# Sys_LoadModule/Sys_GetFactory's sake, divergence #35/#36), so --all
+	# mode correctly, by its own design, included it - but nothing else
+	# in the server target references it, and it collides with
+	# filesystem_stdio's own real CreateInterface (divergence #30) once
+	# both are in the same link. The engine never resolves
+	# "CreateInterface" for the "server" role specifically - only
+	# GetEntityAPI/GetEntityAPI2/GiveFnptrsToDll and every entity
+	# classname are. Keeping it unrenamed was the exports.txt generator
+	# being LITERAL about "every real /EXPORT:", not X7.1b's own stated
+	# principle ("the allowlist is what the ENGINE resolves for THIS
+	# module") - excluding it here is applying that principle, not an
+	# exception to it. See tools/xbox-gen-exports.sh's own --exclude
+	# comment for the full reasoning.
 	bash tools/xbox-gen-exports.sh --all \
 		--require tools/xbox-server-required-exports.txt \
+		--exclude tools/xbox-server-exclude-exports.txt \
 		"$EXPORTS_OUT" "${OBJS[@]}" >&2
 	ALLOW_FILE="$EXPORTS_OUT"
 	;;

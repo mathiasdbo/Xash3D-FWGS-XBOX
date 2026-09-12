@@ -356,8 +356,33 @@ if [ -d "$MAINUI_DIR" ]; then
 		echo "  Run tools/xbox-mainui-sweep.sh again before trusting these objects." >&2
 		exit 1
 	fi
-	MANIFEST_FAIL=$(sed -n 's/.*FAIL=\([0-9]*\).*/\1/p' "$MANIFEST")
-	MANIFEST_TOTAL=$(sed -n 's/.*TOTAL=\([0-9]*\).*/\1/p' "$MANIFEST")
+	# Found running this for real, 2026-09-12: reading $MANIFEST with `sed`
+	# right after the third-party compile step above (186 objects, heavy
+	# I/O) came back EMPTY - reproduced 5 times in a row through this
+	# script, never once reproduced reading the exact same file moments
+	# later by hand. A retry loop around the same two `sed` calls (up to 3
+	# attempts, 1s apart) did NOT fix it either - ruling out a simple
+	# sub-second transient race, the mitigation shape that worked for the
+	# two similar-looking bugs found earlier this session (tools/xbox-
+	# game-sweep.sh's log, tools/xbox-game-isolate.sh's temp dir). What DID
+	# keep working, every time, including inside the very run where both
+	# `sed` calls came back empty: this same script's own next line,
+	# `$(cat "$MANIFEST" ...)`, in the error message - a single whole-file
+	# read via `cat`, not `sed`'s own per-line regex engine. Rather than
+	# chase why `sed` specifically misbehaves here, avoid depending on it
+	# for this extraction at all: read the file once into a variable with
+	# `cat` (the primitive already proven reliable in this exact spot) and
+	# extract both fields from that in-memory string with bash's own
+	# regex matching - no second subprocess, no repeat file access.
+	MANIFEST_CONTENT="$(cat "$MANIFEST" 2>/dev/null)"
+	MANIFEST_FAIL=""
+	MANIFEST_TOTAL=""
+	if [[ "$MANIFEST_CONTENT" =~ FAIL=([0-9]+) ]]; then
+		MANIFEST_FAIL="${BASH_REMATCH[1]}"
+	fi
+	if [[ "$MANIFEST_CONTENT" =~ TOTAL=([0-9]+) ]]; then
+		MANIFEST_TOTAL="${BASH_REMATCH[1]}"
+	fi
 	# Found in review, 2026-09-09 (second pass): checking FAIL alone was
 	# not enough - tools/xbox-mainui-sweep.sh used to write "OK=0 FAIL=0
 	# TOTAL=0" for its own zero-files failure case before that case's own
@@ -369,7 +394,7 @@ if [ -d "$MAINUI_DIR" ]; then
 	if [ -z "$MANIFEST_FAIL" ] || [ "$MANIFEST_FAIL" -gt 0 ] \
 		|| [ -z "$MANIFEST_TOTAL" ] || [ "$MANIFEST_TOTAL" -eq 0 ]; then
 		echo "xbox-link-check: $MAINUI_DIR/manifest.txt is not clean -" >&2
-		echo "  ($(cat "$MANIFEST" 2>/dev/null)) - the last mainui sweep was not" >&2
+		echo "  ($MANIFEST_CONTENT) - the last mainui sweep was not" >&2
 		echo "  clean, or measured nothing." >&2
 		echo "  Fix the failures and re-run tools/xbox-mainui-sweep.sh, or remove" >&2
 		echo "  $MAINUI_DIR entirely to measure engine+third-party only." >&2
@@ -380,8 +405,16 @@ if [ -d "$MAINUI_DIR" ]; then
 	# The manifest's own OK count against what is actually on disk right
 	# now - the manifest could be stale relative to $OUT_DIR even though
 	# it was clean when written (an object deleted by hand after the
-	# sweep, a half-finished manual cleanup).
-	MANIFEST_OK=$(sed -n 's/.*OK=\([0-9]*\).*/\1/p' "$MANIFEST")
+	# sweep, a half-finished manual cleanup). Found in the same pass as
+	# the FAIL/TOTAL fix above: this was a THIRD `sed` call against the
+	# same file, missed the first time - hit the identical empty-read
+	# failure on its own, right after the FAIL/TOTAL fix stopped masking
+	# it. Reuses $MANIFEST_CONTENT (already read once, above) instead of
+	# a fresh `sed`/file read.
+	MANIFEST_OK=""
+	if [[ "$MANIFEST_CONTENT" =~ OK=([0-9]+) ]]; then
+		MANIFEST_OK="${BASH_REMATCH[1]}"
+	fi
 	if [ -z "$MANIFEST_OK" ] || [ "$MAINUI_OBJ_COUNT" -ne "$MANIFEST_OK" ]; then
 		echo "xbox-link-check: $MAINUI_OBJ_COUNT objects on disk in $MAINUI_DIR" >&2
 		echo "  do not match manifest.txt's OK=$MANIFEST_OK - re-run" >&2

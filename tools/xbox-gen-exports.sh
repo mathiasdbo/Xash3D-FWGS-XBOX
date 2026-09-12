@@ -97,13 +97,14 @@ for t in "$READOBJ" "$NM"; do
 done
 
 usage() {
-	echo "usage: xbox-gen-exports.sh --all|--allow <file> [--require <file>] [--allow-empty] <out.txt> <obj>..." >&2
+	echo "usage: xbox-gen-exports.sh --all|--allow <file> [--require <file>] [--exclude <file>] [--allow-empty] <out.txt> <obj>..." >&2
 	exit 1
 }
 
 MODE=""
 ALLOW_FILE=""
 REQUIRE_FILE=""
+EXCLUDE_FILE=""
 ALLOW_EMPTY=0
 OUT=""
 OBJS=()
@@ -123,6 +124,25 @@ while [ $# -gt 0 ]; do
 		;;
 	--require)
 		REQUIRE_FILE="${2:?--require needs a file}"
+		shift 2
+		;;
+	--exclude)
+		# --all mode only: a name with a real /EXPORT: directive that must
+		# NOT be treated as this module's public surface anyway - narrow,
+		# measured exceptions only (X7.1b's own principle: the allowlist is
+		# what the ENGINE resolves for THIS module, nothing else). Found
+		# for real, not invented: CreateInterface has a genuine /EXPORT:
+		# in the hl server target (public/interface.cpp, restored for
+		# Sys_LoadModule/Sys_GetFactory's sake, divergence #35/#36) but is
+		# never referenced by anything else in that target and collides
+		# with filesystem_stdio's own real CreateInterface (divergence
+		# #30) once both are in the same link - the engine never resolves
+		# "CreateInterface" for the "server" role, only for
+		# "filesystem_stdio". Ignored outright in --allow mode: that
+		# mode's allowlist is already an exhaustive, curated list on its
+		# own terms, an exclude file would just be a second, redundant way
+		# to remove a name from it.
+		EXCLUDE_FILE="${2:?--exclude needs a file}"
 		shift 2
 		;;
 	--allow-empty)
@@ -159,6 +179,10 @@ if [ "$MODE" = "allow" ] && [ ! -f "$ALLOW_FILE" ]; then
 fi
 if [ -n "$REQUIRE_FILE" ] && [ ! -f "$REQUIRE_FILE" ]; then
 	echo "xbox-gen-exports: --require file does not exist: $REQUIRE_FILE" >&2
+	exit 1
+fi
+if [ -n "$EXCLUDE_FILE" ] && [ ! -f "$EXCLUDE_FILE" ]; then
+	echo "xbox-gen-exports: --exclude file does not exist: $EXCLUDE_FILE" >&2
 	exit 1
 fi
 
@@ -233,6 +257,9 @@ find_symbol_for() {
 if [ "$MODE" = "all" ]; then
 	while IFS= read -r n; do
 		[ -z "$n" ] && continue
+		if [ -n "$EXCLUDE_FILE" ] && grep -qxF "$n" "$EXCLUDE_FILE"; then
+			continue
+		fi
 		echo "$n" >> "$WORK/out_lines.txt"
 	done < "$WORK/directive_names.txt"
 else
