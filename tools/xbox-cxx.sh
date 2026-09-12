@@ -31,6 +31,25 @@
 # deps/nxdk/lib/libc++.lib to its library list - this script's own -c-only
 # scope means it was never the thing missing that library in the first
 # place.
+#
+# -std=c++17: found 2026-09-12 building X7.4's real hl SDK sweep - without
+# an explicit -std=, this exact target/flag combination's real default is
+# C++14 (measured directly: `clang++ ... -dM -E -x c++ /dev/null | grep
+# __cplusplus` prints 201402L, not the C++17 201703L one might assume from
+# clang 21 being recent), which is not a cosmetic difference: class
+# template argument deduction (deps/hlsdk/dlls/player.cpp's
+# `CallOnDestroy resetIsSpawning{...}`) is unavailable, and std::clamp
+# (also player.cpp) isn't declared at all - both hard errors, not
+# warnings. The HL SDK's own build (deps/hlsdk/CMakeLists.txt's
+# `set_common_properties`) already requires `target_compile_features(...
+# cxx_std_17)`; this was this project's compile route silently not
+# honouring it. Fixed 4 of 5 real server-sweep compile failures outright
+# (player.cpp, game.cpp, nodes.cpp, client.cpp - all 0 errors before this
+# were CTAD/std::clamp/other C++17-feature symptoms of the same root
+# cause); re-verified the existing 3rdparty/mainui sweep
+# (tools/xbox-mainui-sweep.sh, 82/82 clean before this change) is
+# unaffected - C++17 is a compatible superset of C++14 for real, existing
+# code here, not just in theory.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -122,6 +141,7 @@ exec clang++ \
 	-D__STDC__=1 \
 	-U__STDC_NO_THREADS__ \
 	-fno-exceptions \
+	-std=c++17 \
 	"${OUR_INCLUDES[@]}" \
 	"${NXDK_INCLUDES[@]}" \
 	-c "$SRC" -o "$OUT" "$@"

@@ -2763,6 +2763,62 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    against this measurement; an intentionally wrong `--expect-fail 0`
    correctly reports a regression rather than passing.
 
+   **The log-loss mitigation above reduces but does not eliminate the
+   problem - hit again, 2026-09-12, diagnosing these same failures for
+   real.** A fresh client sweep's `errors.txt` was missing the
+   `=== FAIL: cdll_int.cpp ===` marker (14 shown, 15 real failures) despite
+   the persistent-fd fix already being in place - the undercount is rarer
+   now, not gone. Worked around it for this session's own diagnosis by
+   never trusting the log for "which files failed": for each manifest
+   `SOURCE` line, checked directly whether its corresponding `.obj`
+   exists in the sweep's output directory (a failed compile never
+   produces one), which sidesteps the log entirely and is exactly as
+   reliable as the sweep's own OK/FAIL/TOTAL count. `xbox-game-sweep.sh`
+   itself is not changed further here; a fully robust fix (per-source log
+   files instead of any shared accumulator, matching
+   `docs/r3d/lessons.md`'s own recorded advice) is real, still-open
+   follow-up work, not blocking - the count this tool's gates rely on was
+   never wrong, only the optional detail.
+
+   **Two real root causes found and fixed, 2026-09-12, closing most of
+   both counts.** (1) `tools/xbox-cxx.sh` never passed `-std=c++17` -
+   measured directly (`clang++ ... -dM -E -x c++ /dev/null`, `__cplusplus`
+   prints `201402L`) that this exact target/flag combination's real
+   default is C++14, not the C++17 the HL SDK's own build
+   (`set_common_properties`'s `cxx_std_17`) requires - class template
+   argument deduction (`player.cpp`'s `CallOnDestroy resetIsSpawning{...}`)
+   and `std::clamp` are unavailable under C++14, both hard errors. Added
+   `-std=c++17` to `xbox-cxx.sh`'s fixed flags (a caller's own `-std=` in
+   `"$@"` still wins, same override convention as `-o`) - fixed 4 of the
+   5 server failures outright (`player.cpp`, `game.cpp`, `nodes.cpp`,
+   `client.cpp`) and 2 of the 18 client ones (`input.cpp`,
+   `text_message.cpp`). Re-verified `3rdparty/mainui`'s existing sweep
+   (82/82 clean) is unaffected - C++17 is a compatible superset of C++14
+   for this project's real code, not just in theory. (2) The remaining
+   server failure, `game_shared/filesystem_utils.cpp`, was never really
+   about `_stat64i32` vs `struct stat` naming (an earlier pass through
+   this file mis-attributed it to `nodes.cpp` and called it a naming
+   mismatch) - read `deps/nxdk/lib/xboxrt/libc_extensions/stat.c`
+   directly and found its ENTIRE body, `struct stat` included, wrapped in
+   `#if 0`: nxdk provides no working `stat()`/`fstat()` at all, on either
+   the WIN32 or the POSIX branch this function's stock path could take.
+   Fixed on `deps/hlsdk`'s `resonance3d` branch (divergence #36) with an
+   `#if defined(NXDK)` branch returning `0`, the exact same safe fallback
+   the `_STATIC_ENGINE_LINK` branch immediately above it already uses for
+   the identical, already-documented reason (`CGraph::CheckNODFile`
+   treats `0` as "rebuild the `.nod` cache", a correct, harmless
+   degradation).
+
+   **Result: server compiles 107/107 - X7.4 step 1's real, complete
+   object set now exists for the first time.** Client: 15/85 remaining
+   (all of them the pre-existing SDL2-header/clang SAL-annotation
+   incompatibility or a real-`GL/gl.h`/`<memory.h>`/`<memory_resource>`
+   want from the studio-model rendering path - genuinely separate,
+   larger work, correctly out of scope here per the categorisation
+   above). Neither X7.1b's isolation tool nor X7.4 step 1's real link
+   attempt has been re-run against the now-complete server set yet -
+   that is the next real step, not yet taken.
+
    **Codex review round 1 found two more real gaps, both fixed and
    re-verified before round 2.** (1) `--expect-fail` is optional (an
    exploratory run needs no baseline), but a BARE invocation with no
