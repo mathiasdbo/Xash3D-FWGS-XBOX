@@ -5,6 +5,23 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-isolate.sh`: a hard-required server export was silently renamed away (Codex review round 1)
+
+`exports.txt`'s `GiveFnptrsToDll _GiveFnptrsToDll@8` line has a real
+subtlety the allowlist extraction missed: column one is not a real
+symbol in the object at all (only the stdcall-decorated form exists),
+so keying the allowlist on it kept a name nothing defines while the
+real symbol's bare form matched nothing and was silently renamed away -
+breaking the one export the engine hard-requires to load the server
+module. The existing leak-check couldn't catch this: it and the rename
+decision both trust the same allowlist file, so a bug in building that
+file passes both self-consistently. Fixed two ways: the allowlist
+extraction now uses the asm-symbol column's bare form when present; and
+a genuinely independent check, never touching that file, re-reads the
+required-exports source of truth directly and searches the real
+post-rename symbol table for either accepted form. Verified end to end:
+`_GiveFnptrsToDll@8` now confirmed present, unrenamed, after isolation.
+
 ### Added — `tools/xbox-game-isolate.sh`: the real bulk module symbol isolation pipeline (X7.1b)
 
 The bulk implementation of X7.1b's 2-object prototype: runs the target's
@@ -13,7 +30,7 @@ object, builds a rename map from the module's own defined-symbol set
 minus its allowlist, applies it with `llvm-objcopy --redefine-syms`, and
 self-checks every isolated object afterward for a leaked (neither
 allowlisted nor prefixed) symbol. Server isolates cleanly: 102 objects,
-9,349 defined symbols, 239 kept, 9,110 renamed `sv_`, 0 leaked. Client
+9,349 defined symbols, 240 kept, 9,109 renamed `sv_`, 0 leaked. Client
 correctly refuses - not a bug in this tool: the 18 already-known client
 compile failures include the file defining most required `HUD_*` entry
 points, so `exports.txt`'s own completeness gate rejects it; fixing

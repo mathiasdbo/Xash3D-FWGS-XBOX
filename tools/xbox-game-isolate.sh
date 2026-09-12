@@ -93,13 +93,14 @@ TITLE="${POSITIONAL[0]}"
 TARGET="${POSITIONAL[1]}"
 
 case "$TARGET" in
-server) PREFIX="sv" ;;
-client) PREFIX="cl" ;;
+server) PREFIX="sv"; REQUIRE_FILE="tools/xbox-server-required-exports.txt" ;;
+client) PREFIX="cl"; REQUIRE_FILE="tools/xbox-client-required-exports.txt" ;;
 *)
 	echo "xbox-game-isolate: unknown target '$TARGET' (expected server or client)" >&2
 	exit 1
 	;;
 esac
+[ -f "$REQUIRE_FILE" ] || { echo "xbox-game-isolate: $REQUIRE_FILE does not exist" >&2; exit 1; }
 
 MSYS2_BIN="/c/msys64/mingw64/bin"
 if [ ! -d "$MSYS2_BIN" ]; then
@@ -208,9 +209,33 @@ client)
 	;;
 esac
 if [ "$TARGET" = "server" ]; then
-	# exports.txt can also carry the optional asm-symbol column
-	# (GiveFnptrsToDll's stdcall case) - only the bare name matters here.
-	awk '{print $1}' "$EXPORTS_OUT" > "$WORK/server_allow_names.txt"
+	# Found in Codex review: exports.txt's optional second column
+	# (GiveFnptrsToDll's stdcall case, name asm_symbol - e.g.
+	# "GiveFnptrsToDll _GiveFnptrsToDll@8") is not just a label on column
+	# one's name - for a row that HAS one, column one is not a real
+	# symbol in the object AT ALL (GiveFnptrsToDll has no plain cdecl
+	# form or /EXPORT: directive, only the stdcall-decorated one exists -
+	# X7.2's own finding). Keying the allowlist on column one alone kept
+	# "GiveFnptrsToDll" - a name nothing actually defines - while the
+	# REAL defined symbol's bare form ("GiveFnptrsToDll@8", from
+	# "_GiveFnptrsToDll@8" with only the leading underscore stripped)
+	# matched nothing, so it silently got renamed to
+	# "sv__GiveFnptrsToDll@8", breaking the one export
+	# engine/server/sv_game.c hard-requires to load the module at all -
+	# confirmed by direct inspection of the (broken) prior run's output
+	# before this fix. Fixed: a row with a second column allowlists that
+	# column's bare form (what the object really defines); a row without
+	# one allowlists column one directly (already bare, no leading
+	# underscore, per tools/xbox-gen-exports.sh's own convention).
+	awk '{
+		if (NF >= 2) {
+			name = $2
+			sub(/^_/, "", name)
+			print name
+		} else {
+			print $1
+		}
+	}' "$EXPORTS_OUT" > "$WORK/server_allow_names.txt"
 	ALLOW_FILE="$WORK/server_allow_names.txt"
 fi
 
@@ -338,6 +363,42 @@ if [ -n "$LEAKED" ]; then
 	echo "xbox-game-isolate: REGRESSION - post-rename symbol(s) neither" >&2
 	echo "  allowlisted nor ${PREFIX}_-prefixed:" >&2
 	printf '%s\n' "$LEAKED" | sed 's/^/  /' >&2
+	exit 1
+fi
+
+# Independent check, added in Codex review: the leak-check above and the
+# rename decision itself both derive from the SAME $ALLOW_FILE, so a bug
+# in how that file is built (exactly what round 1 found: GiveFnptrsToDll's
+# real symbol, _GiveFnptrsToDll@8, was silently absent from it, so the
+# leak-check couldn't have caught its own allowlist being wrong) passes
+# both checks self-consistently. This one is independent: it re-reads
+# tools/xbox-{server,client}-required-exports.txt directly - the source
+# of truth for what MUST survive - and searches the real post-rename
+# symbol table for either form xbox-gen-exports.sh itself would accept
+# (plain cdecl `_name`, or a stdcall-decorated `_name@<n>`), never
+# touching $ALLOW_FILE at all.
+MISSING_REQUIRED=()
+while IFS= read -r group; do
+	[ -z "$group" ] && continue
+	found=0
+	IFS='|' read -ra ALTS <<< "$group"
+	for alt in "${ALTS[@]}"; do
+		if grep -qxF "_${alt}" "$WORK/post_defined_sorted.txt" 2>/dev/null \
+			|| grep -qE "^_${alt}@[0-9]+\$" "$WORK/post_defined_sorted.txt" 2>/dev/null; then
+			found=1
+			break
+		fi
+	done
+	[ "$found" -eq 0 ] && MISSING_REQUIRED+=("$group")
+done < "$REQUIRE_FILE"
+
+if [ "${#MISSING_REQUIRED[@]}" -gt 0 ]; then
+	echo "xbox-game-isolate: REGRESSION - required export(s) from $REQUIRE_FILE" >&2
+	echo "  are no longer defined (plain or stdcall-decorated) after rename -" >&2
+	echo "  renamed away, or never really defined:" >&2
+	for m in "${MISSING_REQUIRED[@]}"; do
+		echo "  $m" >&2
+	done
 	exit 1
 fi
 

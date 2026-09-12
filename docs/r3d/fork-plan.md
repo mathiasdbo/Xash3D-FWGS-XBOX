@@ -2358,8 +2358,8 @@ a warning.
 
 **Server: isolated cleanly.** 102 objects (the sweep's own real, current
 baseline - 5 known compile failures, tracked via `--expect-fail`), 9,349
-defined symbols total, 239 kept (the API exports plus every real
-`LINK_ENTITY_TO_CLASS` classname), 9,110 renamed `sv_`, 0 leaked.
+defined symbols total, 240 kept (the API exports plus every real
+`LINK_ENTITY_TO_CLASS` classname), 9,109 renamed `sv_`, 0 leaked.
 **Client: correctly refuses, not a bug in this tool.** `xbox-gen-exports.sh`'s
 own completeness gate (X7.2) refuses to write `exports.txt` - the 67
 objects that DID compile are missing `Initialize`/most `HUD_*` entry
@@ -2393,6 +2393,39 @@ closed once. Re-verified after both fixes: the defined-symbol count went
 from an undercounted 606 to the real 9,349 (over 15x), the previously
 leaked symbol confirmed correctly renamed (`sv_?Save@CFlockingFlyer@@...`),
 and the full self-check reports 0 leaked.
+
+**Codex review round 1 found a third, more serious real bug: the
+self-check couldn't have caught its own allowlist being wrong, and it
+was - `GiveFnptrsToDll`, a hard-required server export, was silently
+renamed away.** `exports.txt`'s `GiveFnptrsToDll _GiveFnptrsToDll@8` line
+(the asm-symbol column X7.2's stdcall fallback writes) has a real subtlety
+the allowlist extraction missed: for THIS row, column one
+(`GiveFnptrsToDll`) is not a real symbol in the object at all - no plain
+cdecl form, no `/EXPORT:` directive, only the stdcall-decorated
+`_GiveFnptrsToDll@8` exists (X7.2's own finding). Extracting only column
+one kept a name nothing defines, while the real symbol's bare form
+(`GiveFnptrsToDll@8`) matched nothing and was silently renamed to
+`sv__GiveFnptrsToDll@8` - breaking the one export
+`engine/server/sv_game.c` hard-requires to load the module at all. The
+existing leak-check couldn't catch this because it (correctly, by
+design) trusts the same `$ALLOW_FILE` the rename decision itself uses -
+a bug in building that file passes both self-consistently. Fixed two
+ways: (1) the allowlist extraction now uses column two's bare form when
+present, column one otherwise; (2) a genuinely INDEPENDENT check added
+after the leak-check, never touching `$ALLOW_FILE` - re-reads
+`tools/xbox-{server,client}-required-exports.txt` directly (the same
+source of truth `xbox-gen-exports.sh` itself uses) and searches the real
+post-rename symbol table for either form it would accept (plain cdecl or
+stdcall-decorated). Unit-tested the independent check against the exact
+prior symptom first (a synthetic post-rename symbol list containing only
+`sv__GiveFnptrsToDll@8`, no plain or stdcall-decorated form) - correctly
+reports it missing. Re-verified end to end against the real objects:
+`_GiveFnptrsToDll@8` now confirmed present, unrenamed, in the real
+isolated `h_export.obj` (kept count 239→240, renamed count 9,110→9,109,
+exactly ±1 as expected); `GetEntityAPI`/`GetEntityAPI2`/`weapon_crossbow`
+spot-checked still correctly kept; client re-run confirms an identical,
+unaffected refusal (this bug and fix are server-only - the client
+allowlist file has no two-column entries).
 
 ### X7.2 — Generated export tables, from the objects, not from a list
 
