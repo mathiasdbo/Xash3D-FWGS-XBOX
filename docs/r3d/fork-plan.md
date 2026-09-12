@@ -3090,11 +3090,34 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    established as this milestone's real text,
    **`Host_ErrorInit: can't initialize client: missing essential
    exports`**, word for word, decoded directly from guest memory, not
-   assumed from the symptom. This is now unambiguous: `SV_LoadProgs`
-   really did complete against the real `GetEntityAPI2`, and `CL_Init`
-   really did reach and fail its client-module load exactly as expected,
-   for the real reason expected (the client module is still
-   `stub_game/client`, X7.4 step 2's own job). The network log channel
+   assumed from the symptom.
+
+   *A further real gap, found before this reached Codex review at all
+   (matching round 1's own critique): decoding `CL_Init`'s real failure
+   does not, on its own, prove `SV_LoadProgs` itself succeeded first* -
+   `SV_InitGame`'s own return value is discarded (`engine/server/
+   sv_main.c`), and `Host_Init` calls `CL_Init` regardless, so a FAILED
+   server load followed by this exact same client failure would produce
+   identical evidence. Closed with the same technique, aimed at the real
+   HL SDK's own `GetEntityAPI2` (`deps/hlsdk/dlls/cbase.cpp`, linked in
+   as `_GetEntityAPI2`, XBE-virtual `0x2b9fb0`) instead of the ambiguous
+   generic sink: a breakpoint there hit, with its caller (read the same
+   way, off the stack at entry) resolving to `_SV_LoadProgs + 0x384` -
+   the real SDK function, called from the real place. Its actual return
+   value needed one more step: `GetEntityAPI2`'s own body calls `memcpy`
+   internally (filling the big `DLL_FUNCTIONS` struct), so a fixed
+   single-step count landed mid-`memcpy`, not past the real return - the
+   robust fix was a SECOND breakpoint at `SV_LoadProgs`'s own resume
+   point (`0x1208f4`, the return address already captured from the first
+   breakpoint's stack read - the exact instruction after `call
+   GetEntityAPI2`, regardless of what the callee does internally). That
+   hit too, `EAX = 1` - **`GetEntityAPI2` genuinely returned `TRUE`.**
+   `SV_LoadProgs` really did complete successfully against the real
+   `GetEntityAPI2`, not merely reach a code region that also runs on
+   failure, and `CL_Init` really did then reach and fail its
+   client-module load exactly as expected, for the real reason expected
+   (the client module is still `stub_game/client`, X7.4 step 2's own
+   job). The network log channel
    still produced no output at all across every attempt (the SAME
    pre-existing, already-documented unreliability, not a new symptom -
    `SV_SysError` calls `Log_Printf` before anything else, so this

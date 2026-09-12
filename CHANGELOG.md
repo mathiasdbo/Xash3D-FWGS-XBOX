@@ -27,10 +27,21 @@ entry, before any prologue clobbers it) - the return address resolves
 its two varargs, read and dereferenced directly off guest memory,
 assemble to the exact expected text: `Host_ErrorInit: can't initialize
 client: missing essential exports`, word for word, not inferred from
-the symptom. `SV_LoadProgs` completed against the real `GetEntityAPI2`,
-and `CL_Init` reached and failed its client-module load exactly as
-expected (the client module is still `stub_game/client`, X7.4 step 2's
-own job).
+the symptom.
+
+A third gap found before this reached Codex review at all: decoding
+`CL_Init`'s failure alone doesn't prove `SV_LoadProgs` succeeded first -
+its own caller discards that return value and calls `CL_Init`
+regardless either way. Closed the same way aimed at the real SDK's own
+`GetEntityAPI2` instead of the shared sink: a breakpoint there hit with
+its caller resolving to `SV_LoadProgs + 0x384`, and (via a second
+breakpoint at that captured return address, needed because
+`GetEntityAPI2` calls `memcpy` internally so a fixed single-step count
+undershot the real return) its actual return value confirmed `EAX = 1`,
+true. `SV_LoadProgs` really did complete successfully against the real
+`GetEntityAPI2`, and `CL_Init` really did then reach and fail its
+client-module load exactly as expected (the client module is still
+`stub_game/client`, X7.4 step 2's own job).
 
 Also shows the network log channel is silent even for a message
 definitely, verifiably formed and about to be sent - real, independent

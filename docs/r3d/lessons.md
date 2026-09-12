@@ -856,3 +856,31 @@ formed and about to be sent - stronger evidence than any prior session
 had that the channel's unreliability is real and independent of
 whatever code path is trying to use it, not something a future fix
 should assume away.
+
+**A third gap in the same investigation, found before Codex review even
+saw it this time: proving the LATER step in a chain fired correctly
+does not prove the EARLIER step it depends on actually succeeded.**
+Decoding `Sys_Error`'s caller and message proved `CL_Init` reached its
+real failure path - but `SV_LoadProgs`'s own success or failure right
+before that was never independently checked, and its return value gets
+silently discarded by its own caller (`Host_Init` runs `CL_Init`
+regardless). A failed server load and a successful one would have
+produced the EXACT SAME `CL_Init` evidence. Fixed the same way, aimed
+one step earlier: a breakpoint on the SDK's own real target function
+(not a shared sink), reading its caller off the stack the same way to
+confirm the call came from the SPECIFIC expected place. Its return
+value needed one more refinement: single-stepping a fixed count to
+"exit the function" is unreliable if the function calls something else
+internally (here, `GetEntityAPI2` fills its output struct via `memcpy`,
+so a step count sized for a small, simple function landed mid-`memcpy`,
+not back at the caller) - the robust fix is a SECOND breakpoint at the
+call site's own captured return address (already known from the first
+breakpoint's stack read, before ever single-stepping anything), which
+fires exactly when the callee ACTUALLY returns regardless of what it
+did internally, with `EAX` holding its real return value at that exact
+instant. **A milestone chain ("A succeeded, which let B reach its real
+failure") needs positive evidence for EVERY step whose result is used
+downstream, not just the last one that happens to be easiest to
+observe - especially when an intermediate return value is silently
+discarded by its own caller, which is itself worth grepping for before
+trusting that a later symptom implies an earlier success.**
