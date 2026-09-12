@@ -5,6 +5,20 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-sweep.sh`: a bare run could exit 0 with every compile failing (Codex review round 1)
+
+Two real gaps. (1) `--expect-fail` is optional, but a bare invocation
+with no flags at all silently exited 0 even if every source failed to
+compile - a broken toolchain would look identical, to anything checking
+only the exit code, to a clean run. Any failure without an explicit
+`--expect-fail` acknowledging it is now fatal by default. (2) the
+stale-`.obj` cleanup ignored its own exit status, so a genuine removal
+failure could let the script compile ahead as if the output directory
+were already clean, with a stale object surviving into the current
+run's advertised output. The cleanup's exit status is now checked, and
+the directory is re-verified empty of `.obj` files afterward. Both
+targets re-verified against their real baselines after the fix.
+
 ### Added — `tools/xbox-game-sweep.sh`: the real `hl` SDK compile measurement (X7.4)
 
 The compile step `tools/xbox-game-manifest.sh` exists to feed, same

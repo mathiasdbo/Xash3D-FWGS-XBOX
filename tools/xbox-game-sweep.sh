@@ -134,8 +134,31 @@ mkdir -p "$OUT_DIR" || { echo "xbox-game-sweep: cannot create $OUT_DIR" >&2; exi
 # exactly and only what THIS run actually produced - a source that
 # compiled in an earlier run and later starts failing (or gets removed
 # from the SDK's own manifest) must not leave a stale .obj a link step
-# could still pick up.
-rm -f "$OUT_DIR"/*.obj "$OUT_DIR/manifest.txt"
+# could still pick up. Found in Codex review: the old version ignored
+# `rm -f`'s own exit status - `-f` already suppresses the common "nothing
+# to remove" case (an empty or first-ever run), so a REAL failure here
+# (a locked file, e.g. under the documented Windows/MSYS environment)
+# meant something rm genuinely could not remove, and the old version
+# compiled straight ahead as if the directory were clean anyway. Checked
+# explicitly now, and re-verified empty of .obj files afterward - not
+# just trusting rm's own exit code - since a stale object silently
+# surviving into "this run's output" is exactly the false-clean
+# measurement class a downstream link step must never inherit.
+if ! rm -f "$OUT_DIR"/*.obj "$OUT_DIR/manifest.txt"; then
+	echo "xbox-game-sweep: could not clear stale output in $OUT_DIR - refusing" >&2
+	echo "  to compile against a directory that may still hold objects from" >&2
+	echo "  an earlier run." >&2
+	exit 1
+fi
+for stale in "$OUT_DIR"/*.obj; do
+	if [ -e "$stale" ]; then
+		echo "xbox-game-sweep: $stale survived cleanup - refusing to compile" >&2
+		echo "  against a directory that may still hold objects from an" >&2
+		echo "  earlier run." >&2
+		exit 1
+	fi
+	break
+done
 
 OK=0
 FAIL=0
@@ -218,4 +241,17 @@ if [ -n "$EXPECT_FAIL" ]; then
 		echo "  Update the tracked count and whichever docs cite it." >&2
 		exit 1
 	fi
+elif [ "$FAIL" -gt 0 ]; then
+	# Found in Codex review: --expect-fail is optional (an exploratory
+	# "just show me what's happening" run needs no baseline), but that
+	# must never mean a bare invocation silently exits 0 while compiles
+	# are failing - a broken toolchain producing 107/107 failures would
+	# otherwise look identical, to anything checking only the exit code,
+	# to a clean run. Any failure without an explicit --expect-fail
+	# acknowledging it is fatal by default; pass the real, current count
+	# to get a clean exit despite known failures.
+	echo "xbox-game-sweep: $FAIL of $TOTAL failing and no --expect-fail was" >&2
+	echo "  given - refusing to exit 0. Pass --expect-fail $FAIL to acknowledge" >&2
+	echo "  the current known baseline, or fix the failures." >&2
+	exit 1
 fi

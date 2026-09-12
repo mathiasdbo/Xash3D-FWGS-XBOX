@@ -2647,6 +2647,27 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    (server) and `--expect-fail 18 --expect-total 85` (client) both pass
    against this measurement; an intentionally wrong `--expect-fail 0`
    correctly reports a regression rather than passing.
+
+   **Codex review round 1 found two more real gaps, both fixed and
+   re-verified before round 2.** (1) `--expect-fail` is optional (an
+   exploratory run needs no baseline), but a BARE invocation with no
+   flags at all silently exited 0 even with every source failing - a
+   broken toolchain producing 107/107 failures would look identical, to
+   anything checking only the exit code, to a clean run. Fixed: any
+   failure without an explicit `--expect-fail` acknowledging it is now
+   fatal by default; verified a bare run against the real 5-failure
+   server baseline now correctly refuses to exit 0, naming
+   `--expect-fail 5` as the way to accept it, while the same run WITH
+   the correct `--expect-fail`/`--expect-total` still passes clean. (2)
+   the stale-`.obj` cleanup (`rm -f`) ignored its own exit status, so a
+   genuine removal failure (a locked file, plausible on the documented
+   Windows/MSYS setup) would let the script compile straight ahead as if
+   the directory were already clean, with a stale object from an earlier
+   run able to survive into "this run's output". Fixed: the cleanup's
+   exit status is checked, and the directory is re-verified empty of
+   `.obj` files afterward rather than trusting `rm`'s exit code alone -
+   re-verified both targets still pass against their real baselines
+   after this change.
 1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
    generate `server/exports.txt`; link with `--client-main`. Exit gate is
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,
