@@ -2919,7 +2919,7 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    **Result: the real `hl` client sweep now reports 85/85, zero
    failures** (was 70/85 at the start of this whole investigation), zero
    regressions (server 107/107, `3rdparty/mainui` 82/82). **A fresh real
-   client isolation now reports "isolated cleanly - 85 object(s), 5581
+   client isolation now reports "isolated cleanly - 85 object(s), 5657
    symbol(s) renamed, 0 leaked"** - genuinely, fully link-ready, not
    partial. X7.4 step 2 (the real client link attempt) is now genuinely
    attemptable for the first time - not yet attempted.

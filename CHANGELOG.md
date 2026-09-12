@@ -45,9 +45,23 @@ Verified end to end: the real `hl` client sweep now reports **85/85,
 zero failures** (was 70/85 at the start of this investigation), zero
 regressions in the real server sweep (107/107) or `3rdparty/mainui`
 (82/82). A fresh real client isolation now reports "isolated cleanly -
-85 object(s), 5581 symbol(s) renamed, 0 leaked" - genuinely, fully
+85 object(s), 5657 symbol(s) renamed, 0 leaked" - genuinely, fully
 link-ready. X7.4 step 2 (the real client link attempt) is now genuinely
 attemptable for the first time.
+
+**Codex review round 2**: an earlier version of `compat/xbox/
+memory_resource` tracked blocks in a plain `std::vector`, searching
+linearly on every `deallocate()` - Theta(N) per call, so retiring N
+particles in one frame (`CMiniMem::Reset`, called on every level
+transition) cost Theta(N^2) bookkeeping on top of the real frees,
+exactly the "quadratic teardown" class of bug `CMiniMem`'s own design
+exists to avoid. Fixed: tracked in a `std::unordered_map` keyed by
+pointer instead, making both `allocate()`/`deallocate()` amortised
+O(1) - closes the specific algorithmic complexity named, without a real
+chunked/free-list pool or real-hardware profiling, both still
+genuinely deferred, larger work (see `compat/xbox/memory_resource`'s
+own header comment). Re-verified: identical 85/85 sweep and clean
+isolation results.
 
 ### Fixed — real `hl` client SDK compile failures: 70/85 to 77/85, five real root causes (divergence #39)
 
