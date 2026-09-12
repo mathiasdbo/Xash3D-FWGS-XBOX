@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 # Attempt a real Xbox link of a title's isolated server module against the
 # real engine + third-party + menu object set tools/xbox-link-check.sh
-# already proves clean - X7.4 step 1's real exit gate ("0 duplicate, 0
-# undefined, a real XBE"), the first time this project has actually
-# attempted it against the real hl SDK rather than a stub or a 2-object
-# prototype.
+# already proves clean - X7.4 step 1's real exit gate ("0 duplicate
+# symbols, and the undefined symbol set exactly matches the checked-in
+# baseline"), the first time this project has actually attempted it
+# against the real hl SDK rather than a stub or a 2-object prototype.
+#
+# This is a MEASUREMENT tool, not an XBE build: `nxdk-link -errorlimit:0`
+# reports every undefined symbol but produces no `.exe` at all when any
+# remain (see docs/r3d/fork-plan.md, "A linker cannot emit a loadable
+# binary with unresolved symbols") - the same real limitation
+# tools/xbox-link-check.sh's own `--xbe` flag works around with a
+# SEPARATE `-force:unresolved` link. As long as the current tracked
+# server baseline (docs/r3d/parked-server-undefined-symbols.txt) is
+# non-empty, this script will never produce a real executable; it only
+# ever reports whether the produced .obj was linked correctly.
 #
 #   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-game-link-check.sh <hl> [--expect-undefined N]
 #
@@ -257,5 +267,51 @@ if [ -n "$EXPECT_UNDEFINED" ]; then
 	fi
 fi
 
-echo "xbox-game-link-check: $TITLE server module link-checked. Output: $OUT_EXE" >&2
-echo "$OUT_EXE"
+# Found in Codex review round 1, 2026-09-12: a same-count substitution
+# (___RTDynamicCast resolving while an unrelated symbol goes undefined
+# for an unrelated reason) would still pass the count-only check above -
+# exactly the false-clean measurement class tools/xbox-link-check.sh's
+# own parked-undefined-symbols.txt identity check already exists to
+# close, but that check was not carried into this tool. Mirrors it here
+# with a server-specific baseline (the server module's real undefined
+# set is not the same as the base engine's).
+if [ "$UNDEF" -gt 0 ]; then
+	PARKED_LIST="$REPO/docs/r3d/parked-server-undefined-symbols.txt"
+	if [ ! -f "$PARKED_LIST" ]; then
+		echo "xbox-game-link-check: $PARKED_LIST does not exist - nothing to" >&2
+		echo "  compare the real undefined symbol set against. Refusing to" >&2
+		echo "  report a clean result." >&2
+		exit 1
+	fi
+	ACTUAL_UNDEF_LIST="$SCRATCH/game-$TITLE/actual-undefined.txt"
+	grep 'undefined symbol' "$LOG" | sed 's/.*undefined symbol: //' | sort -u > "$ACTUAL_UNDEF_LIST"
+	EXPECTED_UNDEF_LIST="$SCRATCH/game-$TITLE/expected-undefined.txt"
+	sort -u "$PARKED_LIST" > "$EXPECTED_UNDEF_LIST"
+	if ! diff -u "$EXPECTED_UNDEF_LIST" "$ACTUAL_UNDEF_LIST" > "$SCRATCH/game-$TITLE/undefined-diff.txt"; then
+		echo "xbox-game-link-check: REGRESSION - the actual undefined symbol set" >&2
+		echo "  does not match docs/r3d/parked-server-undefined-symbols.txt, even" >&2
+		echo "  though the COUNT may have matched --expect-undefined. Refusing to" >&2
+		echo "  report a clean result over an unexpected symbol set - see the diff:" >&2
+		cat "$SCRATCH/game-$TITLE/undefined-diff.txt" >&2
+		exit 1
+	fi
+	echo "xbox-game-link-check: actual undefined symbols match" >&2
+	echo "  docs/r3d/parked-server-undefined-symbols.txt exactly." >&2
+fi
+
+# Found in Codex review round 1, 2026-09-12: this script was printing
+# $OUT_EXE as its successful output unconditionally, but nxdk-link
+# produces no .exe at all whenever any undefined symbol remains (see the
+# header comment) - as long as the tracked baseline above is non-empty,
+# that file genuinely does not exist, and reporting its path as "output"
+# would be a fabricated result. Report a real path only when one was
+# actually produced.
+if [ -f "$OUT_EXE" ]; then
+	echo "xbox-game-link-check: $TITLE server module link-checked. Output: $OUT_EXE" >&2
+	echo "$OUT_EXE"
+else
+	echo "xbox-game-link-check: $TITLE server module link-checked - $UNDEF" >&2
+	echo "  undefined symbol(s) match the tracked baseline, so no .exe was" >&2
+	echo "  produced (nxdk-link never emits output with unresolved symbols" >&2
+	echo "  present). This is a measurement pass, not an executable build." >&2
+fi

@@ -54,6 +54,23 @@ Also corrected `docs/r3d/parked-undefined-symbols.txt`: the 31 tracked
 for the base engine link is 0 undefined, not 32) - emptied to reflect
 the real, current measurement.
 
+**Codex review round 1 found two more real gaps.** (1) `--expect-undefined`
+only compared a COUNT, the exact same-count-substitution failure class
+`tools/xbox-link-check.sh`'s own `parked-undefined-symbols.txt` identity
+check already exists to close, but that check was never carried into
+the new tool - fixed with a server-specific
+`docs/r3d/parked-server-undefined-symbols.txt` (`___RTDynamicCast`) and
+the same exact-set diff. (2) the script printed its output executable's
+path unconditionally, but `nxdk-link -errorlimit:0` never produces a
+`.exe` while any undefined symbol remains (confirmed: the file genuinely
+does not exist after this baseline's accepted run) - fixed to report a
+real path only when the file actually exists, and to report a
+measurement-only pass otherwise; softened the header's "real XBE" claim
+to describe what this tool actually does. Re-verified after both fixes:
+same `0 duplicate, 1 undefined` result, exact-set match confirmed, and
+the "no .exe produced" message now prints correctly instead of a
+fabricated path.
+
 ### Fixed — real `hl` SDK compile failures: the server module now compiles 107/107 (X7.4)
 
 Two real root causes, found while running `tools/xbox-game-sweep.sh`
