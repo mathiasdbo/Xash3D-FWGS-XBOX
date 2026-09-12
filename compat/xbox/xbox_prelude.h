@@ -183,8 +183,27 @@ int   __stdcall GetModuleHandleExW( unsigned long flags, LPCWSTR name, void **mo
 unsigned int _set_abort_behavior( unsigned int flags, unsigned int mask );
 char *getcwd( char *buf, unsigned int size );
 
+/* SystemParametersInfoA/SPI_*: found compiling the real hl client SDK
+ * (deps/hlsdk/cl_dll/inputw32.cpp's mouse-acceleration save/restore
+ * around raw mouse look) - see xbox_win32_ext.c for why an unconditional
+ * FALSE is the complete, correct behaviour here, not a stub for missing
+ * functionality. Only these two actions are declared because they are
+ * the only ones any caller in this tree uses yet. */
+int __stdcall SystemParametersInfoA( unsigned int action, unsigned int param, void *data, unsigned int wini );
+
+#ifndef SPI_GETMOUSE
+#define SPI_GETMOUSE 3
+#endif
+#ifndef SPI_SETMOUSE
+#define SPI_SETMOUSE 4
+#endif
+
 #ifdef __cplusplus
 }
+#endif
+
+#ifndef SystemParametersInfo
+#define SystemParametersInfo SystemParametersInfoA
 #endif
 
 #ifndef GetUserName

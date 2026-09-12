@@ -5,6 +5,48 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — real `hl` client SDK compile failures: 70/85 to 77/85, five real root causes (divergence #39)
+
+Building the real `hl` client SDK for the first time
+(`tools/xbox-game-sweep.sh hl client`) hit real compile failures, all
+downstream of one fact measured directly: this project's own clang
+invocation (`-target i386-pc-win32`) defines `_MSC_VER` (`1950`), which
+activates `deps/hlsdk/external/SDL2`'s own `#if defined(_MSC_VER)`
+real-MSVC branches that were never reachable before.
+
+Fixed: SDL2's SAL-annotation macros (`_Out_bytecap_`, `_In_bytecount_`,
+etc. - `compat/xbox/sal.h` extended with the specific ones real headers
+invoke, all no-ops, matching this file's own stated design); a
+`uintptr_t` redefinition conflict between SDL2's own Windows config and
+pdclib's real one (`-D_UINTPTR_T_DEFINED`); a `_m_prefetch` builtin
+collision between SDL2's own clang workaround and clang's real builtin
+(`-D__PRFCHWINTRIN_H`); a missing legacy `<memory.h>` (three files want
+only `memcpy` from it - `compat/xbox/memory.h`, new, redirects to
+`<string.h>`); and `SystemParametersInfo` (`inputw32.cpp`'s real mouse-
+acceleration save/restore around raw mouse look) - never declared or
+implemented on this platform at all, given an unconditional `FALSE`
+body, the real, correct behaviour since Xbox has no OS-level mouse-
+acceleration setting to query or set, not a stub for missing
+functionality (confirmed safe: the caller already checks this return
+value and skips the save/restore on `FALSE`). `SPI_GETMOUSE`/
+`SPI_SETMOUSE` verified against the real Windows 10 SDK's `WinUser.h`,
+not guessed.
+
+Two of the five (`-D_UINTPTR_T_DEFINED`/`-D__PRFCHWINTRIN_H`) are
+compiler-flag additions (`tools/xbox-cxx.sh`), matching the `-std=c++17`
+precedent of flag-only toolchain choices; the rest are real
+`compat/xbox/` source additions, divergence #39.
+
+Verified end to end: the real `hl` client sweep went from 70/85 to
+77/85, zero regressions in the real server sweep (107/107) or
+`3rdparty/mainui` (82/82). The remaining 8 failures are individually
+confirmed (each compiled standalone) to be exactly two already-tracked,
+genuinely separate gaps: `<memory_resource>` (7 files -
+`std::pmr::unsynchronized_pool_resource` needs a real implementation
+nxdk's `libc++.lib` does not have at all, checked directly via
+`llvm-nm`) and `GL/gl.h` (1 file, the pre-existing no-real-GL-on-Xbox
+gap).
+
 ### Confirmed — X7.4 step 1 complete: the real `hl` server module's boot milestone verified by a real breakpoint hit
 
 The entry below left one thing open: whether the boot actually reaches

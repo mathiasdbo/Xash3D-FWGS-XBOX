@@ -2852,12 +2852,29 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    everything.
 
    **Result: server compiles 107/107 - X7.4 step 1's real, complete
-   object set now exists for the first time.** Client: 15/85 remaining
-   (all of them the pre-existing SDL2-header/clang SAL-annotation
-   incompatibility or a real-`GL/gl.h`/`<memory.h>`/`<memory_resource>`
-   want from the studio-model rendering path - genuinely separate,
-   larger work, correctly out of scope here per the categorisation
-   above).
+   object set now exists for the first time.** Client was 15/85 at this
+   point (the SDL2-header/clang SAL-annotation incompatibility, plus a
+   `GL/gl.h`/`<memory.h>`/`<memory_resource>` want from the studio-model
+   rendering path) - **fixed down to 77/85, 2026-09-12, five real root
+   causes closed (divergence #39)**, all downstream of one fact measured
+   directly: this project's own clang invocation defines `_MSC_VER`
+   (`1950`), which activates real-MSVC-only branches in
+   `deps/hlsdk/external/SDL2` that were never reachable before. Fixed:
+   the SAL-annotation macros (`compat/xbox/sal.h`), a `uintptr_t`
+   redefinition conflict and a `_m_prefetch` builtin collision (both
+   `tools/xbox-cxx.sh` flags), a missing legacy `<memory.h>`
+   (`compat/xbox/memory.h`), and `SystemParametersInfo`
+   (`compat/xbox/xbox_prelude.h`/`xbox_win32_ext.c`, a real, correct
+   unconditional `FALSE` - Xbox has no OS-level mouse-acceleration
+   setting to query or set at all). Zero regressions (server 107/107,
+   `3rdparty/mainui` 82/82). **The remaining 8 are now fully, individually
+   confirmed** (each compiled standalone) to be exactly two genuinely
+   separate, larger gaps: `<memory_resource>` (7 files -
+   `std::pmr::unsynchronized_pool_resource` needs a real, non-header-only
+   implementation nxdk's `libc++.lib` does not have, checked directly via
+   `llvm-nm`, and the non-standard `std::experimental::pmr` fallback is
+   equally unimplemented) and `GL/gl.h` (1 file, the pre-existing,
+   already-tracked no-real-GL-on-Xbox gap - X5's own job, not X7.4's).
 
    **`tools/xbox-game-link-check.sh` built and run for real, 2026-09-12 -
    X7.4 step 1's actual real-link attempt, the first time this project has

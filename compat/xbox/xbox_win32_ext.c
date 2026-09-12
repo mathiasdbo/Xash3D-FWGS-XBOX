@@ -525,3 +525,30 @@ unsigned int _set_abort_behavior( unsigned int flags, unsigned int mask )
 	(void)mask;
 	return 0;
 }
+
+/*
+====================
+SystemParametersInfoA
+
+Declared in xbox_prelude.h - found compiling the real hl client SDK for
+the first time (deps/hlsdk/cl_dll/inputw32.cpp: saves the real Windows
+mouse-acceleration curve with SPI_GETMOUSE before overriding it for raw
+mouse look, then restores it with SPI_SETMOUSE on exit). Xbox has no
+OS-level mouse-acceleration setting to query or set at all - not a
+missing feature to stub around, a real absence, so this always returns
+FALSE exactly like a genuine failure would on real Windows. The caller
+already handles that correctly on its own: inputw32.cpp checks this
+return value and skips the save/restore entirely when it is FALSE
+(`mouseparmsvalid = SystemParametersInfo(SPI_GETMOUSE, ...) != FALSE`),
+so an unconditional FALSE here is the SDK's own anticipated behaviour
+for "this platform has no such setting," not a guess.
+====================
+*/
+int __stdcall SystemParametersInfoA( unsigned int action, unsigned int param, void *data, unsigned int wini )
+{
+	(void)action;
+	(void)param;
+	(void)data;
+	(void)wini;
+	return 0;
+}
