@@ -760,3 +760,53 @@ THAT module, and nothing else resolves "CreateInterface" for the
 narrow, measured `--exclude <file>` for exactly this shape (a real
 `/EXPORT:` name that must NOT be treated as this module's public
 surface), not a guess or an invented heuristic.
+
+### `tools/xemu-debug.py`'s `regs`/`mon "info registers"` show a fixed debugger-attach checkpoint, not the guest's true current state, while it is actually running
+
+Found diagnosing the real `hl` server boot's first two crashes (divergence
+#38). A GENUINE crash (the `__xbox_assert` `cli; hlt; jmp 1b` loop from
+`deps/nxdk/lib/pdclib/platform/xbox/functions/assert/assert.c`) shows up
+exactly as expected: every `regs` read returns the identical `EIP`, and
+that's real, because the guest genuinely is halted there. But after
+fixing that crash, a FRESH attach to a build that should have been
+running freely kept reading `EIP=0x8001b02f` (kernel space, `HLT=0`) on
+every single connection - regardless of whether the wait before
+attaching was 5 seconds or 120 - with the stack/registers otherwise
+identical too. That is not a real guest freeze: confirmed by sending a
+genuine GDB `continue` (`GdbRemote.cont()`, not `mon "..."`, which goes
+through `qRcmd` and requires the target already stopped to answer at
+all) over that same connection and it ran for the full 90-second timeout
+with no further stop reply at all - a truly stuck guest would have
+re-hit whatever trapped it almost immediately, the way the real assert
+loop always did. **`mon` commands and a bare `g` (registers) read both
+require the target already stopped to answer, so xemu's gdbstub pauses
+ALL vCPUs at its own fixed, deterministic re-entry point the moment a
+client asks for state - that point is a debugger-implementation detail,
+not "wherever the guest currently is."** Do not read a `regs`/`mon`
+snapshot's `EIP` as "the guest is stuck here" without first issuing a
+real `continue` and confirming it does NOT immediately re-stop at the
+same address.
+
+**Found in Codex review, round 2, on an earlier version of this same
+entry: a `continue` that runs past a timeout with no stop reply only
+disproves ONE specific thing - that the guest is repeatedly re-trapping
+at the same instruction, the way a real crash-halt loop does.** It does
+NOT prove the guest is "healthy," making real forward progress, or past
+any particular point - an infinite loop, a deadlock, or a legitimate
+kernel idle-wait would produce the exact same observation (no stop
+reply, ever) and are not distinguishable from each other by this signal
+alone. The corrected, narrower claim: this technique rules OUT "still
+crashing on the SAME bug as before," nothing more. Calling a boot
+"confirmed working" or "verified end to end" still needs an independent
+forward-progress signal - a breakpoint set at the actual next expected
+milestone (`break <addr> --steps N` and watching it actually advance),
+repeated PC sampling that shows genuinely different addresses over time
+(not just "no stop reply"), or a working log channel - not merely the
+absence of a repeated trap. A screenshot (`tools/xemu-debug.py
+screenshot`) is a cheap fourth signal but not conclusive on its own for
+a headless `ref_null` build: it showed the plain Xbox boot-splash logo,
+unrun and unchanged from BIOS init, which is exactly what an unwritten
+framebuffer looks like under a renderer that (correctly, by design at
+this milestone) never calls `VID_SetMode` at all - consistent with
+either a healthy headless boot or an earlier hang, not distinguishing
+evidence either way on its own.

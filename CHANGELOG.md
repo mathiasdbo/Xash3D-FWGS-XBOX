@@ -5,6 +5,52 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/xbox-game-link-check.sh --xbe`, the real `hl` server module's first real boot attempt
+
+`tools/xbox-game-link-check.sh` gained a `--xbe <path>` mode, mirroring
+`tools/xbox-link-check.sh`'s own `-force:unresolved` + `cxbe` sequence
+against this tool's own isolated-server response file, producing a real,
+`XBEH`-valid `.xbe` for the actual, real `hl` server module for the first
+time - packaged onto a real ISO (`extract-xiso`, the real retail `valve/`
+tree so `delta.lst` exists) and booted in xemu.
+
+The first real boot attempt crashed immediately, twice in a row - not
+the expected "CL_Init: missing essential exports" message at all:
+`assert(nullptr != g_pFileSystemModule)` in `FileSystem_LoadFileSystem`
+(`deps/hlsdk/game_shared/filesystem_utils.cpp:197`), decoded straight
+from the halted guest's own memory rather than inferred from the
+symptom. `Sys_LoadModule`'s stock body is a real `LoadLibrary()` call,
+which NXDK has never had. A first fix (route `Sys_GetFactory` to this
+same file's own local `CreateInterface`) compiled and linked clean but
+was itself wrong - caught by a second real boot, not by inspection:
+X7.1b's own isolation renames every self-reference to `CreateInterface`
+within the server's own isolated set, so that fix always resolved to the
+server's own unrelated local registry, not filesystem_stdio's real one.
+Fixed properly on `deps/hlsdk`'s `resonance3d` branch (divergence #38)
+by reusing the exact mechanism the engine itself already uses
+successfully for this (`COM_LoadLibrary`/`COM_GetProcAddress`, proven
+since divergence #31).
+
+Re-verified: full server sweep still 107/107, still `0 duplicate, 0
+undefined`. A real xemu boot of the fixed XBE is no longer repeatedly
+re-trapping the same two asserts the pre-fix build hit every time within
+seconds - confirmed by attaching the debugger and issuing a genuine
+`continue`, which produced no stop reply for 90+ seconds. That alone
+does not mean the boot is healthy or making real progress (an infinite
+loop or a legitimate kernel idle-wait looks identical to "no stop
+reply") - it only rules out the specific crash this row fixes recurring,
+found and corrected via Codex review round 2 on an earlier, overclaiming
+version of this same entry. Also found and documented
+(`docs/r3d/lessons.md`): `tools/xemu-debug.py`'s `regs`/`mon` reads show
+a fixed debugger-attach checkpoint rather than the guest's true current
+state while it is genuinely running.
+
+Not yet confirmed: the boot reaching its full expected milestone (the
+"CL_Init: missing essential exports" message arriving on the network log
+channel) - the channel produced no output at all this session, matching
+the same pre-existing, already-documented unreliability from an earlier
+session rather than a new symptom this fix introduced.
+
 ### Fixed — real `hl` server SDK now links `0 duplicate, 0 undefined`: the `___RTDynamicCast` gap closed (divergence #37)
 
 The prior entry below tracked one real, understood gap as a baseline
