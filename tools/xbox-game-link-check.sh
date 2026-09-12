@@ -19,7 +19,7 @@
 # non-empty again (a real regression, or a newly deferred gap), this
 # reverts to measurement-only automatically, no script change needed.
 #
-#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-game-link-check.sh <hl> [--expect-undefined N]
+#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>]
 #
 # Reuses, rather than re-derives, three already-built, already-reviewed
 # pieces: tools/xbox-link-check.sh's own response file (the real,
@@ -49,11 +49,16 @@ fi
 export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
 
 EXPECT_UNDEFINED=""
+XBE_OUT=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--expect-undefined)
 		EXPECT_UNDEFINED="${2:?--expect-undefined needs a number}"
+		shift 2
+		;;
+	--xbe)
+		XBE_OUT="${2:?--xbe needs a path}"
 		shift 2
 		;;
 	-*)
@@ -68,7 +73,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${#POSITIONAL[@]}" -ne 1 ]; then
-	echo "usage: xbox-game-link-check.sh <hl> [--expect-undefined N]" >&2
+	echo "usage: xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>]" >&2
 	exit 1
 fi
 TITLE="${POSITIONAL[0]}"
@@ -314,6 +319,55 @@ if [ "$UNDEF" -gt 0 ]; then
 	fi
 	echo "xbox-game-link-check: actual undefined symbols match" >&2
 	echo "  docs/r3d/parked-server-undefined-symbols.txt exactly." >&2
+fi
+
+# --xbe: same mechanism as tools/xbox-link-check.sh's own --xbe block
+# (see that script's comment for the full reasoning on why this is a
+# genuine, deliberate use of -force:unresolved, not a way to hide a real
+# problem) - a SEPARATE link against THIS script's own $NEW_RESPONSE
+# (the real server module swapped in), only reached after a successful
+# --expect-undefined match AND symbol-identity match above, so this
+# never runs on an unexplained, regressed, or substituted link.
+if [ -n "$XBE_OUT" ]; then
+	XBE_EXE="$SCRATCH/game-$TITLE/xbe-build.exe"
+	# shellcheck disable=SC2086
+	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
+		-out:"$XBE_EXE" "@$NEW_RESPONSE" > "$SCRATCH/game-$TITLE/xbe-link.txt" 2>&1
+	XBE_LINK_STATUS=$?
+	if [ "$XBE_LINK_STATUS" -ne 0 ] || [ ! -f "$XBE_EXE" ]; then
+		echo "xbox-game-link-check: XBE build link failed (exit $XBE_LINK_STATUS) even" >&2
+		echo "  with -force:unresolved - this is not the same tracked undefined" >&2
+		echo "  symbol set; something else broke. See:" >&2
+		echo "  $SCRATCH/game-$TITLE/xbe-link.txt" >&2
+		tail -n 20 "$SCRATCH/game-$TITLE/xbe-link.txt" >&2
+		exit 1
+	fi
+
+	CXBE="deps/nxdk/tools/cxbe/cxbe"
+	if [ ! -x "$CXBE" ] && [ ! -f "${CXBE}.exe" ]; then
+		echo "xbox-game-link-check: $CXBE not found or not built." >&2
+		echo "  Run: make -C deps/nxdk/tools/cxbe" >&2
+		exit 1
+	fi
+	if ! "$CXBE" -OUT:"$XBE_OUT" -TITLE:"Resonance3D" "$XBE_EXE" > "$SCRATCH/game-$TITLE/xbe-cxbe.txt" 2>&1; then
+		echo "xbox-game-link-check: cxbe conversion failed. See $SCRATCH/game-$TITLE/xbe-cxbe.txt" >&2
+		tail -n 20 "$SCRATCH/game-$TITLE/xbe-cxbe.txt" >&2
+		exit 1
+	fi
+	if [ ! -f "$XBE_OUT" ]; then
+		echo "xbox-game-link-check: cxbe reported success but $XBE_OUT does not exist." >&2
+		exit 1
+	fi
+	# XBEH, the real magic header every valid .xbe starts with - checked,
+	# not assumed from cxbe's own exit code alone.
+	MAGIC=$(head -c 4 "$XBE_OUT")
+	if [ "$MAGIC" != "XBEH" ]; then
+		echo "xbox-game-link-check: $XBE_OUT does not start with the XBEH magic" >&2
+		echo "  header - cxbe reported success but the output does not look like" >&2
+		echo "  a real XBE." >&2
+		exit 1
+	fi
+	echo "xbox-game-link-check: $XBE_OUT is a real, valid XBE ($(wc -c < "$XBE_OUT") bytes)." >&2
 fi
 
 # Found in Codex review round 1, 2026-09-12: this script was printing

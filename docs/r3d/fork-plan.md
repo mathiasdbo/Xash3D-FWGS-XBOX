@@ -3020,21 +3020,57 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,
    the manifest clean.
 
-   **The link half of this gate is now real and measured, not aspirational
-   - `0 duplicate, 0 undefined`, a real, valid executable produced (see
-   above and divergence #37).** `tools/xbox-game-link-check.sh` builds a
-   plain `.exe` via `nxdk-link`, not yet the actual `--xbe`-converted,
-   `--client-main`-linked, full-response-file XBE this bullet's exit gate
-   names - that assembly (this tool's isolated+regenerated server object
-   set swapped into an ACTUAL `--client-main --xbe` run of
-   `tools/xbox-link-check.sh`, not its own separate measurement link) and
-   the boot itself (`SV_LoadProgs` completing, the log-channel message
-   arriving, the memory numbers below) are the real remaining work here -
-   not yet attempted. Expected boot (headless, `ref/null`, full `valve/`
-   on the disc so `delta.lst` exists): `SV_LoadProgs` completes against the
-   REAL `GetEntityAPI2` (every `DLL_FUNCTIONS` member real, the stub's six-of-forty gone), then
+   **The link gate is fully real and measured now, INCLUDING the actual
+   XBE - `0 duplicate, 0 undefined`, `tools/xbox-game-link-check.sh hl
+   --expect-undefined 0 --xbe <path>` (the tool gained a `--xbe` mode
+   this same pass, mirroring `tools/xbox-link-check.sh`'s own
+   `-force:unresolved` + `cxbe` sequence against THIS tool's own
+   isolated-server response file) produces a real, `XBEH`-valid `.xbe`,
+   packaged onto a real ISO (`extract-xiso`, the real retail `valve/`
+   tree so `delta.lst` exists) and booted for real in xemu.**
+
+   **The first real boot attempt crashed immediately, twice in a row -
+   both real, both found and fixed, both documented as divergence #38.**
+   Not the expected "CL_Init: missing essential exports" message at all:
+   `assert(nullptr != g_pFileSystemModule)` in `FileSystem_LoadFileSystem`
+   (`deps/hlsdk/game_shared/filesystem_utils.cpp:197`), decoded straight
+   from the halted guest's own memory (`tools/xemu-debug.py`, the real
+   expression/function/file/line strings, not inferred from the symptom)
+   - `Sys_LoadModule`'s stock body is a real `LoadLibrary()` call, which
+   NXDK has never had. A first fix (route `Sys_GetFactory` to this same
+   file's own local `CreateInterface`) compiled and linked clean but was
+   itself wrong - caught by a SECOND real boot, not by inspection: X7.1b's
+   own isolation renames every self-reference to `CreateInterface` within
+   the server's own isolated set, so that fix always resolved to the
+   server's own unrelated local registry, not filesystem_stdio's real
+   one. Fixed properly by reusing the exact mechanism the ENGINE itself
+   already uses successfully for this (`COM_LoadLibrary`/
+   `COM_GetProcAddress`, proven since divergence #31) - see divergence
+   #38 for the full story. Re-verified: full server sweep still 107/107,
+   still `0 duplicate, 0 undefined`, and a real xemu boot of the fixed
+   XBE no longer hits either assert - confirmed by attaching the debugger
+   and issuing a genuine `continue`: the CPU ran freely for 90+ seconds
+   with no further trap, where the pre-fix build hit the same crash every
+   time within seconds.
+
+   **Not yet confirmed: the boot reaching its full expected milestone.**
+   The network log channel produced no output at all this session,
+   across every attempt, indistinguishable (with the tools available)
+   from the SAME pre-existing, already-documented log-channel
+   unreliability (`docs/r3d/lessons.md`) rather than a new symptom -
+   `tools/xemu-debug.py`'s `regs`/`mon` reads were themselves found to
+   show a fixed debugger-attach checkpoint rather than true current state
+   while the guest is genuinely running (also now in `lessons.md`), which
+   is what makes a real `continue`-and-wait the only reliable signal this
+   session found for "still running" vs. "actually stuck." Confirming the
+   exact expected message arrives - the real remaining step here - needs
+   either a more reliable log-channel signal or a fresh diagnosis of why
+   it stays silent, not a new build attempt. Expected boot (headless,
+   `ref/null`, full `valve/` on the disc so `delta.lst` exists):
+   `SV_LoadProgs` completes against the REAL `GetEntityAPI2` (every
+   `DLL_FUNCTIONS` member real, the stub's six-of-forty gone), then
    `CL_Init` stops at "can't initialize client: missing essential exports"
-   - now with the message ARRIVING on the log channel, since #34. That
+   - with the message ARRIVING on the log channel, since #34. That
    message is the milestone: it proves 100+ real server translation units
    link and initialise on the console. **And the first memory number is
    taken HERE, at entry, not after a map** (specialist review): the wall
