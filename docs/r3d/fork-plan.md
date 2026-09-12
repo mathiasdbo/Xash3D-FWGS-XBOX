@@ -2821,11 +2821,35 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    itself now returns `false` unconditionally on `NXDK`, taking
    `CheckNODFile`'s own explicit "comparison failed → rebuild" fallback
    directly, rather than depending on a sentinel timestamp value
-   surviving a comparison correctly. Re-verified: `filesystem_utils.cpp`
-   still compiles 0 errors, the full server sweep still reports 107/107,
-   and `CheckNODFile`'s logic was hand-traced again against the corrected
-   code to confirm it now returns `false` (rebuild) unconditionally on
-   this platform.
+   surviving a comparison correctly.
+
+   **Codex review round 2 (the cap) found that "fix" was itself a
+   different real bug: rejecting the timestamp comparison outright makes
+   `CheckNODFile` reject EVERY `.nod`, even a genuinely valid one shipped
+   with the disc.** Read `dlls/world.cpp:641-650` directly: when
+   `CheckNODFile` returns `false`, `FLoadGraph()` is never even called -
+   the map loader jumps straight to `AllocNodes()`, a full node/routing
+   regeneration, unconditionally, on every single map load, real CPU
+   cost this hardware can least afford. Round 1 and round 2 are the same
+   underlying fact from two directions: nxdk has no real timestamp
+   source, so neither "always trust the cache" nor "always reject the
+   cache" is actually correct. Resolution, matching Codex's own
+   recommendation: removed the `FileSystem_CompareFileTime` `NXDK`
+   branch entirely - its original, unconditional logic already does the
+   right thing once `GetFileTime` alone is fixed (both times report `0`,
+   read as equal, `CheckNODFile` proceeds to `FLoadGraph()`), and
+   `FLoadGraph()`'s OWN independent checks (missing file, wrong
+   `GRAPH_VERSION`) are the real, already-correct gate against a
+   genuinely bad graph. True staleness (valid format, but the `.bsp`
+   changed since) is not caught at Xbox runtime by this - explicitly
+   deferred to asset-packaging time, where real timestamps or hashes
+   exist to enforce it; a stale-but-format-valid graph degrading AI
+   navigation, not crashing anything, is the accepted, documented
+   tradeoff. Re-verified after both rounds: `filesystem_utils.cpp` still
+   compiles 0 errors, the full server sweep still reports 107/107, and
+   `CheckNODFile`'s logic was hand-traced against the final code to
+   confirm it now proceeds to `FLoadGraph()` rather than rejecting
+   everything.
 
    **Result: server compiles 107/107 - X7.4 step 1's real, complete
    object set now exists for the first time.** Client: 15/85 remaining
