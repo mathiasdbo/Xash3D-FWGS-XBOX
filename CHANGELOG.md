@@ -5,6 +5,34 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/xbox-game-isolate.sh`: the real bulk module symbol isolation pipeline (X7.1b)
+
+The bulk implementation of X7.1b's 2-object prototype: runs the target's
+sweep, generates `exports.txt`, strips `.drectve` from a copy of every
+object, builds a rename map from the module's own defined-symbol set
+minus its allowlist, applies it with `llvm-objcopy --redefine-syms`, and
+self-checks every isolated object afterward for a leaked (neither
+allowlisted nor prefixed) symbol. Server isolates cleanly: 102 objects,
+9,349 defined symbols, 239 kept, 9,110 renamed `sv_`, 0 leaked. Client
+correctly refuses - not a bug in this tool: the 18 already-known client
+compile failures include the file defining most required `HUD_*` entry
+points, so `exports.txt`'s own completeness gate rejects it; fixing
+those (X7.3/X7.4) unblocks this automatically.
+
+Found and fixed two real bugs while running this against ~100+ real
+objects, both the same class already hit once this session in
+`tools/xbox-game-sweep.sh`'s log: (1) a file written early and read back
+only after ~200 external process calls came back missing, traced to
+`mktemp -d`'s default system-temp location being unreliable across that
+much intervening I/O on this Windows/MSYS setup - fixed by rooting the
+working directory under `$SCRATCH` instead. (2) the same repeated-`>>`-
+reopen pattern already found once, this time building the module's
+defined-symbol list across ~100 objects, undercounted 9,349 real symbols
+as 606 and let one genuinely leak through unrenamed - fixed identically,
+one persistent file descriptor per accumulation loop. Both traps
+recorded in `docs/r3d/lessons.md` for future `tools/xbox-*.sh` work at
+this scale.
+
 ### Fixed — `tools/xbox-game-sweep.sh`: a rejected run could still publish a clean-looking manifest.txt (Codex review round 2)
 
 `OK/FAIL/TOTAL` was written right after the zero-attempted check but

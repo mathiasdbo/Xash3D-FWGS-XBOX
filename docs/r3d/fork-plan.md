@@ -2338,6 +2338,62 @@ exactly its allowlist, and the allowlisted names are never renamed, so
 Record the resulting build divergence in the ledger; it lives in
 `tools/`, form 1, touching no SDK source at all.
 
+**`tools/xbox-game-isolate.sh` built and run for real against the whole
+compiled `hl` object set, 2026-09-12 - the bulk implementation of the
+2-object prototype above, not a rewrite of its design.** Runs the target's
+sweep itself first (fresh, never trusting stale objects, same discipline
+as the sweep tool's own manifest regeneration), generates `exports.txt`
+(X7.2), strips `.drectve` from a copy of every object, builds a rename
+map from the module's own defined-symbol set minus the allowlist (server:
+the just-generated `exports.txt` itself, since the server allowlist IS
+"the objects' own `/EXPORT:` set"; client: the FIXED
+`tools/xbox-client-allowed-exports.txt`, not the `--allow`-filtered
+generated one - per the design above, what matters is which names the
+engine will ever look up by that string, not which of them this
+particular object set happens to export), applies it with
+`llvm-objcopy --redefine-syms`, and self-checks by re-scanning every
+isolated object afterward - every defined symbol must be either
+allowlisted or `${prefix}_`-prefixed, or the run is a hard failure, not
+a warning.
+
+**Server: isolated cleanly.** 102 objects (the sweep's own real, current
+baseline - 5 known compile failures, tracked via `--expect-fail`), 9,349
+defined symbols total, 239 kept (the API exports plus every real
+`LINK_ENTITY_TO_CLASS` classname), 9,110 renamed `sv_`, 0 leaked.
+**Client: correctly refuses, not a bug in this tool.** `xbox-gen-exports.sh`'s
+own completeness gate (X7.2) refuses to write `exports.txt` - the 67
+objects that DID compile are missing `Initialize`/most `HUD_*` entry
+points, because the file that defines them (`cdll_int.cpp`) is one of
+the 18 real, already-known client compile failures (the SDL2-header/clang
+incompatibility `tools/xbox-game-sweep.sh`'s own X7.4 entry already
+flagged). Client isolation is blocked on the same pre-existing problem,
+not a new one - fixing that (X7.3/X7.4 scope) unblocks this automatically,
+no change to this tool needed.
+
+**Two real bugs found and fixed while running this for real, both the
+SAME class already found once this session (`tools/xbox-game-sweep.sh`'s
+log), re-appearing because this tool didn't yet carry the same fix.**
+(1) A file written early (a small allowlist extraction) and read back
+only after ~200 external process invocations (a `cp` plus an
+`llvm-objcopy` call per object) had run in between came back "No such
+file or directory" - traced to the file living under `mktemp -d`'s
+default system-temp location, which this session had ALREADY measured
+directly to be unreliable for this kind of gap (a plain
+`: > /tmp/x; ls /tmp/x` round trip failed outright, run standalone,
+earlier the same session). Fixed by rooting the working directory under
+`$SCRATCH` instead - the same real project disk every other tool in this
+session's own `$SCRATCH` usage has been reliable on. (2) Even after that
+fix, one real symbol (`CFlockingFlyer::Save`, mangled) measurably leaked
+through unrenamed - traced to the exact repeated-`>>`-reopen pattern
+already fixed once in `xbox-game-sweep.sh`'s log (there: ~100 reopens of
+one file across a compile loop; here: the same shape building the
+module's defined-symbol list across ~100 objects). Fixed identically:
+one persistent file descriptor per accumulation loop, opened once,
+closed once. Re-verified after both fixes: the defined-symbol count went
+from an undercounted 606 to the real 9,349 (over 15x), the previously
+leaked symbol confirmed correctly renamed (`sv_?Save@CFlockingFlyer@@...`),
+and the full self-check reports 0 leaked.
+
 ### X7.2 — Generated export tables, from the objects, not from a list
 
 **Built and verified end-to-end, 2026-09-11 (`tools/xbox-gen-exports.sh`,
