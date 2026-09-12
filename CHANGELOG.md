@@ -5,6 +5,60 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — real `hl` SDK compile failures: the server module now compiles 107/107 (X7.4)
+
+Two real root causes, found while running `tools/xbox-game-sweep.sh`
+against the whole SDK. `tools/xbox-cxx.sh` never passed `-std=c++17` -
+measured directly that this project's exact target/flag combination
+defaults to C++14, not the C++17 the HL SDK's own build actually
+requires, so class template argument deduction and `std::clamp` were
+hard errors. Added `-std=c++17` to `xbox-cxx.sh`'s fixed flags (a
+caller's own `-std=` still wins); fixed 4 of 5 server failures and 2 of
+18 client ones outright. Re-verified `3rdparty/mainui`'s existing sweep
+(82/82 clean) is unaffected.
+
+The remaining server failure, `filesystem_utils.cpp`, was never really
+a `_stat64i32` naming mismatch - nxdk provides no working `stat()`/
+`fstat()` at all (`deps/nxdk/lib/xboxrt/libc_extensions/stat.c`'s
+entire body is `#if 0`'d out). Fixed on `deps/hlsdk`'s `resonance3d`
+branch (divergence #36) with the same safe `return 0` fallback the
+`_STATIC_ENGINE_LINK` branch already uses.
+
+**Two Codex review rounds, each catching the opposite mistake for the
+same underlying limitation - nxdk has no real timestamp source at
+all.** Round 1: the inherited fallback's claim was false - returning
+`0` from `FileSystem_GetFileTime` for both the `.bsp` and the `.nod`
+made `FileSystem_CompareFileTime` see them as EQUAL and report success,
+and `CGraph::CheckNODFile` only rebuilds on `iCompare > 0` or a failed
+compare, so equal timestamps silently kept a stale `.nod` cache -
+exactly backwards from the intended behaviour. Fixed by making
+`FileSystem_CompareFileTime` return `false` unconditionally on `NXDK`.
+Round 2, on that fix: `false` unconditionally makes `CheckNODFile`
+reject EVERY graph, even a genuinely valid, freshly-packaged one -
+`world.cpp` never even calls `FLoadGraph()`, forcing a full node/routing
+regeneration on every single map load. Resolution: removed the
+`FileSystem_CompareFileTime` branch entirely - its original,
+unconditional logic already does the right thing once `GetFileTime`
+alone is fixed (reads as "equal", proceeds to `FLoadGraph()`), and that
+function's own independent checks (missing file, wrong version) are the
+real gate. True `.nod`/`.bsp` staleness is not caught at Xbox runtime by
+this - deferred to asset-packaging time, a real, deliberately-open gap.
+Re-verified after both rounds: still 0 errors, server still 107/107, and
+`CheckNODFile` hand-traced against the final code to confirm it
+proceeds to `FLoadGraph()` rather than rejecting everything.
+
+Server now compiles 107/107 - X7.4 step 1's real, complete object set
+exists for the first time. Client: 15/85 remaining, all the
+already-known SDL2-header/clang incompatibility or studio-model
+rendering headers X5 replaces anyway - separate, larger work.
+
+Also found again while diagnosing this: `xbox-game-sweep.sh`'s
+persistent-fd log fix reduces but does not eliminate occasional marker
+loss under this Windows/MSYS setup (a fresh run dropped 1 of 15 FAIL
+markers). Worked around for this diagnosis by checking `.obj` existence
+directly rather than trusting the log; a fully robust fix (per-source
+log files) remains real, open follow-up work.
+
 ### Fixed — `tools/xbox-game-isolate.sh`: a partial object set was published indistinguishably from a complete one (Codex review round 2)
 
 A run against a known-partial object set (the server's own tracked
