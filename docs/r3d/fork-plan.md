@@ -2804,10 +2804,28 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    the WIN32 or the POSIX branch this function's stock path could take.
    Fixed on `deps/hlsdk`'s `resonance3d` branch (divergence #36) with an
    `#if defined(NXDK)` branch returning `0`, the exact same safe fallback
-   the `_STATIC_ENGINE_LINK` branch immediately above it already uses for
-   the identical, already-documented reason (`CGraph::CheckNODFile`
-   treats `0` as "rebuild the `.nod` cache", a correct, harmless
-   degradation).
+   the `_STATIC_ENGINE_LINK` branch immediately above it already uses.
+
+   **Codex review round 1 found that fallback's own claim was false:
+   returning `0` from `FileSystem_GetFileTime` does NOT make
+   `CGraph::CheckNODFile` rebuild the `.nod` cache - it does the exact
+   opposite.** Traced the real call chain rather than trusting the
+   inherited comment: with both the `.bsp` and the `.nod` timestamps
+   returning `0`, `FileSystem_CompareFileTime` sees them as EQUAL and
+   returns `true, iCompare == 0` - `CheckNODFile` (`dlls/nodes.cpp:2621-2642`)
+   only rebuilds when `iCompare > 0` or the compare call itself fails;
+   equal timestamps read as "the cache is current", silently reusing
+   stale AI navigation data - a real bug, not a style nit, and one this
+   project's own `_STATIC_ENGINE_LINK`-branch-derived comment had simply
+   never traced through. Fixed properly: `FileSystem_CompareFileTime`
+   itself now returns `false` unconditionally on `NXDK`, taking
+   `CheckNODFile`'s own explicit "comparison failed → rebuild" fallback
+   directly, rather than depending on a sentinel timestamp value
+   surviving a comparison correctly. Re-verified: `filesystem_utils.cpp`
+   still compiles 0 errors, the full server sweep still reports 107/107,
+   and `CheckNODFile`'s logic was hand-traced again against the corrected
+   code to confirm it now returns `false` (rebuild) unconditionally on
+   this platform.
 
    **Result: server compiles 107/107 - X7.4 step 1's real, complete
    object set now exists for the first time.** Client: 15/85 remaining

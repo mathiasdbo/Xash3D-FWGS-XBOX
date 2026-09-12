@@ -22,8 +22,19 @@ a `_stat64i32` naming mismatch - nxdk provides no working `stat()`/
 `fstat()` at all (`deps/nxdk/lib/xboxrt/libc_extensions/stat.c`'s
 entire body is `#if 0`'d out). Fixed on `deps/hlsdk`'s `resonance3d`
 branch (divergence #36) with the same safe `return 0` fallback the
-`_STATIC_ENGINE_LINK` branch already uses for the identical, documented
-reason (the only caller treats it as "rebuild the cache").
+`_STATIC_ENGINE_LINK` branch already uses.
+
+**Found in Codex review: that inherited fallback's own claim was
+false.** Returning `0` from `FileSystem_GetFileTime` for both the
+`.bsp` and the `.nod` made `FileSystem_CompareFileTime` see them as
+EQUAL and report success - `CGraph::CheckNODFile` only rebuilds on
+`iCompare > 0` or a failed compare, so equal timestamps silently kept a
+stale `.nod` cache, exactly backwards from the intended behaviour.
+Fixed by gating `FileSystem_CompareFileTime` itself to return `false`
+unconditionally on `NXDK`, taking `CheckNODFile`'s own explicit
+"comparison failed → rebuild" path directly. Re-verified: still 0
+errors, server still 107/107, and the real caller hand-traced again to
+confirm it now rebuilds unconditionally.
 
 Server now compiles 107/107 - X7.4 step 1's real, complete object set
 exists for the first time. Client: 15/85 remaining, all the
