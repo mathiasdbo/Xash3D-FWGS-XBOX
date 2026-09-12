@@ -51,35 +51,43 @@
 # unaffected - C++17 is a compatible superset of C++14 for real, existing
 # code here, not just in theory.
 #
-# -D_UINTPTR_T_DEFINED / -D__PRFCHWINTRIN_H: found 2026-09-12 compiling the
-# real hl CLIENT SDK for the first time (tools/xbox-game-sweep.sh hl
-# client) - both root-caused to the same fact, that this target/flag
-# combination defines _MSC_VER (verified directly: a `#ifdef _MSC_VER /
-# #error` probe fires), which is enough for deps/hlsdk/external/SDL2's own
-# `#if defined(_MSC_VER)`-guarded compatibility branches to activate even
-# though nothing here is real MSVC. Blanket `-U_MSC_VER` was tried and
-# rejected - nxdk's own libcxx/pdclib headers rely on `_MSC_VER` being
-# defined for their own real branches (verified: undefining it globally
-# breaks deps/nxdk/lib/libcxx/include/string.h's own strstr overload
-# resolution, a real, working, unrelated codepath). Targeted instead, one
-# guard macro per real conflict: (1) SDL_config_windows.h's own
+# -D_UINTPTR_T_DEFINED: found 2026-09-12 compiling the real hl CLIENT SDK
+# for the first time (tools/xbox-game-sweep.sh hl client) - root-caused to
+# the fact that this target/flag combination defines _MSC_VER (verified
+# directly: a `#ifdef _MSC_VER / #error` probe fires), which is enough for
+# deps/hlsdk/external/SDL2's own `#if defined(_MSC_VER)`-guarded
+# compatibility branches to activate even though nothing here is real
+# MSVC. Blanket `-U_MSC_VER` was tried and rejected - nxdk's own
+# libcxx/pdclib headers rely on `_MSC_VER` being defined for their own
+# real branches (verified: undefining it globally breaks deps/nxdk/lib/
+# libcxx/include/string.h's own strstr overload resolution, a real,
+# working, unrelated codepath). SDL_config_windows.h's own
 # `#ifndef _UINTPTR_T_DEFINED` block redeclares `uintptr_t` as `unsigned
 # int`, conflicting with pdclib's own already-correct `unsigned long`
 # typedef (a real "typedef redefinition with different types" hard error,
-# not a warning) - `-D_UINTPTR_T_DEFINED` makes SDL2 skip only that one
-# redundant typedef, not the surrounding block's other real setup (tried
-# and rejected: skipping the whole block via `-D_STDINT_H_` fixed this
-# but broke other things the same block also does, a strictly worse
-# trade). (2) SDL_endian.h's own clang-specific `_m_prefetch` workaround
-# (itself written for a real, different clang/MSVC-intrin conflict)
-# collides with clang's OWN builtin `_m_prefetch` here (a real "definition
-# of builtin function" hard error) - `-D__PRFCHWINTRIN_H` makes SDL2 skip
-# its own redundant definition, since clang's builtin already provides it.
-# Verified: cl_dll/cdll_int.cpp's real error count dropped from these two
-# plus the SAL-macro gap (compat/xbox/sal.h, same investigation) down to
-# just the separately-tracked, already-known `<memory_resource>` want;
-# re-verified the real hl server sweep (107/107) and 3rdparty/mainui
-# (82/82) are both unaffected.
+# not a warning) - this makes SDL2 skip only that one redundant typedef,
+# not the surrounding block's other real setup (tried and rejected:
+# skipping the whole block via `-D_STDINT_H_` fixed this but broke other
+# things the same block also does, a strictly worse trade).
+#
+# A companion `_m_prefetch`/SDL_cpuinfo.h SIMD-macro conflict (same root
+# cause) was found in the same pass - first fixed here too with a global
+# `-D__PRFCHWINTRIN_H`, then corrected in Codex review: that flag
+# predefines a header guard clang's OWN real `<intrin.h>` uses, so it
+# would ALSO suppress clang's real `_m_prefetch`/`_m_prefetchw`
+# declarations for any future file that legitimately wants them - fine
+# for today's sweep (nothing does), wrong as a permanent global flag.
+# Fixed instead at the source: `deps/hlsdk/external/SDL2/SDL_endian.h`
+# and `SDL_cpuinfo.h` (divergence #39) each gained a `&& !defined(NXDK)`
+# on the exact `_MSC_VER`-guarded block that redefines `_m_prefetch` (and,
+# in SDL_cpuinfo.h's case, unconditionally `#define`s `__SSE2__`/
+# `__SSE3__` too - wrong on real Xbox hardware, which clang's own
+# `-march=pentium3` already correctly omits, verified directly). Verified:
+# cl_dll/cdll_int.cpp's real error count dropped from the SAL-macro gap
+# (compat/xbox/sal.h), the uintptr_t conflict, and the _m_prefetch
+# conflict combined, down to just the separately-tracked, already-known
+# `<memory_resource>` want; re-verified the real hl server sweep (107/107)
+# and 3rdparty/mainui (82/82) are both unaffected.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -173,7 +181,6 @@ exec clang++ \
 	-fno-exceptions \
 	-std=c++17 \
 	-D_UINTPTR_T_DEFINED \
-	-D__PRFCHWINTRIN_H \
 	"${OUR_INCLUDES[@]}" \
 	"${NXDK_INCLUDES[@]}" \
 	-c "$SRC" -o "$OUT" "$@"

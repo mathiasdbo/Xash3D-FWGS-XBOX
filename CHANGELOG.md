@@ -18,24 +18,36 @@ Fixed: SDL2's SAL-annotation macros (`_Out_bytecap_`, `_In_bytecount_`,
 etc. - `compat/xbox/sal.h` extended with the specific ones real headers
 invoke, all no-ops, matching this file's own stated design); a
 `uintptr_t` redefinition conflict between SDL2's own Windows config and
-pdclib's real one (`-D_UINTPTR_T_DEFINED`); a `_m_prefetch` builtin
-collision between SDL2's own clang workaround and clang's real builtin
-(`-D__PRFCHWINTRIN_H`); a missing legacy `<memory.h>` (three files want
-only `memcpy` from it - `compat/xbox/memory.h`, new, redirects to
-`<string.h>`); and `SystemParametersInfo` (`inputw32.cpp`'s real mouse-
-acceleration save/restore around raw mouse look) - never declared or
-implemented on this platform at all, given an unconditional `FALSE`
-body, the real, correct behaviour since Xbox has no OS-level mouse-
-acceleration setting to query or set, not a stub for missing
-functionality (confirmed safe: the caller already checks this return
-value and skips the save/restore on `FALSE`). `SPI_GETMOUSE`/
-`SPI_SETMOUSE` verified against the real Windows 10 SDK's `WinUser.h`,
-not guessed.
+pdclib's real one (`-D_UINTPTR_T_DEFINED`); a missing legacy
+`<memory.h>` (three files want only `memcpy` from it -
+`compat/xbox/memory.h`, new, redirects to `<string.h>`); and
+`SystemParametersInfo` (`inputw32.cpp`'s real mouse-acceleration
+save/restore around raw mouse look) - never declared or implemented on
+this platform at all, given an unconditional `FALSE` body, the real,
+correct behaviour since Xbox has no OS-level mouse-acceleration setting
+to query or set, not a stub for missing functionality (confirmed safe:
+the caller already checks this return value and skips the save/restore
+on `FALSE`). `SPI_GETMOUSE`/`SPI_SETMOUSE` verified against the real
+Windows 10 SDK's `WinUser.h`, not guessed.
 
-Two of the five (`-D_UINTPTR_T_DEFINED`/`-D__PRFCHWINTRIN_H`) are
-compiler-flag additions (`tools/xbox-cxx.sh`), matching the `-std=c++17`
-precedent of flag-only toolchain choices; the rest are real
-`compat/xbox/` source additions, divergence #39.
+A fifth, a `_m_prefetch` builtin collision between SDL2's own clang
+workaround and clang's real builtin, was first fixed with a global
+`-D__PRFCHWINTRIN_H` flag - **corrected in Codex review round 1**: that
+flag predefines the same header guard clang's own real `<intrin.h>`
+uses, so it would also suppress clang's real `_m_prefetch`/
+`_m_prefetchw` declarations for any future file that legitimately wants
+them. Fixed at the source instead: `deps/hlsdk`'s `resonance3d` branch
+(`external/SDL2/SDL_endian.h`/`SDL_cpuinfo.h`) narrows the one
+`_MSC_VER`-guarded block that redefines it to `&& !defined(NXDK)` -
+confirmed correct rather than just convenient, since `SDL_cpuinfo.h`'s
+same block also unconditionally `#define`s `__SSE2__`/`__SSE3__`, which
+the real Xbox CPU never had (clang's own `-march=pentium3` already
+predefines the accurate feature set).
+
+`-D_UINTPTR_T_DEFINED` remains a compiler-flag addition
+(`tools/xbox-cxx.sh`), matching the `-std=c++17` precedent of flag-only
+toolchain choices; the rest are real `compat/xbox/` and vendored-SDL2
+source additions, divergence #39.
 
 Verified end to end: the real `hl` client sweep went from 70/85 to
 77/85, zero regressions in the real server sweep (107/107) or
