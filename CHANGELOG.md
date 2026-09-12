@@ -31,16 +31,19 @@ by reusing the exact mechanism the engine itself already uses
 successfully for this (`COM_LoadLibrary`/`COM_GetProcAddress`, proven
 since divergence #31).
 
-Re-verified end to end: full server sweep still 107/107, still `0
-duplicate, 0 undefined`, and a real xemu boot of the fixed XBE no longer
-hits either assert - confirmed by attaching the debugger and issuing a
-genuine `continue`: the CPU ran freely for 90+ seconds with no further
-trap, where the pre-fix build hit the same crash every time within
-seconds. Also found and documented (`docs/r3d/lessons.md`):
-`tools/xemu-debug.py`'s `regs`/`mon` reads show a fixed debugger-attach
-checkpoint rather than the guest's true current state while it is
-genuinely running - a real `continue`-and-wait, not a register snapshot,
-is the reliable signal for "still running" vs. "actually stuck."
+Re-verified: full server sweep still 107/107, still `0 duplicate, 0
+undefined`. A real xemu boot of the fixed XBE is no longer repeatedly
+re-trapping the same two asserts the pre-fix build hit every time within
+seconds - confirmed by attaching the debugger and issuing a genuine
+`continue`, which produced no stop reply for 90+ seconds. That alone
+does not mean the boot is healthy or making real progress (an infinite
+loop or a legitimate kernel idle-wait looks identical to "no stop
+reply") - it only rules out the specific crash this row fixes recurring,
+found and corrected via Codex review round 2 on an earlier, overclaiming
+version of this same entry. Also found and documented
+(`docs/r3d/lessons.md`): `tools/xemu-debug.py`'s `regs`/`mon` reads show
+a fixed debugger-attach checkpoint rather than the guest's true current
+state while it is genuinely running.
 
 Not yet confirmed: the boot reaching its full expected milestone (the
 "CL_Init: missing essential exports" message arriving on the network log

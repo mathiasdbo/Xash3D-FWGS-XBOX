@@ -3047,11 +3047,17 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    already uses successfully for this (`COM_LoadLibrary`/
    `COM_GetProcAddress`, proven since divergence #31) - see divergence
    #38 for the full story. Re-verified: full server sweep still 107/107,
-   still `0 duplicate, 0 undefined`, and a real xemu boot of the fixed
-   XBE no longer hits either assert - confirmed by attaching the debugger
-   and issuing a genuine `continue`: the CPU ran freely for 90+ seconds
-   with no further trap, where the pre-fix build hit the same crash every
-   time within seconds.
+   still `0 duplicate, 0 undefined`. **What the debugger CAN confirm about
+   the boot: it is no longer repeatedly re-trapping the same two asserts
+   the pre-fix build hit every time within seconds** - attaching and
+   issuing a genuine `continue` produced no stop reply for 90+ seconds,
+   where the pre-fix build always re-hit its crash almost immediately.
+   **Found in Codex review, round 2: that observation does NOT, on its
+   own, mean the boot is "healthy" or making real progress** - an
+   infinite loop, a deadlock, or a legitimate kernel idle-wait would look
+   identical to this exact signal (no stop reply, ever), so it only rules
+   out "still crashing on the same bug as before," nothing more (see
+   `docs/r3d/lessons.md`'s corrected entry).
 
    **Not yet confirmed: the boot reaching its full expected milestone.**
    The network log channel produced no output at all this session,

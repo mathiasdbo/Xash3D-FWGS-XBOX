@@ -785,13 +785,28 @@ client asks for state - that point is a debugger-implementation detail,
 not "wherever the guest currently is."** Do not read a `regs`/`mon`
 snapshot's `EIP` as "the guest is stuck here" without first issuing a
 real `continue` and confirming it does NOT immediately re-stop at the
-same address - if it runs past a reasonable timeout instead, the guest
-is healthy and the earlier snapshot was the debugger's own attach
-artifact, not guest state. A screenshot (`tools/xemu-debug.py screenshot`)
-is a cheap third signal but not conclusive on its own for a headless
-`ref_null` build: it showed the plain Xbox boot-splash logo, unrun and
-unchanged from BIOS init, which is exactly what an unwritten framebuffer
-looks like under a renderer that (correctly, by design at this milestone)
-never calls `VID_SetMode` at all - consistent with either a healthy
-headless boot or an earlier hang, not distinguishing evidence either
-way on its own.
+same address.
+
+**Found in Codex review, round 2, on an earlier version of this same
+entry: a `continue` that runs past a timeout with no stop reply only
+disproves ONE specific thing - that the guest is repeatedly re-trapping
+at the same instruction, the way a real crash-halt loop does.** It does
+NOT prove the guest is "healthy," making real forward progress, or past
+any particular point - an infinite loop, a deadlock, or a legitimate
+kernel idle-wait would produce the exact same observation (no stop
+reply, ever) and are not distinguishable from each other by this signal
+alone. The corrected, narrower claim: this technique rules OUT "still
+crashing on the SAME bug as before," nothing more. Calling a boot
+"confirmed working" or "verified end to end" still needs an independent
+forward-progress signal - a breakpoint set at the actual next expected
+milestone (`break <addr> --steps N` and watching it actually advance),
+repeated PC sampling that shows genuinely different addresses over time
+(not just "no stop reply"), or a working log channel - not merely the
+absence of a repeated trap. A screenshot (`tools/xemu-debug.py
+screenshot`) is a cheap fourth signal but not conclusive on its own for
+a headless `ref_null` build: it showed the plain Xbox boot-splash logo,
+unrun and unchanged from BIOS init, which is exactly what an unwritten
+framebuffer looks like under a renderer that (correctly, by design at
+this milestone) never calls `VID_SetMode` at all - consistent with
+either a healthy headless boot or an earlier hang, not distinguishing
+evidence either way on its own.
