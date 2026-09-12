@@ -2910,7 +2910,7 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
      heuristic.
 
    **Result after all three fixes: `0 duplicate, 1 undefined`.** The one
-   real remaining undefined symbol is `___RTDynamicCast` - the MSVC-ABI
+   real remaining undefined symbol was `___RTDynamicCast` - the MSVC-ABI
    RTTI runtime function clang emits for `dynamic_cast`. Confirmed real,
    not decorative: `deps/hlsdk/dlls/client.cpp` (5 call sites) and
    `player.cpp` (1) use `dynamic_cast<CBasePlayer*>(CBaseEntity::Instance(pev))`-
@@ -2919,23 +2919,44 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    Checked nxdk's own tree directly (`llvm-nm` against every prebuilt
    `.lib`, source grep across `libcxx`) - no implementation of
    `__RTDynamicCast` exists anywhere in this toolchain; nothing built on
-   nxdk before this has ever needed real C++ RTTI. Deliberately NOT
-   attempted here: implementing MSVC-ABI RTTI support correctly means
-   matching clang's own `__RTTICompleteObjectLocator`/`TypeDescriptor`
-   layout, real, error-prone low-level ABI work, and replacing the 6 call
-   sites with an SDK-level equivalent check requires proving behavioural
-   equivalence for each one - both are real, separate, dedicated
-   investigations, not a rushed fix at the end of this one. Tracked
-   honestly as the current baseline: `tools/xbox-game-link-check.sh hl
-   --expect-undefined 1` passes; a bare invocation (no flag) correctly
-   refuses, exactly the same "no silent baseline drift" discipline every
-   other tool in this project's `tools/xbox-*.sh` family already
-   enforces. `docs/r3d/parked-undefined-symbols.txt` (the engine-level
-   baseline, `--client-main --xbe` with the stub game module) is now
-   genuinely empty - the 32 previously-tracked networking symbols
+   nxdk before this has ever needed real C++ RTTI. Tracked at the time as
+   the baseline: `tools/xbox-game-link-check.sh hl --expect-undefined 1`.
+   `docs/r3d/parked-undefined-symbols.txt` (the engine-level baseline,
+   `--client-main --xbe` with the stub game module) was found genuinely
+   empty in the same pass - the 32 previously-tracked networking symbols
    (`Netchan_*`/`SteamBroker_*`) are ALL resolved in the current tree; that
    file had simply gone unmeasured for a while under the `sed` bug above,
    not silently regressed.
+
+   **`___RTDynamicCast` closed the same day (divergence #37) - real MSVC-ABI
+   RTTI support was never actually needed.** Implementing it from scratch
+   (matching clang's own `__RTTICompleteObjectLocator`/`TypeDescriptor`
+   layout) would have been real, error-prone low-level ABI work - but
+   this SDK already has an established, in-use idiom for exactly this
+   problem: `CBaseEntity::MyMonsterPointer()`/`MyTogglePointer()`/
+   `MySquadMonsterPointer()`, a virtual defaulting to `NULL`, overridden
+   to `return this` only in the target type, giving an RTTI-free safe
+   downcast wherever the class hierarchy is single and non-virtual (which
+   it is confirmed to be, `grep`-checked across every `dlls/*.h`, for both
+   `CBasePlayer` and `CBasePlayerWeapon`'s full inheritance chains).
+   Extended that exact pattern with two more virtuals -
+   `MyPlayerPointer()` (new on `CBaseEntity`, overridden in `CBasePlayer`)
+   and `GetWeaponPtr()` (already existed on `CBasePlayerItem`, pulled up
+   one level to `CBaseEntity` so it is reachable from a bare
+   `CBaseEntity*`) - and replaced all 6 real `dynamic_cast` call sites
+   with them; each site's original null-safety around `CBaseEntity::
+   Instance()` possibly returning `nullptr` (which `dynamic_cast` handles
+   for free but a raw virtual call does not) was preserved explicitly.
+   Verified end to end, not just compiled: the full server sweep is still
+   107/107, and `tools/xbox-game-link-check.sh hl --expect-undefined 0`
+   now reports **`0 duplicate, 0 undefined`** - a real, valid `.exe`
+   produced (`nxdk-link` only ever produces one once nothing remains
+   unresolved), the first time this has happened for the real `hl` server
+   SDK. `docs/r3d/parked-server-undefined-symbols.txt` is now empty, same
+   as the engine-level baseline. X7.4 step 1's own exit gate - "0
+   duplicate symbols, and the undefined symbol set exactly matches the
+   checked-in baseline" - is met with the checked-in baseline being
+   truly, fully empty, not a tracked, accepted gap.
 
    **Codex review round 1 found two more real gaps, both fixed and
    re-verified before round 2.** (1) `--expect-fail` is optional (an
@@ -2982,7 +3003,19 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
 1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
    generate `server/exports.txt`; link with `--client-main`. Exit gate is
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,
-   the manifest clean. Expected boot (headless, `ref/null`, full `valve/`
+   the manifest clean.
+
+   **The link half of this gate is now real and measured, not aspirational
+   - `0 duplicate, 0 undefined`, a real, valid executable produced (see
+   above and divergence #37).** `tools/xbox-game-link-check.sh` builds a
+   plain `.exe` via `nxdk-link`, not yet the actual `--xbe`-converted,
+   `--client-main`-linked, full-response-file XBE this bullet's exit gate
+   names - that assembly (this tool's isolated+regenerated server object
+   set swapped into an ACTUAL `--client-main --xbe` run of
+   `tools/xbox-link-check.sh`, not its own separate measurement link) and
+   the boot itself (`SV_LoadProgs` completing, the log-channel message
+   arriving, the memory numbers below) are the real remaining work here -
+   not yet attempted. Expected boot (headless, `ref/null`, full `valve/`
    on the disc so `delta.lst` exists): `SV_LoadProgs` completes against the
    REAL `GetEntityAPI2` (every `DLL_FUNCTIONS` member real, the stub's six-of-forty gone), then
    `CL_Init` stops at "can't initialize client: missing essential exports"
