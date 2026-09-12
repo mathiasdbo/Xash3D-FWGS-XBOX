@@ -2947,6 +2947,21 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    with them; each site's original null-safety around `CBaseEntity::
    Instance()` possibly returning `nullptr` (which `dynamic_cast` handles
    for free but a raw virtual call does not) was preserved explicitly.
+
+   **Codex review round 1 found the first version unconditional - it
+   changed `CBaseEntity`'s vtable and all 6 call sites' behaviour on
+   every platform this SDK builds for, not just Xbox, a real ABI/
+   behaviour divergence mislabelled as the cheapest form.** `deps/hlsdk`'s
+   `resonance3d` branch is not Xbox-exclusive, and `dynamic_cast` works
+   correctly everywhere else - fixed by putting every addition and
+   call-site edit behind `#if defined(NXDK)`, `#else` restoring the exact
+   original `dynamic_cast` code. Verified by diffing against the
+   pre-fix commit: every non-NXDK line is now byte-identical to what was
+   there before this divergence (this repo's own tooling has no PC build
+   path for `deps/hlsdk` to compile-verify against directly, so the diff
+   check is the real, available verification). Re-verified the NXDK path
+   is unaffected by the guards.
+
    Verified end to end, not just compiled: the full server sweep is still
    107/107, and `tools/xbox-game-link-check.sh hl --expect-undefined 0`
    now reports **`0 duplicate, 0 undefined`** - a real, valid `.exe`

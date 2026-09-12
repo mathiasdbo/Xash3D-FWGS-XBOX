@@ -29,6 +29,20 @@ them, preserving each site's original null-safety around
 `CBaseEntity::Instance()` explicitly (a raw virtual call needs that
 where `dynamic_cast` on a null pointer handled it for free).
 
+**Codex review round 1: the first version was unconditional, changing
+`CBaseEntity`'s vtable layout and all 6 call sites' behaviour on every
+platform this SDK builds for, not just Xbox - a real finding, since
+`deps/hlsdk`'s `resonance3d` branch is not Xbox-exclusive and
+`dynamic_cast` works fine everywhere else.** Fixed: every addition and
+call-site edit now sits behind `#if defined(NXDK)`, with the `#else` arm
+restoring the exact original `dynamic_cast` code. Verified by diffing
+against the pre-fix commit: every non-NXDK line is byte-identical to
+what was there before, confirming zero behavioural change on any other
+platform (this repository's own tooling has no PC build path for
+`deps/hlsdk` yet, so this diff-identity check is the real verification
+available). Re-verified the NXDK path is unaffected by the guards: full
+server sweep still 107/107, `0 duplicate, 0 undefined` unchanged.
+
 Verified end to end: full server sweep still 107/107, and
 `tools/xbox-game-link-check.sh hl --expect-undefined 0` now reports
 **`0 duplicate, 0 undefined`** - a real, valid executable produced for
