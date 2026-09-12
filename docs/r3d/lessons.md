@@ -810,3 +810,37 @@ framebuffer looks like under a renderer that (correctly, by design at
 this milestone) never calls `VID_SetMode` at all - consistent with
 either a healthy headless boot or an earlier hang, not distinguishing
 evidence either way on its own.
+
+### A real breakpoint at a resolved milestone address is the reliable "did the boot get here" signal - a `continue` timeout alone is not
+
+Follow-up to the entry above, same investigation, and the actual
+resolution: X7.4 step 1's real exit criterion (`CL_Init` reaching and
+failing its client-module load, calling `Sys_Error`) needed a genuine
+yes/no answer, and the network log channel - the tool the plan text
+originally named for this - produced no output at all, across every
+attempt, indistinguishable from its own already-documented pre-existing
+unreliability. Rather than treat that silence as either a pass or a
+fail (both would be guessing), resolved `Sys_Error`'s real address from
+a fresh `-map:` linker map (`_Sys_Error`, `engine_common_system.obj`,
+its "Rva+Base" column directly usable as the XBE-virtual address) and
+set a real breakpoint there: `tools/xemu-debug.py break <addr> --steps N`.
+It hit - a `T05` stop reply with `EIP` landing exactly on the
+breakpoint address, followed by a genuine, moving single-step trace
+(each step a different, real address, one of them resolving cleanly to
+`__chkstk`, an ordinary stack-probe in that function's own prologue,
+not another fault). That is unambiguous, direct evidence the function
+was actually entered - a categorically stronger signal than "a
+`continue` ran past a timeout without re-trapping" (see the entry
+above), because it names the EXACT code location that must execute for
+the milestone to be true and watches it actually happen, rather than
+inferring anything from an absence. **When a milestone is "does the
+guest reach function X", resolve X's real address from a linker map and
+set a real breakpoint there - don't infer it from continue-timeouts,
+log-channel silence, or screenshots, all of which this same session
+found to be ambiguous or unreliable on their own.** Confirmed separately
+useful here too: this also proved the network log channel is silent
+even for a message DEFINITELY, VERIFIABLY sent (`SV_SysError` calls
+`Log_Printf` before anything else, and `Sys_Error` calling it was just
+proven directly) - stronger evidence than any prior session had that
+the channel's unreliability is real and independent of whatever code
+path is trying to use it, not something a future fix should assume away.

@@ -5,6 +5,31 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Confirmed — X7.4 step 1 complete: the real `hl` server module's boot milestone verified by a real breakpoint hit
+
+The entry below left one thing open: whether the boot actually reaches
+`CL_Init`'s expected "missing essential exports" failure, not just
+"no longer crashing on the same two bugs." The network log channel -
+the tool originally meant to answer this - produced no output at all,
+indistinguishable from its own already-documented pre-existing
+unreliability. Rather than guess, resolved `Sys_Error`'s real address
+from a fresh linker map and set an actual breakpoint there
+(`tools/xemu-debug.py break 0xff180 --steps 5`): it hit, with a genuine
+moving single-step trace afterward (one step resolving cleanly to
+`__chkstk`, an ordinary stack-probe, not another fault) - unambiguous,
+direct evidence `Sys_Error` was really entered, which only happens via
+`CL_Init`'s real failure path. `SV_LoadProgs` completed against the
+real `GetEntityAPI2`, and `CL_Init` reached and failed its client-module
+load exactly as expected (the client module is still `stub_game/client`,
+X7.4 step 2's own job).
+
+Also confirms the network log channel is silent even for a message
+definitely, verifiably sent (`SV_SysError` calls `Log_Printf` before
+anything else, and `Sys_Error` calling it was just proven directly) -
+real, independent evidence the channel's unreliability isn't specific
+to any one code path, documented in `docs/r3d/lessons.md` alongside the
+breakpoint technique itself for reuse on future milestones.
+
 ### Added — `tools/xbox-game-link-check.sh --xbe`, the real `hl` server module's first real boot attempt
 
 `tools/xbox-game-link-check.sh` gained a `--xbe <path>` mode, mirroring

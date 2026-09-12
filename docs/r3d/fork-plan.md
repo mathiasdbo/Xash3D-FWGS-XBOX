@@ -3059,26 +3059,42 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    out "still crashing on the same bug as before," nothing more (see
    `docs/r3d/lessons.md`'s corrected entry).
 
-   **Not yet confirmed: the boot reaching its full expected milestone.**
-   The network log channel produced no output at all this session,
-   across every attempt, indistinguishable (with the tools available)
-   from the SAME pre-existing, already-documented log-channel
-   unreliability (`docs/r3d/lessons.md`) rather than a new symptom -
-   `tools/xemu-debug.py`'s `regs`/`mon` reads were themselves found to
-   show a fixed debugger-attach checkpoint rather than true current state
-   while the guest is genuinely running (also now in `lessons.md`), which
-   is what makes a real `continue`-and-wait the only reliable signal this
-   session found for "still running" vs. "actually stuck." Confirming the
-   exact expected message arrives - the real remaining step here - needs
-   either a more reliable log-channel signal or a fresh diagnosis of why
-   it stays silent, not a new build attempt. Expected boot (headless,
+   **CONFIRMED, 2026-09-12, by a real breakpoint hit - not inferred from a
+   `continue` timeout's absence-of-evidence, the exact independent
+   forward-progress signal Codex's round 2 review demanded.** The network
+   log channel still produced no output at all (the SAME pre-existing,
+   already-documented unreliability, not a new symptom - `SV_SysError`
+   calls `Log_Printf` before anything else, so this channel is now
+   confirmed silent even for a message definitely, verifiably sent),
+   so instead: resolved `Sys_Error`'s real address from a fresh linker
+   map (`_Sys_Error`, `engine_common_system.obj`, XBE-virtual `0xff180`),
+   set a real breakpoint there with `tools/xemu-debug.py break 0xff180
+   --steps 5`, and it HIT - `stop reply: T05thread:p01.01;`, `EIP` landing
+   exactly on the breakpoint address, with a genuine, moving single-step
+   trace afterward (`0xff180` → `0xff181` → `0xff183` → `0xff188` →
+   `0x3a7bbc`, resolving to `__chkstk`, an entirely ordinary stack-probe
+   in `Sys_Error`'s own prologue - ordinary execution, not another crash).
+   This is unambiguous: `Sys_Error` was genuinely called during this
+   boot, which only happens via `Host_Error` off `CL_Init`'s "missing
+   essential exports" failure path (divergence #34's own traced chain) -
+   meaning `SV_LoadProgs` really did complete against the real
+   `GetEntityAPI2`, and `CL_Init` really did reach and fail its client-module
+   load exactly as expected, for the real reason expected (the client
+   module is still `stub_game/client`, X7.4 step 2's own job). **X7.4 step
+   1 is complete**: link gate met (`0 duplicate, 0 undefined`, a real
+   XBE), and the boot milestone independently confirmed by direct
+   execution evidence, not the log channel this bullet originally named -
+   that channel's own unreliability remains real, separately open,
+   unrelated-to-and-not-blocking this milestone. Expected boot (headless,
    `ref/null`, full `valve/` on the disc so `delta.lst` exists):
    `SV_LoadProgs` completes against the REAL `GetEntityAPI2` (every
    `DLL_FUNCTIONS` member real, the stub's six-of-forty gone), then
    `CL_Init` stops at "can't initialize client: missing essential exports"
-   - with the message ARRIVING on the log channel, since #34. That
-   message is the milestone: it proves 100+ real server translation units
-   link and initialise on the console. **And the first memory number is
+   - now confirmed by direct execution evidence rather than the log
+   channel, since the channel itself is confirmed unreliable even for a
+   message provably sent. That confirmation IS the milestone: it proves
+   100+ real server translation units link and initialise on the
+   console. **And the first memory number is
    taken HERE, at entry, not after a map** (specialist review): the wall
    is already built by the engine's own statics, not by the SDK.
    `.sweep/xbe-buildfix.map` for the current client XBE: `.text` 3.37 MB,
@@ -3090,9 +3106,15 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    is ~648 KB text + 118 KB data, `client.dll` ~312 + 272 KB, `opfor.dll`
    ~1.0 MB text; libc++ adds tens of KB for `<string>`/`<vector>`, not
    MB. Measure with `MmQueryStatistics` (`deps/nxdk/lib/xboxkrnl/
-   xboxkrnl.h:3333`) printed over the log channel at `Host_InitCommon`
-   entry and again after `SV_LoadProgs`; those two numbers are X8's
-   opening brief.
+   xboxkrnl.h:3333`) at `Host_InitCommon` entry and again after
+   `SV_LoadProgs`; those two numbers are X8's opening brief. Don't route
+   this through the network log channel and trust its silence either
+   way - step 1's own boot confirmation (above) found it produces no
+   output even for a message definitely, verifiably sent (`SV_SysError`'s
+   `Log_Printf`, confirmed reached via a real breakpoint hit). Read the
+   value directly with the debugger instead (a breakpoint at the right
+   call site, then `mem`/`regs` on the return value), the same real,
+   conclusive technique that closed step 1's own verification gap.
 2. **`hl` client module links.** Sweep `cl_dll/` (no VGUI), generate
    `client/exports.txt`, link. Expected boot: `CL_Init` passes, `UI_LoadProgs`
    loads the menu (X6's `mainui`, already linking; its manifest must be
