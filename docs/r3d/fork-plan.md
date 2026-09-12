@@ -2874,14 +2874,35 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    guard macro affects every translation unit project-wide, not just the
    one vendored block it was meant for; see `tools/xbox-cxx.sh`'s own
    header comment for the full story. Zero regressions (server 107/107,
-   `3rdparty/mainui` 82/82). **The remaining 8 are now fully, individually
-   confirmed** (each compiled standalone) to be exactly two genuinely
-   separate, larger gaps: `<memory_resource>` (7 files -
-   `std::pmr::unsynchronized_pool_resource` needs a real, non-header-only
-   implementation nxdk's `libc++.lib` does not have, checked directly via
-   `llvm-nm`, and the non-standard `std::experimental::pmr` fallback is
-   equally unimplemented) and `GL/gl.h` (1 file, the pre-existing,
-   already-tracked no-real-GL-on-Xbox gap - X5's own job, not X7.4's).
+   `3rdparty/mainui` 82/82). The remaining 8 were then confirmed (each
+   compiled standalone) to be exactly two categories: `<memory_resource>`
+   (7 files) and `GL/gl.h` (1 file) - **the `<memory_resource>`
+   categorisation as "genuinely separate, larger work" was WRONG,
+   corrected the same day running the real client isolation for the
+   first time.** `cl_dll/cdll_int.cpp` - the client module's own main
+   entry point, providing every REQUIRED export the engine's
+   `COM_GetProcAddress` lookups hard-need (`HUD_Init`/`HUD_VidInit`/
+   `HUD_Redraw`/21 more) - transitively but genuinely, load-bearingly
+   includes `CMiniMem.h` (it really uses `IParticleMan`, not an
+   incidental pull-in): a real isolation attempt without a working
+   `std::pmr` reported all 22 required exports entirely missing, a real
+   blocker for X7.4 step 2, not a deferrable want. Fixed with
+   `compat/xbox/memory_resource` (divergence #40) - not a full,
+   standards-compliant `std::pmr` (real thread-safety options,
+   `upstream_resource` chaining, chunked-pool allocation performance
+   remain genuinely deferred), but a correct, minimal implementation of
+   the exact three methods (`allocate`/`deallocate`/`release`) `CMiniMem`
+   actually calls (the ONLY consumer of `std::pmr::` anywhere in the
+   client SDK, verified by grep), as a tracked list of individually
+   aligned `::operator new` blocks. **Result: the real `hl` client sweep
+   went from 77/85 to 84/85**, zero regressions (server 107/107,
+   `3rdparty/mainui` 82/82); the sole remaining failure is the genuinely
+   out-of-scope `GL/gl.h` want (`particleman/CFrustum.cpp`, X5's own
+   job). **A fresh real client isolation now succeeds**: all 41 required
+   exports present, 0 leaked symbols - `COMPLETE no` only because one
+   non-required source is still missing, not because anything the engine
+   actually needs is absent. X7.4 step 2 (the real client link attempt)
+   is now genuinely attemptable for the first time - not yet attempted.
 
    **`tools/xbox-game-link-check.sh` built and run for real, 2026-09-12 -
    X7.4 step 1's actual real-link attempt, the first time this project has

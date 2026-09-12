@@ -5,6 +5,37 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — real `hl` client SDK: 77/85 to 84/85, `<memory_resource>` was a real blocker, not deferrable work (divergence #40)
+
+The prior entry's `<memory_resource>` categorisation ("genuinely
+separate, larger work") was wrong - found running the real client
+isolation for the first time (`tools/xbox-game-isolate.sh hl client`).
+`cl_dll/cdll_int.cpp`, the client module's own main entry point
+providing every REQUIRED export the engine's `COM_GetProcAddress`
+lookups hard-need (`HUD_Init`/`HUD_VidInit`/`HUD_Redraw`/21 more),
+transitively but genuinely includes `CMiniMem.h` (it really uses
+`IParticleMan`, not an incidental pull-in) - a real isolation attempt
+without a working `std::pmr` reported all 22 required exports entirely
+missing, a real blocker for X7.4 step 2, not a deferrable want.
+
+Fixed with `compat/xbox/memory_resource` (new file) - not a full,
+standards-compliant `std::pmr` (real thread-safety options,
+`upstream_resource` chaining, chunked-pool allocation performance remain
+genuinely deferred), but a correct, minimal implementation of the exact
+three methods (`allocate`/`deallocate`/`release`) `CMiniMem` actually
+calls (the ONLY consumer of `std::pmr::` anywhere in the client SDK,
+verified by grep), as a tracked list of individually `::operator new`'d,
+correctly-aligned blocks.
+
+Verified end to end: the real `hl` client sweep went from 77/85 to
+84/85, zero regressions in the real server sweep (107/107) or
+`3rdparty/mainui` (82/82). The sole remaining failure is the genuinely
+out-of-scope `GL/gl.h` want (`particleman/CFrustum.cpp`, X5's own job).
+A fresh real client isolation now succeeds: all 41 required exports
+present, 0 leaked symbols - `COMPLETE no` only because one non-required
+source is still missing. X7.4 step 2 (the real client link attempt) is
+now genuinely attemptable for the first time.
+
 ### Fixed — real `hl` client SDK compile failures: 70/85 to 77/85, five real root causes (divergence #39)
 
 Building the real `hl` client SDK for the first time
