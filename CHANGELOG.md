@@ -5,6 +5,72 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/xbox-game-link-check.sh`: the real `hl` server module linked against the real engine for the first time (X7.4 step 1)
+
+Reuses `tools/xbox-link-check.sh`'s response file, `tools/xbox-game-isolate.sh`'s
+fresh isolation, and `tools/gen-library-tables.sh`'s generation mechanism:
+verifies the baseline engine link is clean, isolates the `hl` server
+module, swaps its two stub-server objects for the isolated set plus a
+freshly generated `generated_lib_server_exports.c`, and links directly
+with `nxdk-link`.
+
+Getting a trustworthy first result took fixing three real bugs, not a
+clean first run:
+
+- `tools/xbox-link-check.sh`'s mainui-manifest `sed` extraction came back
+  empty right after 186 third-party compiles, reproducibly - a retry loop
+  did not fix it, but the script's own `cat` on the same file, moments
+  later in the same failing run, always succeeded. Fixed both `sed` call
+  sites (`FAIL=`/`TOTAL=`, and a separate `OK=` further down) by reading
+  the manifest once with `cat` and extracting with bash `[[ =~ ]]` regex
+  instead.
+- `eval "$(deps/nxdk/bin/activate -s)"` measurably replaces `$PATH`
+  rather than extending it on this Git-Bash/MSYS2 setup, breaking
+  `nxdk-link`'s ability to find `lld`. Removed the call from the new
+  tool, matching `xbox-link-check.sh`'s own proven approach of never
+  calling it.
+- The first real link reported one duplicate symbol, `CreateInterface` -
+  a genuine `/EXPORT:` in the server target's own `public/interface.cpp`
+  (divergence #35/#36), correctly kept by X7.1b's literal "every real
+  `/EXPORT:`" rule, but colliding with `filesystem_stdio`'s own
+  `CreateInterface` (divergence #30) once both share a link; nothing else
+  in the server target references it. Added `tools/xbox-gen-exports.sh
+  --exclude <file>` (mirroring the existing `--allow`/`--require`
+  design) and `tools/xbox-server-exclude-exports.txt` (one line,
+  `CreateInterface`), wired into `xbox-game-isolate.sh`'s server case.
+
+Final, current result: **0 duplicate symbols, 1 real undefined symbol**
+(`___RTDynamicCast`, the MSVC-ABI RTTI runtime function `dynamic_cast`
+lowers to). Confirmed real and needed: 6 genuine downcast call sites in
+`deps/hlsdk/dlls/client.cpp`/`player.cpp`; confirmed absent from nxdk's
+entire toolchain via `llvm-nm` against every prebuilt `.lib`. Deliberately
+not attempted here - implementing MSVC-ABI RTTI or replacing the SDK's
+`dynamic_cast` call sites are both real, separate investigations.
+Tracked honestly as the new baseline: `tools/xbox-game-link-check.sh hl
+--expect-undefined 1`.
+
+Also corrected `docs/r3d/parked-undefined-symbols.txt`: the 31 tracked
+`Netchan_*`/`SteamBroker_*` names were stale (the real current baseline
+for the base engine link is 0 undefined, not 32) - emptied to reflect
+the real, current measurement.
+
+**Codex review round 1 found two more real gaps.** (1) `--expect-undefined`
+only compared a COUNT, the exact same-count-substitution failure class
+`tools/xbox-link-check.sh`'s own `parked-undefined-symbols.txt` identity
+check already exists to close, but that check was never carried into
+the new tool - fixed with a server-specific
+`docs/r3d/parked-server-undefined-symbols.txt` (`___RTDynamicCast`) and
+the same exact-set diff. (2) the script printed its output executable's
+path unconditionally, but `nxdk-link -errorlimit:0` never produces a
+`.exe` while any undefined symbol remains (confirmed: the file genuinely
+does not exist after this baseline's accepted run) - fixed to report a
+real path only when the file actually exists, and to report a
+measurement-only pass otherwise; softened the header's "real XBE" claim
+to describe what this tool actually does. Re-verified after both fixes:
+same `0 duplicate, 1 undefined` result, exact-set match confirmed, and
+the "no .exe produced" message now prints correctly instead of a
+fabricated path.
+
 ### Fixed — real `hl` SDK compile failures: the server module now compiles 107/107 (X7.4)
 
 Two real root causes, found while running `tools/xbox-game-sweep.sh`

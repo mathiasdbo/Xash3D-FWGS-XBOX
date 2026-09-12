@@ -714,3 +714,49 @@ tooling has been reliable; the system temp directory, measured twice
 now, has not. Neither trap is specific to the tool that first hit it -
 any future `tools/xbox-*.sh` doing bulk work across 100+ files should
 default to both fixes from the start, not rediscover them.
+
+**Three more real traps hit building and running `tools/xbox-game-link-check.sh`
+(X7.4 step 1's real link attempt) for the first time - none of them the
+SDK's fault.** (1) `tools/xbox-link-check.sh`'s own mainui-manifest check
+called `sed -n '...FAIL=...' "$MANIFEST"` right after compiling 186
+third-party objects (heavy I/O) and got EMPTY back, reproducibly, 5 times
+in a row - a retry loop around the same `sed` call did NOT fix it (ruling
+out a simple sub-second race, the shape that fixed the two traps above),
+but the SAME script's own `cat "$MANIFEST"` a few lines later, in the
+exact same failing run, read the file correctly every time. Whatever is
+wrong is specific to `sed`'s own read path here, not the file or a
+generic timing race - avoid depending on it for this kind of extraction
+at all rather than chasing why: read the file once with `cat` (proven
+reliable in this exact spot) into a variable, then extract fields with
+bash's own `[[ =~ ]]` regex against that string, no second subprocess.
+There were TWO separate `sed` calls against the same manifest a few lines
+apart (`FAIL=`/`TOTAL=` together, then a separate `OK=` further down) -
+fixing the first let execution reach the second, which then failed the
+same way on its own; when a class of bug like this is found, grep the
+whole file for the same pattern rather than assuming one fix covers it.
+(2) `eval "$(deps/nxdk/bin/activate -s)"` (documented elsewhere in this
+project as needed before calling `nxdk-link`) actively REPLACES `$PATH`
+on this Git-Bash/MSYS2 setup rather than extending it, substituting a
+bare `/mingw64/bin` for the real `/c/msys64/mingw64/bin` - `command -v
+lld` resolved correctly immediately before that call and "command not
+found" immediately after it, same shell, nothing else changed.
+`tools/xbox-link-check.sh` itself never calls `activate` at all and its
+own `nxdk-link` calls work fine on the plain `MSYS2_BIN` `PATH` export
+every `tools/xbox-*.sh` script already uses - that alone is sufficient;
+don't add `activate` on top of it. (3) Excluding stub-module boilerplate,
+a module that reuses a genuinely SHARED SDK utility file (here,
+`public/interface.cpp`, restored to the `hl` server target for
+`Sys_LoadModule`/`Sys_GetFactory`'s sake, divergence #35/#36) can pull in
+a function with a real `/EXPORT:` directive that has NOTHING to do with
+that module's own role - `CreateInterface` is also compiled into
+`filesystem_stdio`/`ref_null`/`menu`, each for their OWN reason, and
+X7.1b's "keep the objects' own `/EXPORT:` set" design correctly, by its
+own literal rule, kept it unrenamed in `hl`'s server target too, causing
+a real duplicate-symbol collision the first time all of them shared one
+link. The fix is not "shrink the rule", it's applying X7.1b's own STATED
+principle more precisely: the allowlist is what the ENGINE resolves for
+THAT module, and nothing else resolves "CreateInterface" for the
+"server" role specifically - `tools/xbox-gen-exports.sh` gained a
+narrow, measured `--exclude <file>` for exactly this shape (a real
+`/EXPORT:` name that must NOT be treated as this module's public
+surface), not a guess or an invented heuristic.

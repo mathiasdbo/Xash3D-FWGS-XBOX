@@ -2857,9 +2857,85 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    incompatibility or a real-`GL/gl.h`/`<memory.h>`/`<memory_resource>`
    want from the studio-model rendering path - genuinely separate,
    larger work, correctly out of scope here per the categorisation
-   above). Neither X7.1b's isolation tool nor X7.4 step 1's real link
-   attempt has been re-run against the now-complete server set yet -
-   that is the next real step, not yet taken.
+   above).
+
+   **`tools/xbox-game-link-check.sh` built and run for real, 2026-09-12 -
+   X7.4 step 1's actual real-link attempt, the first time this project has
+   linked the real `hl` server SDK against the real engine (not a stub, not
+   a 2-object prototype).** Reuses three already-built pieces rather than
+   re-deriving them: `tools/xbox-link-check.sh`'s own response file (the
+   real, currently-clean engine+third-party+menu+`filesystem_stdio`+`ref_null`
+   set, plus the still-stubbed client half), `tools/xbox-game-isolate.sh`'s
+   fresh server isolation, and `tools/gen-library-tables.sh` fed the
+   isolated `exports.txt` instead of the stub's. Verifies the baseline link
+   is clean first (refusing to build on an unverified foundation), then
+   swaps the stub server's two objects for the isolated set plus a freshly
+   generated `generated_lib_server_exports.c`, and links.
+
+   Getting a trustworthy first result took real debugging, not a clean
+   first try - three genuine bugs, none of them in the SDK:
+   - `tools/xbox-link-check.sh`'s own mainui-manifest check (`sed -n
+     '...FAIL=...' "$MANIFEST"`) came back EMPTY when run right after
+     compiling 186 third-party objects, reproducibly, 5 times in a row -
+     a retry loop around the same `sed` call did not fix it, but the same
+     script's own `cat "$MANIFEST"` a few lines later, in the SAME failing
+     run, read the file correctly every time. Fixed by reading the file
+     once with `cat` into a variable and extracting both fields (plus a
+     SECOND, separate `sed` call further down, `OK=`, found only once the
+     first fix let execution reach it) with bash's own `[[ =~ ]]` regex,
+     never depending on `sed` for this again.
+   - `eval "$(deps/nxdk/bin/activate -s)"` (documented elsewhere as needed
+     before `nxdk-link`) measurably REPLACES `$PATH` on this Git-Bash/MSYS2
+     setup rather than extending it - `lld` resolved correctly immediately
+     before that call and "command not found" immediately after it, same
+     shell. `tools/xbox-link-check.sh` itself never calls `activate` at
+     all; removed the call, relying on the same plain `MSYS2_BIN` `PATH`
+     export every `tools/xbox-*.sh` script already uses.
+   - Once linking actually ran: `1 duplicate symbol, 0 undefined` -
+     `CreateInterface`. A genuine `/EXPORT:` directive in the `hl` server
+     target (`public/interface.cpp`, restored for
+     `Sys_LoadModule`/`Sys_GetFactory`'s sake, divergence #35/#36), correctly
+     kept unrenamed by X7.1b's own literal "the objects' own `/EXPORT:` set"
+     rule - but nothing else in the server target references it, and it
+     collides with `filesystem_stdio`'s own real `CreateInterface`
+     (divergence #30) once both share a link. The engine never resolves
+     "CreateInterface" for the "server" role specifically, only for
+     "filesystem_stdio" - keeping it was the generator being literal about
+     "every real `/EXPORT:`", not X7.1b's own stated principle ("the
+     allowlist is what the ENGINE resolves for THIS module"). Fixed with a
+     new, narrow `tools/xbox-gen-exports.sh --exclude <file>` (mirroring
+     the existing `--allow`/`--require` file-based design) and a new
+     checked-in `tools/xbox-server-exclude-exports.txt` (one line,
+     `CreateInterface`) - a measured, specific exception, not an invented
+     heuristic.
+
+   **Result after all three fixes: `0 duplicate, 1 undefined`.** The one
+   real remaining undefined symbol is `___RTDynamicCast` - the MSVC-ABI
+   RTTI runtime function clang emits for `dynamic_cast`. Confirmed real,
+   not decorative: `deps/hlsdk/dlls/client.cpp` (5 call sites) and
+   `player.cpp` (1) use `dynamic_cast<CBasePlayer*>(CBaseEntity::Instance(pev))`-
+   shaped downcasts from a genuine base-class pointer, real runtime type
+   verification, not a redundant self-cast that could simply be deleted.
+   Checked nxdk's own tree directly (`llvm-nm` against every prebuilt
+   `.lib`, source grep across `libcxx`) - no implementation of
+   `__RTDynamicCast` exists anywhere in this toolchain; nothing built on
+   nxdk before this has ever needed real C++ RTTI. Deliberately NOT
+   attempted here: implementing MSVC-ABI RTTI support correctly means
+   matching clang's own `__RTTICompleteObjectLocator`/`TypeDescriptor`
+   layout, real, error-prone low-level ABI work, and replacing the 6 call
+   sites with an SDK-level equivalent check requires proving behavioural
+   equivalence for each one - both are real, separate, dedicated
+   investigations, not a rushed fix at the end of this one. Tracked
+   honestly as the current baseline: `tools/xbox-game-link-check.sh hl
+   --expect-undefined 1` passes; a bare invocation (no flag) correctly
+   refuses, exactly the same "no silent baseline drift" discipline every
+   other tool in this project's `tools/xbox-*.sh` family already
+   enforces. `docs/r3d/parked-undefined-symbols.txt` (the engine-level
+   baseline, `--client-main --xbe` with the stub game module) is now
+   genuinely empty - the 32 previously-tracked networking symbols
+   (`Netchan_*`/`SteamBroker_*`) are ALL resolved in the current tree; that
+   file had simply gone unmeasured for a while under the `sed` bug above,
+   not silently regressed.
 
    **Codex review round 1 found two more real gaps, both fixed and
    re-verified before round 2.** (1) `--expect-fail` is optional (an
