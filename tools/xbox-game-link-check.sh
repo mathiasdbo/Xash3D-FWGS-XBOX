@@ -211,6 +211,20 @@ echo "  object." >&2
 # own - that script never calls activate either.
 LOG="$SCRATCH/game-$TITLE/link-check.txt"
 OUT_EXE="$SCRATCH/game-$TITLE/link-check.exe"
+# Found in Codex review round 2, 2026-09-12: without this, a stale .exe
+# from an earlier run (e.g. once the RTTI gap is fixed and this baseline
+# goes to 0 undefined, producing a real .exe) would still be sitting at
+# this same fixed path if a LATER run regressed back to an accepted
+# nonzero undefined count - the existence check below would then report
+# that stale file as this run's output. Remove it first and fail loudly
+# if removal doesn't leave it actually gone, so "the file exists" only
+# ever means "this run's own link produced it."
+rm -f "$OUT_EXE"
+if [ -e "$OUT_EXE" ]; then
+	echo "xbox-game-link-check: could not remove stale $OUT_EXE before" >&2
+	echo "  linking - refusing to risk reporting a stale artifact." >&2
+	exit 1
+fi
 deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
 	-out:"$OUT_EXE" "@$NEW_RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
