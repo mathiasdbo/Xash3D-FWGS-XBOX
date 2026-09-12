@@ -147,6 +147,43 @@ if [ "${#OBJS[@]}" -eq 0 ]; then
 	echo "  this should be impossible (the sweep already refuses zero attempted)." >&2
 	exit 1
 fi
+
+# Found in Codex review: --expect-fail lets the sweep above CERTIFY a
+# known-partial object set (this project's own established pattern for
+# tracking real, unfixed compile failures - tools/xbox-mainui-sweep.sh
+# and tools/xbox-game-sweep.sh both allow it deliberately), but this
+# script was then publishing that partial set's isolation result with no
+# machine-readable trace of the gap - "isolated cleanly" and a
+# manifest.txt carrying only object/symbol counts, indistinguishable from
+# a genuinely complete, link-ready module to any future automated
+# consumer. Read the sweep's OWN manifest.txt (OK/FAIL/TOTAL, already
+# written by tools/xbox-game-sweep.sh) back here rather than re-deriving
+# it, and carry SWEEP_FAIL/SWEEP_TOTAL and an explicit COMPLETE flag
+# through to this tool's own manifest.txt and terminal messaging, so a
+# partial isolation can never read as equivalent to a complete one -
+# Codex's own offered alternative to refusing to publish anything at all
+# for a partial run, chosen because proving this tool's mechanism against
+# a known, tracked-partial baseline (exactly what this session's own
+# server run already did, honestly, in the plan's prose - just not yet
+# in the artifact itself) has real value X7.4's own bring-up work relies
+# on, and does not need to wait for every compile failure to be fixed
+# first.
+SWEEP_MANIFEST="$OBJ_DIR/manifest.txt"
+[ -f "$SWEEP_MANIFEST" ] || { echo "xbox-game-isolate: $SWEEP_MANIFEST missing after a certified sweep - impossible." >&2; exit 1; }
+SWEEP_OK=""
+SWEEP_FAIL=""
+SWEEP_TOTAL=""
+for tok in $(cat "$SWEEP_MANIFEST"); do
+	case "$tok" in
+	OK=*) SWEEP_OK="${tok#OK=}" ;;
+	FAIL=*) SWEEP_FAIL="${tok#FAIL=}" ;;
+	TOTAL=*) SWEEP_TOTAL="${tok#TOTAL=}" ;;
+	esac
+done
+if [ -z "$SWEEP_FAIL" ] || [ -z "$SWEEP_TOTAL" ]; then
+	echo "xbox-game-isolate: could not parse OK/FAIL/TOTAL from $SWEEP_MANIFEST" >&2
+	exit 1
+fi
 echo "xbox-game-isolate: isolating ${#OBJS[@]} compiled object(s)" >&2
 
 ISO_DIR="$SCRATCH/game-$TITLE/$TARGET-isolated"
@@ -402,13 +439,32 @@ if [ "${#MISSING_REQUIRED[@]}" -gt 0 ]; then
 	exit 1
 fi
 
+if [ "$SWEEP_FAIL" -eq 0 ]; then
+	COMPLETE="yes"
+else
+	COMPLETE="no"
+fi
+
 echo "TITLE $TITLE" > "$ISO_DIR/manifest.txt"
 echo "TARGET $TARGET" >> "$ISO_DIR/manifest.txt"
 echo "OBJECTS ${#OBJS[@]}" >> "$ISO_DIR/manifest.txt"
 echo "DEFINED $TOTAL_DEFINED" >> "$ISO_DIR/manifest.txt"
 echo "KEPT $KEPT_COUNT" >> "$ISO_DIR/manifest.txt"
 echo "RENAMED $RENAME_COUNT" >> "$ISO_DIR/manifest.txt"
+echo "SWEEP_OK $SWEEP_OK" >> "$ISO_DIR/manifest.txt"
+echo "SWEEP_FAIL $SWEEP_FAIL" >> "$ISO_DIR/manifest.txt"
+echo "SWEEP_TOTAL $SWEEP_TOTAL" >> "$ISO_DIR/manifest.txt"
+echo "COMPLETE $COMPLETE" >> "$ISO_DIR/manifest.txt"
 
-echo "xbox-game-isolate: $TITLE/$TARGET isolated cleanly - ${#OBJS[@]} object(s)," >&2
-echo "  $RENAME_COUNT symbol(s) renamed, 0 leaked. Output: $ISO_DIR" >&2
+if [ "$COMPLETE" = "yes" ]; then
+	echo "xbox-game-isolate: $TITLE/$TARGET isolated cleanly - ${#OBJS[@]} object(s)," >&2
+	echo "  $RENAME_COUNT symbol(s) renamed, 0 leaked. Output: $ISO_DIR" >&2
+else
+	echo "xbox-game-isolate: $TITLE/$TARGET isolated a PARTIAL object set -" >&2
+	echo "  ${#OBJS[@]}/$SWEEP_TOTAL object(s) ($SWEEP_FAIL known compile" >&2
+	echo "  failure(s) not present at all), $RENAME_COUNT symbol(s) renamed, 0" >&2
+	echo "  leaked among what IS here. NOT link-ready - manifest.txt records" >&2
+	echo "  COMPLETE no and the real SWEEP_FAIL/SWEEP_TOTAL so nothing mistakes" >&2
+	echo "  this for a complete module. Output: $ISO_DIR" >&2
+fi
 echo "$ISO_DIR"

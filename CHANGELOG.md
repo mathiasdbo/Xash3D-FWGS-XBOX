@@ -5,6 +5,21 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-isolate.sh`: a partial object set was published indistinguishably from a complete one (Codex review round 2)
+
+A run against a known-partial object set (the server's own tracked
+5-compile-failure baseline, accepted via `--expect-fail`) published
+`manifest.txt` with only object/symbol counts and said "isolated
+cleanly" regardless - nothing in the artifact itself let a future
+consumer tell a probe apart from a genuinely complete, link-ready
+module. Rather than refuse to publish anything for a partial run,
+carries the sweep's real `OK`/`FAIL`/`TOTAL` through to a new
+`SWEEP_OK`/`SWEEP_FAIL`/`SWEEP_TOTAL`/`COMPLETE yes|no` block in this
+tool's own manifest, and the terminal message now reads differently for
+a partial run ("isolated a PARTIAL object set... NOT link-ready").
+Verified against the real server baseline: `manifest.txt` now correctly
+reads `COMPLETE no` with the real fail/total counts.
+
 ### Fixed — `tools/xbox-game-isolate.sh`: a hard-required server export was silently renamed away (Codex review round 1)
 
 `exports.txt`'s `GiveFnptrsToDll _GiveFnptrsToDll@8` line has a real

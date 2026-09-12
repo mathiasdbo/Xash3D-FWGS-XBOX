@@ -2427,6 +2427,32 @@ spot-checked still correctly kept; client re-run confirms an identical,
 unaffected refusal (this bug and fix are server-only - the client
 allowlist file has no two-column entries).
 
+**Codex review round 2 (the cap) found a real design gap: a PARTIAL
+object set (the server's own documented 5-known-failure baseline) was
+published as "isolated cleanly" with nothing in the artifact itself
+distinguishing it from a genuinely complete, link-ready module.** The
+plan's own prose already said "102 objects (5 known compile failures)",
+but `manifest.txt` carried only object/symbol counts, and the terminal
+message said "isolated cleanly" regardless - a future automated
+consumer reading only the artifact, not this document, would have no
+way to tell a probe from a real module. Rather than refuse to publish
+anything for a partial run (Codex's primary suggestion, which would
+remove real value: proving this tool's mechanism against a known,
+tracked-partial baseline is exactly what the server run above already
+did, and X7.4's own bring-up work does not need every compile failure
+fixed first to keep exercising this tool), took Codex's own offered
+alternative: the sweep's real `OK`/`FAIL`/`TOTAL` (already written by
+`tools/xbox-game-sweep.sh` to its own manifest) is read back and carried
+through to a new `SWEEP_OK`/`SWEEP_FAIL`/`SWEEP_TOTAL`/`COMPLETE
+yes|no` block in this tool's own `manifest.txt`, and the terminal
+message itself now reads differently for a partial run ("isolated a
+PARTIAL object set... NOT link-ready") rather than the same "isolated
+cleanly" either way. Re-verified against the real server baseline:
+`manifest.txt` now reads `SWEEP_OK 102`/`SWEEP_FAIL 5`/`SWEEP_TOTAL 107`/
+`COMPLETE no`, and the terminal message correctly reflects the partial
+state - a future consumer checking `COMPLETE` before trusting this
+directory for a real link now has something real to check.
+
 ### X7.2 — Generated export tables, from the objects, not from a list
 
 **Built and verified end-to-end, 2026-09-11 (`tools/xbox-gen-exports.sh`,
