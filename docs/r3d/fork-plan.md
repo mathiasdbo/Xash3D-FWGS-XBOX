@@ -2668,6 +2668,28 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    `.obj` files afterward rather than trusting `rm`'s exit code alone -
    re-verified both targets still pass against their real baselines
    after this change.
+
+   **Codex review round 2 (the cap) found the same stale-manifest class
+   of bug the manifest tool itself had already been fixed for, this time
+   in the sweep's own `manifest.txt`.** `OK=$OK FAIL=$FAIL TOTAL=$TOTAL`
+   was written right after the `TOTAL==0` check but BEFORE
+   `--expect-total`/`--expect-fail` ran - so a run one of those gates
+   REJECTED (a source-set drift to, say, 108 files, all compiling clean)
+   still published a clean-looking `manifest.txt` (`FAIL=0 TOTAL=108`)
+   before exiting nonzero, exactly the shape a downstream consumer
+   modelled on `tools/xbox-link-check.sh`'s own manifest-trust pattern
+   would accept despite the gate's rejection. Per the project's 2-round
+   cadence cap, fixed and independently re-verified: `manifest.txt` is
+   now written only after every applicable gate has passed without
+   exiting (it was already removed at the very top of the script, with
+   the round-1 fix confirming that removal actually happened, so a
+   rejected run now leaves NO manifest.txt at all). Verified exactly the
+   scenario Codex named: a deliberately wrong `--expect-total 999`
+   against the real 107-file server sweep correctly fails and leaves no
+   `manifest.txt` behind (a pre-existing one from an earlier accepted run
+   confirmed gone, not just "never created"); the correct
+   `--expect-fail 5 --expect-total 107` re-run afterward still publishes
+   `OK=102 FAIL=5 TOTAL=107` as before.
 1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
    generate `server/exports.txt`; link with `--client-main`. Exit gate is
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,

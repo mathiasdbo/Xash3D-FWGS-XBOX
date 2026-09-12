@@ -5,6 +5,19 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-sweep.sh`: a rejected run could still publish a clean-looking manifest.txt (Codex review round 2)
+
+`OK/FAIL/TOTAL` was written right after the zero-attempted check but
+before the `--expect-total`/`--expect-fail` gates ran - so a run one of
+those gates rejected (a source-set drift, say) still published a
+clean-looking `manifest.txt` before exiting nonzero, the same
+stale-output shape already fixed once in `tools/xbox-game-manifest.sh`
+itself. `manifest.txt` is now written only after every applicable gate
+has passed. Verified: a deliberately wrong `--expect-total` against the
+real server sweep fails and leaves no `manifest.txt` (a pre-existing one
+from an earlier accepted run confirmed gone); the correct baseline
+re-run afterward still publishes it correctly.
+
 ### Fixed — `tools/xbox-game-sweep.sh`: a bare run could exit 0 with every compile failing (Codex review round 1)
 
 Two real gaps. (1) `--expect-fail` is optional, but a bare invocation

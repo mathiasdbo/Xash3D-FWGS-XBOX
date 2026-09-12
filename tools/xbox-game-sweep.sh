@@ -213,11 +213,20 @@ if [ "$TOTAL" -eq 0 ]; then
 	exit 1
 fi
 
-# Manifest written only after a run that attempted something real - see
-# tools/xbox-mainui-sweep.sh's own comment on why this must not happen
-# before the TOTAL==0 check above.
-echo "OK=$OK FAIL=$FAIL TOTAL=$TOTAL" > "$OUT_DIR/manifest.txt"
-
+# All gates run BEFORE manifest.txt is (re-)written - found in Codex
+# review round 2: the old order wrote OK/FAIL/TOTAL right after the
+# TOTAL==0 check, then ran --expect-total/--expect-fail afterward, so a
+# run one of those gates REJECTED (a source-set drift to 108 files, say,
+# all compiling clean) still published a "clean-looking" manifest.txt
+# (FAIL=0, TOTAL=108) before exiting nonzero - a downstream consumer
+# checking only that file (the exact pattern tools/xbox-link-check.sh's
+# own manifest already uses for its sibling sweeps) would accept a TU set
+# the gate explicitly rejected. manifest.txt was already removed at the
+# very top of this script (with the round-1 fix verifying that removal
+# actually happened) and is not written again until every gate below has
+# passed without exiting - so a rejected run leaves NO manifest.txt at
+# all, the same "no manifest means nothing to trust" contract
+# tools/xbox-game-manifest.sh's own stale-output fix already established.
 if [ -n "$EXPECT_TOTAL" ]; then
 	if [ "$TOTAL" -eq "$EXPECT_TOTAL" ]; then
 		echo "xbox-game-sweep: $TOTAL attempted matches --expect-total $EXPECT_TOTAL."
@@ -242,16 +251,20 @@ if [ -n "$EXPECT_FAIL" ]; then
 		exit 1
 	fi
 elif [ "$FAIL" -gt 0 ]; then
-	# Found in Codex review: --expect-fail is optional (an exploratory
-	# "just show me what's happening" run needs no baseline), but that
-	# must never mean a bare invocation silently exits 0 while compiles
-	# are failing - a broken toolchain producing 107/107 failures would
-	# otherwise look identical, to anything checking only the exit code,
-	# to a clean run. Any failure without an explicit --expect-fail
-	# acknowledging it is fatal by default; pass the real, current count
-	# to get a clean exit despite known failures.
+	# --expect-fail is optional (an exploratory "just show me what's
+	# happening" run needs no baseline), but that must never mean a bare
+	# invocation silently exits 0 while compiles are failing - a broken
+	# toolchain producing 107/107 failures would otherwise look
+	# identical, to anything checking only the exit code, to a clean
+	# run. Any failure without an explicit --expect-fail acknowledging it
+	# is fatal by default; pass the real, current count to get a clean
+	# exit despite known failures.
 	echo "xbox-game-sweep: $FAIL of $TOTAL failing and no --expect-fail was" >&2
 	echo "  given - refusing to exit 0. Pass --expect-fail $FAIL to acknowledge" >&2
 	echo "  the current known baseline, or fix the failures." >&2
 	exit 1
 fi
+
+# Every applicable gate passed - only now is this run's result trustworthy
+# enough to publish.
+echo "OK=$OK FAIL=$FAIL TOTAL=$TOTAL" > "$OUT_DIR/manifest.txt"
