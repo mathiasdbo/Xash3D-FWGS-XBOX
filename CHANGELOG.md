@@ -5,6 +5,50 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Confirmed — X7.4 step 1 complete: the real `hl` server module's boot milestone verified by a real breakpoint hit
+
+The entry below left one thing open: whether the boot actually reaches
+`CL_Init`'s expected "missing essential exports" failure, not just
+"no longer crashing on the same two bugs." The network log channel -
+the tool originally meant to answer this - produced no output at all,
+indistinguishable from its own already-documented pre-existing
+unreliability.
+
+Two real gaps found by Codex review before this was actually rigorous.
+Round 2 (on the `continue`-timeout approach): a timeout with no stop
+reply only disproves the guest re-trapping the same bug, not that it is
+"healthy." Round 1 (on the fix for that: a bare breakpoint at
+`Sys_Error`): hitting it only proves SOME call reached that shared
+fatal-error sink, not which one - `Sys_Error` has real callers before
+`CL_Init` ever runs. Fixed properly: read `Sys_Error`'s own stack at
+that same breakpoint hit (`tools/xemu-debug.py break 0xff180`, cdecl
+entry, before any prologue clobbers it) - the return address resolves
+(fresh linker map) to `Host_Error + 0x63`, and the format string plus
+its two varargs, read and dereferenced directly off guest memory,
+assemble to the exact expected text: `Host_ErrorInit: can't initialize
+client: missing essential exports`, word for word, not inferred from
+the symptom.
+
+A third gap found before this reached Codex review at all: decoding
+`CL_Init`'s failure alone doesn't prove `SV_LoadProgs` succeeded first -
+its own caller discards that return value and calls `CL_Init`
+regardless either way. Closed the same way aimed at the real SDK's own
+`GetEntityAPI2` instead of the shared sink: a breakpoint there hit with
+its caller resolving to `SV_LoadProgs + 0x384`, and (via a second
+breakpoint at that captured return address, needed because
+`GetEntityAPI2` calls `memcpy` internally so a fixed single-step count
+undershot the real return) its actual return value confirmed `EAX = 1`,
+true. `SV_LoadProgs` really did complete successfully against the real
+`GetEntityAPI2`, and `CL_Init` really did then reach and fail its
+client-module load exactly as expected (the client module is still
+`stub_game/client`, X7.4 step 2's own job).
+
+Also shows the network log channel is silent even for a message
+definitely, verifiably formed and about to be sent - real, independent
+evidence the channel's unreliability isn't specific to any one code
+path, documented in `docs/r3d/lessons.md` alongside the corrected
+breakpoint-plus-stack-decode technique for reuse on future milestones.
+
 ### Added — `tools/xbox-game-link-check.sh --xbe`, the real `hl` server module's first real boot attempt
 
 `tools/xbox-game-link-check.sh` gained a `--xbe <path>` mode, mirroring

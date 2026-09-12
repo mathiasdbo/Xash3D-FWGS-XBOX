@@ -3059,26 +3059,85 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    out "still crashing on the same bug as before," nothing more (see
    `docs/r3d/lessons.md`'s corrected entry).
 
-   **Not yet confirmed: the boot reaching its full expected milestone.**
-   The network log channel produced no output at all this session,
-   across every attempt, indistinguishable (with the tools available)
-   from the SAME pre-existing, already-documented log-channel
-   unreliability (`docs/r3d/lessons.md`) rather than a new symptom -
-   `tools/xemu-debug.py`'s `regs`/`mon` reads were themselves found to
-   show a fixed debugger-attach checkpoint rather than true current state
-   while the guest is genuinely running (also now in `lessons.md`), which
-   is what makes a real `continue`-and-wait the only reliable signal this
-   session found for "still running" vs. "actually stuck." Confirming the
-   exact expected message arrives - the real remaining step here - needs
-   either a more reliable log-channel signal or a fresh diagnosis of why
-   it stays silent, not a new build attempt. Expected boot (headless,
+   **CONFIRMED, 2026-09-12, by a real breakpoint hit with the actual
+   caller and message decoded from the guest's own stack - not inferred
+   from a `continue` timeout's absence-of-evidence, and not just "some
+   call reached `Sys_Error`" either.** Two real gaps in a row here, both
+   found by Codex review, both fixed the same rigorous way:
+
+   *Round 2 (on an earlier draft): a `continue` timeout alone does not
+   mean the boot is healthy* - see the corrected entry in
+   `docs/r3d/lessons.md`; the fix was a real breakpoint at `Sys_Error`'s
+   resolved address instead of inferring anything from silence.
+
+   *Round 1 (on the breakpoint version itself): hitting `Sys_Error`
+   alone does not prove WHICH caller or WHICH error* - `Sys_Error`
+   (`engine/common/system.c:388`) is a shared fatal-error sink with
+   multiple real callers before `CL_Init` ever runs (filesystem load
+   failures, a missing-gfx check in `Host_Init`), so a bare "the
+   breakpoint hit" is exactly the same class of unsupported inference
+   the round 2 finding already corrected once. Fixed properly: at the
+   SAME breakpoint hit (`tools/xemu-debug.py break 0xff180`, cdecl entry,
+   before any prologue clobbers the arguments), read `[ESP+0]` (the
+   return address - the actual CALLER) and `[ESP+4..+12]` (`Sys_Error`'s
+   own `const char *error, ...` varargs) directly off the guest's stack.
+   Return address `0xb3c73` resolves (fresh `-map:`) to `_Host_Error +
+   0x63` - not any of the earlier, filesystem-load-time callers, exactly
+   `CL_Init`'s own real failure path (divergence #34's traced chain).
+   The format string was `"%sInit: %s"` with the two varargs reading
+   `"Host_Error"` and `"can't initialize client: missing essential
+   exports\n"` - assembling to the EXACT message divergence #34 already
+   established as this milestone's real text,
+   **`Host_ErrorInit: can't initialize client: missing essential
+   exports`**, word for word, decoded directly from guest memory, not
+   assumed from the symptom.
+
+   *A further real gap, found before this reached Codex review at all
+   (matching round 1's own critique): decoding `CL_Init`'s real failure
+   does not, on its own, prove `SV_LoadProgs` itself succeeded first* -
+   `SV_InitGame`'s own return value is discarded (`engine/server/
+   sv_main.c`), and `Host_Init` calls `CL_Init` regardless, so a FAILED
+   server load followed by this exact same client failure would produce
+   identical evidence. Closed with the same technique, aimed at the real
+   HL SDK's own `GetEntityAPI2` (`deps/hlsdk/dlls/cbase.cpp`, linked in
+   as `_GetEntityAPI2`, XBE-virtual `0x2b9fb0`) instead of the ambiguous
+   generic sink: a breakpoint there hit, with its caller (read the same
+   way, off the stack at entry) resolving to `_SV_LoadProgs + 0x384` -
+   the real SDK function, called from the real place. Its actual return
+   value needed one more step: `GetEntityAPI2`'s own body calls `memcpy`
+   internally (filling the big `DLL_FUNCTIONS` struct), so a fixed
+   single-step count landed mid-`memcpy`, not past the real return - the
+   robust fix was a SECOND breakpoint at `SV_LoadProgs`'s own resume
+   point (`0x1208f4`, the return address already captured from the first
+   breakpoint's stack read - the exact instruction after `call
+   GetEntityAPI2`, regardless of what the callee does internally). That
+   hit too, `EAX = 1` - **`GetEntityAPI2` genuinely returned `TRUE`.**
+   `SV_LoadProgs` really did complete successfully against the real
+   `GetEntityAPI2`, not merely reach a code region that also runs on
+   failure, and `CL_Init` really did then reach and fail its
+   client-module load exactly as expected, for the real reason expected
+   (the client module is still `stub_game/client`, X7.4 step 2's own
+   job). The network log channel
+   still produced no output at all across every attempt (the SAME
+   pre-existing, already-documented unreliability, not a new symptom -
+   `SV_SysError` calls `Log_Printf` before anything else, so this
+   channel is now confirmed silent even for a message definitely,
+   verifiably sent and fully decoded). **X7.4 step 1 is complete**: link
+   gate met (`0 duplicate, 0 undefined`, a real XBE), and the boot
+   milestone independently confirmed by direct execution evidence - the
+   exact caller, the exact message - not the log channel this bullet
+   originally named; that channel's own unreliability remains real,
+   separately open, unrelated-to-and-not-blocking this milestone.
+   Expected boot (headless,
    `ref/null`, full `valve/` on the disc so `delta.lst` exists):
    `SV_LoadProgs` completes against the REAL `GetEntityAPI2` (every
    `DLL_FUNCTIONS` member real, the stub's six-of-forty gone), then
    `CL_Init` stops at "can't initialize client: missing essential exports"
-   - with the message ARRIVING on the log channel, since #34. That
-   message is the milestone: it proves 100+ real server translation units
-   link and initialise on the console. **And the first memory number is
+   - now confirmed by direct execution evidence rather than the log
+   channel, since the channel itself is confirmed unreliable even for a
+   message provably sent. That confirmation IS the milestone: it proves
+   100+ real server translation units link and initialise on the
+   console. **And the first memory number is
    taken HERE, at entry, not after a map** (specialist review): the wall
    is already built by the engine's own statics, not by the SDK.
    `.sweep/xbe-buildfix.map` for the current client XBE: `.text` 3.37 MB,
@@ -3090,9 +3149,15 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    is ~648 KB text + 118 KB data, `client.dll` ~312 + 272 KB, `opfor.dll`
    ~1.0 MB text; libc++ adds tens of KB for `<string>`/`<vector>`, not
    MB. Measure with `MmQueryStatistics` (`deps/nxdk/lib/xboxkrnl/
-   xboxkrnl.h:3333`) printed over the log channel at `Host_InitCommon`
-   entry and again after `SV_LoadProgs`; those two numbers are X8's
-   opening brief.
+   xboxkrnl.h:3333`) at `Host_InitCommon` entry and again after
+   `SV_LoadProgs`; those two numbers are X8's opening brief. Don't route
+   this through the network log channel and trust its silence either
+   way - step 1's own boot confirmation (above) found it produces no
+   output even for a message definitely, verifiably sent (`SV_SysError`'s
+   `Log_Printf`, confirmed reached via a real breakpoint hit). Read the
+   value directly with the debugger instead (a breakpoint at the right
+   call site, then `mem`/`regs` on the return value), the same real,
+   conclusive technique that closed step 1's own verification gap.
 2. **`hl` client module links.** Sweep `cl_dll/` (no VGUI), generate
    `client/exports.txt`, link. Expected boot: `CL_Init` passes, `UI_LoadProgs`
    loads the menu (X6's `mainui`, already linking; its manifest must be
