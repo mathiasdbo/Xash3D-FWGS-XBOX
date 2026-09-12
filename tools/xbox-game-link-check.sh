@@ -330,6 +330,21 @@ fi
 # never runs on an unexplained, regressed, or substituted link.
 if [ -n "$XBE_OUT" ]; then
 	XBE_EXE="$SCRATCH/game-$TITLE/xbe-build.exe"
+	# Found in Codex review round 1, 2026-09-12: without this, a stale
+	# xbe-build.exe or $XBE_OUT from an earlier run could survive a
+	# nxdk-link/cxbe invocation that returns success without actually
+	# writing fresh output, and the existence/magic checks below would
+	# then certify that stale artifact as this run's - same class of bug
+	# already fixed for the ordinary link's $OUT_EXE (Codex round 2,
+	# see that fix's comment above). Remove both first and fail loudly
+	# if removal doesn't leave them actually gone.
+	rm -f "$XBE_EXE" "$XBE_OUT"
+	if [ -e "$XBE_EXE" ] || [ -e "$XBE_OUT" ]; then
+		echo "xbox-game-link-check: could not remove stale XBE build" >&2
+		echo "  artifact(s) before building - refusing to risk reporting a" >&2
+		echo "  stale artifact." >&2
+		exit 1
+	fi
 	# shellcheck disable=SC2086
 	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
 		-out:"$XBE_EXE" "@$NEW_RESPONSE" > "$SCRATCH/game-$TITLE/xbe-link.txt" 2>&1
