@@ -16,10 +16,8 @@ real-MSVC branches that were never reachable before.
 
 Fixed: SDL2's SAL-annotation macros (`_Out_bytecap_`, `_In_bytecount_`,
 etc. - `compat/xbox/sal.h` extended with the specific ones real headers
-invoke, all no-ops, matching this file's own stated design); a
-`uintptr_t` redefinition conflict between SDL2's own Windows config and
-pdclib's real one (`-D_UINTPTR_T_DEFINED`); a missing legacy
-`<memory.h>` (three files want only `memcpy` from it -
+invoke, all no-ops, matching this file's own stated design); a missing
+legacy `<memory.h>` (three files want only `memcpy` from it -
 `compat/xbox/memory.h`, new, redirects to `<string.h>`); and
 `SystemParametersInfo` (`inputw32.cpp`'s real mouse-acceleration
 save/restore around raw mouse look) - never declared or implemented on
@@ -30,24 +28,28 @@ the caller already checks this return value and skips the save/restore
 on `FALSE`). `SPI_GETMOUSE`/`SPI_SETMOUSE` verified against the real
 Windows 10 SDK's `WinUser.h`, not guessed.
 
-A fifth, a `_m_prefetch` builtin collision between SDL2's own clang
-workaround and clang's real builtin, was first fixed with a global
-`-D__PRFCHWINTRIN_H` flag - **corrected in Codex review round 1**: that
-flag predefines the same header guard clang's own real `<intrin.h>`
-uses, so it would also suppress clang's real `_m_prefetch`/
-`_m_prefetchw` declarations for any future file that legitimately wants
-them. Fixed at the source instead: `deps/hlsdk`'s `resonance3d` branch
-(`external/SDL2/SDL_endian.h`/`SDL_cpuinfo.h`) narrows the one
-`_MSC_VER`-guarded block that redefines it to `&& !defined(NXDK)` -
-confirmed correct rather than just convenient, since `SDL_cpuinfo.h`'s
-same block also unconditionally `#define`s `__SSE2__`/`__SSE3__`, which
-the real Xbox CPU never had (clang's own `-march=pentium3` already
-predefines the accurate feature set).
+Two more - a `uintptr_t` redefinition conflict between SDL2's own
+Windows config and pdclib's real one, and a `_m_prefetch` builtin
+collision between SDL2's own clang workaround and clang's real builtin -
+were first fixed as global compiler flags
+(`-D_UINTPTR_T_DEFINED`/`-D__PRFCHWINTRIN_H`), then each corrected in
+turn by Codex review (round 1 for `_m_prefetch`, round 2 for `uintptr_t`
+once it noticed the first fix hadn't been held to the same standard): a
+flag predefining a guard macro affects every translation unit
+project-wide, not just the one vendored block it was meant for - wrong
+for a guard name clang's own real `<intrin.h>` also uses, and risky in
+general even for an SDL2-specific one. Fixed at the source instead, on
+`deps/hlsdk`'s `resonance3d` branch: `SDL_config_windows.h`'s inner
+`uintptr_t` block and `SDL_endian.h`/`SDL_cpuinfo.h`'s `_m_prefetch`
+blocks each gain a narrow `&& !defined(NXDK)` on the specific guarded
+block responsible, not the whole surrounding `_MSC_VER` branch -
+confirmed correct rather than just convenient for `SDL_cpuinfo.h`
+specifically, since its same block also unconditionally `#define`s
+`__SSE2__`/`__SSE3__`, which the real Xbox CPU never had (clang's own
+`-march=pentium3` already predefines the accurate feature set).
 
-`-D_UINTPTR_T_DEFINED` remains a compiler-flag addition
-(`tools/xbox-cxx.sh`), matching the `-std=c++17` precedent of flag-only
-toolchain choices; the rest are real `compat/xbox/` and vendored-SDL2
-source additions, divergence #39.
+Every fix is now a real `compat/xbox/` or vendored-SDL2 source addition
+(divergence #39) - no global compiler flags remain.
 
 Verified end to end: the real `hl` client sweep went from 70/85 to
 77/85, zero regressions in the real server sweep (107/107) or

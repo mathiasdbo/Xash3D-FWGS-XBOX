@@ -2860,13 +2860,20 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    directly: this project's own clang invocation defines `_MSC_VER`
    (`1950`), which activates real-MSVC-only branches in
    `deps/hlsdk/external/SDL2` that were never reachable before. Fixed:
-   the SAL-annotation macros (`compat/xbox/sal.h`), a `uintptr_t`
-   redefinition conflict and a `_m_prefetch` builtin collision (both
-   `tools/xbox-cxx.sh` flags), a missing legacy `<memory.h>`
-   (`compat/xbox/memory.h`), and `SystemParametersInfo`
+   the SAL-annotation macros (`compat/xbox/sal.h`); a missing legacy
+   `<memory.h>` (`compat/xbox/memory.h`); `SystemParametersInfo`
    (`compat/xbox/xbox_prelude.h`/`xbox_win32_ext.c`, a real, correct
    unconditional `FALSE` - Xbox has no OS-level mouse-acceleration
-   setting to query or set at all). Zero regressions (server 107/107,
+   setting to query or set at all); and a `uintptr_t` redefinition
+   conflict plus a `_m_prefetch` builtin collision, BOTH fixed at the
+   vendored SDL2 source itself (`SDL_config_windows.h`/`SDL_endian.h`/
+   `SDL_cpuinfo.h`, each gaining a narrow `&& !defined(NXDK)` on the
+   specific guarded block responsible) after Codex review corrected two
+   successive drafts that instead used global compiler flags
+   (`-D_UINTPTR_T_DEFINED`/`-D__PRFCHWINTRIN_H`) - a flag predefining a
+   guard macro affects every translation unit project-wide, not just the
+   one vendored block it was meant for; see `tools/xbox-cxx.sh`'s own
+   header comment for the full story. Zero regressions (server 107/107,
    `3rdparty/mainui` 82/82). **The remaining 8 are now fully, individually
    confirmed** (each compiled standalone) to be exactly two genuinely
    separate, larger gaps: `<memory_resource>` (7 files -
