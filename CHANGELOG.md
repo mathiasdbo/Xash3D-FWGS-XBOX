@@ -5,6 +5,28 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/xbox-game-sweep.sh`: the real `hl` SDK compile measurement (X7.4)
+
+The compile step `tools/xbox-game-manifest.sh` exists to feed, same
+shape as `tools/xbox-mainui-sweep.sh` (OK/FAIL/TOTAL,
+`--expect-fail`/`--expect-total` regression gates, a zero-attempted hard
+failure) but reading its TU list/defines/includes from the manifest
+instead of a hand-maintained glob. First real result, not a three-file
+prototype: server 102/107 compile clean, client 67/85. Failures
+categorised and left for X7.4/X7.3 (not this tool's scope): a real
+Win32-vs-pdclib struct mismatch in `nodes.cpp`, missing `std::byte`/
+`std::clamp` visibility under `-ffreestanding -nostdlib`, and (client)
+mostly the same SDL2-header/clang incompatibility the manifest tool's
+`INCLUDE` work already flagged, plus a few real-`GL/gl.h`/`<memory.h>`
+wants from the studio-model renderer path X5 replaces anyway.
+
+Found and fixed while running this for real: the error log silently
+lost roughly half of the real failures' detail (though never the
+count) by reopening the same file for append once per compile - over a
+hundred open/close cycles on one file in quick succession lost data on
+this Windows/MSYS setup, reproducibly. Fixed by opening the log once
+before the loop and reusing that file descriptor for every compile.
+
 ### Fixed — `tools/xbox-game-manifest.sh`: a failed run could leave a stale manifest in place (Codex review round 2)
 
 Every validation in this script ran before the final output write, and
