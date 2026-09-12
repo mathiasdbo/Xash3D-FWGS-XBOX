@@ -683,3 +683,34 @@ an XBE from a run whose log says anything but `0 duplicate, 0 undefined`.
 `0xC0000005` - the exception record and the formatted message were both
 right there on the first dump, once the dump was read as an exception
 frame instead of as a call chain.
+
+**Two more Windows/MSYS file-I/O traps, both self-inflicted, both hit
+building the X7 `tools/` chain (manifest/sweep/isolate) on real ~100+
+object counts - neither shows up on small inputs, which is exactly why
+each shipped once before being caught.** (1) Reopening the SAME file for
+append (`>> file`) once per iteration of a 100+-iteration loop silently
+loses data on this setup, reproducibly, not randomly: `tools/xbox-game-sweep.sh`
+lost 3 of 5 real compile failures' log detail this way (the fail COUNT,
+which never went through the file, stayed correct - only the written
+detail vanished), and `tools/xbox-game-isolate.sh` independently hit the
+identical shape building a module's defined-symbol list across ~100
+objects, losing enough real symbols (undercounting 9,349 as 606) that a
+genuinely leaked, unrenamed symbol slipped past its own self-check. Fix,
+proven twice: open the file ONCE with a persistent file descriptor
+(`exec 3>> file`, redirect each iteration's output to `>&3`), close it
+once after the loop - never let a loop's iteration count become a
+same-file reopen count. (2) `mktemp -d`'s default (the system temp
+directory, `/tmp` under this MSYS setup) is not reliably usable for a
+file written early and read back only after substantial intervening I/O
+- measured directly, standalone, outside any script: a bare
+`: > /tmp/x; ls /tmp/x` round trip in one command failed outright.
+`tools/xbox-game-isolate.sh` hit this for real: a small allowlist file
+written before ~200 external process calls (a `cp` plus an
+`llvm-objcopy` per object) came back "No such file or directory" when
+read afterward. Fix: root a script's working temp directory under
+`$SCRATCH` (`mktemp -d -p "$SCRATCH/tmp"`) instead of accepting `mktemp`'s
+system-temp default - every `$SCRATCH`-rooted path in this project's own
+tooling has been reliable; the system temp directory, measured twice
+now, has not. Neither trap is specific to the tool that first hit it -
+any future `tools/xbox-*.sh` doing bulk work across 100+ files should
+default to both fixes from the start, not rediscover them.

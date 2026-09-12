@@ -2338,6 +2338,121 @@ exactly its allowlist, and the allowlisted names are never renamed, so
 Record the resulting build divergence in the ledger; it lives in
 `tools/`, form 1, touching no SDK source at all.
 
+**`tools/xbox-game-isolate.sh` built and run for real against the whole
+compiled `hl` object set, 2026-09-12 - the bulk implementation of the
+2-object prototype above, not a rewrite of its design.** Runs the target's
+sweep itself first (fresh, never trusting stale objects, same discipline
+as the sweep tool's own manifest regeneration), generates `exports.txt`
+(X7.2), strips `.drectve` from a copy of every object, builds a rename
+map from the module's own defined-symbol set minus the allowlist (server:
+the just-generated `exports.txt` itself, since the server allowlist IS
+"the objects' own `/EXPORT:` set"; client: the FIXED
+`tools/xbox-client-allowed-exports.txt`, not the `--allow`-filtered
+generated one - per the design above, what matters is which names the
+engine will ever look up by that string, not which of them this
+particular object set happens to export), applies it with
+`llvm-objcopy --redefine-syms`, and self-checks by re-scanning every
+isolated object afterward - every defined symbol must be either
+allowlisted or `${prefix}_`-prefixed, or the run is a hard failure, not
+a warning.
+
+**Server: isolated cleanly.** 102 objects (the sweep's own real, current
+baseline - 5 known compile failures, tracked via `--expect-fail`), 9,349
+defined symbols total, 240 kept (the API exports plus every real
+`LINK_ENTITY_TO_CLASS` classname), 9,109 renamed `sv_`, 0 leaked.
+**Client: correctly refuses, not a bug in this tool.** `xbox-gen-exports.sh`'s
+own completeness gate (X7.2) refuses to write `exports.txt` - the 67
+objects that DID compile are missing `Initialize`/most `HUD_*` entry
+points, because the file that defines them (`cdll_int.cpp`) is one of
+the 18 real, already-known client compile failures (the SDL2-header/clang
+incompatibility `tools/xbox-game-sweep.sh`'s own X7.4 entry already
+flagged). Client isolation is blocked on the same pre-existing problem,
+not a new one - fixing that (X7.3/X7.4 scope) unblocks this automatically,
+no change to this tool needed.
+
+**Two real bugs found and fixed while running this for real, both the
+SAME class already found once this session (`tools/xbox-game-sweep.sh`'s
+log), re-appearing because this tool didn't yet carry the same fix.**
+(1) A file written early (a small allowlist extraction) and read back
+only after ~200 external process invocations (a `cp` plus an
+`llvm-objcopy` call per object) had run in between came back "No such
+file or directory" - traced to the file living under `mktemp -d`'s
+default system-temp location, which this session had ALREADY measured
+directly to be unreliable for this kind of gap (a plain
+`: > /tmp/x; ls /tmp/x` round trip failed outright, run standalone,
+earlier the same session). Fixed by rooting the working directory under
+`$SCRATCH` instead - the same real project disk every other tool in this
+session's own `$SCRATCH` usage has been reliable on. (2) Even after that
+fix, one real symbol (`CFlockingFlyer::Save`, mangled) measurably leaked
+through unrenamed - traced to the exact repeated-`>>`-reopen pattern
+already fixed once in `xbox-game-sweep.sh`'s log (there: ~100 reopens of
+one file across a compile loop; here: the same shape building the
+module's defined-symbol list across ~100 objects). Fixed identically:
+one persistent file descriptor per accumulation loop, opened once,
+closed once. Re-verified after both fixes: the defined-symbol count went
+from an undercounted 606 to the real 9,349 (over 15x), the previously
+leaked symbol confirmed correctly renamed (`sv_?Save@CFlockingFlyer@@...`),
+and the full self-check reports 0 leaked.
+
+**Codex review round 1 found a third, more serious real bug: the
+self-check couldn't have caught its own allowlist being wrong, and it
+was - `GiveFnptrsToDll`, a hard-required server export, was silently
+renamed away.** `exports.txt`'s `GiveFnptrsToDll _GiveFnptrsToDll@8` line
+(the asm-symbol column X7.2's stdcall fallback writes) has a real subtlety
+the allowlist extraction missed: for THIS row, column one
+(`GiveFnptrsToDll`) is not a real symbol in the object at all - no plain
+cdecl form, no `/EXPORT:` directive, only the stdcall-decorated
+`_GiveFnptrsToDll@8` exists (X7.2's own finding). Extracting only column
+one kept a name nothing defines, while the real symbol's bare form
+(`GiveFnptrsToDll@8`) matched nothing and was silently renamed to
+`sv__GiveFnptrsToDll@8` - breaking the one export
+`engine/server/sv_game.c` hard-requires to load the module at all. The
+existing leak-check couldn't catch this because it (correctly, by
+design) trusts the same `$ALLOW_FILE` the rename decision itself uses -
+a bug in building that file passes both self-consistently. Fixed two
+ways: (1) the allowlist extraction now uses column two's bare form when
+present, column one otherwise; (2) a genuinely INDEPENDENT check added
+after the leak-check, never touching `$ALLOW_FILE` - re-reads
+`tools/xbox-{server,client}-required-exports.txt` directly (the same
+source of truth `xbox-gen-exports.sh` itself uses) and searches the real
+post-rename symbol table for either form it would accept (plain cdecl or
+stdcall-decorated). Unit-tested the independent check against the exact
+prior symptom first (a synthetic post-rename symbol list containing only
+`sv__GiveFnptrsToDll@8`, no plain or stdcall-decorated form) - correctly
+reports it missing. Re-verified end to end against the real objects:
+`_GiveFnptrsToDll@8` now confirmed present, unrenamed, in the real
+isolated `h_export.obj` (kept count 239→240, renamed count 9,110→9,109,
+exactly ±1 as expected); `GetEntityAPI`/`GetEntityAPI2`/`weapon_crossbow`
+spot-checked still correctly kept; client re-run confirms an identical,
+unaffected refusal (this bug and fix are server-only - the client
+allowlist file has no two-column entries).
+
+**Codex review round 2 (the cap) found a real design gap: a PARTIAL
+object set (the server's own documented 5-known-failure baseline) was
+published as "isolated cleanly" with nothing in the artifact itself
+distinguishing it from a genuinely complete, link-ready module.** The
+plan's own prose already said "102 objects (5 known compile failures)",
+but `manifest.txt` carried only object/symbol counts, and the terminal
+message said "isolated cleanly" regardless - a future automated
+consumer reading only the artifact, not this document, would have no
+way to tell a probe from a real module. Rather than refuse to publish
+anything for a partial run (Codex's primary suggestion, which would
+remove real value: proving this tool's mechanism against a known,
+tracked-partial baseline is exactly what the server run above already
+did, and X7.4's own bring-up work does not need every compile failure
+fixed first to keep exercising this tool), took Codex's own offered
+alternative: the sweep's real `OK`/`FAIL`/`TOTAL` (already written by
+`tools/xbox-game-sweep.sh` to its own manifest) is read back and carried
+through to a new `SWEEP_OK`/`SWEEP_FAIL`/`SWEEP_TOTAL`/`COMPLETE
+yes|no` block in this tool's own `manifest.txt`, and the terminal
+message itself now reads differently for a partial run ("isolated a
+PARTIAL object set... NOT link-ready") rather than the same "isolated
+cleanly" either way. Re-verified against the real server baseline:
+`manifest.txt` now reads `SWEEP_OK 102`/`SWEEP_FAIL 5`/`SWEEP_TOTAL 107`/
+`COMPLETE no`, and the terminal message correctly reflects the partial
+state - a future consumer checking `COMPLETE` before trusting this
+directory for a real link now has something real to check.
+
 ### X7.2 — Generated export tables, from the objects, not from a list
 
 **Built and verified end-to-end, 2026-09-11 (`tools/xbox-gen-exports.sh`,

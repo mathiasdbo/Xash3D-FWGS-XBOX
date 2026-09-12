@@ -5,6 +5,66 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-isolate.sh`: a partial object set was published indistinguishably from a complete one (Codex review round 2)
+
+A run against a known-partial object set (the server's own tracked
+5-compile-failure baseline, accepted via `--expect-fail`) published
+`manifest.txt` with only object/symbol counts and said "isolated
+cleanly" regardless - nothing in the artifact itself let a future
+consumer tell a probe apart from a genuinely complete, link-ready
+module. Rather than refuse to publish anything for a partial run,
+carries the sweep's real `OK`/`FAIL`/`TOTAL` through to a new
+`SWEEP_OK`/`SWEEP_FAIL`/`SWEEP_TOTAL`/`COMPLETE yes|no` block in this
+tool's own manifest, and the terminal message now reads differently for
+a partial run ("isolated a PARTIAL object set... NOT link-ready").
+Verified against the real server baseline: `manifest.txt` now correctly
+reads `COMPLETE no` with the real fail/total counts.
+
+### Fixed — `tools/xbox-game-isolate.sh`: a hard-required server export was silently renamed away (Codex review round 1)
+
+`exports.txt`'s `GiveFnptrsToDll _GiveFnptrsToDll@8` line has a real
+subtlety the allowlist extraction missed: column one is not a real
+symbol in the object at all (only the stdcall-decorated form exists),
+so keying the allowlist on it kept a name nothing defines while the
+real symbol's bare form matched nothing and was silently renamed away -
+breaking the one export the engine hard-requires to load the server
+module. The existing leak-check couldn't catch this: it and the rename
+decision both trust the same allowlist file, so a bug in building that
+file passes both self-consistently. Fixed two ways: the allowlist
+extraction now uses the asm-symbol column's bare form when present; and
+a genuinely independent check, never touching that file, re-reads the
+required-exports source of truth directly and searches the real
+post-rename symbol table for either accepted form. Verified end to end:
+`_GiveFnptrsToDll@8` now confirmed present, unrenamed, after isolation.
+
+### Added — `tools/xbox-game-isolate.sh`: the real bulk module symbol isolation pipeline (X7.1b)
+
+The bulk implementation of X7.1b's 2-object prototype: runs the target's
+sweep, generates `exports.txt`, strips `.drectve` from a copy of every
+object, builds a rename map from the module's own defined-symbol set
+minus its allowlist, applies it with `llvm-objcopy --redefine-syms`, and
+self-checks every isolated object afterward for a leaked (neither
+allowlisted nor prefixed) symbol. Server isolates cleanly: 102 objects,
+9,349 defined symbols, 240 kept, 9,109 renamed `sv_`, 0 leaked. Client
+correctly refuses - not a bug in this tool: the 18 already-known client
+compile failures include the file defining most required `HUD_*` entry
+points, so `exports.txt`'s own completeness gate rejects it; fixing
+those (X7.3/X7.4) unblocks this automatically.
+
+Found and fixed two real bugs while running this against ~100+ real
+objects, both the same class already hit once this session in
+`tools/xbox-game-sweep.sh`'s log: (1) a file written early and read back
+only after ~200 external process calls came back missing, traced to
+`mktemp -d`'s default system-temp location being unreliable across that
+much intervening I/O on this Windows/MSYS setup - fixed by rooting the
+working directory under `$SCRATCH` instead. (2) the same repeated-`>>`-
+reopen pattern already found once, this time building the module's
+defined-symbol list across ~100 objects, undercounted 9,349 real symbols
+as 606 and let one genuinely leak through unrenamed - fixed identically,
+one persistent file descriptor per accumulation loop. Both traps
+recorded in `docs/r3d/lessons.md` for future `tools/xbox-*.sh` work at
+this scale.
+
 ### Fixed — `tools/xbox-game-sweep.sh`: a rejected run could still publish a clean-looking manifest.txt (Codex review round 2)
 
 `OK/FAIL/TOTAL` was written right after the zero-attempted check but
