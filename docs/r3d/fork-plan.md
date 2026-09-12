@@ -2894,15 +2894,35 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    the exact three methods (`allocate`/`deallocate`/`release`) `CMiniMem`
    actually calls (the ONLY consumer of `std::pmr::` anywhere in the
    client SDK, verified by grep), as a tracked list of individually
-   aligned `::operator new` blocks. **Result: the real `hl` client sweep
-   went from 77/85 to 84/85**, zero regressions (server 107/107,
-   `3rdparty/mainui` 82/82); the sole remaining failure is the genuinely
-   out-of-scope `GL/gl.h` want (`particleman/CFrustum.cpp`, X5's own
-   job). **A fresh real client isolation now succeeds**: all 41 required
-   exports present, 0 leaked symbols - `COMPLETE no` only because one
-   non-required source is still missing, not because anything the engine
-   actually needs is absent. X7.4 step 2 (the real client link attempt)
-   is now genuinely attemptable for the first time - not yet attempted.
+   aligned `::operator new` blocks. **Result at this point: the real
+   `hl` client sweep went from 77/85 to 84/85**, zero regressions
+   (server 107/107, `3rdparty/mainui` 82/82).
+
+   **Found in Codex review, round 1: the one remaining failure
+   (`GL/gl.h`, `particleman/CFrustum.cpp`) was NOT safely dismissable as
+   "non-required" either.** Two OTHER real, compiled files
+   (`IParticleMan_Active.cpp`, `CBaseParticle.cpp`, confirmed by grep)
+   genuinely call `CFrustum`'s own methods - a real link without it
+   would fail on 4 undefined symbols the isolation tool's own
+   required-exports check does not catch (an internal cross-module
+   dependency, not an engine-facing export). Reading `CFrustum.cpp`
+   itself found the earlier "needs real rendering, X5's job" framing was
+   ALSO wrong: its own header comment says exactly why it includes
+   `<GL/gl.h>` ("the triangle API uses OpenGL constants for certain
+   functions") - it calls no real GL function at all, only passes
+   `GL_PROJECTION_MATRIX`/`GL_MODELVIEW_MATRIX` as plain `int`s to the
+   SDK's own `gEngfuncs.pTriAPI->GetMatrix()`. Fixed with two `#define`s
+   (`compat/xbox/GL/gl.h`, divergence #40, values cross-checked against
+   this repo's own vendored SDL2 header AND the real `ref/gl` reference
+   renderer's own header, not guessed).
+
+   **Result: the real `hl` client sweep now reports 85/85, zero
+   failures** (was 70/85 at the start of this whole investigation), zero
+   regressions (server 107/107, `3rdparty/mainui` 82/82). **A fresh real
+   client isolation now reports "isolated cleanly - 85 object(s), 5581
+   symbol(s) renamed, 0 leaked"** - genuinely, fully link-ready, not
+   partial. X7.4 step 2 (the real client link attempt) is now genuinely
+   attemptable for the first time - not yet attempted.
 
    **`tools/xbox-game-link-check.sh` built and run for real, 2026-09-12 -
    X7.4 step 1's actual real-link attempt, the first time this project has
