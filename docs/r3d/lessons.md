@@ -811,36 +811,48 @@ this milestone) never calls `VID_SetMode` at all - consistent with
 either a healthy headless boot or an earlier hang, not distinguishing
 evidence either way on its own.
 
-### A real breakpoint at a resolved milestone address is the reliable "did the boot get here" signal - a `continue` timeout alone is not
+### A real breakpoint at a resolved milestone address is the reliable "did the boot get here" signal - a `continue` timeout alone is not, and neither is "some call reached a shared function"
 
-Follow-up to the entry above, same investigation, and the actual
-resolution: X7.4 step 1's real exit criterion (`CL_Init` reaching and
-failing its client-module load, calling `Sys_Error`) needed a genuine
-yes/no answer, and the network log channel - the tool the plan text
-originally named for this - produced no output at all, across every
-attempt, indistinguishable from its own already-documented pre-existing
-unreliability. Rather than treat that silence as either a pass or a
-fail (both would be guessing), resolved `Sys_Error`'s real address from
-a fresh `-map:` linker map (`_Sys_Error`, `engine_common_system.obj`,
-its "Rva+Base" column directly usable as the XBE-virtual address) and
-set a real breakpoint there: `tools/xemu-debug.py break <addr> --steps N`.
-It hit - a `T05` stop reply with `EIP` landing exactly on the
-breakpoint address, followed by a genuine, moving single-step trace
-(each step a different, real address, one of them resolving cleanly to
-`__chkstk`, an ordinary stack-probe in that function's own prologue,
-not another fault). That is unambiguous, direct evidence the function
-was actually entered - a categorically stronger signal than "a
-`continue` ran past a timeout without re-trapping" (see the entry
-above), because it names the EXACT code location that must execute for
-the milestone to be true and watches it actually happen, rather than
-inferring anything from an absence. **When a milestone is "does the
-guest reach function X", resolve X's real address from a linker map and
-set a real breakpoint there - don't infer it from continue-timeouts,
-log-channel silence, or screenshots, all of which this same session
-found to be ambiguous or unreliable on their own.** Confirmed separately
-useful here too: this also proved the network log channel is silent
-even for a message DEFINITELY, VERIFIABLY sent (`SV_SysError` calls
-`Log_Printf` before anything else, and `Sys_Error` calling it was just
-proven directly) - stronger evidence than any prior session had that
-the channel's unreliability is real and independent of whatever code
-path is trying to use it, not something a future fix should assume away.
+Follow-up to the entry above, same investigation, corrected TWICE by
+Codex review before it was actually rigorous. X7.4 step 1's real exit
+criterion (`CL_Init` reaching and failing its client-module load,
+calling `Sys_Error` with a specific message) needed a genuine yes/no
+answer, and the network log channel - the tool the plan text originally
+named for this - produced no output at all, across every attempt,
+indistinguishable from its own already-documented pre-existing
+unreliability.
+
+**First attempt (corrected in round 1): a bare breakpoint hit on
+`Sys_Error` is NOT enough.** Resolved `Sys_Error`'s real address from a
+fresh `-map:` linker map and set a breakpoint there
+(`tools/xemu-debug.py break <addr> --steps N`) - it hit, with a genuine
+moving single-step trace afterward. That is real evidence the function
+was ENTERED, but `Sys_Error` is a shared fatal-error sink with several
+real callers before `CL_Init` ever runs (a filesystem load failure, a
+missing-gfx check) - "the breakpoint hit" alone cannot tell WHICH caller
+or WHICH error fired, and claiming the specific milestone from that
+alone is exactly the same class of unsupported leap as inferring health
+from a `continue` timeout.
+
+**The actual fix: read the function's own arguments off the stack at
+the SAME breakpoint hit, before its prologue can clobber them.** cdecl
+means, right at entry, `[ESP+0]` is the return address (the real
+CALLER) and `[ESP+4...]` are the function's own parameters -
+`GdbRemote.read_mem()` reads them directly. The return address resolved
+(via the same map) to the SPECIFIC expected caller
+(`Host_Error + 0x63`, not any other `Sys_Error` call site), and
+`Sys_Error`'s own `(const char *error, ...)` format string plus its two
+varargs, read the same way and dereferenced as C strings, assembled to
+the EXACT expected message text, word for word - not inferred from the
+symptom, decoded directly from guest memory. **When a milestone is "does
+the guest reach function X for reason Y", a bare breakpoint on X only
+proves X was entered by SOMETHING - read the caller (return address) and
+X's own real arguments off the stack at that same stop to prove it was
+Y specifically, especially when X is a shared/generic sink (error
+handlers, logging funnels, common allocators) with more than one real
+caller.** Confirmed separately useful here too: this also showed the
+network log channel is silent even for a message DEFINITELY, VERIFIABLY
+formed and about to be sent - stronger evidence than any prior session
+had that the channel's unreliability is real and independent of
+whatever code path is trying to use it, not something a future fix
+should assume away.
