@@ -5,6 +5,53 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — real `hl` server SDK now links `0 duplicate, 0 undefined`: the `___RTDynamicCast` gap closed (divergence #37)
+
+The prior entry below tracked one real, understood gap as a baseline
+(`--expect-undefined 1`): `___RTDynamicCast`, the MSVC-ABI RTTI runtime
+function `dynamic_cast` lowers to, absent from nxdk's entire toolchain
+(confirmed via `llvm-nm` against every prebuilt `.lib`). Closed the same
+day rather than left open - implementing real MSVC-ABI RTTI from scratch
+would have been genuine low-level ABI work, but this SDK already has an
+established, in-use idiom for exactly this problem: `CBaseEntity::
+MyMonsterPointer()`/`MyTogglePointer()`/`MySquadMonsterPointer()`, a
+virtual defaulting to `NULL`, overridden to `return this` only in the
+target type - an RTTI-free safe downcast, valid wherever the class
+hierarchy is single and non-virtual (confirmed true for both affected
+types by checking every `dlls/*.h` class declaration directly).
+
+Extended that pattern with two more virtuals on `CBaseEntity` -
+`MyPlayerPointer()` (new, overridden in `CBasePlayer`) and
+`GetWeaponPtr()` (already existed on `CBasePlayerItem`, pulled up one
+level so it is reachable from a bare `CBaseEntity*`) - and replaced all
+6 real `dynamic_cast` call sites in `dlls/client.cpp`/`player.cpp` with
+them, preserving each site's original null-safety around
+`CBaseEntity::Instance()` explicitly (a raw virtual call needs that
+where `dynamic_cast` on a null pointer handled it for free).
+
+**Codex review round 1: the first version was unconditional, changing
+`CBaseEntity`'s vtable layout and all 6 call sites' behaviour on every
+platform this SDK builds for, not just Xbox - a real finding, since
+`deps/hlsdk`'s `resonance3d` branch is not Xbox-exclusive and
+`dynamic_cast` works fine everywhere else.** Fixed: every addition and
+call-site edit now sits behind `#if defined(NXDK)`, with the `#else` arm
+restoring the exact original `dynamic_cast` code. Verified by diffing
+against the pre-fix commit: every non-NXDK line is byte-identical to
+what was there before, confirming zero behavioural change on any other
+platform (this repository's own tooling has no PC build path for
+`deps/hlsdk` yet, so this diff-identity check is the real verification
+available). Re-verified the NXDK path is unaffected by the guards: full
+server sweep still 107/107, `0 duplicate, 0 undefined` unchanged.
+
+Verified end to end: full server sweep still 107/107, and
+`tools/xbox-game-link-check.sh hl --expect-undefined 0` now reports
+**`0 duplicate, 0 undefined`** - a real, valid executable produced for
+the first time for the real `hl` server SDK (`nxdk-link` only ever
+produces one once nothing remains unresolved). Both
+`docs/r3d/parked-undefined-symbols.txt` and the new
+`docs/r3d/parked-server-undefined-symbols.txt` are now genuinely empty -
+no tracked, accepted undefined-symbol gap remains anywhere in this link.
+
 ### Added — `tools/xbox-game-link-check.sh`: the real `hl` server module linked against the real engine for the first time (X7.4 step 1)
 
 Reuses `tools/xbox-link-check.sh`'s response file, `tools/xbox-game-isolate.sh`'s

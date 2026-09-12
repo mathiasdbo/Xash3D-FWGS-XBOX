@@ -6,15 +6,18 @@
 # baseline"), the first time this project has actually attempted it
 # against the real hl SDK rather than a stub or a 2-object prototype.
 #
-# This is a MEASUREMENT tool, not an XBE build: `nxdk-link -errorlimit:0`
-# reports every undefined symbol but produces no `.exe` at all when any
-# remain (see docs/r3d/fork-plan.md, "A linker cannot emit a loadable
-# binary with unresolved symbols") - the same real limitation
-# tools/xbox-link-check.sh's own `--xbe` flag works around with a
-# SEPARATE `-force:unresolved` link. As long as the current tracked
-# server baseline (docs/r3d/parked-server-undefined-symbols.txt) is
-# non-empty, this script will never produce a real executable; it only
-# ever reports whether the produced .obj was linked correctly.
+# This was a MEASUREMENT-only tool while the tracked server baseline
+# (docs/r3d/parked-server-undefined-symbols.txt) was non-empty:
+# `nxdk-link -errorlimit:0` reports every undefined symbol but produces
+# no `.exe` at all when any remain (see docs/r3d/fork-plan.md, "A linker
+# cannot emit a loadable binary with unresolved symbols") - the same
+# real limitation tools/xbox-link-check.sh's own `--xbe` flag works
+# around with a SEPARATE `-force:unresolved` link. As of divergence #37
+# (the RTTI-free downcast fix), that baseline is empty and this script's
+# own `nxdk-link` call now produces a real, valid $OUT_EXE every time -
+# still true generically, though: if the tracked baseline ever goes
+# non-empty again (a real regression, or a newly deferred gap), this
+# reverts to measurement-only automatically, no script change needed.
 #
 #   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-game-link-check.sh <hl> [--expect-undefined N]
 #
