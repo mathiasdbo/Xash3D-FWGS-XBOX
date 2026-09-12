@@ -50,6 +50,50 @@
 # (tools/xbox-mainui-sweep.sh, 82/82 clean before this change) is
 # unaffected - C++17 is a compatible superset of C++14 for real, existing
 # code here, not just in theory.
+#
+# Two real deps/hlsdk/external/SDL2 conflicts, found 2026-09-12 compiling
+# the real hl CLIENT SDK for the first time (tools/xbox-game-sweep.sh hl
+# client), both root-caused to the fact that this target/flag combination
+# defines _MSC_VER (verified directly: a `#ifdef _MSC_VER / #error` probe
+# fires), which is enough for deps/hlsdk/external/SDL2's own
+# `#if defined(_MSC_VER)`-guarded compatibility branches to activate even
+# though nothing here is real MSVC. Blanket `-U_MSC_VER` was tried and
+# rejected - nxdk's own libcxx/pdclib headers rely on `_MSC_VER` being
+# defined for their own real branches (verified: undefining it globally
+# breaks deps/nxdk/lib/libcxx/include/string.h's own strstr overload
+# resolution, a real, working, unrelated codepath).
+#
+# Both were first fixed HERE, as global compiler flags
+# (`-D_UINTPTR_T_DEFINED`/`-D__PRFCHWINTRIN_H`) - then corrected in Codex
+# review (round 1 for the first, round 2 for the second, once it noticed
+# the first hadn't been held to the same standard): a flag predefining a
+# guard macro affects EVERY translation unit project-wide, not just the
+# one vendored block it was meant for, which is wrong for a guard name
+# clang's own real `<intrin.h>` also uses (`__PRFCHWINTRIN_H`) and risky
+# in general even for an SDL2-specific one. Fixed at the source instead,
+# on `deps/hlsdk`'s `resonance3d` branch (divergence #39): three vendored
+# SDL2 headers (`SDL_config_windows.h`'s `uintptr_t` redeclaration -
+# `unsigned int`, conflicting with pdclib's own already-correct
+# `unsigned long`, found as a real "typedef redefinition with different
+# types" hard error; `SDL_endian.h`/`SDL_cpuinfo.h`'s `_m_prefetch`
+# pseudo-header, colliding with clang's own real builtin) each gained a
+# narrow `&& !defined(NXDK)` on the SPECIFIC guarded block responsible,
+# not the whole surrounding `_MSC_VER` branch (tried and rejected for the
+# uintptr_t case: skipping the WHOLE block via `-D_STDINT_H_` fixed this
+# but broke other real setup the same block also does). Confirmed correct
+# rather than just convenient for `SDL_cpuinfo.h` specifically: its same
+# block also unconditionally `#define`s `__SSE2__`/`__SSE3__`, which the
+# real Xbox CPU (Pentium III class) never had - clang's own
+# `-march=pentium3` already predefines the accurate feature set
+# (`__MMX__`/`__SSE__` only, verified directly), so excluding NXDK here
+# is not a workaround, it is the correct answer either way. Verified:
+# cl_dll/cdll_int.cpp's real error count dropped from the SAL-macro gap
+# (compat/xbox/sal.h), the uintptr_t conflict, and the _m_prefetch
+# conflict combined, down to just the separately-tracked, already-known
+# `<memory_resource>` want; re-verified the real hl server sweep (107/107)
+# and 3rdparty/mainui (82/82) are both unaffected, and the full client
+# sweep result is unchanged (70/85 to 77/85) between the flag-based and
+# source-based fixes.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
