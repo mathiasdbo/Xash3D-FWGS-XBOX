@@ -5,6 +5,64 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — real `hl` client SDK: 85/85, zero failures - the real, full `hl` client SDK compiles and isolates completely clean for the first time (divergence #40)
+
+The prior entry's `<memory_resource>` categorisation ("genuinely
+separate, larger work") was wrong - found running the real client
+isolation for the first time (`tools/xbox-game-isolate.sh hl client`).
+`cl_dll/cdll_int.cpp`, the client module's own main entry point
+providing every REQUIRED export the engine's `COM_GetProcAddress`
+lookups hard-need (`HUD_Init`/`HUD_VidInit`/`HUD_Redraw`/21 more),
+transitively but genuinely includes `CMiniMem.h` (it really uses
+`IParticleMan`, not an incidental pull-in) - a real isolation attempt
+without a working `std::pmr` reported all 22 required exports entirely
+missing, a real blocker for X7.4 step 2, not a deferrable want.
+
+Fixed with `compat/xbox/memory_resource` (new file) - not a full,
+standards-compliant `std::pmr` (real thread-safety options,
+`upstream_resource` chaining, chunked-pool allocation performance remain
+genuinely deferred), but a correct, minimal implementation of the exact
+three methods (`allocate`/`deallocate`/`release`) `CMiniMem` actually
+calls (the ONLY consumer of `std::pmr::` anywhere in the client SDK,
+verified by grep), as a tracked list of individually `::operator new`'d,
+correctly-aligned blocks.
+
+**Codex review round 1: the remaining `GL/gl.h` failure (`particleman/
+CFrustum.cpp`) was NOT safely dismissable as "non-required" either.**
+Two other real, compiled files (`IParticleMan_Active.cpp`,
+`CBaseParticle.cpp`) genuinely call `CFrustum`'s own methods - a real
+link without it would fail on 4 undefined symbols the isolation tool's
+own required-exports check does not catch. Reading `CFrustum.cpp` itself
+found the "needs real rendering, X5's job" framing was also wrong: its
+own header comment says it includes `<GL/gl.h>` only for two symbolic
+constants (`GL_PROJECTION_MATRIX`/`GL_MODELVIEW_MATRIX`), passed as
+plain `int`s to the SDK's own `GetMatrix()` - no real GL function is
+ever called. Fixed with two `#define`s (`compat/xbox/GL/gl.h`, values
+cross-checked against this repo's own vendored SDL2 header and the real
+`ref/gl` reference renderer's own header, not guessed).
+
+Verified end to end: the real `hl` client sweep now reports **85/85,
+zero failures** (was 70/85 at the start of this investigation), zero
+regressions in the real server sweep (107/107) or `3rdparty/mainui`
+(82/82). A fresh real client isolation now reports "isolated cleanly -
+85 object(s), 5657 symbol(s) renamed, 0 leaked" - genuinely, fully
+link-ready. X7.4 step 2 (the real client link attempt) is now genuinely
+attemptable for the first time.
+
+**Codex review round 2**: an earlier version of `compat/xbox/
+memory_resource` tracked blocks in a plain `std::vector`, searching
+linearly on every `deallocate()` - Theta(N) per call, so retiring N
+particles in one frame (`CMiniMem::Reset`, called on every level
+transition) cost Theta(N^2) bookkeeping on top of the real frees,
+exactly the "quadratic teardown" class of bug `CMiniMem`'s own design
+exists to avoid. Fixed: tracked in a `std::unordered_map` keyed by
+pointer instead, making both `allocate()`/`deallocate()` amortised
+O(1) - closes the specific algorithmic complexity named, without a real
+chunked/free-list pool or real-hardware profiling, both still
+genuinely deferred, larger work (see `compat/xbox/memory_resource`'s
+own header comment). Re-verified: identical 85/85 sweep and clean
+isolation results.
+
 ### Fixed — real `hl` client SDK compile failures: 70/85 to 77/85, five real root causes (divergence #39)
 
 Building the real `hl` client SDK for the first time

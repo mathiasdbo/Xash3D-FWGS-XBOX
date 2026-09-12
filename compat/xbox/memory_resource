@@ -1,0 +1,168 @@
+/*
+memory_resource - minimal std::pmr, for nxdk
+
+Part of compat/xbox; see that directory's README.
+
+nxdk's libcxx has no real <memory_resource> at all, only the older
+Filesystem-TS-era <experimental/memory_resource> - and even that only
+implements the global new_delete_resource()/null_memory_resource()/
+default_resource() functions (deps/nxdk/lib/libcxx/src/experimental/
+memory_resource.cpp), never the pool_resource classes it forward-declares
+(verified directly: `llvm-nm` on the prebuilt libc++.lib has zero
+"pool_resource"/"memory_resource" symbols at all).
+
+Found compiling the real hl client SDK for the first time
+(tools/xbox-game-sweep.sh hl client): deps/hlsdk/cl_dll/particleman/
+CMiniMem.h declares a concrete `std::pmr::unsynchronized_pool_resource`
+data member - this is not an optional, deferrable want. cl_dll/cdll_int.cpp
+(the client module's own main entry point, providing every real, REQUIRED
+export the engine's own COM_GetProcAddress lookups hard-need -
+HUD_Init/HUD_VidInit/HUD_Redraw/etc.) transitively includes this same
+header (via tri.h -> particleman.h -> CBaseParticle.h -> CMiniMem.h, all
+load-bearing: cdll_int.cpp genuinely uses IParticleMan, not just an
+incidental pull-in), so nothing in the real client module compiles or
+isolates at all without SOME working std::pmr::unsynchronized_pool_resource.
+
+A full, standards-compliant std::pmr implementation is real, separate
+work (thread-safety options, upstream_resource chaining, pool_options
+tuning, ...) - but reading CMiniMem.h/.cpp's own, actual usage (the ONLY
+consumer of std::pmr:: anywhere in the client SDK, verified directly)
+shows it only ever calls three things: allocate(), deallocate(), and
+release(). This file implements exactly that surface, correctly - not a
+real pool allocator (each allocation is its own aligned ::operator new,
+not a chunked pool, so this does not have real pool-allocator performance
+characteristics), but a genuinely correct one: every real call site gets
+the real, documented std::pmr::memory_resource contract (matching
+allocate/deallocate calls free the same memory; release() frees
+everything at once). Chunked-pool performance (fewer, larger heap
+round-trips instead of one per particle) is a later, measurable
+optimisation concern once the client module boots at all and a real
+particle-heavy scene can be profiled on real hardware, not a correctness
+requirement blocking it from linking in the first place.
+
+Found in Codex review, round 2: an EARLIER version of this file tracked
+blocks in a plain std::vector, searched linearly on every deallocate()
+- Theta(N) per call, so retiring N particles in one frame (CMiniMem::Reset,
+called on every level transition) cost Theta(N^2) bookkeeping on top of
+the real frees, the exact "quadratic teardown" class of bug this file's
+own design is supposed to avoid. Fixed: tracked in a std::unordered_map
+keyed by pointer instead, making both allocate() and deallocate()
+amortised O(1) - this closes the specific algorithmic complexity Codex
+named. What remains deliberately, explicitly deferred (not fixed by
+this round): this is still one real heap allocation per particle, not a
+real chunked/free-list pool, and no real-hardware particle-heavy frame
+time measurement exists yet - both genuinely separate, larger work
+(a real pool allocator's own free-list/chunk-growth design, then
+profiling on real Xbox hardware), not appropriate to rush into this
+same change; the O(1) fix above closes the specific quadratic-blowup
+risk without needing either.
+*/
+#ifndef R3D_COMPAT_MEMORY_RESOURCE
+#define R3D_COMPAT_MEMORY_RESOURCE
+
+#include <cstddef>
+#include <new>
+#include <unordered_map>
+
+namespace std
+{
+namespace pmr
+{
+
+class memory_resource
+{
+public:
+	virtual ~memory_resource() = default;
+
+	void* allocate( std::size_t bytes, std::size_t alignment = alignof( std::max_align_t ))
+	{
+		return do_allocate( bytes, alignment );
+	}
+
+	void deallocate( void* p, std::size_t bytes, std::size_t alignment = alignof( std::max_align_t ))
+	{
+		do_deallocate( p, bytes, alignment );
+	}
+
+	bool is_equal( const memory_resource& other ) const noexcept
+	{
+		return do_is_equal( other );
+	}
+
+protected:
+	virtual void* do_allocate( std::size_t bytes, std::size_t alignment ) = 0;
+	virtual void do_deallocate( void* p, std::size_t bytes, std::size_t alignment ) = 0;
+	virtual bool do_is_equal( const memory_resource& other ) const noexcept = 0;
+};
+
+inline bool operator==( const memory_resource& a, const memory_resource& b ) noexcept
+{
+	return &a == &b || a.is_equal( b );
+}
+
+inline bool operator!=( const memory_resource& a, const memory_resource& b ) noexcept
+{
+	return !( a == b );
+}
+
+// unsynchronized_pool_resource - the one class CMiniMem.h actually
+// instantiates (as a direct data member, so it must be a real, complete,
+// default-constructible type, not just forward-declared). Implemented as
+// a tracked map of individually-aligned-new'd blocks rather than a real
+// chunked pool - see this file's own header comment for why that is a
+// correct, deliberate scope choice, not an oversight, and why the map
+// (not a vector) is load-bearing for allocate()/deallocate() staying
+// O(1) amortised rather than the O(N) linear scan an earlier version had.
+class unsynchronized_pool_resource : public memory_resource
+{
+public:
+	unsynchronized_pool_resource() = default;
+	~unsynchronized_pool_resource() override { release(); }
+
+	unsynchronized_pool_resource( const unsynchronized_pool_resource& ) = delete;
+	unsynchronized_pool_resource& operator=( const unsynchronized_pool_resource& ) = delete;
+
+	void release()
+	{
+		for ( auto& [ptr, alignment] : _blocks )
+		{
+			::operator delete( ptr, std::align_val_t( alignment ));
+		}
+		_blocks.clear();
+	}
+
+protected:
+	void* do_allocate( std::size_t bytes, std::size_t alignment ) override
+	{
+		void* p = ::operator new( bytes, std::align_val_t( alignment ));
+		_blocks.emplace( p, alignment );
+		return p;
+	}
+
+	void do_deallocate( void* p, std::size_t bytes, std::size_t alignment ) override
+	{
+		(void)bytes;
+		auto it = _blocks.find( p );
+		if ( it != _blocks.end() )
+		{
+			::operator delete( p, std::align_val_t( it->second ));
+			_blocks.erase( it );
+		}
+	}
+
+	bool do_is_equal( const memory_resource& other ) const noexcept override
+	{
+		return this == &other;
+	}
+
+private:
+	// pointer -> the alignment it was allocated with (operator delete's
+	// aligned overload needs it back, and the standard allocate()/
+	// deallocate() contract doesn't otherwise round-trip it).
+	std::unordered_map<void*, std::size_t> _blocks;
+};
+
+} // namespace pmr
+} // namespace std
+
+#endif
