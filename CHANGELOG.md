@@ -5,6 +5,55 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `tools/xbox-game-sweep.sh`: a rejected run could still publish a clean-looking manifest.txt (Codex review round 2)
+
+`OK/FAIL/TOTAL` was written right after the zero-attempted check but
+before the `--expect-total`/`--expect-fail` gates ran - so a run one of
+those gates rejected (a source-set drift, say) still published a
+clean-looking `manifest.txt` before exiting nonzero, the same
+stale-output shape already fixed once in `tools/xbox-game-manifest.sh`
+itself. `manifest.txt` is now written only after every applicable gate
+has passed. Verified: a deliberately wrong `--expect-total` against the
+real server sweep fails and leaves no `manifest.txt` (a pre-existing one
+from an earlier accepted run confirmed gone); the correct baseline
+re-run afterward still publishes it correctly.
+
+### Fixed — `tools/xbox-game-sweep.sh`: a bare run could exit 0 with every compile failing (Codex review round 1)
+
+Two real gaps. (1) `--expect-fail` is optional, but a bare invocation
+with no flags at all silently exited 0 even if every source failed to
+compile - a broken toolchain would look identical, to anything checking
+only the exit code, to a clean run. Any failure without an explicit
+`--expect-fail` acknowledging it is now fatal by default. (2) the
+stale-`.obj` cleanup ignored its own exit status, so a genuine removal
+failure could let the script compile ahead as if the output directory
+were already clean, with a stale object surviving into the current
+run's advertised output. The cleanup's exit status is now checked, and
+the directory is re-verified empty of `.obj` files afterward. Both
+targets re-verified against their real baselines after the fix.
+
+### Added — `tools/xbox-game-sweep.sh`: the real `hl` SDK compile measurement (X7.4)
+
+The compile step `tools/xbox-game-manifest.sh` exists to feed, same
+shape as `tools/xbox-mainui-sweep.sh` (OK/FAIL/TOTAL,
+`--expect-fail`/`--expect-total` regression gates, a zero-attempted hard
+failure) but reading its TU list/defines/includes from the manifest
+instead of a hand-maintained glob. First real result, not a three-file
+prototype: server 102/107 compile clean, client 67/85. Failures
+categorised and left for X7.4/X7.3 (not this tool's scope): a real
+Win32-vs-pdclib struct mismatch in `nodes.cpp`, missing `std::byte`/
+`std::clamp` visibility under `-ffreestanding -nostdlib`, and (client)
+mostly the same SDL2-header/clang incompatibility the manifest tool's
+`INCLUDE` work already flagged, plus a few real-`GL/gl.h`/`<memory.h>`
+wants from the studio-model renderer path X5 replaces anyway.
+
+Found and fixed while running this for real: the error log silently
+lost roughly half of the real failures' detail (though never the
+count) by reopening the same file for append once per compile - over a
+hundred open/close cycles on one file in quick succession lost data on
+this Windows/MSYS setup, reproducibly. Fixed by opening the log once
+before the loop and reusing that file descriptor for every compile.
+
 ### Fixed — `tools/xbox-game-manifest.sh`: a failed run could leave a stale manifest in place (Codex review round 2)
 
 Every validation in this script ran before the final output write, and

@@ -2601,6 +2601,95 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    allowlist generator with the API-name fallback, the strip-then-rename
    step) is what X7.4 step 1 now needs; the design is de-risked on every
    point two rounds of review found.
+
+   **`tools/xbox-game-manifest.sh` (X7.1) and a new `tools/xbox-game-sweep.sh`
+   built and run for real against the whole `hl` SDK, 2026-09-11 - the
+   first real compile measurement of this SDK for Xbox, not a
+   three-file prototype.** `xbox-game-sweep.sh` is the compile step the
+   manifest tool exists to feed, same shape as `tools/xbox-mainui-sweep.sh`
+   (OK/FAIL/TOTAL, `--expect-fail`/`--expect-total` regression gates, a
+   zero-attempted hard failure) but reading its TU list/defines/includes
+   from the manifest instead of a hand-maintained glob. Server: **102/107
+   compile clean.** Client: **67/85 compile clean.** Real, categorised
+   failures, not yet fixed (X7.4/X7.3 scope, not this tool's):
+   - Server (5): `nodes.cpp`'s `_stat64i32`-based `FileSystem_GetFileTime`
+     path (a real Win32-vs-pdclib struct-naming mismatch, same file
+     X7.4's writable-rootdir risk already flags); `std::byte`/`std::clamp`
+     missing across several files (`<cstddef>`/`<algorithm>` not visible
+     under `-ffreestanding -nostdlib`'s reduced standard-library surface);
+     `player.cpp`'s `CallOnDestroy` template usage; `client.cpp`.
+   - Client (18): the SAME SDL2-header/clang incompatibility found and
+     flagged while building the manifest tool's `INCLUDE` derivation
+     (`SDL_INOUT_Z_CAP`/`SDL_SCANF_FORMAT_STRING` MSVC SAL macros
+     `SDL_stdinc.h` uses) accounts for most of them - `cdll_int.cpp`,
+     `input.cpp`, `inputw32.cpp`, `in_camera.cpp`, `tri.cpp`, others;
+     `GameStudioModelRenderer.cpp`/`StudioModelRenderer.cpp`/`studio_util.cpp`
+     want `<memory.h>`/real `GL/gl.h` (no GL on Xbox - `ref/null`/a real
+     Xbox renderer replaces this path anyway, X5); `particleman/*.cpp`
+     wants `<memory_resource>`.
+
+   **Found and fixed while running this for real: `xbox-game-sweep.sh`'s
+   own error log silently lost data on this Windows/MSYS setup.**
+   Reopening the same log file for append (`>> "$LOG"`) once per compile -
+   over a hundred separate open/close cycles on one file in quick
+   succession - lost roughly half of the real failures' markers and
+   compiler output, reproducibly, across two full runs (the fail COUNT was
+   always correct, since it comes from each compile's own exit status, not
+   the file; only the human-readable detail silently vanished). A
+   `--expect-fail`/`--expect-total` gate reading only the count would never
+   have caught this - a maintainer reading the log to fix a real failure
+   would have found 2 of 5, not 5 of 5. Fixed by opening the log file
+   ONCE (`exec 3>> "$LOG"`) before the loop and reusing that file
+   descriptor for every compile, closed once after - no repeated
+   open/close cycle left for Windows to race. Re-verified: two more full
+   107-source server runs, all 5 real failures' markers and full compiler
+   output present both times. `--expect-fail 5 --expect-total 107`
+   (server) and `--expect-fail 18 --expect-total 85` (client) both pass
+   against this measurement; an intentionally wrong `--expect-fail 0`
+   correctly reports a regression rather than passing.
+
+   **Codex review round 1 found two more real gaps, both fixed and
+   re-verified before round 2.** (1) `--expect-fail` is optional (an
+   exploratory run needs no baseline), but a BARE invocation with no
+   flags at all silently exited 0 even with every source failing - a
+   broken toolchain producing 107/107 failures would look identical, to
+   anything checking only the exit code, to a clean run. Fixed: any
+   failure without an explicit `--expect-fail` acknowledging it is now
+   fatal by default; verified a bare run against the real 5-failure
+   server baseline now correctly refuses to exit 0, naming
+   `--expect-fail 5` as the way to accept it, while the same run WITH
+   the correct `--expect-fail`/`--expect-total` still passes clean. (2)
+   the stale-`.obj` cleanup (`rm -f`) ignored its own exit status, so a
+   genuine removal failure (a locked file, plausible on the documented
+   Windows/MSYS setup) would let the script compile straight ahead as if
+   the directory were already clean, with a stale object from an earlier
+   run able to survive into "this run's output". Fixed: the cleanup's
+   exit status is checked, and the directory is re-verified empty of
+   `.obj` files afterward rather than trusting `rm`'s exit code alone -
+   re-verified both targets still pass against their real baselines
+   after this change.
+
+   **Codex review round 2 (the cap) found the same stale-manifest class
+   of bug the manifest tool itself had already been fixed for, this time
+   in the sweep's own `manifest.txt`.** `OK=$OK FAIL=$FAIL TOTAL=$TOTAL`
+   was written right after the `TOTAL==0` check but BEFORE
+   `--expect-total`/`--expect-fail` ran - so a run one of those gates
+   REJECTED (a source-set drift to, say, 108 files, all compiling clean)
+   still published a clean-looking `manifest.txt` (`FAIL=0 TOTAL=108`)
+   before exiting nonzero, exactly the shape a downstream consumer
+   modelled on `tools/xbox-link-check.sh`'s own manifest-trust pattern
+   would accept despite the gate's rejection. Per the project's 2-round
+   cadence cap, fixed and independently re-verified: `manifest.txt` is
+   now written only after every applicable gate has passed without
+   exiting (it was already removed at the very top of the script, with
+   the round-1 fix confirming that removal actually happened, so a
+   rejected run now leaves NO manifest.txt at all). Verified exactly the
+   scenario Codex named: a deliberately wrong `--expect-total 999`
+   against the real 107-file server sweep correctly fails and leaves no
+   `manifest.txt` behind (a pre-existing one from an earlier accepted run
+   confirmed gone, not just "never created"); the correct
+   `--expect-fail 5 --expect-total 107` re-run afterward still publishes
+   `OK=102 FAIL=5 TOTAL=107` as before.
 1. **`hl` server module links, stub retired.** Sweep `dlls/` + `pm_shared/`;
    generate `server/exports.txt`; link with `--client-main`. Exit gate is
    the same three lines as always: `0 duplicate, 0 undefined`, a real XBE,
