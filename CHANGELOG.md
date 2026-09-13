@@ -5,6 +5,31 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — tools/xemu-debug.py: a killed continue/step desyncs the next connection
+
+Found during X7.4 step 2's first real combined server+client+freevgui
+boot attempt. Killing the tool while it waited on a `c`/`s` stop-reply
+(e.g. an external `timeout` wrapper) closes the socket out from under it;
+xemu's gdbstub responds to the disconnect by auto-halting the CPU and
+queuing a stop-reply for the next connection, which then silently
+consumes it instead of its own `qSupported` handshake reply - the real
+reply arrives one packet late and surfaces as an unrelated
+`<unexpected packet: ...>` later on, making a live target look broken
+when the tool's own prior invocation caused the desync.
+
+`GdbRemote.__init__` now drains and discards anything already queued in
+the socket before sending its first command, and `cont()`/`step()` raise
+a clear error on a local read timeout instead of an uncaught
+`socket.timeout` traceback, explaining that the `c`/`s` was already sent
+and is not undone. Covered by `tools/test_xemu_debug.py`'s
+`DrainStaleConnectionState` (a loopback `socketpair()`, no emulator
+needed). See `docs/r3d/lessons.md` for the full account, including the
+real (still open) finding this fix made possible: the boot reaches a
+genuinely alive, non-crashed state but does not reach `Host_Frame` within
+150+ real seconds - the CPU spends that time in the kernel's own
+idle/ready-queue-poll loop, consistent with a thread blocked on an
+unsignaled kernel wait somewhere earlier in boot.
+
 ### Added — real __RTDynamicCast: combined server+client+freevgui link reaches 0 duplicate, 0 undefined (divergence #43)
 
 The last of the 527 originally-undefined VGUI1 symbols (divergence #42),
