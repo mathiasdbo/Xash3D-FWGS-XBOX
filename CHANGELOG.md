@@ -5,6 +5,34 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — real VGUI1 via freevgui: 527 undefined VGUI1 symbols down to 1 (divergence #42)
+
+Divergence #41's "the fix is populating `3rdparty/vgui_support`" was
+wrong - checked out directly, found headers-only plus prebuilt binaries,
+same as `deps/hlsdk/utils/vgui`. The real fix, vendored here:
+`3rdparty/freevgui`, FWGS's real, buildable-from-source, clean-room VGUI1
+reimplementation, public-API-compatible with Valve's original headers and
+shipping a static-link backend purpose-built for this exact engine.
+
+`tools/xbox-freevgui-sweep.sh`: 34/38 clean on the first real attempt,
+39/39 after two missing include paths and one real upstream API-drift bug
+(`vguiapi_t::SetPaintOffset`, a field this fork's vendored `engine/
+vgui_api.h` predated relative to upstream Xash3D-FWGS - added, with a
+correct, documented no-op implementation since no reference renderer this
+fork has does real 2D drawing yet).
+
+With `--include-freevgui` added to `tools/xbox-game-link-check.sh`, the
+real combined server+client+freevgui link went from 527 undefined to 4
+(three missing `vgui::App` overrides, fixed with a new file,
+`compat/xbox/freevgui_app.cpp`, that does not touch the vendored
+submodule at all), then to 0 duplicate, 1 undefined. The one remaining
+symbol, `___RTDynamicCast`, is deliberately left as a tracked, deferred
+gap rather than fixed via divergence #37's own RTTI-avoidance technique -
+that technique is not safely portable to freevgui's `Panel`/`LayoutInfo`,
+which deliberately bit-match Valve's original vtable layout for ABI
+compatibility with `cl_dll`'s already-compiled objects. Parked as
+`docs/r3d/parked-game-freevgui-undefined-symbols.txt`. See divergence #42.
+
 ### Fixed — first real combined server+client link: 0 duplicate, 527 undefined (all VGUI1, now tracked) (divergence #41)
 
 The first real link of the real, isolated `hl` server (107 objects) and

@@ -277,6 +277,26 @@ static int GAME_EXPORT VGUI_UtfProcessChar( int in )
 	return in;
 }
 
+// R3D: upstream's own VGUI_SetPaintOffset (engine/client/vgui/vgui_draw.c,
+// REF_API revision 19) tracks the offset in a vgui.paint_offset[2] field
+// this fork predates, then applies it to every 2D draw via
+// ref.dllFuncs.R_Set2DOffset() - a ref_api_t member this fork's
+// engine/ref_api.h also predates, so no reference renderer we have
+// (ref/null - our only one) implements it. This project's own vgui1
+// support (freevgui, X7.3) is a genuinely newer version than this fork's
+// vgui_api.h and needs this member to exist and be safely callable purely
+// to link and not crash - correctly a no-op for now: ref/null draws
+// nothing at all yet, so there is no real 2D drawing anywhere in this
+// engine for an offset to observably apply to. Wiring the real
+// vgui.paint_offset tracking and a real ref_api_t::R_Set2DOffset is
+// genuinely separate work, gated on a real renderer existing (X5) for the
+// offset to matter to, not required for X7.4's own headless exit gate.
+static void GAME_EXPORT VGUI_SetPaintOffset( int x, int y )
+{
+	(void)x;
+	(void)y;
+}
+
 qboolean VGui_IsActive( void )
 {
 	return vgui.initialized;
@@ -313,6 +333,19 @@ static const vguiapi_t gEngfuncs =
 	Platform_GetClipboardText,
 	Platform_SetClipboardText,
 	Platform_GetKeyModifiers,
+	// Startup/Shutdown/GetPanel/Paint/Mouse/Key/MouseMove/TextInput are
+	// left unset here (zero-initialised to NULL by this initialiser being
+	// shorter than the struct) - VGui_LoadProgs fills them in from
+	// whichever vgui support module actually loaded.
+	NULL, // Startup
+	NULL, // Shutdown
+	NULL, // GetPanel
+	NULL, // Paint
+	NULL, // Mouse
+	NULL, // Key
+	NULL, // MouseMove
+	NULL, // TextInput
+	VGUI_SetPaintOffset,
 };
 
 qboolean VGui_LoadProgs( HINSTANCE hInstance )

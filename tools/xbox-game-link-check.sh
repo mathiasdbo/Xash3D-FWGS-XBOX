@@ -19,7 +19,7 @@
 # non-empty again (a real regression, or a newly deferred gap), this
 # reverts to measurement-only automatically, no script change needed.
 #
-#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>] [--include-client]
+#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>] [--include-client] [--include-freevgui]
 #
 # Reuses, rather than re-derives, three already-built, already-reviewed
 # pieces: tools/xbox-link-check.sh's own response file (the real,
@@ -58,6 +58,7 @@ export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
 EXPECT_UNDEFINED=""
 XBE_OUT=""
 INCLUDE_CLIENT=""
+INCLUDE_FREEVGUI=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -73,6 +74,10 @@ while [ $# -gt 0 ]; do
 		INCLUDE_CLIENT=1
 		shift
 		;;
+	--include-freevgui)
+		INCLUDE_FREEVGUI=1
+		shift
+		;;
 	-*)
 		echo "xbox-game-link-check: unrecognised argument: $1" >&2
 		exit 1
@@ -85,7 +90,13 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${#POSITIONAL[@]}" -ne 1 ]; then
-	echo "usage: xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>] [--include-client]" >&2
+	echo "usage: xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>] [--include-client] [--include-freevgui]" >&2
+	exit 1
+fi
+if [ -n "$INCLUDE_FREEVGUI" ] && [ -z "$INCLUDE_CLIENT" ]; then
+	echo "xbox-game-link-check: --include-freevgui requires --include-client -" >&2
+	echo "  freevgui is a client-side dependency only, meaningless without the" >&2
+	echo "  real client module also being linked." >&2
 	exit 1
 fi
 TITLE="${POSITIONAL[0]}"
@@ -96,7 +107,9 @@ if [ "$TITLE" != "hl" ]; then
 fi
 
 SCRATCH="${SCRATCH:-$REPO/.sweep}"
-if [ -n "$INCLUDE_CLIENT" ]; then
+if [ -n "$INCLUDE_CLIENT" ] && [ -n "$INCLUDE_FREEVGUI" ]; then
+	MODULE_LABEL="server+client+freevgui"
+elif [ -n "$INCLUDE_CLIENT" ]; then
 	MODULE_LABEL="server+client"
 else
 	MODULE_LABEL="server"
@@ -222,6 +235,37 @@ if [ -n "$INCLUDE_CLIENT" ]; then
 	[ -f "$CLIENT_EXPORTS_TXT" ] || { echo "xbox-game-link-check: $CLIENT_EXPORTS_TXT missing." >&2; exit 1; }
 fi
 
+# --include-freevgui: freevgui (X7.3, divergence-tracked) provides the
+# real, buildable-from-source VGUI1 the isolated client module above
+# needs and does not itself provide (deps/hlsdk/utils/vgui ships no
+# source at all, headers plus one prebuilt win32 .lib). Its objects need
+# NO isolation treatment, unlike the server/client modules above: they
+# are not a second copy of anything already in this link (nothing else
+# defines vgui::Panel/Scheme/etc.), so there is no same-name collision
+# for X7.1b's isolation to guard against - they are simply added to the
+# response file as-is, the real, public library the isolated client
+# module's own (isolated, cl_-prefixed) code calls into by its real,
+# unrenamed, Valve-mangled symbol names.
+FREEVGUI_OBJS=()
+if [ -n "$INCLUDE_FREEVGUI" ]; then
+	echo "xbox-game-link-check: sweeping freevgui..." >&2
+	if ! bash tools/xbox-freevgui-sweep.sh --expect-fail 0 --expect-total 39; then
+		echo "xbox-game-link-check: freevgui did not sweep clean - refusing to" >&2
+		echo "  link against a source set already known to be broken." >&2
+		exit 1
+	fi
+	FREEVGUI_OUT_DIR="$SCRATCH/freevgui"
+	for o in "$FREEVGUI_OUT_DIR"/*.obj; do
+		[ -f "$o" ] && FREEVGUI_OBJS+=("$o")
+	done
+	if [ "${#FREEVGUI_OBJS[@]}" -eq 0 ]; then
+		echo "xbox-game-link-check: zero .obj files in $FREEVGUI_OUT_DIR despite a" >&2
+		echo "  clean sweep - impossible." >&2
+		exit 1
+	fi
+	echo "xbox-game-link-check: ${#FREEVGUI_OBJS[@]} freevgui object(s)." >&2
+fi
+
 # Step 3: a fresh generated_lib_server_exports.c from the ISOLATED
 # exports.txt (not stub_game/server/exports.txt) - the real
 # GetEntityAPI/GetEntityAPI2/GiveFnptrsToDll (asm-overridden, X7.2) this
@@ -250,7 +294,36 @@ echo "  (${EXPORTS_TXT#"$REPO/"})." >&2
 # treatment, one module later.
 CLIENT_EXPORTS_OBJ=""
 if [ -n "$INCLUDE_CLIENT" ]; then
-	if ! bash tools/gen-library-tables.sh "$GAME_GEN_DIR" "client:$CLIENT_EXPORTS_TXT" > /dev/null; then
+	# --include-freevgui: freevgui's real InitVGUISupportAPI (compiled into
+	# one of the freevgui objects added to the response file above, not
+	# any of the isolated client's own 85) is NOT in the isolated client's
+	# own exports.txt (X7.1b's isolation never sees freevgui at all - it
+	# runs entirely on the client's OWN 85 objects). Found in Codex review:
+	# without this, the symbol links (it is a real, defined function
+	# somewhere in this response file) but is UNDISCOVERABLE at runtime -
+	# on a static build, COM_GetProcAddress only ever searches the
+	# GENERATED export table (engine/platform/misc/lib_static.c), and
+	# engine/client/vgui/vgui_draw.c's own VGui_LoadProgs looks this name
+	# up through exactly that mechanism, by name, same as every other
+	# required export in this project. A clean link-only measurement
+	# cannot see this gap at all - it is a real, defined, correctly-linked
+	# symbol, just not reachable by the one lookup path that matters.
+	# Fixed the same way this project registers every other statically-
+	# linked module's entry point (ref_null's GetRefAPI, menu's
+	# GetMenuAPI, filesystem_stdio's GetFSAPI): add the name to the
+	# generated table's own input list. Which .obj actually DEFINES a
+	# name is irrelevant to gen-library-tables.sh's own output (it emits
+	# a plain `extern void NAME(void)` + a `{"NAME", (void*)NAME}` table
+	# row, resolved at link time regardless of source object), so
+	# appending to a COPY of the client's own real, isolated exports.txt
+	# is correct and does not touch X7.1b's own isolation output.
+	CLIENT_EXPORTS_LIST="$CLIENT_EXPORTS_TXT"
+	if [ -n "$INCLUDE_FREEVGUI" ]; then
+		CLIENT_EXPORTS_LIST="$GAME_GEN_DIR/client-exports-with-freevgui.txt"
+		cp "$CLIENT_EXPORTS_TXT" "$CLIENT_EXPORTS_LIST"
+		echo "InitVGUISupportAPI" >> "$CLIENT_EXPORTS_LIST"
+	fi
+	if ! bash tools/gen-library-tables.sh "$GAME_GEN_DIR" "client:$CLIENT_EXPORTS_LIST" > /dev/null; then
 		echo "xbox-game-link-check: tools/gen-library-tables.sh failed generating" >&2
 		echo "  the real client export table." >&2
 		exit 1
@@ -313,6 +386,12 @@ if [ -n "$INCLUDE_CLIENT" ]; then
 	done
 	echo "xbox-game-link-check: removed 1 stub-client object, added" >&2
 	echo "  ${#CLIENT_ISO_OBJS[@]} isolated + 1 generated export table object." >&2
+fi
+if [ -n "$INCLUDE_FREEVGUI" ]; then
+	for o in "${FREEVGUI_OBJS[@]}"; do
+		echo "\"$(cygpath -m "$o")\"" >> "$NEW_RESPONSE"
+	done
+	echo "xbox-game-link-check: added ${#FREEVGUI_OBJS[@]} freevgui object(s)." >&2
 fi
 
 # Step 5: the real link. Deliberately NOT `eval "$(deps/nxdk/bin/activate
@@ -403,10 +482,13 @@ fi
 # own parked-undefined-symbols.txt identity check already exists to
 # close, but that check was not carried into this tool. Mirrors it here
 # with a module-specific baseline (the real undefined set for server-only
-# vs. server+client together is not the same, so --include-client uses
-# its own separately-tracked file rather than conflating the two).
+# vs. server+client vs. server+client+freevgui is not the same in any two
+# of these, so each combination uses its own separately-tracked file
+# rather than conflating them).
 if [ "$UNDEF" -gt 0 ]; then
-	if [ -n "$INCLUDE_CLIENT" ]; then
+	if [ -n "$INCLUDE_CLIENT" ] && [ -n "$INCLUDE_FREEVGUI" ]; then
+		PARKED_LIST="$REPO/docs/r3d/parked-game-freevgui-undefined-symbols.txt"
+	elif [ -n "$INCLUDE_CLIENT" ]; then
 		PARKED_LIST="$REPO/docs/r3d/parked-game-undefined-symbols.txt"
 	else
 		PARKED_LIST="$REPO/docs/r3d/parked-server-undefined-symbols.txt"
@@ -440,6 +522,20 @@ fi
 # (the real server module swapped in), only reached after a successful
 # --expect-undefined match AND symbol-identity match above, so this
 # never runs on an unexplained, regressed, or substituted link.
+if [ -n "$XBE_OUT" ] && [ "$UNDEF" -gt 0 ]; then
+	echo "xbox-game-link-check: refusing --xbe with $UNDEF undefined" >&2
+	echo "  symbol(s) present, even though the count/identity match a" >&2
+	echo "  tracked baseline. -force:unresolved (below) would still" >&2
+	echo "  produce a file that passes the existence/magic checks this" >&2
+	echo "  script's own --xbe path runs - but a real, callable branch" >&2
+	echo "  through a genuinely undefined symbol (found in Codex review," >&2
+	echo "  2026-09-13: real dynamic_cast<> call sites in 3rdparty/freevgui" >&2
+	echo "  reach the parked ___RTDynamicCast gap) is not the same thing as" >&2
+	echo "  a real, valid XBE. --xbe is for a clean (0 duplicate, 0" >&2
+	echo "  undefined) link only; use this script without --xbe to measure" >&2
+	echo "  a tracked, nonzero undefined baseline." >&2
+	exit 1
+fi
 if [ -n "$XBE_OUT" ]; then
 	XBE_EXE="$SCRATCH/game-$TITLE/xbe-build.exe"
 	# Found in Codex review round 1, 2026-09-12: without this, a stale

@@ -61,3 +61,6 @@
 [submodule "deps/nxdk"]
 	path = deps/nxdk
 	url = https://github.com/XboxDev/nxdk.git
+[submodule "3rdparty/freevgui"]
+	path = 3rdparty/freevgui
+	url = https://github.com/FWGS/freevgui.git
