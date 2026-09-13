@@ -5,6 +5,34 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — real __RTDynamicCast: combined server+client+freevgui link reaches 0 duplicate, 0 undefined (divergence #43)
+
+The last of the 527 originally-undefined VGUI1 symbols (divergence #42),
+`___RTDynamicCast`, was previously left parked, on the assumption that
+implementing real MSVC RTTI was "real, separate, low-level ABI work" -
+the same reasoning divergence #37 used to avoid it for the server SDK.
+Checked directly rather than re-assumed: clang already emits a complete,
+correct set of MSVC-ABI RTTI type descriptors for every class in this
+build - what nxdk's toolchain actually lacks is only the runtime walker
+function, a categorically smaller problem.
+
+`compat/xbox/msvc_rtti_dynamic_cast.cpp` is a real, clean-room
+`__RTDynamicCast`, researched from public documentation (not transcribed
+from Microsoft's own proprietary CRT source), deliberately scoped to the
+non-virtual inheritance this codebase's real call sites actually need
+(virtual inheritance and reference-cast throws are honestly left
+unimplemented - verified unreachable by anything that exists today).
+
+Verified against real, ground-truth Microsoft Visual C++ (`cl.exe`,
+32-bit): a test harness compiled the exact same implementation alongside
+test classes matching freevgui's real shapes and compared results
+directly against real `dynamic_cast`, including a genuine nonzero-offset
+multiple-inheritance cross-cast - all 6 cases byte-identical.
+
+With it, the real combined server+client+freevgui link now reaches
+**0 duplicate, 0 undefined** for the first time ever - X7.4 step 2's real
+link-only exit gate. See divergence #43.
+
 ### Added — real VGUI1 via freevgui: 527 undefined VGUI1 symbols down to 1 (divergence #42)
 
 Divergence #41's "the fix is populating `3rdparty/vgui_support`" was

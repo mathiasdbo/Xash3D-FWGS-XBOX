@@ -3285,8 +3285,8 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    real combined link went from **527 undefined to 4** on the first
    attempt (three missing `vgui::App` overrides, fixed with a new,
    submodule-untouched `compat/xbox/freevgui_app.cpp`), then to **0
-   duplicate, 1 undefined** once fixed. **The one remaining symbol,
-   `___RTDynamicCast`, is deliberately left as a tracked, deferred gap** -
+   duplicate, 1 undefined** once fixed. The one remaining symbol,
+   `___RTDynamicCast`, was first left as a tracked, deferred gap -
    divergence #37's own RTTI-avoidance technique (a safe-downcast virtual
    on the base class) is NOT safely portable to freevgui's `Panel`/
    `LayoutInfo`, which deliberately bit-match Valve's original vtable
@@ -3295,11 +3295,29 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    correct vtable offsets; adding a new virtual there would silently
    shift every later slot, a memory-corruption-class risk `panel.h`'s own
    `CHECK_STRUCT_SIZE` guard does not catch (it checks per-instance size,
-   not vtable slot count). See divergence #42 for the full account.
-   Parked as `docs/r3d/parked-game-freevgui-undefined-symbols.txt`. No
-   XBE is produced by this measurement (`nxdk-link` emits nothing with
-   unresolved symbols present) - step 2's actual boot attempt now waits
-   on this one real, separate, deferred RTTI gap.
+   not vtable slot count).
+
+   **Closed for real, same investigation, divergence #43: `___RTDynamicCast`
+   is not actually MSVC RTTI in full - clang already emits every real
+   type descriptor, only the runtime walker was missing.** A genuine,
+   clean-room `__RTDynamicCast` (`compat/xbox/msvc_rtti_dynamic_cast.cpp`),
+   scoped to the non-virtual inheritance this codebase's real call sites
+   actually need, verified against real MSVC 32-bit `dynamic_cast` itself
+   (a ground-truth test harness built with real `cl.exe`, 6 real cases
+   including a genuine nonzero-offset multiple-inheritance cross-cast,
+   all byte-identical to the real compiler's own results) - not verified
+   by "it links" alone. With it, **the real combined link now reaches 0
+   duplicate, 0 undefined** and produces a real linked output for the
+   first time ever with server, client, and freevgui all real together.
+   X7.4 step 2's real link-only exit gate is met. See divergence #43 for
+   the full account. The next real step is a real `--xbe` build and a
+   real boot attempt, verified the same rigorous way step 1's own boot
+   was (`tools/xemu-debug.py`, real breakpoint/stack evidence - see
+   step 1's own account above for why a `continue`-timeout or log-channel
+   silence alone is not sufficient proof) - expected boot: `CL_Init`
+   passes, `UI_LoadProgs` loads the menu, `Host_Frame` runs, matching
+   this step's own already-stated expected boot at the top of this
+   item.
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's
