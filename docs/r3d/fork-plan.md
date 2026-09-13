@@ -2674,19 +2674,18 @@ form of it exists.
 
 ### X7.3 — VGUI out of `cl_dll`, on the `resonance3d` branches
 
-Port `hlsdk-portable`'s `USE_VGUI` discipline: exclude the 9 `vgui_*.cpp`
-from the sweep, and `#ifdef USE_VGUI` the call sites in the 27 files that
-include VGUI headers (`hud.cpp`, `cl_util.h`, `vgui_TeamFortressViewport`
-users, `vgui_int.cpp`'s `VGui_Startup`/`VGui_Shutdown`). Everything the
-single-player game draws (HUD, health, ammo, flashlight, messages, titles,
-train/tank overlays) is `cl_dll`'s own `CHud` code, not VGUI. This is the
-one SDK change of real size; it is done once on `deps/hlsdk`'s
-`resonance3d` branch, then replayed on the other two (same author, same
-files; `git cherry-pick` will mostly apply). Reference-fidelity note for
-the ledger: with `USE_VGUI` off, `VGui_*` become no-ops, `CHud::VidInit`
-skips `gViewPort`, and the scoreboard/MOTD/class-menu paths compile out -
-document which `cdll` behaviour changes (multiplayer-only UI) and that
-single-player is untouched.
+**Superseded, done differently - see divergence #42.** This section
+originally planned porting `hlsdk-portable`'s own `USE_VGUI` discipline
+(excluding the 9 `vgui_*.cpp` from the sweep, `#ifdef USE_VGUI` the 27
+files that include VGUI headers) - an unverified claim: `hlsdk-portable`'s
+real, current source has no `USE_VGUI` switch at all (checked directly
+against a fresh clone, 0 hits). What it actually ships, and what this
+project vendored instead, is `3rdparty/freevgui` - a real, buildable,
+clean-room VGUI1 reimplementation, giving `cl_dll`'s existing, unmodified
+`vgui_*.cpp` files (single-player AND multiplayer UI both) a real library
+to link against, rather than excluding VGUI-dependent code from the build
+at all. No SDK-side changes to `deps/hlsdk` were needed for this -
+`VGUI_*.h` stayed exactly as upstream ships them.
 
 One engine-side prerequisite the client module has that the stub never
 exercised, from the specialist review: `cl_dll/inputw32.cpp:31-33,148`
@@ -3247,14 +3246,60 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    real remaining gap is `deps/hlsdk/utils/vgui` - headers plus a prebuilt
    win32 `.lib`, no buildable source - all 527 undefined symbols are VGUI1
    (`vgui::Panel`/`Scheme`/`Color`/`Font`/etc.). **VGUI1 is the next
-   concrete blocker for this step**: the real, portable, buildable fix is
-   populating `3rdparty/vgui_support` (an FWGS submodule already declared
-   in `.gitmodules`, never checked out), not something to improvise inline.
-   Parked as `docs/r3d/parked-game-undefined-symbols.txt` (the real,
-   measured, reviewed 527-symbol set) so this stays a tracked, reproducible
-   baseline rather than a silently-accepted gap. No XBE is produced by this
-   measurement (`nxdk-link` emits nothing with unresolved symbols present) -
-   step 2's actual boot attempt waits on VGUI1.
+   concrete blocker for this step. Correction, same day: the sentence
+   originally here ("the real, portable, buildable fix is populating
+   `3rdparty/vgui_support`") was wrong, and disproven directly rather than
+   left standing** - checking that submodule out (and its own nested
+   `vgui-dev` submodule) found BOTH are headers-only plus prebuilt binaries
+   too (win32/linux/macos this time, still none buildable, still none
+   Xbox), because Valve never publicly released VGUI1's actual
+   implementation source at all; `vgui_support` itself is engine-side
+   glue that links against a real VGUI1 build, not a VGUI1 replacement.
+   **A second correction, same investigation: X7.3's own text below
+   (`hlsdk-portable`'s `USE_VGUI` discipline) was ALSO an unverified,
+   outdated claim** - a fresh clone of `hlsdk-portable`'s real, current
+   source has zero `USE_VGUI` occurrences anywhere. Parked as
+   `docs/r3d/parked-game-undefined-symbols.txt` (the real, measured,
+   reviewed 527-symbol set) so this stayed a tracked, reproducible
+   baseline rather than a silently-accepted gap while the real fix below
+   was found and built.
+
+   **The real fix (divergence #42): `3rdparty/freevgui`, FWGS's real,
+   buildable-from-source, clean-room VGUI1 reimplementation** - what
+   `hlsdk-portable` actually ships today, in place of the `USE_VGUI`
+   switch this document originally (wrongly) described. Public-API-
+   compatible with Valve's original headers (`deps/hlsdk/utils/vgui/
+   include/VGUI_*.h` stay unmodified - only the library backing those
+   real, unrenamed symbols changes), with a `platform/xash3d-fwgs`
+   static-link backend already purpose-built for this exact engine,
+   whose `InitVGUISupportAPI()` entry point matches the real, existing,
+   unmodified by-name lookup `engine/client/vgui/vgui_draw.c`'s own
+   `VGui_LoadProgs` already performs on the client module. `tools/xbox-
+   freevgui-sweep.sh`: 34/38 clean on the first real attempt, 39/39 after
+   two missing include paths and one genuine upstream API-drift bug
+   (`vguiapi_t::SetPaintOffset`, a real field this fork's vendored
+   `engine/vgui_api.h` predated - added correctly, with a documented
+   no-op `VGUI_SetPaintOffset` since no reference renderer this fork has
+   does real 2D drawing yet for a paint offset to matter to). With
+   `--include-freevgui` added to `tools/xbox-game-link-check.sh`, the
+   real combined link went from **527 undefined to 4** on the first
+   attempt (three missing `vgui::App` overrides, fixed with a new,
+   submodule-untouched `compat/xbox/freevgui_app.cpp`), then to **0
+   duplicate, 1 undefined** once fixed. **The one remaining symbol,
+   `___RTDynamicCast`, is deliberately left as a tracked, deferred gap** -
+   divergence #37's own RTTI-avoidance technique (a safe-downcast virtual
+   on the base class) is NOT safely portable to freevgui's `Panel`/
+   `LayoutInfo`, which deliberately bit-match Valve's original vtable
+   slot order so that `cl_dll`'s already-compiled, isolated objects
+   (compiled separately, against Valve's real header) call through the
+   correct vtable offsets; adding a new virtual there would silently
+   shift every later slot, a memory-corruption-class risk `panel.h`'s own
+   `CHECK_STRUCT_SIZE` guard does not catch (it checks per-instance size,
+   not vtable slot count). See divergence #42 for the full account.
+   Parked as `docs/r3d/parked-game-freevgui-undefined-symbols.txt`. No
+   XBE is produced by this measurement (`nxdk-link` emits nothing with
+   unresolved symbols present) - step 2's actual boot attempt now waits
+   on this one real, separate, deferred RTTI gap.
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's
