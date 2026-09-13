@@ -162,6 +162,27 @@ if [ -n "$EXPECT_TOTAL" ]; then
 	fi
 fi
 
+# Found in Codex review: unlike tools/xbox-game-link-check.sh's own
+# undefined-symbol handling (which refuses to report success on a first,
+# unreviewed nonzero count), this script's own documented usage line
+# makes --expect-fail optional - meaning a real compiler regression (or
+# a broken toolchain, or nxdk itself going missing) would print a
+# nonzero FAIL count and still exit 0, because the ONLY place FAIL is
+# ever checked against anything was this `-n "$EXPECT_FAIL"` guard.
+# Exactly the false-clean measurement class docs/r3d/lessons.md's own
+# "a measuring tool that cannot report its own failure will eventually
+# lie" entry exists to name. Fail closed instead: a nonzero FAIL with no
+# --expect-fail given is refused, the same way tools/xbox-game-link-
+# check.sh refuses to report a clean result on a first, unreviewed
+# undefined-symbol count.
+if [ "$FAIL" -gt 0 ] && [ -z "$EXPECT_FAIL" ]; then
+	echo "xbox-freevgui-sweep: $FAIL failing, no --expect-fail given. This" >&2
+	echo "  looks like a real compile regression, not something to silently" >&2
+	echo "  pass - review the log above, then pass --expect-fail $FAIL once" >&2
+	echo "  the count is reviewed, or fix the failures." >&2
+	exit 1
+fi
+
 if [ -n "$EXPECT_FAIL" ]; then
 	if [ "$FAIL" -eq "$EXPECT_FAIL" ]; then
 		echo "xbox-freevgui-sweep: $FAIL failing matches --expect-fail $EXPECT_FAIL."

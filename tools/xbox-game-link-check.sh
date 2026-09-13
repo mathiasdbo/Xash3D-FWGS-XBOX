@@ -294,7 +294,36 @@ echo "  (${EXPORTS_TXT#"$REPO/"})." >&2
 # treatment, one module later.
 CLIENT_EXPORTS_OBJ=""
 if [ -n "$INCLUDE_CLIENT" ]; then
-	if ! bash tools/gen-library-tables.sh "$GAME_GEN_DIR" "client:$CLIENT_EXPORTS_TXT" > /dev/null; then
+	# --include-freevgui: freevgui's real InitVGUISupportAPI (compiled into
+	# one of the freevgui objects added to the response file above, not
+	# any of the isolated client's own 85) is NOT in the isolated client's
+	# own exports.txt (X7.1b's isolation never sees freevgui at all - it
+	# runs entirely on the client's OWN 85 objects). Found in Codex review:
+	# without this, the symbol links (it is a real, defined function
+	# somewhere in this response file) but is UNDISCOVERABLE at runtime -
+	# on a static build, COM_GetProcAddress only ever searches the
+	# GENERATED export table (engine/platform/misc/lib_static.c), and
+	# engine/client/vgui/vgui_draw.c's own VGui_LoadProgs looks this name
+	# up through exactly that mechanism, by name, same as every other
+	# required export in this project. A clean link-only measurement
+	# cannot see this gap at all - it is a real, defined, correctly-linked
+	# symbol, just not reachable by the one lookup path that matters.
+	# Fixed the same way this project registers every other statically-
+	# linked module's entry point (ref_null's GetRefAPI, menu's
+	# GetMenuAPI, filesystem_stdio's GetFSAPI): add the name to the
+	# generated table's own input list. Which .obj actually DEFINES a
+	# name is irrelevant to gen-library-tables.sh's own output (it emits
+	# a plain `extern void NAME(void)` + a `{"NAME", (void*)NAME}` table
+	# row, resolved at link time regardless of source object), so
+	# appending to a COPY of the client's own real, isolated exports.txt
+	# is correct and does not touch X7.1b's own isolation output.
+	CLIENT_EXPORTS_LIST="$CLIENT_EXPORTS_TXT"
+	if [ -n "$INCLUDE_FREEVGUI" ]; then
+		CLIENT_EXPORTS_LIST="$GAME_GEN_DIR/client-exports-with-freevgui.txt"
+		cp "$CLIENT_EXPORTS_TXT" "$CLIENT_EXPORTS_LIST"
+		echo "InitVGUISupportAPI" >> "$CLIENT_EXPORTS_LIST"
+	fi
+	if ! bash tools/gen-library-tables.sh "$GAME_GEN_DIR" "client:$CLIENT_EXPORTS_LIST" > /dev/null; then
 		echo "xbox-game-link-check: tools/gen-library-tables.sh failed generating" >&2
 		echo "  the real client export table." >&2
 		exit 1
