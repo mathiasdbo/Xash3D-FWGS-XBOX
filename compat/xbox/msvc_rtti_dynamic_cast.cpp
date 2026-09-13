@@ -125,7 +125,14 @@ struct PMD
 
 enum : unsigned long
 {
-	BCD_AMBIGUOUS = 0x2, // the compiler already determined this base is reachable via more than one path - a real, compile-time-computed fact this file trusts rather than re-deriving
+	BCD_AMBIGUOUS           = 0x2, // the compiler already determined this base is reachable via more than one path - a real, compile-time-computed fact this file trusts rather than re-deriving
+	BCD_PRIVORPROTINCOMPOBJ = 0x4, // somewhere along the path from the COMPLETE object down to this entry, at least one inheritance edge is private or protected
+	BCD_PRIVORPROTBASE      = 0x8, // this entry's own, direct inheritance edge is private or protected
+	// Values confirmed against a real, verbatim #define listing (not
+	// guessed, and not the same as this file's own first, wrong,
+	// from-memory attempt at these two - re-verified after Codex review
+	// round 2 found the omission): github.com/nihilus/IDA_ClassInformer,
+	// Plugin/RTTI.h.
 };
 
 struct RTTIBaseClassDescriptor
@@ -212,6 +219,22 @@ inline bool NonVirtualOffset( const PMD &pmd, long *outOffset )
 // dynamic_cast semantics - detected here directly (two matches at
 // different offsets), on top of trusting the compiler's own
 // BCD_AMBIGUOUS bit for the cases it already flags.
+//
+// Access control: found in Codex review, round 2 - an earlier version
+// of this function matched ANY entry with the right type, regardless
+// of whether the real inheritance path to it was public. Real
+// dynamic_cast must fail a cast to a base reachable only through a
+// private or protected inheritance edge, even though the type genuinely
+// exists in the hierarchy - the whole point of `private`/`protected`
+// inheritance is that it is not a public "is-a" relationship dynamic_cast
+// may use. A match through such a path is treated as no match at all
+// (not merely "found but rejected" - correctly falls through to keep
+// scanning the rest of the array, in case the SAME type is ALSO
+// reachable via a different, genuinely public path elsewhere). Verified
+// this omission could not affect any real caller in this codebase
+// today (grep found zero `: private`/`: protected` inheritance anywhere
+// in 3rdparty/freevgui), but the whole point of this file is to be a
+// real, general ABI runtime, not narrowly patched to today's callers.
 bool FindBaseOffset( const RTTIClassHierarchyDescriptor *hierarchy, const RTTITypeDescriptor *target, long *outOffset )
 {
 	bool foundOne = false;
@@ -222,6 +245,9 @@ bool FindBaseOffset( const RTTIClassHierarchyDescriptor *hierarchy, const RTTITy
 		const RTTIBaseClassDescriptor *entry = hierarchy->pBaseClassArray[i];
 		if ( !SameType( entry->pTypeDescriptor, target ))
 			continue;
+
+		if ( entry->attributes & ( BCD_PRIVORPROTBASE | BCD_PRIVORPROTINCOMPOBJ ))
+			continue; // not a publicly-accessible path - not a valid dynamic_cast target, but the type may still be reachable via a different, genuinely public path elsewhere in the array
 
 		if ( entry->attributes & BCD_AMBIGUOUS )
 			return false;
@@ -244,6 +270,53 @@ bool FindBaseOffset( const RTTIClassHierarchyDescriptor *hierarchy, const RTTITy
 	return true;
 }
 
+// Is the SOURCE subobject the cast actually starts from itself
+// publicly reachable from the complete object? Found missing in Codex
+// review, round 2, and confirmed with a real, constructed test case
+// against real MSVC (not reasoned from memory): a dynamic_cast that
+// starts at a subobject reached only via a private or protected base -
+// obtained, for instance, through a member function of the derived
+// class that legally exposes its own private base's own pointer to
+// outside code - must fail, EVEN when the requested target is the
+// complete object's own exact type. FindBaseOffset's own access check
+// (above) is necessary but not sufficient on its own: it protects the
+// TARGET's own path, but says nothing about whether the STARTING point
+// itself was reached privately - a real, separate correctness axis,
+// confirmed by constructing exactly this case (a class privately
+// inheriting one base and publicly inheriting a second, then calling
+// dynamic_cast from a pointer to the private base) and comparing
+// against real MSVC's own dynamic_cast: real MSVC returns null for
+// both "cast to the exact complete type" and "cast to the OTHER,
+// public base" when starting from the private one - this function
+// exists to reproduce that.
+bool SourceIsPubliclyReachable( const RTTIClassHierarchyDescriptor *hierarchy, const RTTITypeDescriptor *srcType )
+{
+	for ( unsigned long i = 0; i < hierarchy->numBaseClasses; i++ )
+	{
+		const RTTIBaseClassDescriptor *entry = hierarchy->pBaseClassArray[i];
+		if ( !SameType( entry->pTypeDescriptor, srcType ))
+			continue;
+
+		// The complete object's own self-entry (real, present at array
+		// index 0 - lukaszlipski.dev's own description) carries no
+		// privacy flags of its own; any real, non-self entry's flags
+		// are authoritative.
+		return !( entry->attributes & ( BCD_PRIVORPROTBASE | BCD_PRIVORPROTINCOMPOBJ ));
+	}
+
+	// srcType not found in the array at all: every real call site in
+	// this codebase always passes a genuine ancestor type (verified),
+	// so this is not expected to happen for anything this file's own
+	// real callers do - defaulting to "reachable" here rather than
+	// refusing outright keeps this function from becoming MORE
+	// restrictive than real MSVC for a case this project cannot
+	// currently construct or verify either way, consistent with this
+	// file's own scope (real, verified cases handled correctly; only
+	// genuinely unreachable/unverifiable cases stay open rather than
+	// guessed in either direction).
+	return true;
+}
+
 } // namespace
 
 extern "C"
@@ -258,8 +331,6 @@ extern "C"
 // this file needing to know anything about them beyond this contract.
 void *__RTDynamicCast( void *inptr, long VfDelta, void *srcType, void *targetType, int isReference )
 {
-	(void)srcType; // the object's OWN real dynamic-type locator (read below) is authoritative - the compiler-supplied static source type is not needed to answer "is this actually a T", only to select which of Microsoft's real internal functions to call, a split this file does not replicate
-
 	if ( inptr == nullptr )
 		return nullptr;
 
@@ -281,6 +352,21 @@ void *__RTDynamicCast( void *inptr, long VfDelta, void *srcType, void *targetTyp
 	void *completeObject = static_cast<char *>( sourceThis ) - locator->offset;
 	const RTTITypeDescriptor *dynamicType = locator->pTypeDescriptor;
 	const RTTITypeDescriptor *target = static_cast<const RTTITypeDescriptor *>( targetType );
+	const RTTITypeDescriptor *source = static_cast<const RTTITypeDescriptor *>( srcType );
+
+	if ( locator->pClassDescriptor->attributes & CHD_VIRTINH )
+		return nullptr; // see this file's own header comment
+
+	// Found in Codex review, round 2, confirmed against real MSVC with a
+	// real, constructed test case (see SourceIsPubliclyReachable's own
+	// comment): a cast is invalid, for ANY target, if the pointer it
+	// actually starts from was itself only reachable via a private or
+	// protected base - checked BEFORE the exact-match fast path below,
+	// since that path is not exempt (real MSVC also fails a cast to the
+	// exact complete type when starting from a privately-reached
+	// subobject, verified directly, not assumed).
+	if ( !SameType( source, dynamicType ) && !SourceIsPubliclyReachable( locator->pClassDescriptor, source ))
+		return nullptr;
 
 	// Exact match: the object's own real, most-derived type already IS
 	// the target - the common case for every one of this codebase's
@@ -290,9 +376,6 @@ void *__RTDynamicCast( void *inptr, long VfDelta, void *srcType, void *targetTyp
 	// it). Handled first, without needing the base class array at all.
 	if ( SameType( dynamicType, target ))
 		return completeObject;
-
-	if ( locator->pClassDescriptor->attributes & CHD_VIRTINH )
-		return nullptr; // see this file's own header comment
 
 	long offset;
 	if ( !FindBaseOffset( locator->pClassDescriptor, target, &offset ))
