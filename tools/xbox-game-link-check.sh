@@ -19,7 +19,7 @@
 # non-empty again (a real regression, or a newly deferred gap), this
 # reverts to measurement-only automatically, no script change needed.
 #
-#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>]
+#   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash tools/xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>] [--include-client]
 #
 # Reuses, rather than re-derives, three already-built, already-reviewed
 # pieces: tools/xbox-link-check.sh's own response file (the real,
@@ -31,10 +31,17 @@
 # builds fresh from the isolated exports.txt).
 #
 # Only `hl` is meaningful here (X7.1's own manifest tool only supports it
-# yet), and only the SERVER half - the client isolation currently refuses
-# outright (X7.4's own tracked, pre-existing SDL2-header/clang blocker),
-# so the stub client stays in this link exactly as tools/xbox-link-check.sh
-# already has it.
+# yet). Server-only by default, matching X7.4 step 1's own already-proven,
+# already-boot-verified milestone exactly (the CLIENT_MAIN launcher, the
+# real server module, still-stubbed client - see divergence #38's real
+# breakpoint-verified boot). `--include-client`, added once the real
+# client SDK itself reached 85/85 zero-failure and clean isolation
+# (divergence #40), additionally swaps the still-empty stub client module
+# (`client/exports.txt` is deliberately empty upstream - no
+# `stub_game/client/*.c` file exists at all, so there is only ONE client
+# object to remove, `generated_lib_client_exports.obj`, unlike the
+# server's two) for the real, isolated `hl` client module - X7.4 step 2's
+# own real exit gate.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,6 +57,7 @@ export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
 
 EXPECT_UNDEFINED=""
 XBE_OUT=""
+INCLUDE_CLIENT=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -60,6 +68,10 @@ while [ $# -gt 0 ]; do
 	--xbe)
 		XBE_OUT="${2:?--xbe needs a path}"
 		shift 2
+		;;
+	--include-client)
+		INCLUDE_CLIENT=1
+		shift
 		;;
 	-*)
 		echo "xbox-game-link-check: unrecognised argument: $1" >&2
@@ -73,7 +85,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${#POSITIONAL[@]}" -ne 1 ]; then
-	echo "usage: xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>]" >&2
+	echo "usage: xbox-game-link-check.sh <hl> [--expect-undefined N] [--xbe <path>] [--include-client]" >&2
 	exit 1
 fi
 TITLE="${POSITIONAL[0]}"
@@ -84,6 +96,11 @@ if [ "$TITLE" != "hl" ]; then
 fi
 
 SCRATCH="${SCRATCH:-$REPO/.sweep}"
+if [ -n "$INCLUDE_CLIENT" ]; then
+	MODULE_LABEL="server+client"
+else
+	MODULE_LABEL="server"
+fi
 
 # Step 1: a fresh, verified-clean baseline link (engine + third-party +
 # menu + filesystem_stdio + ref_null + the STILL-stubbed client and
@@ -155,6 +172,56 @@ echo "xbox-game-link-check: ${#ISO_OBJS[@]} isolated server object(s)." >&2
 EXPORTS_TXT="$ISO_DIR/exports.txt"
 [ -f "$EXPORTS_TXT" ] || { echo "xbox-game-link-check: $EXPORTS_TXT missing." >&2; exit 1; }
 
+# --include-client: the SAME isolation treatment as the server above, one
+# module later - X7.4 step 2's own real exit gate. Kept as a clearly
+# separate block (not folded into a loop over "server client") so the
+# server-only default path above stays exactly what X7.4 step 1's own
+# real, boot-verified milestone already ran - this block only ever adds
+# to that, never changes it.
+CLIENT_ISO_OBJS=()
+CLIENT_EXPORTS_TXT=""
+if [ -n "$INCLUDE_CLIENT" ]; then
+	echo "xbox-game-link-check: isolating the $TITLE client module..." >&2
+	if ! bash tools/xbox-game-isolate.sh "$TITLE" client --expect-fail 0 --expect-total 85; then
+		echo "xbox-game-link-check: $TITLE client isolation did not certify a" >&2
+		echo "  complete object set - refusing to attempt a real link against a" >&2
+		echo "  set already known to be partial or regressed." >&2
+		exit 1
+	fi
+
+	CLIENT_ISO_DIR="$SCRATCH/game-$TITLE/client-isolated"
+	CLIENT_ISO_MANIFEST="$CLIENT_ISO_DIR/manifest.txt"
+	if [ ! -f "$CLIENT_ISO_MANIFEST" ]; then
+		echo "xbox-game-link-check: $CLIENT_ISO_MANIFEST missing after a certified" >&2
+		echo "  isolation - impossible." >&2
+		exit 1
+	fi
+	CLIENT_ISO_COMPLETE=""
+	CLIENT_ISO_CONTENT="$(cat "$CLIENT_ISO_MANIFEST" 2>/dev/null)"
+	if [[ "$CLIENT_ISO_CONTENT" =~ COMPLETE\ ([a-z]+) ]]; then
+		CLIENT_ISO_COMPLETE="${BASH_REMATCH[1]}"
+	fi
+	if [ "$CLIENT_ISO_COMPLETE" != "yes" ]; then
+		echo "xbox-game-link-check: $CLIENT_ISO_MANIFEST reports COMPLETE" >&2
+		echo "  $CLIENT_ISO_COMPLETE, not yes - a partial client object set is not" >&2
+		echo "  link-ready. Refusing." >&2
+		exit 1
+	fi
+
+	for o in "$CLIENT_ISO_DIR"/*.obj; do
+		[ -f "$o" ] && CLIENT_ISO_OBJS+=("$o")
+	done
+	if [ "${#CLIENT_ISO_OBJS[@]}" -eq 0 ]; then
+		echo "xbox-game-link-check: zero .obj files in $CLIENT_ISO_DIR despite a" >&2
+		echo "  COMPLETE-yes manifest - impossible." >&2
+		exit 1
+	fi
+	echo "xbox-game-link-check: ${#CLIENT_ISO_OBJS[@]} isolated client object(s)." >&2
+
+	CLIENT_EXPORTS_TXT="$CLIENT_ISO_DIR/exports.txt"
+	[ -f "$CLIENT_EXPORTS_TXT" ] || { echo "xbox-game-link-check: $CLIENT_EXPORTS_TXT missing." >&2; exit 1; }
+fi
+
 # Step 3: a fresh generated_lib_server_exports.c from the ISOLATED
 # exports.txt (not stub_game/server/exports.txt) - the real
 # GetEntityAPI/GetEntityAPI2/GiveFnptrsToDll (asm-overridden, X7.2) this
@@ -179,6 +246,27 @@ fi
 echo "xbox-game-link-check: real server export table generated and compiled" >&2
 echo "  (${EXPORTS_TXT#"$REPO/"})." >&2
 
+# --include-client: the SAME fresh generated_lib_client_exports.c
+# treatment, one module later.
+CLIENT_EXPORTS_OBJ=""
+if [ -n "$INCLUDE_CLIENT" ]; then
+	if ! bash tools/gen-library-tables.sh "$GAME_GEN_DIR" "client:$CLIENT_EXPORTS_TXT" > /dev/null; then
+		echo "xbox-game-link-check: tools/gen-library-tables.sh failed generating" >&2
+		echo "  the real client export table." >&2
+		exit 1
+	fi
+	CLIENT_EXPORTS_C="$GAME_GEN_DIR/generated_lib_client_exports.c"
+	[ -f "$CLIENT_EXPORTS_C" ] || { echo "xbox-game-link-check: $CLIENT_EXPORTS_C was not generated." >&2; exit 1; }
+	CLIENT_EXPORTS_OBJ="$GAME_GEN_DIR/generated_lib_client_exports.obj"
+	if ! tools/xbox-cc.sh "$CLIENT_EXPORTS_C" -o "$CLIENT_EXPORTS_OBJ" 2>"$GAME_GEN_DIR/lasterr-client.txt"; then
+		echo "xbox-game-link-check: $CLIENT_EXPORTS_C failed to compile:" >&2
+		cat "$GAME_GEN_DIR/lasterr-client.txt" >&2
+		exit 1
+	fi
+	echo "xbox-game-link-check: real client export table generated and compiled" >&2
+	echo "  (${CLIENT_EXPORTS_TXT#"$REPO/"})." >&2
+fi
+
 # Step 4: build this attempt's own response file - the real, just-verified
 # baseline response file, with the stub server's two objects removed
 # (matched by their distinctive, stable filename suffixes - the exact
@@ -186,19 +274,31 @@ echo "  (${EXPORTS_TXT#"$REPO/"})." >&2
 # tools/xbox-link-check.sh's own naming; only the suffix is stable to
 # match against) and the isolated server objects + the freshly-generated
 # export table object added. generated_lib_client_exports.obj is a
-# DIFFERENT suffix and must survive this filter - the client stays
-# stubbed.
+# DIFFERENT suffix and must survive this filter UNLESS --include-client is
+# set, in which case it is removed too (the stub client's own only
+# object - no stub_game/client/*.c source exists at all, so this is ONE
+# object, not two) and replaced with the real isolated client module the
+# same way.
 NEW_RESPONSE="$SCRATCH/game-$TITLE/link-check-response.txt"
 mkdir -p "$(dirname "$NEW_RESPONSE")"
-grep -v -F 'server_stub.obj' "$RESPONSE" \
-	| grep -v -F 'generated_lib_server_exports.obj' \
-	> "$NEW_RESPONSE" || true
+if [ -n "$INCLUDE_CLIENT" ]; then
+	grep -v -F 'server_stub.obj' "$RESPONSE" \
+		| grep -v -F 'generated_lib_server_exports.obj' \
+		| grep -v -F 'generated_lib_client_exports.obj' \
+		> "$NEW_RESPONSE" || true
+	EXPECTED_REMOVED=3
+else
+	grep -v -F 'server_stub.obj' "$RESPONSE" \
+		| grep -v -F 'generated_lib_server_exports.obj' \
+		> "$NEW_RESPONSE" || true
+	EXPECTED_REMOVED=2
+fi
 REMOVED=$(( $(wc -l < "$RESPONSE") - $(wc -l < "$NEW_RESPONSE") ))
-if [ "$REMOVED" -ne 2 ]; then
-	echo "xbox-game-link-check: expected to remove exactly 2 stub-server" >&2
-	echo "  object(s) from $RESPONSE, actually removed $REMOVED - the stub" >&2
-	echo "  game module's naming may have changed; fix this script's filter" >&2
-	echo "  rather than trusting a mismatched count." >&2
+if [ "$REMOVED" -ne "$EXPECTED_REMOVED" ]; then
+	echo "xbox-game-link-check: expected to remove exactly $EXPECTED_REMOVED" >&2
+	echo "  stub-module object(s) from $RESPONSE, actually removed $REMOVED -" >&2
+	echo "  the stub game module's naming may have changed; fix this script's" >&2
+	echo "  filter rather than trusting a mismatched count." >&2
 	exit 1
 fi
 for o in "${ISO_OBJS[@]}" "$SERVER_EXPORTS_OBJ"; do
@@ -207,6 +307,13 @@ done
 echo "xbox-game-link-check: response file built - removed 2 stub-server" >&2
 echo "  object(s), added ${#ISO_OBJS[@]} isolated + 1 generated export table" >&2
 echo "  object." >&2
+if [ -n "$INCLUDE_CLIENT" ]; then
+	for o in "${CLIENT_ISO_OBJS[@]}" "$CLIENT_EXPORTS_OBJ"; do
+		echo "\"$(cygpath -m "$o")\"" >> "$NEW_RESPONSE"
+	done
+	echo "xbox-game-link-check: removed 1 stub-client object, added" >&2
+	echo "  ${#CLIENT_ISO_OBJS[@]} isolated + 1 generated export table object." >&2
+fi
 
 # Step 5: the real link. Deliberately NOT `eval "$(deps/nxdk/bin/activate
 # -s)"` - measured directly that calling it here REPLACES PATH rather
@@ -241,7 +348,7 @@ DUP=$(grep -c 'duplicate symbol' "$LOG")
 UNDEF=$(grep -c 'undefined symbol' "$LOG")
 
 echo
-echo "xbox-game-link-check: $TITLE server - $DUP duplicate, $UNDEF undefined   (full log: $LOG)"
+echo "xbox-game-link-check: $TITLE $MODULE_LABEL - $DUP duplicate, $UNDEF undefined   (full log: $LOG)"
 echo
 
 # Same robustness as tools/xbox-link-check.sh's own gate - see that
@@ -295,10 +402,15 @@ fi
 # exactly the false-clean measurement class tools/xbox-link-check.sh's
 # own parked-undefined-symbols.txt identity check already exists to
 # close, but that check was not carried into this tool. Mirrors it here
-# with a server-specific baseline (the server module's real undefined
-# set is not the same as the base engine's).
+# with a module-specific baseline (the real undefined set for server-only
+# vs. server+client together is not the same, so --include-client uses
+# its own separately-tracked file rather than conflating the two).
 if [ "$UNDEF" -gt 0 ]; then
-	PARKED_LIST="$REPO/docs/r3d/parked-server-undefined-symbols.txt"
+	if [ -n "$INCLUDE_CLIENT" ]; then
+		PARKED_LIST="$REPO/docs/r3d/parked-game-undefined-symbols.txt"
+	else
+		PARKED_LIST="$REPO/docs/r3d/parked-server-undefined-symbols.txt"
+	fi
 	if [ ! -f "$PARKED_LIST" ]; then
 		echo "xbox-game-link-check: $PARKED_LIST does not exist - nothing to" >&2
 		echo "  compare the real undefined symbol set against. Refusing to" >&2
@@ -311,14 +423,14 @@ if [ "$UNDEF" -gt 0 ]; then
 	sort -u "$PARKED_LIST" > "$EXPECTED_UNDEF_LIST"
 	if ! diff -u "$EXPECTED_UNDEF_LIST" "$ACTUAL_UNDEF_LIST" > "$SCRATCH/game-$TITLE/undefined-diff.txt"; then
 		echo "xbox-game-link-check: REGRESSION - the actual undefined symbol set" >&2
-		echo "  does not match docs/r3d/parked-server-undefined-symbols.txt, even" >&2
+		echo "  does not match ${PARKED_LIST#"$REPO/"}, even" >&2
 		echo "  though the COUNT may have matched --expect-undefined. Refusing to" >&2
 		echo "  report a clean result over an unexpected symbol set - see the diff:" >&2
 		cat "$SCRATCH/game-$TITLE/undefined-diff.txt" >&2
 		exit 1
 	fi
 	echo "xbox-game-link-check: actual undefined symbols match" >&2
-	echo "  docs/r3d/parked-server-undefined-symbols.txt exactly." >&2
+	echo "  ${PARKED_LIST#"$REPO/"} exactly." >&2
 fi
 
 # --xbe: same mechanism as tools/xbox-link-check.sh's own --xbe block
@@ -393,10 +505,10 @@ fi
 # would be a fabricated result. Report a real path only when one was
 # actually produced.
 if [ -f "$OUT_EXE" ]; then
-	echo "xbox-game-link-check: $TITLE server module link-checked. Output: $OUT_EXE" >&2
+	echo "xbox-game-link-check: $TITLE $MODULE_LABEL module(s) link-checked. Output: $OUT_EXE" >&2
 	echo "$OUT_EXE"
 else
-	echo "xbox-game-link-check: $TITLE server module link-checked - $UNDEF" >&2
+	echo "xbox-game-link-check: $TITLE $MODULE_LABEL module(s) link-checked - $UNDEF" >&2
 	echo "  undefined symbol(s) match the tracked baseline, so no .exe was" >&2
 	echo "  produced (nxdk-link never emits output with unresolved symbols" >&2
 	echo "  present). This is a measurement pass, not an executable build." >&2

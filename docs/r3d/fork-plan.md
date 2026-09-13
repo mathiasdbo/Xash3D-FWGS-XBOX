@@ -3230,6 +3230,31 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    `tools/xemu-debug.py`: `regs` in the kernel idle-wait between frames,
    `mon "info registers"` `HLT=0`, and the log channel carrying `Con_Printf`
    traffic from the frame loop - three independent signals, not one.
+
+   **First real combined link (`tools/xbox-game-link-check.sh hl
+   --include-client`, divergence #41): 0 duplicate, 527 undefined.** The
+   real, isolated server (107 objects) and real, isolated client (85
+   objects) linked together for the first time in this project's history
+   hit one genuine collision first - the engine's own `IN_ActivateMouse`/
+   `IN_DeactivateMouse`/`IN_MouseEvent` (real, externally-linked dispatcher
+   functions, `engine/client/input/input.c`) share a name with the
+   client's own required, protocol-mandated exports of the same name
+   (`tools/xbox-client-required-exports.txt`), harmless on every other
+   platform (a separate DLL per module) but a real duplicate-symbol error
+   on Xbox's one static binary. Fixed by renaming only the engine's linker
+   symbol (`asm("Host_IN_ActivateMouse")` etc., `#if XASH_XBOX`-guarded in
+   `engine/client/input.h`), zero call-site changes. With that fixed, the
+   real remaining gap is `deps/hlsdk/utils/vgui` - headers plus a prebuilt
+   win32 `.lib`, no buildable source - all 527 undefined symbols are VGUI1
+   (`vgui::Panel`/`Scheme`/`Color`/`Font`/etc.). **VGUI1 is the next
+   concrete blocker for this step**: the real, portable, buildable fix is
+   populating `3rdparty/vgui_support` (an FWGS submodule already declared
+   in `.gitmodules`, never checked out), not something to improvise inline.
+   Parked as `docs/r3d/parked-game-undefined-symbols.txt` (the real,
+   measured, reviewed 527-symbol set) so this stays a tracked, reproducible
+   baseline rather than a silently-accepted gap. No XBE is produced by this
+   measurement (`nxdk-link` emits nothing with unresolved symbols present) -
+   step 2's actual boot attempt waits on VGUI1.
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's
