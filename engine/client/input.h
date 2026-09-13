@@ -32,10 +32,36 @@ INPUT
 void IN_Init( void );
 void Host_InputFrame( void );
 void IN_Shutdown( void );
+// R3D: on every other platform the client module is a separate DLL, so
+// the engine's own IN_ActivateMouse/IN_DeactivateMouse/IN_MouseEvent
+// (this file, below - real, multi-file-used engine input dispatch
+// functions, each internally calling the CLIENT's own same-named
+// function through clgame.dllFuncs, engine/client/dll_int/cl_game.c) and
+// the HL SDK's own client-side functions of the exact same name
+// (deps/hlsdk/cl_dll/inputw32.cpp, a real, required client export -
+// tools/xbox-client-required-exports.txt) never collide: two DLLs, two
+// private symbol tables. Xbox statically links everything into one
+// binary, so without this the two real, both-needed definitions are a
+// genuine duplicate-symbol link error - found running the first real
+// combined server+client link (tools/xbox-game-link-check.sh hl
+// --include-client). The client SDK's own names are the ones a real
+// COM_GetProcAddress-style lookup resolves BY NAME (tools/xbox-client-
+// required-exports.txt), so they must stay exactly as-is; these ENGINE
+// functions have no such external-name requirement (every real caller
+// - in_keys.c, in_touch.c, the SDL host_sdl*.c files - reaches them
+// through this header's own declaration, never by looking up a string),
+// so renaming their LINKER symbol only, not their C-level name any
+// caller writes, is the correct, minimal fix.
+#if XASH_XBOX
+void IN_MouseEvent( int key, int down ) asm( "Host_IN_MouseEvent" );
+void IN_ActivateMouse( void ) asm( "Host_IN_ActivateMouse" );
+void IN_DeactivateMouse( void ) asm( "Host_IN_DeactivateMouse" );
+#else
 void IN_MouseEvent( int key, int down );
-void IN_MWheelEvent( int direction );
 void IN_ActivateMouse( void );
 void IN_DeactivateMouse( void );
+#endif
+void IN_MWheelEvent( int direction );
 void IN_MouseSavePos( void );
 void IN_MouseRestorePos( void );
 void IN_ToggleClientMouse( int newstate, int oldstate );

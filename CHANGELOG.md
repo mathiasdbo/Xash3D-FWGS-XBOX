@@ -5,6 +5,39 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — first real combined server+client link: 0 duplicate, 527 undefined (all VGUI1, now tracked) (divergence #41)
+
+The first real link of the real, isolated `hl` server (107 objects) and
+real, isolated `hl` client (85 objects) together, ever, in this
+project's history (`tools/xbox-game-link-check.sh hl --include-client`,
+new flag added this change) hit a genuine duplicate-symbol collision
+that only exists once both real modules are present: the engine's own
+`IN_ActivateMouse`/`IN_DeactivateMouse`/`IN_MouseEvent`
+(`engine/client/input/input.c`) share a name with the client SDK's own
+required, protocol-mandated exports of the same name. Harmless on every
+other platform (a separate DLL per module); a real duplicate-symbol
+error on Xbox's one static binary.
+
+Fixed by renaming only the engine's own linker symbol
+(`asm("Host_IN_ActivateMouse")` etc., `#if XASH_XBOX`-guarded in
+`engine/client/input.h`) - the client SDK's identical names stay exactly
+as-is, since they are the ones a real `COM_GetProcAddress`-style lookup
+resolves by name. Zero call-site changes: none of the 5 real callers
+take the function's address or look it up by string. Verified directly
+with `llvm-nm` on the compiled objects that the engine's real definition
+and every real caller agree on the renamed symbol.
+
+With that fixed, the real combined link now reaches **0 duplicate** for
+the first time, surfacing **527 undefined symbols, all VGUI1**
+(`vgui::Panel`/`Scheme`/`Color`/`Font`/etc.) - `deps/hlsdk/utils/vgui` is
+headers-only plus a prebuilt win32 `.lib`, no buildable source anywhere
+in this vendored SDK. The real, portable fix is populating
+`3rdparty/vgui_support` (an FWGS submodule already declared in
+`.gitmodules`, never checked out) - real, separate future work, tracked
+as the next concrete blocker for X7.4 step 2 rather than rushed here.
+Parked as a new, real, measured baseline: `docs/r3d/parked-game-
+undefined-symbols.txt`. See divergence #41.
+
 ### Fixed — real `hl` client SDK: 85/85, zero failures - the real, full `hl` client SDK compiles and isolates completely clean for the first time (divergence #40)
 
 The prior entry's `<memory_resource>` categorisation ("genuinely
