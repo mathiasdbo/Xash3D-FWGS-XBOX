@@ -163,7 +163,34 @@ _HEXWORD_RE = re.compile(r"0x([0-9a-fA-F]{8})")
 class GdbRemote:
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=10):
         self.sock = socket.create_connection((host, port), timeout=timeout)
+        self._drain_stale()
         self.cmd("qSupported:multiprocess+;swbreak+;hwbreak+")
+
+    def _drain_stale(self):
+        # A prior connection that sent 'c'/'s' and then disconnected before
+        # a stop-reply arrived (script killed, timed out, or crashed) leaves
+        # that reply queued in the stub. The stub delivers it as the FIRST
+        # bytes on the NEXT connection, ahead of whatever that connection
+        # actually asked for - shifting every subsequent reply on this
+        # connection by one packet (the real qSupported reply then shows up
+        # later as an "<unexpected packet>" in an unrelated read). Discard
+        # anything already sitting in the socket before we send our own
+        # first command, so a fresh connection always starts in sync.
+        self.sock.settimeout(0.2)
+        discarded = b""
+        try:
+            while True:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    break
+                discarded += chunk
+        except socket.timeout:
+            pass
+        if discarded:
+            sys.stderr.write(
+                f"xemu-debug: discarded {len(discarded)} stale byte(s) left over from a "
+                "previous connection (likely an unacknowledged continue/step reply): "
+                f"{discarded[:120]!r}\n")
 
     @staticmethod
     def _checksum(data):
@@ -263,10 +290,24 @@ class GdbRemote:
         return self.cmd(f"z0,{addr:x},1")
 
     def cont(self, timeout=60):
-        return self.cmd("c", timeout=timeout)
+        try:
+            return self.cmd("c", timeout=timeout)
+        except socket.timeout:
+            raise RuntimeError(
+                f"no stop-reply within {timeout}s - the target is still running "
+                "(the breakpoint has not been hit yet, or never will be on this "
+                "path). The 'c' was already sent and is NOT undone by this "
+                "timeout: the guest keeps running and the eventual stop-reply "
+                "stays queued in the stub until the next connection drains it. "
+                "Reconnect and try again with a longer --timeout, or use "
+                "`mon \"info registers\"` / `mon \"cont\"` to inspect/drive the "
+                "target via the QEMU monitor instead.") from None
 
     def step(self, timeout=15):
-        return self.cmd("s", timeout=timeout)
+        try:
+            return self.cmd("s", timeout=timeout)
+        except socket.timeout:
+            raise RuntimeError(f"no stop-reply within {timeout}s for single-step") from None
 
     def close(self):
         self.sock.close()

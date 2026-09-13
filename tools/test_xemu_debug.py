@@ -13,6 +13,8 @@ that the happy path works.
 """
 import importlib.util
 import os
+import socket
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -108,6 +110,38 @@ class ScanFailurePaths(unittest.TestCase):
         self.assertEqual(res.found, [0x2000 + 10], "a 4-byte pattern read 1 byte at a time must be found exactly once")
         out = []
         self.assertEqual(xd.report_scan(res, 0x2000, 0x2000 + len(image), "test", log=out.append), 0)
+
+
+class DrainStaleConnectionState(unittest.TestCase):
+    """A prior connection that sent 'c'/'s' and disconnected before the
+    stop-reply arrived (killed, timed out, crashed) leaves that reply
+    queued in the stub, which delivers it as the first bytes on the NEXT
+    connection - shifting every later reply on that connection by one
+    packet. Reproduced here with a loopback socketpair standing in for the
+    stub, no emulator needed."""
+
+    def setUp(self):
+        self.client, self.stub = socket.socketpair()
+        self.addCleanup(self.client.close)
+        self.addCleanup(self.stub.close)
+        self.conn = object.__new__(xd.GdbRemote)
+        self.conn.sock = self.client
+
+    def test_stale_bytes_from_a_prior_session_are_discarded(self):
+        stale_stop_reply = b"$T02thread:p01.01;#03"
+        self.stub.sendall(stale_stop_reply)
+        time.sleep(0.05)  # let it land in the client socket's receive buffer
+        self.conn._drain_stale()
+        # Nothing left to drain a second time - it was really consumed.
+        self.stub.settimeout(0.1)
+        self.stub.sendall(b"$OK#9a")
+        self.conn.sock.settimeout(1)
+        self.assertEqual(self.conn.sock.recv(64), b"$OK#9a")
+
+    def test_a_clean_connection_with_nothing_queued_drains_quickly(self):
+        started = time.time()
+        self.conn._drain_stale()
+        self.assertLess(time.time() - started, 1.0, "drain must not block waiting for data that isn't coming")
 
 
 if __name__ == "__main__":
