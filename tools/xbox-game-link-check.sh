@@ -522,6 +522,20 @@ fi
 # (the real server module swapped in), only reached after a successful
 # --expect-undefined match AND symbol-identity match above, so this
 # never runs on an unexplained, regressed, or substituted link.
+if [ -n "$XBE_OUT" ] && [ "$UNDEF" -gt 0 ]; then
+	echo "xbox-game-link-check: refusing --xbe with $UNDEF undefined" >&2
+	echo "  symbol(s) present, even though the count/identity match a" >&2
+	echo "  tracked baseline. -force:unresolved (below) would still" >&2
+	echo "  produce a file that passes the existence/magic checks this" >&2
+	echo "  script's own --xbe path runs - but a real, callable branch" >&2
+	echo "  through a genuinely undefined symbol (found in Codex review," >&2
+	echo "  2026-09-13: real dynamic_cast<> call sites in 3rdparty/freevgui" >&2
+	echo "  reach the parked ___RTDynamicCast gap) is not the same thing as" >&2
+	echo "  a real, valid XBE. --xbe is for a clean (0 duplicate, 0" >&2
+	echo "  undefined) link only; use this script without --xbe to measure" >&2
+	echo "  a tracked, nonzero undefined baseline." >&2
+	exit 1
+fi
 if [ -n "$XBE_OUT" ]; then
 	XBE_EXE="$SCRATCH/game-$TITLE/xbe-build.exe"
 	# Found in Codex review round 1, 2026-09-12: without this, a stale
