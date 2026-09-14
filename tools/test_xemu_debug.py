@@ -13,6 +13,9 @@ that the happy path works.
 """
 import importlib.util
 import os
+import socket
+import threading
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -108,6 +111,67 @@ class ScanFailurePaths(unittest.TestCase):
         self.assertEqual(res.found, [0x2000 + 10], "a 4-byte pattern read 1 byte at a time must be found exactly once")
         out = []
         self.assertEqual(xd.report_scan(res, 0x2000, 0x2000 + len(image), "test", log=out.append), 0)
+
+
+class HandshakeSynchronization(unittest.TestCase):
+    """A prior connection that sent 'c'/'s' and disconnected before the
+    stop-reply arrived (killed, timed out, crashed) leaves that reply
+    queued in the stub, which delivers it as the first packet(s) on the
+    NEXT connection, ahead of that connection's own qSupported reply.
+    _handshake() must recognize and discard those by shape (not by
+    guessing a delay is long enough) and keep waiting for the real
+    qSupported reply specifically. Reproduced with a loopback socketpair
+    standing in for the stub, no emulator needed."""
+
+    def setUp(self):
+        self.client, self.stub = socket.socketpair()
+        self.addCleanup(self.client.close)
+        self.addCleanup(self.stub.close)
+        self.conn = object.__new__(xd.GdbRemote)
+        self.conn.sock = self.client
+
+    def test_no_stale_packets_returns_the_real_reply_directly(self):
+        self.stub.sendall(b"$PacketSize=4000#00")
+        self.assertEqual(self.conn._handshake(deadline=1.0), "PacketSize=4000")
+
+    def test_stale_packet_is_acked_then_discarded_and_the_real_reply_is_returned(self):
+        # A real stub withholds whatever it queues next until the previous
+        # packet is acked (see _recv's own comment on this) - both packets
+        # are staged up front here, so returning the real reply at all
+        # proves the stale one was actually consumed, and the ack count
+        # below proves it was acked rather than raw-byte-drained.
+        self.stub.sendall(b"$T02thread:p01.01;#03")
+        self.stub.sendall(b"$PacketSize=4000#00")
+        result = self.conn._handshake(deadline=1.0)
+        self.assertEqual(result, "PacketSize=4000")
+        self.stub.settimeout(1)
+        sent_to_stub = self.stub.recv(4096)
+        # The query itself legitimately contains literal '+' characters
+        # (qSupported feature flags) - check for the two bare single-byte
+        # ACKs that must follow it, not a raw '+' count over everything.
+        query = b"$qSupported:multiprocess+;swbreak+;hwbreak+#" + f"{xd.GdbRemote._checksum('qSupported:multiprocess+;swbreak+;hwbreak+'):02x}".encode()
+        self.assertEqual(sent_to_stub, query + b"++", "the stale packet and the real reply must each get exactly one bare ACK")
+
+    def test_real_reply_arriving_after_a_delay_is_still_caught(self):
+        # Codex review round 2: a fixed short window of silence is not
+        # proof the connection starts clean - the real reply can
+        # legitimately arrive after that window closes. Send it from a
+        # background thread well past what the old fixed window was.
+        def send_late():
+            time.sleep(0.3)
+            self.stub.sendall(b"$PacketSize=4000#00")
+        t = threading.Thread(target=send_late)
+        t.start()
+        try:
+            self.assertEqual(self.conn._handshake(deadline=2.0), "PacketSize=4000")
+        finally:
+            t.join()
+
+    def test_no_reply_ever_arriving_fails_loudly_after_the_deadline(self):
+        started = time.time()
+        with self.assertRaises(RuntimeError):
+            self.conn._handshake(deadline=0.3)
+        self.assertLess(time.time() - started, 1.5, "must fail near the deadline, not hang indefinitely")
 
 
 if __name__ == "__main__":

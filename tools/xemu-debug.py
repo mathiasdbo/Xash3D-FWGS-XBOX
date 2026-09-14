@@ -113,6 +113,7 @@ import re
 import socket
 import struct
 import sys
+import time
 import zlib
 
 DEFAULT_HOST = "127.0.0.1"
@@ -163,7 +164,48 @@ _HEXWORD_RE = re.compile(r"0x([0-9a-fA-F]{8})")
 class GdbRemote:
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=10):
         self.sock = socket.create_connection((host, port), timeout=timeout)
-        self.cmd("qSupported:multiprocess+;swbreak+;hwbreak+")
+        self._handshake()
+
+    def _handshake(self, deadline=2.0):
+        # A prior connection that sent 'c'/'s' and then disconnected before
+        # a stop-reply arrived (script killed, timed out, or crashed) leaves
+        # that reply queued in the stub, which delivers it as the FIRST
+        # packet on the NEXT connection, ahead of whatever that connection
+        # actually asked for - shifting every subsequent reply by one packet
+        # (the real qSupported reply then shows up later as an "<unexpected
+        # packet>" in an unrelated read). A fixed window of silence is not
+        # proof the connection starts clean - the stale reply can legitimately
+        # arrive after that window closes - so instead of guessing a delay,
+        # send qSupported and keep discarding (acking each one, since an
+        # unacked packet can make the stub hold back whatever it queues next
+        # - see _recv's own comment on this) anything that isn't actually the
+        # qSupported reply, until one arrives or `deadline` is exhausted. A
+        # stop-reply/console-output/error packet always starts with one of
+        # S/T/W/X/O/E, or is exactly "OK" - none of those is how a real
+        # qSupported reply starts ("PacketSize=...;qXfer:...", confirmed
+        # against xemu's own gdbstub), so shape alone reliably tells a stale
+        # packet apart from the one actually being waited for here.
+        self._send("qSupported:multiprocess+;swbreak+;hwbreak+")
+        start = time.monotonic()
+        discarded = 0
+        while True:
+            remaining = deadline - (time.monotonic() - start)
+            try:
+                pkt = self._recv(timeout=max(remaining, 0.001))
+            except socket.timeout:
+                pkt = None
+            if pkt is None:
+                raise RuntimeError(
+                    f"no qSupported reply within {deadline}s (discarded {discarded} "
+                    "stale packet(s) first) - the connection may still be desynced")
+            if pkt == "OK" or pkt[:1] in ("S", "T", "W", "X", "O", "E"):
+                discarded += 1
+                continue
+            if discarded:
+                sys.stderr.write(
+                    f"xemu-debug: discarded {discarded} stale packet(s) left over from a "
+                    "previous connection (likely an unacknowledged continue/step reply)\n")
+            return pkt
 
     @staticmethod
     def _checksum(data):
@@ -263,10 +305,24 @@ class GdbRemote:
         return self.cmd(f"z0,{addr:x},1")
 
     def cont(self, timeout=60):
-        return self.cmd("c", timeout=timeout)
+        try:
+            return self.cmd("c", timeout=timeout)
+        except socket.timeout:
+            raise RuntimeError(
+                f"no stop-reply within {timeout}s - the target is still running "
+                "(the breakpoint has not been hit yet, or never will be on this "
+                "path). The 'c' was already sent and is NOT undone by this "
+                "timeout: the guest keeps running and the eventual stop-reply "
+                "stays queued in the stub until the next connection drains it. "
+                "Reconnect and try again with a longer --timeout, or use "
+                "`mon \"info registers\"` / `mon \"cont\"` to inspect/drive the "
+                "target via the QEMU monitor instead.") from None
 
     def step(self, timeout=15):
-        return self.cmd("s", timeout=timeout)
+        try:
+            return self.cmd("s", timeout=timeout)
+        except socket.timeout:
+            raise RuntimeError(f"no stop-reply within {timeout}s for single-step") from None
 
     def close(self):
         self.sock.close()

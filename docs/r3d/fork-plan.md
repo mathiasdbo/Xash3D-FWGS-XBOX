@@ -3310,14 +3310,40 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    duplicate, 0 undefined** and produces a real linked output for the
    first time ever with server, client, and freevgui all real together.
    X7.4 step 2's real link-only exit gate is met. See divergence #43 for
-   the full account. The next real step is a real `--xbe` build and a
-   real boot attempt, verified the same rigorous way step 1's own boot
-   was (`tools/xemu-debug.py`, real breakpoint/stack evidence - see
-   step 1's own account above for why a `continue`-timeout or log-channel
-   silence alone is not sufficient proof) - expected boot: `CL_Init`
-   passes, `UI_LoadProgs` loads the menu, `Host_Frame` runs, matching
-   this step's own already-stated expected boot at the top of this
-   item.
+   the full account.
+
+   **A real `--xbe` build and real boot attempt followed, on real retail
+   `valve/` assets packaged into a real XISO and launched under xemu -
+   first time ever with server, client, and freevgui all real
+   together.** Verified the same rigorous way step 1's own boot was
+   (`tools/xemu-debug.py`, real breakpoint/stack evidence, not a
+   `continue`-timeout or log-channel silence). Along the way, a real bug
+   in the tool itself produced several false "the breakpoint never
+   fires" readings - see `docs/r3d/lessons.md`'s entry on
+   `_handshake` for the full account - fixed before trusting any
+   further result from it. With the fixed tool: the guest is confirmed
+   genuinely alive (never `HLT`, real varied EIPs inside genuine engine
+   code, e.g. `_memset`/`__Mem_Alloc` activity), the breakpoint
+   mechanism itself is confirmed working (an immediate, exact hit with
+   correct single-step progression at a known-hot address), but a
+   breakpoint at the real, map-resolved `Host_Frame` address never fires
+   across 150+ real, uninterrupted seconds of continue time. Every async
+   pause instead lands at the exact same instruction - the Xbox kernel's
+   own idle/ready-queue-poll loop (`sti; nop; nop; cli; cmp ebp,[ebp+0];
+   je ...`), identified by disassembling the bytes at the repeatedly-
+   observed EIP, with the same `EBX`/`EBP` values every time. Landing on
+   the identical instruction across independent async disconnect-
+   triggered halts, over many real seconds, is real evidence the CPU
+   spends the overwhelming majority of its time there, not that it was
+   merely sampled there once: **some thread the game needs is genuinely
+   blocked on a kernel wait that is never signaled, somewhere before
+   `Host_Frame` - not crashed, not making forward progress either.**
+   Finding which wait call blocks it (the caller site of the one real
+   engine activity glimpsed, or a breakpoint on the kernel's own
+   wait/dispatch entry points) is real, separate, targeted follow-up
+   work - not yet started. **X7.4 step 2 is therefore NOT closed**: the
+   link-only exit gate is met, but the boot milestone (`CL_Init` passes,
+   `UI_LoadProgs` loads the menu, `Host_Frame` runs) is not.
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's

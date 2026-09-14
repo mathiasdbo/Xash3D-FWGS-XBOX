@@ -884,3 +884,68 @@ downstream, not just the last one that happens to be easiest to
 observe - especially when an intermediate return value is silently
 discarded by its own caller, which is itself worth grepping for before
 trusting that a later symptom implies an earlier success.**
+
+**A real bug in `tools/xemu-debug.py` itself produced a false "the
+breakpoint never fires" signal during the first real combined
+server+client+freevgui boot attempt (X7.4 step 2): killing the script
+via an external `timeout N` wrapper while it was blocked waiting for a
+`c` (continue) stop-reply closes the TCP connection out from under it,
+and xemu's gdbstub responds to that abrupt disconnect by auto-halting
+the CPU and queuing a synthetic `T02` (SIGINT-style) stop-reply for
+whoever connects next. The NEXT invocation's own `qSupported` handshake
+then silently consumes that stale packet instead of its own reply, and
+the real `qSupported` reply arrives one packet late, surfacing later as
+an `<unexpected packet: ...>` in an unrelated `monitor()` call - so
+"the debugger looks broken" and "the breakpoint never fires" were, for
+several attempts, actually "my own tooling killed the connection and
+desynced the next one," not a fact about the guest. **Fixed properly**
+(not worked around, and not with a guessed timing window either - two
+Codex review rounds on the fix itself found real gaps in both a first,
+raw-byte drain and a second, fixed-200ms-window version):
+`GdbRemote.__init__` now runs a real handshake (`_handshake`) that sends
+its own `qSupported` and keeps discarding - acking each one, since an
+unacked packet can make a real stub withhold whatever it queues next -
+anything that isn't actually the `qSupported` reply (told apart by
+shape: a stop-reply/console/error packet always starts with one of
+`S`/`T`/`W`/`X`/`O`/`E`, or is exactly `OK`; a real `qSupported` reply
+never does) until the real reply arrives or a bounded deadline is hit,
+instead of assuming a fixed window of silence proves the connection
+starts clean (`tools/test_xemu_debug.py`'s `HandshakeSynchronization`
+covers a stale packet, a real reply arriving after a real delay, and no
+reply ever arriving, over a loopback `socketpair()` - no emulator
+needed). `cont()`/`step()` now also catch a local read timeout and raise
+a clear `RuntimeError` explaining that the `c`/`s` was already sent and
+NOT undone - use the script's own `--timeout`, not an external
+process-killer, and prefer `mon "cont"` / `mon "info registers"` (the
+QEMU monitor passthrough) when a raw GDB stop-reply proves unreliable
+for a given target. **Never let a debugger's own retry/timeout wrapper
+close the transport out from under a request that is still genuinely in
+flight on the target side - the target does not know the client gave
+up, and the next session inherits
+the mess.**
+
+**With that fixed, the real result for X7.4 step 2's first boot
+attempt (server+client+freevgui, real retail `valve/` assets, real
+XISO, real xemu launch) is a genuine, well-evidenced finding, not an
+inconclusive one: the guest is confirmed alive (never `HLT`, varied
+real EIPs seen inside genuine engine code, e.g. `_memset`/`__Mem_Alloc`
+activity), the breakpoint mechanism itself is confirmed working (an
+immediate, exact hit with correct single-step progression at a
+known-hot address, `_memset`), but a breakpoint at the real,
+map-resolved `Host_Frame` address never fires across 150+ real,
+uninterrupted seconds of continue time. Every async pause lands at the
+exact same instruction, `sti; nop; nop; cli; cmp ebp,[ebp+0]; je ...`
+at a fixed kernel address - the Xbox kernel's own idle/ready-queue-poll
+loop, identified by disassembling the bytes at the repeatedly-observed
+EIP and recognizing the self-referential list-empty check
+(`cmp ebp,[ebp+0]`), with the same `EBX`/`EBP` values in every reading.
+Landing on the EXACT SAME instruction on independent async
+disconnect-triggered halts, over many real seconds, is strong evidence
+the CPU is spending the overwhelming majority of its time there, not
+that it was merely sampled there once - meaning some thread the game
+needs is genuinely blocked on a kernel wait that is never signaled,
+somewhere before `Host_Frame`, not crashed and not making forward
+progress either. Finding WHICH wait call blocks it needs the caller
+site of the one real engine activity glimpsed (`_memset`/`Mem_Alloc`)
+or a breakpoint on the kernel's own wait/dispatch entry points - real,
+separate, targeted follow-up work, not concluded here.**
