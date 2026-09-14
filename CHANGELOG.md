@@ -5,6 +5,41 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — deps/hlsdk: exempt exactly "valve" on NXDK, not a prefix match (divergence #44)
+
+Found via live boot debugging of X7.4 step 2's first real combined
+server+client+freevgui build: the boot reliably executed a `quit`
+command ~2.5-3.3s into every attempt, restarting the whole init
+sequence from scratch each time. Traced the real call chain
+(`Cmd_ExecuteString` → `CL_Quit_f` → `Sys_Quit("command")`) to
+`cdll_int.cpp`'s `Initialize()`, which quits whenever `CL_InitClient()`
+returns false - and it was returning false because
+`UTIL_IsValveGameDirectory()`, a real HL SDK safety check meant to stop
+a mod's compiled DLL from running inside someone's real retail Valve
+install, correctly refused the moment it saw our disc's real retail
+Half-Life assets sitting in a directory named `valve` (matching
+upstream HL's own canonical gamedir - this fork ports the stock game
+itself, not a mod alongside a separate retail install).
+
+Fixed in `deps/hlsdk` (an owned fork, direct commit, not a patch):
+`UTIL_IsValveGameDirectory()` gained a new `NXDK` arm, alongside the
+existing `_STATIC_ENGINE_LINK` one (Ferrum56's own bypass for the
+identical tension, kept untouched and independent - reusing that macro
+directly would have pulled in unrelated Rust-FFI code paths). Final
+shape, after two real review rounds: exempts exactly `valve` (this
+checkout's own title - Blue Shift/Op4 have their own separate SDK
+checkouts, `deps/hlsdk-bshift`/`deps/hlsdk-opfor`, and need the
+identical fix in their own copy when their own bring-up starts) by
+full case-insensitive equality, not a prefix match (an earlier version
+would also have silently accepted `valve_custom`, or `gearbox`/`bshift`
+in this same checkout, which don't belong here). Verified live: read
+the actual compiled machine code at the resolved runtime address in a
+running boot, then re-tested the full boot - the `quit`-at-~2.5s is
+gone, and the boot now demonstrably reaches `R_Init()`'s real
+renderer-selection code before hitting a new, later, separate,
+well-understood gap (`video.cfg` needs `r_refdll "null"` for this
+milestone's headless renderer). See divergence #44.
+
 ### Fixed — tools/xemu-debug.py: a killed continue/step desyncs the next connection
 
 Found during X7.4 step 2's first real combined server+client+freevgui
