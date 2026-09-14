@@ -662,6 +662,14 @@ if [ "$OTHER_ERR" -gt 0 ] || { [ "$LINK_STATUS" -ne 0 ] && [ "$TOTAL_ERR" -eq 0 
 	exit 1
 fi
 
+# The -stack: override is measured on the actual output, not trusted from
+# the flag - see tools/xbox-check-stack.sh and divergence #47. nxdk-link
+# emits no output while undefined symbols remain, so only an output that
+# exists is checked.
+if [ -f "$SCRATCH/link-check.exe" ] && ! tools/xbox-check-stack.sh "$SCRATCH/link-check.exe" "$XBOX_STACK_SIZE"; then
+	exit 1
+fi
+
 # Any duplicate symbol at all is always a regression: this project has no
 # accepted/expected duplicate-symbol case, unlike undefined symbols, which
 # has a large, deliberately-parked networking group. Fail loudly on any
@@ -776,6 +784,12 @@ if [ -n "$XBE_OUT" ]; then
 		exit 1
 	fi
 
+	# Measured stack check on the PE that is about to become the XBE -
+	# see tools/xbox-check-stack.sh and divergence #47.
+	if ! tools/xbox-check-stack.sh "$XBE_EXE" "$XBOX_STACK_SIZE"; then
+		exit 1
+	fi
+
 	CXBE="deps/nxdk/tools/cxbe/cxbe"
 	if [ ! -x "$CXBE" ] && [ ! -f "${CXBE}.exe" ]; then
 		echo "link-check: $CXBE not found or not built." >&2
@@ -789,6 +803,11 @@ if [ -n "$XBE_OUT" ]; then
 	fi
 	if [ ! -f "$XBE_OUT" ]; then
 		echo "link-check: cxbe reported success but $XBE_OUT does not exist." >&2
+		exit 1
+	fi
+	# And on the XBE header itself (SizeOfStackCommit, the value nxdk's
+	# CreateThread(..., 0, ...) hands every thread) - divergence #47.
+	if ! tools/xbox-check-stack.sh "$XBE_OUT" "$XBOX_STACK_SIZE"; then
 		exit 1
 	fi
 	# XBEH, the real magic header every valid .xbe starts with - checked,

@@ -475,6 +475,18 @@ if [ "$DUP" -gt 0 ]; then
 	exit 1
 fi
 
+# The -stack: override is measured on the actual output, not trusted from
+# the flag (found in review, divergence #47): lld takes the LAST -stack:
+# given, and nothing else here would notice if that ordering, or the
+# option itself, ever stopped overriding nxdk-link's own -stack:65536 -
+# the binary would still link and still pass every other gate while
+# restoring the first-frame stack overflow. nxdk-link emits no output at
+# all when undefined symbols remain (see the --xbe path's -force:unresolved
+# for why), so only an output that exists is checked here.
+if [ -f "$OUT_EXE" ] && ! tools/xbox-check-stack.sh "$OUT_EXE" "$XBOX_STACK_SIZE"; then
+	exit 1
+fi
+
 if [ "$UNDEF" -gt 0 ] && [ -z "$EXPECT_UNDEFINED" ]; then
 	echo "xbox-game-link-check: $UNDEF undefined symbol(s), no --expect-undefined" >&2
 	echo "  given. This is likely the FIRST real measurement of what the hl" >&2
@@ -589,6 +601,12 @@ if [ -n "$XBE_OUT" ]; then
 		exit 1
 	fi
 
+	# Same measured stack check as the ordinary link above, on the PE that
+	# is about to become the XBE.
+	if ! tools/xbox-check-stack.sh "$XBE_EXE" "$XBOX_STACK_SIZE"; then
+		exit 1
+	fi
+
 	CXBE="deps/nxdk/tools/cxbe/cxbe"
 	if [ ! -x "$CXBE" ] && [ ! -f "${CXBE}.exe" ]; then
 		echo "xbox-game-link-check: $CXBE not found or not built." >&2
@@ -611,6 +629,12 @@ if [ -n "$XBE_OUT" ]; then
 		echo "xbox-game-link-check: $XBE_OUT does not start with the XBEH magic" >&2
 		echo "  header - cxbe reported success but the output does not look like" >&2
 		echo "  a real XBE." >&2
+		exit 1
+	fi
+	# And on the XBE itself: cxbe's propagation of the PE field into the
+	# XBE header's SizeOfStackCommit is the value the target actually runs
+	# on (nxdk's CreateThread(..., 0, ...) reads it for every thread).
+	if ! tools/xbox-check-stack.sh "$XBE_OUT" "$XBOX_STACK_SIZE"; then
 		exit 1
 	fi
 	echo "xbox-game-link-check: $XBE_OUT is a real, valid XBE ($(wc -c < "$XBE_OUT") bytes)." >&2

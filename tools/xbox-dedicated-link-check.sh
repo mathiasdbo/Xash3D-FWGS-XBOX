@@ -201,6 +201,12 @@ fi
 
 echo "xbox-dedicated-link-check: clean link, 0 duplicate, 0 undefined."
 
+# The -stack: override is measured on the actual output, not trusted from
+# the flag - see tools/xbox-check-stack.sh and divergence #47.
+if ! tools/xbox-check-stack.sh "$LINK_OUT" "$XBOX_STACK_SIZE"; then
+	exit 1
+fi
+
 # $LINK_OUT above is a raw PE .exe, not an XBE - nxdk-link's own output
 # format. A real .xbe needs cxbe's separate conversion pass (same
 # two-step tools/xbox-link-check.sh already uses); unlike that script this
@@ -220,6 +226,10 @@ if [ -n "$XBE_OUT" ]; then
 	fi
 	if [ ! -f "$XBE_OUT" ]; then
 		echo "xbox-dedicated-link-check: cxbe reported success but $XBE_OUT does not exist." >&2
+		exit 1
+	fi
+	# And on the XBE header itself (SizeOfStackCommit) - divergence #47.
+	if ! tools/xbox-check-stack.sh "$XBE_OUT" "$XBOX_STACK_SIZE"; then
 		exit 1
 	fi
 	# cmp against a literal 4-byte file, not a command-substitution capture

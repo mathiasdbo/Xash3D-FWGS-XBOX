@@ -28,7 +28,12 @@ passes `-stack:1048576` (the dedicated tool was missed at first - found
 in review; its flag is verified to propagate, though that target's own
 boot could not be re-verified: its link currently fails on a separate,
 pre-existing `_lib_ref_null_exports` undefined symbol, identically with
-or without the flag).
+or without the flag). The flag is also guarded, not just set: a new
+read-only `tools/xbox-check-stack.sh` reads the real field (PE
+`SizeOfStackReserve`, XBE `SizeOfStackCommit` at 0x130) and every link
+tool now asserts 1048576 on every PE it links and every XBE it converts,
+so a toolchain-ordering or propagation regression fails loudly instead
+of silently restoring the overflow (found in review).
 
 Verified in the PE (`SizeOfStackReserve`) and XBE (`SizeOfStackCommit`)
 headers, then live: 300 consecutive counted `Host_Frame` calls with no
