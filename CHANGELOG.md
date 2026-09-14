@@ -5,6 +5,34 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the engine's main thread ran on a 64 KiB stack; now 1 MiB (divergence #47)
+
+Root cause of the stack-overflow bugcheck divergence #46 left open,
+found live rather than guessed. It was never recursion: the bugcheck's
+own ESP sat only ~2 KiB below `Host_Frame`'s entry ESP. Catching nxdk's
+own `_xlibc_check_stack` (armed only after the first `Host_Frame`, since
+init probes 32 KiB for every console command) named the frame: the very
+first frame's `NET_QueuePacket` (`engine/common/net_ws.c`) puts
+`byte buf[NET_MAX_FRAGMENT]` - 65535 bytes - on the stack, and the check
+raises `EXCEPTION_STACK_OVERFLOW` as `NONCONTINUABLE`, which the kernel
+turns into exactly the observed `KeBugCheckEx(0x1E, 0xC00000FD)`.
+
+It could never fit because `nxdk-link` hardcodes `-stack:65536`, and
+nxdk's `CreateThread(..., 0, ...)` - including the thread crt0 runs
+`main()` on - inherits that XBE header value: the whole engine was on
+64 KiB. Upstream assumes Windows' 1 MiB and already raises the stack on
+its own small-default ports (DOS 512 KiB, Emscripten 16 MiB). Every
+`nxdk-link` call in `tools/xbox-game-link-check.sh` and
+`tools/xbox-link-check.sh` now passes `-stack:1048576`.
+
+Verified in the PE (`SizeOfStackReserve`) and XBE (`SizeOfStackCommit`)
+headers, then live: 300 consecutive counted `Host_Frame` calls with no
+failure breakpoint firing, and a 75-second free run with nothing armed
+ending in the kernel's between-frames idle loop, not the bugcheck.
+X7.4 step 2's boot milestone now holds for real - `CL_Init` passes and
+`Host_Frame` runs, sustained. `UI_LoadProgs` loading the menu is not
+claimed yet: next to verify directly. See divergence #47.
+
 ### Fixed — Host_Frame reached for the first time ever (divergences #45, #46)
 
 Continuing live boot debugging from divergence #44's fix, the boot

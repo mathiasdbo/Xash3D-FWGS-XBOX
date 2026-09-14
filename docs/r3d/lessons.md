@@ -995,3 +995,36 @@ actually get executed (breaking on `Cmd_ExecuteString`/`Cbuf_AddText*`
 and decoding their real string arguments) is what actually distinguishes
 the two, and is worth reaching for before concluding "stuck" from
 register samples alone, however consistent those samples look.**
+
+**A `STATUS_STACK_OVERFLOW` bugcheck whose ESP is still near the top of
+the stack is not recursion - it is one frame that can never fit, and
+the stack size itself is the suspect.** The X7.4 step 2 overflow
+(divergence #47) had every outward sign of runaway recursion, and three
+plausible hypotheses about the video-init path were each checked live
+and ruled out before the actual clue was read properly: the bugcheck
+frame's ESP (`0xd005d24c`) sat only ~2 KiB below `Host_Frame`'s own
+entry ESP (`0xd005d994`). Nothing recursive had happened yet. That
+arithmetic alone says "a single allocation bigger than the whole
+remaining stack" - and reading nxdk's `_xlibc_check_stack` confirmed
+exactly that contract: `__chkstk` calls it with the requested frame
+size, it compares against the thread's `StackLimit`, and raises
+`EXCEPTION_STACK_OVERFLOW` as `NONCONTINUABLE` on the spot. From there
+the fix was one question ("how big is the stack, and who set it?") and
+the answer was `nxdk-link`'s hardcoded `-stack:65536`, inherited by
+every `CreateThread(..., 0, ...)` including the one `main()` runs on.
+**Two techniques made the catch cheap and unambiguous, both worth
+reusing: (1) when the probe/check function is hot during init, arm its
+breakpoint only after the milestone breakpoint has already fired - here
+`Cmd_TokenizeString` probes a 32 KiB frame for every console command,
+so an unfiltered catch burned a 400-hit budget on config execution
+alone and never reached the frame loop; (2) record every probe's
+requested size and requester (the requester's return address is at
+`stack_ptr - 4`, since `__chkstk` hands the check function the caller's
+pre-call ESP) and take the last one before `RaiseException` fires - no
+stack walk needed, and no guessing about which of several plausible
+big-buffer functions was actually the one.** The corollary for a port:
+before attributing an overflow to engine code, check what stack size
+the platform's runtime actually hands the main thread - upstream's own
+small-default ports (DOS, Emscripten) had already had to raise it
+explicitly, and that precedent was sitting in `scripts/waifulib/` the
+whole time.

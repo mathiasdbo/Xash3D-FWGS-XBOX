@@ -419,7 +419,29 @@ if [ -e "$OUT_EXE" ]; then
 	echo "  linking - refusing to risk reporting a stale artifact." >&2
 	exit 1
 fi
+# Main-thread stack size, in bytes. nxdk-link's own default is -stack:65536
+# (64 KiB), and that XBE header value is what every CreateThread(..., 0, ...)
+# inherits - including the thread crt0's thrd_create() runs main() on, so
+# the whole engine. Upstream assumes far more: Windows' 1 MiB default, and
+# its own ports with small native defaults raise it explicitly (DOS:
+# `stack=512k`, Emscripten: 16 MiB, scripts/waifulib/compiler_optimizations.py
+# and engine/wscript). Found live, X7.4 step 2: the very first Host_Frame's
+# NET_QueuePacket (engine/common/net_ws.c) puts byte buf[NET_MAX_FRAGMENT]
+# (65535 bytes) on the stack - a 0x10100-byte frame that can never fit in
+# 64 KiB at any depth - and nxdk's __chkstk -> _xlibc_check_stack raises
+# EXCEPTION_STACK_OVERFLOW, NONCONTINUABLE, which the kernel turns into
+# KeBugCheckEx(0x1E, 0xC00000FD). 1 MiB matches Windows, the platform
+# XASH_XBOX is a sub-platform of (divergence #7), and also covers the
+# larger frames already known further in (MAX_INIT_MSG = 196608-byte
+# buffers in CL_ProcessFile/CL_BatchResourceRequest/CL_SendResourceList,
+# Cmd_TokenizeString's 32 KiB). Cost: every thread created with size 0
+# gets this much, so keep the thread count in mind at the memory-ceiling
+# milestone. lld applies the last -stack: given, so this overrides
+# nxdk-link's own default cleanly.
+XBOX_STACK_SIZE=1048576
+
 deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
+	-stack:"$XBOX_STACK_SIZE" \
 	-out:"$OUT_EXE" "@$NEW_RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
 
@@ -555,6 +577,7 @@ if [ -n "$XBE_OUT" ]; then
 	fi
 	# shellcheck disable=SC2086
 	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
+		-stack:"$XBOX_STACK_SIZE" \
 		-out:"$XBE_EXE" "@$NEW_RESPONSE" > "$SCRATCH/game-$TITLE/xbe-link.txt" 2>&1
 	XBE_LINK_STATUS=$?
 	if [ "$XBE_LINK_STATUS" -ne 0 ] || [ ! -f "$XBE_EXE" ]; then

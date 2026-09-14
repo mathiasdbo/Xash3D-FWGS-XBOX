@@ -623,7 +623,14 @@ for f in $ENGINE_OBJS $THIRDPARTY_OBJS $MAINUI_OBJS $STUB_GAME_OBJS "${LIBS[@]}"
 done
 
 LOG="$SCRATCH/link-check.txt"
+# 1 MiB main-thread stack, overriding nxdk-link's own -stack:65536 default -
+# same value and full reasoning as tools/xbox-game-link-check.sh's
+# XBOX_STACK_SIZE (a 64 KiB stack cannot hold NET_QueuePacket's own
+# 65535-byte frame; found live, X7.4 step 2). Kept in step here so an
+# engine-only --xbe boot test measures the same binary shape.
+XBOX_STACK_SIZE=1048576
 deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
+	-stack:"$XBOX_STACK_SIZE" \
 	-out:"$SCRATCH/link-check.exe" "@$RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
 
@@ -758,6 +765,7 @@ if [ -n "$XBE_OUT" ]; then
 	XBE_EXE="$SCRATCH/xbe-build.exe"
 	# shellcheck disable=SC2086
 	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
+		-stack:"$XBOX_STACK_SIZE" \
 		-out:"$XBE_EXE" "@$RESPONSE" > "$SCRATCH/xbe-link.txt" 2>&1
 	XBE_LINK_STATUS=$?
 	if [ "$XBE_LINK_STATUS" -ne 0 ] || [ ! -f "$XBE_EXE" ]; then
