@@ -22,16 +22,21 @@ upstream HL's own canonical gamedir - this fork ports the stock game
 itself, not a mod alongside a separate retail install).
 
 Fixed in `deps/hlsdk` (an owned fork, direct commit, not a patch):
-`UTIL_IsValveGameDirectory()` now also returns `false` unconditionally
-on `NXDK`, alongside the existing `_STATIC_ENGINE_LINK` arm (Ferrum56's
-own bypass for the identical tension, kept untouched and independent -
-reusing that macro directly would have pulled in unrelated Rust-FFI
-code paths). Verified live: read the actual compiled machine code at
-the resolved runtime address in a running boot (an unconditional
-`return false;`, byte-identical for the client and server copies), then
-re-tested the full boot - the `quit`-at-~2.5s is gone, and the boot now
-demonstrably reaches `R_Init()`'s real renderer-selection code before
-hitting a new, later, separate, well-understood gap (`video.cfg` needs
+`UTIL_IsValveGameDirectory()` gained a new `NXDK` arm, alongside the
+existing `_STATIC_ENGINE_LINK` one (Ferrum56's own bypass for the
+identical tension, kept untouched and independent - reusing that macro
+directly would have pulled in unrelated Rust-FFI code paths). Scoped to
+Resonance3D's own real, intended per-title gamedirs
+(`valve`/`gearbox`/`bshift` - HL/Blue Shift/Op4), not every
+Valve-prefixed directory - a first version that returned `false`
+unconditionally would have silently accepted mod directories this fork
+does not ship (`cstrike`/`tfc`/etc.), a real gap caught in review.
+Verified live: read the actual compiled machine code at the resolved
+runtime address in a running boot (an unconditional `return false;`,
+byte-identical for the client and server copies), then re-tested the
+full boot - the `quit`-at-~2.5s is gone, and the boot now demonstrably
+reaches `R_Init()`'s real renderer-selection code before hitting a new,
+later, separate, well-understood gap (`video.cfg` needs
 `r_refdll "null"` for this milestone's headless renderer). See
 divergence #44.
 
