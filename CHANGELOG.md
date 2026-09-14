@@ -5,6 +5,39 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — a real writable rootdir, split from the read-only disc (divergence #48)
+
+X7.4 step 3, a bring-up blocker: `FS_DetermineRootDirectory` resolved
+to `D:\` (the disc, X0.5's own real fix for "can the engine find its
+assets at all") - but that value becomes `fs_rootdir`, upstream's own
+name for the WRITABLE root, and an XISO is permanently read-only. The
+first real level transition's `SaveGameState()` (`.HL1`/`.HL2` under
+`<gamedir>/save/`) would have failed on it.
+
+`-rodir` cannot arrive via argv or `getenv()` on this platform (nxdk's
+own crt0 hardcodes `argc=0`; `getenv()` is a real, unconditional `NULL`
+stub), so both `FS_DetermineRootDirectory` and
+`FS_DetermineReadOnlyRootDirectory` gained their own direct `XASH_XBOX`
+arms. `E:` (confirmed against `hal/fileio.c`'s own partition table to
+be `\Device\Harddisk0\Partition1\`, the same partition every retail
+title's own `E:\UDATA\<title ID>\` save path already uses) is mounted
+and `E:\UDATA\<title ID>\<gamedir>\` created if missing, then returned
+as `fs_rootdir`; `D:\` moves to `fs_rodir`, the read-only overlay. The
+extra `<gamedir>` level (found in review): `cxbe`, this project's own
+XBE-building tool, hardcodes the same certificate `TitleID` for every
+XBE it builds (its own `// TODO`), which a first live check confirmed
+would collide across future titles - namespaced under `XASH_GAMEDIR`
+instead, the same compile-time per-title name `launcher.c` already
+relies on for the identical purpose.
+
+Verified live, after the fix: a fresh boot reads `fs_rootdir` as
+`E:/UDATA/FFFF0002/valve` and `fs_rodir` as `D:` directly out of guest
+memory - the real global the filesystem module writes through -
+`nxMountDrive('E', ...)` confirmed to genuinely run and succeed, and
+`Host_Frame` is still reached with no `Sys_Error` anywhere in the path.
+A real write landing under this directory remains X7.4 step 4's own
+exit test. See divergence #48.
+
 ### Verified — X7.4 step 2's boot milestone is closed: all three indicators confirmed live
 
 Following the stack-size fix, the milestone's third named indicator -

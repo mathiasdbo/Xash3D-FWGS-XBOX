@@ -31,6 +31,11 @@ GNU General Public License for more details.
 #include <direct.h>
 #endif
 
+#if XASH_XBOX
+#include <windows.h>
+#include <nxdk/mount.h>
+#endif
+
 static CVAR_DEFINE_AUTO( fs_mount_hd, "0", FCVAR_PRIVILEGED, "mount high definition content folder" );
 static CVAR_DEFINE_AUTO( fs_mount_lv, "0", FCVAR_PRIVILEGED, "mount low violence models content folder" );
 static CVAR_DEFINE_AUTO( fs_mount_addon, "0", FCVAR_PRIVILEGED, "mount addon content folder" );
@@ -283,17 +288,91 @@ static qboolean FS_DetermineRootDirectory( char *out, size_t size )
 	// resolved this (X0.5) was checked by seeing the function existed, not
 	// by reading its body - wrong, corrected here and in those docs.
 	//
-	// The real fix: D:\ is not guessed, it is guaranteed. tools/xbox-
-	// dedicated-link-check.sh links `-include:_automount_d_drive`
-	// (deps/nxdk/lib/nxdk/automount_d.c), a CRT-init-array hook
-	// (`.CRT$XIT`) that runs BEFORE main() and mounts D: to the directory
-	// containing the running XBE if it is not already mounted - the
-	// standard nxdk convention every sample in deps/nxdk/samples relies
-	// on. By the time this function runs, D:\ is a real, valid,
-	// already-mounted absolute path to exactly where a deployed game's
-	// files live alongside its XBE.
-	Q_strncpy( out, "D:\\", size );
-	return true;
+	// D:\ (X0.5's own fix - tools/xbox-dedicated-link-check.sh links
+	// `-include:_automount_d_drive`, deps/nxdk/lib/nxdk/automount_d.c, a
+	// CRT-init-array hook that mounts D: to the directory containing the
+	// running XBE before main() runs) solved "can the engine find its
+	// assets at all" - X0.5's own real exit line. It never solved "can it
+	// WRITE anything": D:\ is the disc (an XISO), permanently read-only,
+	// and this function's return value becomes fs_rootdir - upstream's
+	// own name for the WRITABLE root, split from fs_rodir (a separate,
+	// optional read-only overlay, FS_DetermineReadOnlyRootDirectory
+	// below) precisely for platforms like this one. Returning D:\ here
+	// left fs_rootdir pointing at read-only media, which stayed invisible
+	// through X7.4 step 2 - nothing tries to write until the first real
+	// level transition's SaveGameState() (specialist review; see
+	// docs/r3d/fork-plan.md's X7.4 step 3).
+	//
+	// The real fix: mount E:, the real Xbox convention for per-title user
+	// data (confirmed against hal/fileio.c's own partition table -
+	// getPartitionIndex maps 'E' to \Device\Harddisk0\Partition1\, the
+	// same real hardware layout every retail title's own E:\UDATA\<title
+	// ID>\ save path already uses), then use that real, hardware-standard
+	// layout - EXCEPT the title ID itself. Codex review, round 1, caught
+	// a real gap: cxbe (deps/nxdk/tools/cxbe/Xbe.cpp:275) hardcodes
+	// dwTitleId = 0xFFFF0002 into every certificate this project's own
+	// tools generate (its own comment: "TODO: generate in the form
+	// CX-9999" - a real, separate, not-yet-done nxdk tooling gap, not
+	// invented here), so reading it back gives every title THIS fork
+	// ever builds the exact same value, not a real per-title namespace -
+	// confirmed live below, not assumed. Namespaced under it instead,
+	// with the one thing genuinely known at this point in the project's
+	// real timeline: XASH_GAMEDIR, the exact same compile-time per-title
+	// name launcher.c already relies on for the identical "which title
+	// is this build" purpose (defaulted the same way, "valve", since
+	// X7.6's own real per-title `-D` build wiring does not exist yet
+	// either - see docs/r3d/fork-plan.md's X7.6). Whoever wires that up
+	// needs to pass it to this translation unit too, not just
+	// launcher.c's; a real, unique certificate TitleID per title
+	// (cxbe's own real fix) would let this drop the extra directory
+	// level entirely and is worth doing at that same point, not before -
+	// no title but "valve" exists to test isolation against today.
+	// CreateDirectoryA has no FILE_OPEN_IF-style "create if missing, else
+	// succeed" mode (winapi/filemanip.c:274-299 always uses FILE_CREATE),
+	// so every path level is created unconditionally and
+	// GetLastError()'s ERROR_ALREADY_EXISTS is the one failure this
+	// genuinely expects and ignores - a real, empty HDD partition on a
+	// first boot needs UDATA\ and the title-ID level created too, not
+	// just the per-game leaf.
+#ifndef XASH_GAMEDIR
+#define XASH_GAMEDIR "valve" // !!! Same default as engine/common/launcher.c - keep both in sync !!!
+#endif
+	{
+		string xbox_rootdir;
+		DWORD title_id;
+
+		if( !nxIsDriveMounted( 'E' ) && !nxMountDrive( 'E', "\\Device\\Harddisk0\\Partition1\\" ))
+		{
+			Sys_Error( "couldn't mount E: (Partition1, the real Xbox per-title user-data drive) - error %lu", GetLastError( ));
+			return false;
+		}
+
+		title_id = CURRENT_XBE_HEADER->CertificateHeader->TitleID;
+		Q_snprintf( xbox_rootdir, sizeof( xbox_rootdir ), "E:\\UDATA\\%08X\\" XASH_GAMEDIR, title_id );
+
+		if( !CreateDirectoryA( "E:\\UDATA", NULL ) && GetLastError() != ERROR_ALREADY_EXISTS )
+		{
+			Sys_Error( "couldn't create E:\\UDATA - error %lu", GetLastError( ));
+			return false;
+		}
+		{
+			string title_dir;
+			Q_snprintf( title_dir, sizeof( title_dir ), "E:\\UDATA\\%08X", title_id );
+			if( !CreateDirectoryA( title_dir, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS )
+			{
+				Sys_Error( "couldn't create %s - error %lu", title_dir, GetLastError( ));
+				return false;
+			}
+		}
+		if( !CreateDirectoryA( xbox_rootdir, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS )
+		{
+			Sys_Error( "couldn't create %s - error %lu", xbox_rootdir, GetLastError( ));
+			return false;
+		}
+
+		Q_strncpy( out, xbox_rootdir, size );
+		return true;
+	}
 #elif XASH_IOS
 	Q_strncpy( out, IOS_GetDocsDir(), size );
 	return true;
@@ -352,6 +431,19 @@ static qboolean FS_DetermineReadOnlyRootDirectory( char *out, size_t size )
 
 #if XASH_IOS
 	Q_strncpy( out, IOS_GetExecDir(), size );
+	return true;
+#elif XASH_XBOX
+	// -rodir can never arrive via argv here (matching this function's own
+	// -rodir/env checks above, both real but unreachable on this
+	// platform): nxdk's own crt0 hardcodes argc=0 into main() (deps/nxdk/
+	// lib/pdclib/platform/xbox/crt0.c's main_wrapper: `main(0, &_argv)`),
+	// and getenv() is a real, unconditional NULL stub (see
+	// FS_DetermineRootDirectory's own comment on both). D:\ - the disc,
+	// guaranteed mounted by X0.5's own automount hook - is exactly what
+	// upstream's fs_rodir contract wants here: a separate, read-only
+	// overlay of real game content, now that fs_rootdir above points at
+	// the real writable E:\UDATA\<title ID>\ instead.
+	Q_strncpy( out, "D:\\", size );
 	return true;
 #endif
 
