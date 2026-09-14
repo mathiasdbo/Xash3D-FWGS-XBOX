@@ -3453,11 +3453,25 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    calls with no failure breakpoint firing, and a 75-second free run
    with nothing armed ending in the kernel's between-frames idle loop,
    not the bugcheck.** X7.4 step 2's boot milestone now holds for real:
-   `CL_Init` passes and `Host_Frame` runs, sustained. Not separately
-   re-verified this round, and deliberately not claimed: that
-   `UI_LoadProgs` loaded the menu - the milestone's own third named
-   indicator - which is the next thing to confirm directly rather than
-   infer from the frame loop surviving.
+   `CL_Init` passes and `Host_Frame` runs, sustained.
+
+   **`UI_LoadProgs` itself confirmed too, not inferred - the milestone's
+   third named indicator, checked directly.** A breakpoint on
+   `UI_LoadProgs`'s own return address (read off the stack at entry,
+   the same technique used throughout this investigation) shows `EAX =
+   1` on a fresh boot: it genuinely loads `3rdparty/mainui` (statically
+   linked - `GetMenuAPI` resolves from `3rdparty_mainui_udll_int.obj`
+   in the real link, confirmed in the map) and its own `GetMenuAPI()`
+   call inside succeeds. `SCR_Init`'s own next line then runs
+   `UI_SetActiveMenu( true )` (not the console fallback, which only
+   fires when `UI_LoadProgs` fails) - confirmed by a breakpoint on that
+   call too, `fActive=1`. With the menu genuinely active, not just
+   loaded, a further stability check found no new failure: 2000
+   consecutive counted `Host_Frame` calls in 8.3s. **All three of the
+   milestone's own named indicators are now independently confirmed
+   with real, live evidence: `CL_Init` passes, `UI_LoadProgs` loads and
+   activates the real menu, `Host_Frame` runs, sustained. X7.4 step 2 is
+   closed.**
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's

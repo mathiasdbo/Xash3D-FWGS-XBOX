@@ -5,6 +5,24 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Verified — X7.4 step 2's boot milestone is closed: all three indicators confirmed live
+
+Following the stack-size fix, the milestone's third named indicator -
+`UI_LoadProgs` loading the menu - was confirmed directly instead of
+inferred from the frame loop surviving. A breakpoint on its own return
+address shows `EAX = 1` on a fresh boot: it genuinely loads
+`3rdparty/mainui` (statically linked, `GetMenuAPI` resolves in the real
+link) and `GetMenuAPI()` succeeds. `SCR_Init`'s next line then runs
+`UI_SetActiveMenu( true )` (not the console fallback, which only fires
+on failure) - confirmed by its own breakpoint, `fActive=1`. With the
+menu genuinely active, a further stability check found no new failure:
+2000 consecutive counted `Host_Frame` calls in 8.3s.
+
+All three of the milestone's own named indicators are now independently
+confirmed with real, live evidence: `CL_Init` passes, `UI_LoadProgs`
+loads and activates the real menu, `Host_Frame` runs, sustained. X7.4
+step 2 is closed. No code changed - `docs/r3d/fork-plan.md` updated.
+
 ### Fixed — the engine's main thread ran on a 64 KiB stack; now 1 MiB (divergence #47)
 
 Root cause of the stack-overflow bugcheck divergence #46 left open,
