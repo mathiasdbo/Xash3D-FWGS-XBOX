@@ -24,6 +24,13 @@ tracking its own grab state normally - the gamepad is Xbox's real aim
 input, not a warped mouse cursor. Verified live: the previously-stuck
 boot now reaches `SV_ExecLoadLevel` immediately instead of hanging.
 
+The statically linked Half-Life client DLL has its own, independent
+copy of this same unguarded call (`deps/hlsdk/cl_dll/inputw32.cpp`'s
+`IN_SetMouseRelative`, reached from every `key_menu`/`key_console` to
+`key_game` transition, not only the first) - found in review and
+fixed the same way, directly in this fork's owned `deps/hlsdk`
+checkout.
+
 ### Fixed — a real writable rootdir, split from the read-only disc (divergence #48)
 
 X7.4 step 3, a bring-up blocker: `FS_DetermineRootDirectory` resolved

@@ -3644,12 +3644,26 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    `SDL_SetRelativeMouseMode`/`SDL_GetRelativeMouseState` calls under
    `#if XASH_SDL >= 2 && !XASH_XBOX`, while still tracking `s_bRawInput`
    state normally either way - Xbox's primary aim input is the gamepad,
-   not a warped OS mouse cursor. **Verified live, real, not guessed**: with
-   the fix built and a fresh XISO repackaged, the identical boot sequence
-   now reaches `SV_ExecLoadLevel` at ~4.2s - immediately, not after any
-   wait - confirming the state-machine transition that was stuck is now
-   processed correctly. `SV_ExecLoadLevel`'s exit test (`SV_SpawnServer`
-   completing) was NOT reached within a further patient 900-second wait;
+   not a warped OS mouse cursor. **Codex review, round 2, found a real
+   second call site to the identical broken function**: the statically
+   linked client DLL's own `IN_SetMouseRelative()`
+   (`deps/hlsdk/cl_dll/inputw32.cpp`), reachable on every
+   `key_menu`/`key_console`→`key_game` transition once the client module
+   is loaded, not only the very first one this session traced - fixed
+   the same way, directly in this fork's owned `deps/hlsdk` checkout
+   (same precedent as divergence #44), committed and pushed to that
+   submodule's own remote before bumping this repo's pointer. See
+   divergence #49 for the full account, including what remains
+   unverified live (the client DLL's own call path specifically, since
+   step 4 has not yet progressed far enough to test a menu/console
+   reopen after a map is active). **Verified live, real, not guessed**:
+   with the fix built and a fresh XISO repackaged, the identical boot
+   sequence now reaches `SV_ExecLoadLevel` at ~4.2s - immediately, not
+   after any wait - confirming the state-machine transition that was
+   stuck is now processed correctly, and this holds unchanged after the
+   `deps/hlsdk` rebuild too. `SV_ExecLoadLevel`'s exit test
+   (`SV_SpawnServer` completing) was NOT reached within a further patient
+   900-second wait;
    single-stepping past `SV_ExecLoadLevel`'s entry shows real, legitimate
    forward progress through `FS_FixFileCase`/`FS_Search_DIR`
    (`filesystem/dir.c`) and this fork's own `r3d_native_path`
