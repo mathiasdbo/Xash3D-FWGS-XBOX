@@ -374,6 +374,46 @@ class Pools(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             xd.read_pools(read, pc, ph)
 
+    def _map_file(self, rows):
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".map", delete=False)
+        f.write(" x\n\n Start         Length     Name                   Class\n")
+        for seg, off, length, name in rows:
+            f.write(f" {seg:04x}:{off:08x} {length:08x}H {name:<22} DATA\n")
+        f.write(" 0001:00000010       _R_Init            0000000000012010     x.obj\n")
+        f.close()
+        return f.name
+
+    def test_map_binds_to_its_own_pe_within_one_alignment_quantum(self):
+        import os
+        text = bytes(range(256)) * 4            # 1024 bytes
+        rdata = b"\x55" * 300
+        pe = _fake_pe(0x10000, [(".text", 0x1000, text, False), (".rdata", 0x2000, rdata, False)])
+        # .text listed 6 bytes short (trailing alignment fill), .rdata exact
+        path = self._map_file([(1, 0, 1024 - 6, ".text"), (2, 0, 300, ".rdata")])
+        try:
+            self.assertEqual(xd.map_matches_pe(path, pe), [])
+        finally:
+            os.unlink(path)
+
+    def test_a_map_from_a_different_link_is_refused(self):
+        # Codex review round 2: a CURRENT PE with a stale-but-valid map must
+        # not be accepted - .text of a different link is off by whole functions.
+        import os
+        text = bytes(range(256)) * 4
+        pe = _fake_pe(0x10000, [(".text", 0x1000, text, False)])
+        for length in (1024 - 16, 1024 + 1, 700):
+            path = self._map_file([(1, 0, length, ".text")])
+            try:
+                self.assertNotEqual(xd.map_matches_pe(path, pe), [], f"length {length} must not bind")
+            finally:
+                os.unlink(path)
+        path = self._map_file([])
+        try:
+            self.assertNotEqual(xd.map_matches_pe(path, pe), [], "a map with no section table cannot bind")
+        finally:
+            os.unlink(path)
+
     def test_load_map_symbols_reads_data_sections_too(self):
         import tempfile, os
         with tempfile.NamedTemporaryFile("w", suffix=".map", delete=False) as f:

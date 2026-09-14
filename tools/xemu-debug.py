@@ -146,10 +146,15 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  _poolchain), largest first - which subsystem a
                                  map's heap actually went to (ref_soft zone, the
                                  BSP, edicts, SoundLib, ...). memstats says how
-                                 much; this says what. Runs the full verify-image
-                                 identity check against <pe> first and refuses
-                                 to read anything if it fails - a stale map's
-                                 addresses once produced a credible "0 pools".
+                                 much; this says what. Two identity checks first,
+                                 refusing to read anything if either fails: the
+                                 map must be <pe>'s own (every output segment's
+                                 extent in the map's section table equals the PE
+                                 section's VirtualSize, within one 16-byte
+                                 alignment), and the guest must be running <pe>
+                                 (the full verify-image comparison). A stale
+                                 map's addresses once produced a credible
+                                 "0 pools".
 
 Addresses are hex, with or without 0x.
 """
@@ -881,6 +886,55 @@ def load_map_symbols(path):
     return out
 
 
+def map_section_extents(path):
+    """The lld map's own leading section table ("Start Length Name Class"
+    rows, `SSSS:OOOOOOOO LLLLLLLLH name class`): per output segment index,
+    the extent (largest start+length) its input sections reach. Segment
+    0001 is the PE's first section (.text), 0002 its second (.rdata), ..."""
+    extents = {}
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            m = re.match(r"\s*([0-9a-fA-F]{4}):([0-9a-fA-F]{8})\s+([0-9a-fA-F]{8})H\s+(\S+)", line)
+            if not m:
+                continue
+            seg, off, length = int(m.group(1), 16), int(m.group(2), 16), int(m.group(3), 16)
+            if seg == 0:
+                continue
+            extents[seg] = max(extents.get(seg, 0), off + length)
+    return extents
+
+
+def pe_section_sizes(data):
+    """VirtualSize of every section of a 32-bit PE, in section order."""
+    pe = struct.unpack_from("<I", data, 0x3c)[0]
+    nsec = struct.unpack_from("<H", data, pe + 6)[0]
+    optsz = struct.unpack_from("<H", data, pe + 20)[0]
+    return [struct.unpack_from("<I", data, pe + 24 + optsz + i * 40 + 8)[0] for i in range(nsec)]
+
+
+def map_matches_pe(map_path, data):
+    """Bind a linker map to a PE without a sidecar: every output segment the
+    map describes must reach exactly the VirtualSize of the PE section it
+    corresponds to. Any code or data change moves .text's or .data's length,
+    so a map from a different link fails here. Returns a list of
+    (segment, map_extent, pe_size) mismatches; empty means bound."""
+    extents = map_section_extents(map_path)
+    sizes = pe_section_sizes(data)
+    if not extents:
+        return [(0, 0, 0)]
+    bad = []
+    for seg, extent in sorted(extents.items()):
+        pe_size = sizes[seg - 1] if seg - 1 < len(sizes) else -1
+        # Measured on this project's own link: .rdata/.data/.tls agree to
+        # the byte, .text's VirtualSize is 6 bytes past the map's last
+        # listed input section - trailing alignment fill the map has no
+        # row for. One 16-byte alignment quantum of slack, never a byte
+        # short: a map from a different link is off by whole functions.
+        if not (0 <= pe_size - extent < 16):
+            bad.append((seg, extent, pe_size))
+    return bad
+
+
 MEMPOOL_SIZE = 96   # engine/common/zone.c mempool_t, 32-bit: 8 x 4-byte fields + name[64]
 
 
@@ -918,10 +972,20 @@ def cmd_pools(a):
         raise RuntimeError(f"{a.map} has no _poolcount/_poolchain - is it this build's map?")
     with open(a.exe, "rb") as f:
         data = f.read()
+    # Two identities, every time: the first pool dump of this project read
+    # "0 pools" from a stale map's addresses and looked like a result.
+    # (1) the map must be THIS PE's map - every output segment's extent in
+    # the map equals the PE section's VirtualSize (Codex review, round 2:
+    # a current PE plus a stale map passed the guest check below and read
+    # from unrelated addresses); (2) the guest must be running this PE.
+    bad = map_matches_pe(a.map, data)
+    if bad:
+        for seg, ext, size in bad:
+            print(f"  segment {seg:04x}: map extent {ext:#x}, PE section size {size:#x}")
+        print(f"pools: {a.map} is not the map of {a.exe} - its section extents differ. "
+              "Regenerate the map from the same link, or point --map at the right one.")
+        sys.exit(1)
     g = GdbRemote(a.host, a.port)
-    # Identity first, every time: the first pool dump of this project read
-    # "0 pools" from a stale map's addresses and looked like a result. The
-    # map is only as good as the guest matching the PE it was linked with.
     exports = pe_exports(g.read_mem, KERNEL_BASE)
     results = verify_image(g.read_mem, data, resolve=exports.get)
     bad = [(n, s, e, v) for n, s, e, v in results if v not in ("ok", "thunks")]
