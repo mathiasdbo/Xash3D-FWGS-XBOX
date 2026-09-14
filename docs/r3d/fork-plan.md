@@ -1566,6 +1566,57 @@ finding the ceiling late is not survivable.
 **Exit:** a declared budget, enforced at bake time, measured at runtime across
 level transitions.
 
+**First real measurement and first lever, 2026-09-14 (divergence #51).**
+Where a map's memory actually goes on the console, read from the kernel's
+own page counters (`tools/xemu-debug.py memstats`) and the engine's own
+pool table (`tools/xemu-debug.py pools`, `zone.c`'s `poolchain`), on a
+`verify-image`-confirmed guest, `c0a0` under `ref_soft` at 640x480:
+
+- **The lever that made the map fit at all**: `XASH_LOW_MEMORY=1`
+  (upstream's own, MotoMAGX's level; protocol-compatible). Image 27.1 →
+  16.1 MiB; the PC-sized statics collapse (`cl` 3.4 → 2.1 MiB, `sv` 2.4
+  → 0.7, `net` 1.6 → 0.3, `mod_known` 1.5 → 0.4, `ref_soft`'s `r_images`
+  2.4 → 0.3, `g_studio` 1.8 → 0.2). Without it the map died in
+  `CL_InitEdicts` with 0.97 MiB free; with it, 12.57 MiB free with `c0a0`
+  up and 11.63 after the tram to `c0a0a`.
+- **The 64 MiB, `c0a0` up**: Image 16.1 (code 6.3, statics 10.5 - of
+  which `vid`'s rasterizer tables 2.5, `cl` 2.1, `sv` 0.8, two `gpMove`s
+  0.6, `s_knownSfx` 0.5), heap (VirtualMemory) 30.2, stacks 3.0,
+  contiguous 2.0 (the 1.2 MiB framebuffer among it), kernel and page
+  tables ~0.3, free 12.6.
+- **The heap, by pool (26.0 of the 30.2 MiB)**: `ref_soft zone` 12.1
+  (~2.9 surface cache at 640x480 by `r_surf.c:778`'s formula; the rest
+  the map's textures as 16-bit texels x 4 mips + alpha copies, ~2.7x the
+  BSP's 8-bit miptex), `maps/c0a0.bsp` 3.3, `Client Edicts Zone` 2.7
+  (`max_edicts 900` x ~2.9 KB `cl_entity_t`, mostly its 64-entry position
+  history), `SoundLib Pool` 2.6 (precached sounds as PCM), `Client Static
+  Pool` 1.8, `Server Edicts Zone` 0.7, `Zone Engine` 0.6, studio models
+  ~1.3. Outside the pools, ~4 MiB: SDL's 1.2 MiB window surface, the CRT
+  heap, freevgui.
+
+**Where the next MiB are, in order of size over risk** (analysis, not
+done): (1) `ref_soft`'s texture store - 16-bit texels are the
+rasterizer's design, but mip 3 (1/64) and the alpha copies are choices,
+and a 320x240 render target halves the surface cache; the honest number
+needs a per-texture walk of `r_images`, which the pool table does not
+give. (2) The two allocators the plan already names: 1.2 MiB of SDL
+shadow surface plus a per-frame `SDL_ConvertPixels` that `vid_xbox.c`
+deletes outright. (3) `vid`'s 2.5 MiB of fixed tables - `colormap` 512
+KiB, `alphamap` 1.5 MiB - are `ref_soft`'s lighting/blending model; only
+a different blend path shrinks them. (4) Stacks: 3.0 MiB is three 1 MiB
+threads because divergence #47 raised the DEFAULT; a per-thread size for
+the secondary threads is the ~2 MiB it deferred. (5) `SoundLib Pool`:
+2.6 MiB of PCM for a map with no audio output yet (X8) - real cost
+later, but the format (8-bit vs 16-bit, resample-on-load) is X8's
+choice. (6) `max_edicts` is per title, not per map: 900 is retail's
+`liblist.gam`, and later maps need it, so the edict zone is a fixed
+cost. (7) `XASH_LOW_MEMORY=2` would take `cl` down further
+(`MULTIPLAYER_BACKUP` 64 → 4) at the cost of the protocol; not needed
+yet. (8) The asset-side items above (RGB565 lightmaps, `.mpak`) shrink
+the 3.3 MiB BSP pool and the 8-bit texture source, not the renderer's
+copies. The frame-time half of X5's exit is measured next, before any of
+these is spent.
+
 ## X4 — Video bring-up, standalone
 
 **[from PS3]** Outside the engine. A separate XBE that initialises pbkit, sets
@@ -1730,6 +1781,19 @@ confirmed byte-for-byte first. Two review findings closed on the way
 longer links any engine object the sweep's new manifest does not vouch
 for - the class of stale-build false pass that adding
 `XASH_REF_SOFT_ENABLED` would otherwise have invited.
+
+**The map, on screen, 2026-09-14 (divergence #51).** With
+`XASH_LOW_MEMORY=1` the OOM above is gone: `c0a0` spawns under `ref_soft`,
+the client receives the world with 12.57 MiB free, and the tram changes
+level to `c0a0a` with 11.63 MiB free. Captured off the GPU's scan-out
+while halted, ~400 frames in: the inside of the Black Mesa tram car -
+lit, textured, seats, rail, the intro credits overlaid - at 640x480 in
+software (`.sweep/x5-shots/halted-map-c0a0-tram.png`, Valve's art, not
+committed). **A recognisable Half-Life map, rendered in software: the
+first half of this milestone's exit line.** The second half - frame
+time on `c1a3` and `crossfire` at 640x480 and 320x240 from the X0
+counters, X9's baseline - is the next item. X3's entry above has where
+the memory went and where the next MiB are.
 
 **[from PS3]** The change their roadmap forced in this plan.
 

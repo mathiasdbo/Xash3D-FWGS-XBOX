@@ -328,6 +328,106 @@ def _fake_kernel(base, ord_base, func_rvas, globals_rva=0x3000):
     return img
 
 
+class Pools(unittest.TestCase):
+    """read_pools() attributes a map's heap per engine pool - the number
+    memstats cannot give. It must skip freed slots and refuse garbage."""
+
+    def _image(self, pools):
+        import struct
+        base = 0x400000
+        img = bytearray(0x1000 + len(pools) * xd.MEMPOOL_SIZE)
+        struct.pack_into("<I", img, 0x10, len(pools))   # poolcount at base+0x10
+        struct.pack_into("<I", img, 0x14, base + 0x1000)  # poolchain at base+0x14
+        for i, (name, real, payload, fname) in enumerate(pools):
+            o = 0x1000 + i * xd.MEMPOOL_SIZE
+            struct.pack_into("<8I", img, o, 0, 0, payload, real, 0, fname, 0, 0)
+            img[o + 32:o + 32 + len(name)] = name.encode()
+        return _mem_reader(bytes(img), base), base + 0x10, base + 0x14
+
+    def test_pools_sorted_largest_first_skipping_freed_slots(self):
+        read, pc, ph = self._image([("Zone Engine", 400, 380, 0x1234),
+                                    ("freed", 999999, 999999, 0),
+                                    ("ref_soft zone", 12000, 11900, 0x1234)])
+        self.assertEqual(xd.read_pools(read, pc, ph),
+                         [(12000, 11900, "ref_soft zone"), (400, 380, "Zone Engine")])
+
+    def test_garbage_table_raises_instead_of_walking_memory(self):
+        import struct
+        img = bytearray(0x100); struct.pack_into("<II", img, 0x10, 100000, 0x500000)
+        with self.assertRaises(RuntimeError):
+            xd.read_pools(_mem_reader(bytes(img), 0x400000), 0x400010, 0x400014)
+
+    def test_stale_map_shape_zero_count_nonzero_base_is_an_error_not_zero_pools(self):
+        # Codex review: exactly what a stale map's addresses read as in this
+        # project's own first dump - a plausible nonzero "base", a zero
+        # "count" - must not print "0 pools, 0.00 MiB" as if measured.
+        import struct
+        img = bytearray(0x100); struct.pack_into("<II", img, 0x10, 0, 0x500000)
+        with self.assertRaises(RuntimeError):
+            xd.read_pools(_mem_reader(bytes(img), 0x400000), 0x400010, 0x400014)
+
+    def test_all_slots_freed_or_unprintable_names_are_errors(self):
+        read, pc, ph = self._image([("freed", 1, 1, 0)])
+        with self.assertRaises(RuntimeError):
+            xd.read_pools(read, pc, ph)
+        read, pc, ph = self._image([("\x01\x02junk", 5, 5, 0x1234)])
+        with self.assertRaises(RuntimeError):
+            xd.read_pools(read, pc, ph)
+
+    def _map_file(self, rows):
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".map", delete=False)
+        f.write(" x\n\n Start         Length     Name                   Class\n")
+        for seg, off, length, name in rows:
+            f.write(f" {seg:04x}:{off:08x} {length:08x}H {name:<22} DATA\n")
+        f.write(" 0001:00000010       _R_Init            0000000000012010     x.obj\n")
+        f.close()
+        return f.name
+
+    def test_map_binds_to_its_own_pe_within_one_alignment_quantum(self):
+        import os
+        text = bytes(range(256)) * 4            # 1024 bytes
+        rdata = b"\x55" * 300
+        pe = _fake_pe(0x10000, [(".text", 0x1000, text, False), (".rdata", 0x2000, rdata, False)])
+        # .text listed 6 bytes short (trailing alignment fill), .rdata exact
+        path = self._map_file([(1, 0, 1024 - 6, ".text"), (2, 0, 300, ".rdata")])
+        try:
+            self.assertEqual(xd.map_matches_pe(path, pe), [])
+        finally:
+            os.unlink(path)
+
+    def test_a_map_from_a_different_link_is_refused(self):
+        # Codex review round 2: a CURRENT PE with a stale-but-valid map must
+        # not be accepted - .text of a different link is off by whole functions.
+        import os
+        text = bytes(range(256)) * 4
+        pe = _fake_pe(0x10000, [(".text", 0x1000, text, False)])
+        for length in (1024 - 16, 1024 + 1, 700):
+            path = self._map_file([(1, 0, length, ".text")])
+            try:
+                self.assertNotEqual(xd.map_matches_pe(path, pe), [], f"length {length} must not bind")
+            finally:
+                os.unlink(path)
+        path = self._map_file([])
+        try:
+            self.assertNotEqual(xd.map_matches_pe(path, pe), [], "a map with no section table cannot bind")
+        finally:
+            os.unlink(path)
+
+    def test_load_map_symbols_reads_data_sections_too(self):
+        import tempfile, os
+        with tempfile.NamedTemporaryFile("w", suffix=".map", delete=False) as f:
+            f.write(" 0001:00001000       _R_Init            0000000000012000     x.obj\n")
+            f.write(" 0003:00002000       _poolchain         0000000000af6774     engine_common_zone.obj\n")
+            path = f.name
+        try:
+            syms = xd.load_map_symbols(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(syms["_poolchain"], 0xaf6774)
+        self.assertEqual(syms["_R_Init"], 0x12000)
+
+
 class KernelExportsAndMemstats(unittest.TestCase):
     BASE = 0x80010000
 

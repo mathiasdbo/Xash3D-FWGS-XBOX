@@ -140,6 +140,21 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  - available pages and busy pages per usage
                                  (stack, pool, image, contiguous, ...) - with a
                                  self-check that they sum to the 64 MiB.
+  pools --map <file> --exe <pe> [--min-bytes N]
+                                The engine's own memory pools (zone.c's
+                                 poolchain, located via the map's _poolcount/
+                                 _poolchain), largest first - which subsystem a
+                                 map's heap actually went to (ref_soft zone, the
+                                 BSP, edicts, SoundLib, ...). memstats says how
+                                 much; this says what. Two identity checks first,
+                                 refusing to read anything if either fails: the
+                                 map must be <pe>'s own (every output segment's
+                                 extent in the map's section table equals the PE
+                                 section's VirtualSize, within one 16-byte
+                                 alignment), and the guest must be running <pe>
+                                 (the full verify-image comparison). A stale
+                                 map's addresses once produced a credible
+                                 "0 pools".
 
 Addresses are hex, with or without 0x.
 """
@@ -855,6 +870,142 @@ def kernel_memstats(read, resolve):
     return available, dict(zip(MM_USAGE_NAMES, usage))
 
 
+def load_map_symbols(path):
+    """Every symbol in an lld-link map, any section: name -> VA. (load_map()
+    keeps only .text, which is what `sym` wants; data symbols live in 0003.)"""
+    out = {}
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 4 or ":" not in parts[0]:
+                continue
+            try:
+                out[parts[1]] = int(parts[2], 16)
+            except ValueError:
+                continue
+    return out
+
+
+def map_section_extents(path):
+    """The lld map's own leading section table ("Start Length Name Class"
+    rows, `SSSS:OOOOOOOO LLLLLLLLH name class`): per output segment index,
+    the extent (largest start+length) its input sections reach. Segment
+    0001 is the PE's first section (.text), 0002 its second (.rdata), ..."""
+    extents = {}
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            m = re.match(r"\s*([0-9a-fA-F]{4}):([0-9a-fA-F]{8})\s+([0-9a-fA-F]{8})H\s+(\S+)", line)
+            if not m:
+                continue
+            seg, off, length = int(m.group(1), 16), int(m.group(2), 16), int(m.group(3), 16)
+            if seg == 0:
+                continue
+            extents[seg] = max(extents.get(seg, 0), off + length)
+    return extents
+
+
+def pe_section_sizes(data):
+    """VirtualSize of every section of a 32-bit PE, in section order."""
+    pe = struct.unpack_from("<I", data, 0x3c)[0]
+    nsec = struct.unpack_from("<H", data, pe + 6)[0]
+    optsz = struct.unpack_from("<H", data, pe + 20)[0]
+    return [struct.unpack_from("<I", data, pe + 24 + optsz + i * 40 + 8)[0] for i in range(nsec)]
+
+
+def map_matches_pe(map_path, data):
+    """Bind a linker map to a PE without a sidecar: every output segment the
+    map describes must reach exactly the VirtualSize of the PE section it
+    corresponds to. Any code or data change moves .text's or .data's length,
+    so a map from a different link fails here. Returns a list of
+    (segment, map_extent, pe_size) mismatches; empty means bound."""
+    extents = map_section_extents(map_path)
+    sizes = pe_section_sizes(data)
+    if not extents:
+        return [(0, 0, 0)]
+    bad = []
+    for seg, extent in sorted(extents.items()):
+        pe_size = sizes[seg - 1] if seg - 1 < len(sizes) else -1
+        # Measured on this project's own link: .rdata/.data/.tls agree to
+        # the byte, .text's VirtualSize is 6 bytes past the map's last
+        # listed input section - trailing alignment fill the map has no
+        # row for. One 16-byte alignment quantum of slack, never a byte
+        # short: a map from a different link is off by whole functions.
+        if not (0 <= pe_size - extent < 16):
+            bad.append((seg, extent, pe_size))
+    return bad
+
+
+MEMPOOL_SIZE = 96   # engine/common/zone.c mempool_t, 32-bit: 8 x 4-byte fields + name[64]
+
+
+def read_pools(read, poolcount_addr, poolchain_addr):
+    """The engine's own memory pools (zone.c's poolchain array): a list of
+    (real_bytes, payload_bytes, name), largest first, skipping freed slots
+    (filename == NULL). Attribution the kernel's page counters cannot give:
+    which subsystem a map's heap actually went to."""
+    count = struct.unpack("<I", read(poolcount_addr, 4))[0]
+    base = struct.unpack("<I", read(poolchain_addr, 4))[0]
+    if not base or not count or count > 4096:
+        raise RuntimeError(f"implausible pool table: base={base:#x} count={count} - "
+                           "a stale map's addresses read exactly like this")
+    rows = []
+    for i in range(count):
+        d = read(base + i * MEMPOOL_SIZE, MEMPOOL_SIZE)
+        _chain, _small, total, real, _last, fname, _line, _flags = struct.unpack_from("<8I", d, 0)
+        if not fname:
+            continue
+        name = d[32:96].split(b"\0")[0].decode(errors="replace")
+        if not name or not name.isprintable():
+            raise RuntimeError(f"pool {i} has an unprintable name {name!r} - not a pool table")
+        rows.append((real, total, name))
+    if not rows:
+        raise RuntimeError(f"{count} pool slot(s) and none live - not a pool table, or nothing allocated yet")
+    rows.sort(reverse=True)
+    return rows
+
+
+def cmd_pools(a):
+    syms = load_map_symbols(a.map)
+    try:
+        pc, ph = syms["_poolcount"], syms["_poolchain"]
+    except KeyError:
+        raise RuntimeError(f"{a.map} has no _poolcount/_poolchain - is it this build's map?")
+    with open(a.exe, "rb") as f:
+        data = f.read()
+    # Two identities, every time: the first pool dump of this project read
+    # "0 pools" from a stale map's addresses and looked like a result.
+    # (1) the map must be THIS PE's map - every output segment's extent in
+    # the map equals the PE section's VirtualSize (Codex review, round 2:
+    # a current PE plus a stale map passed the guest check below and read
+    # from unrelated addresses); (2) the guest must be running this PE.
+    bad = map_matches_pe(a.map, data)
+    if bad:
+        for seg, ext, size in bad:
+            print(f"  segment {seg:04x}: map extent {ext:#x}, PE section size {size:#x}")
+        print(f"pools: {a.map} is not the map of {a.exe} - its section extents differ. "
+              "Regenerate the map from the same link, or point --map at the right one.")
+        sys.exit(1)
+    g = GdbRemote(a.host, a.port)
+    exports = pe_exports(g.read_mem, KERNEL_BASE)
+    results = verify_image(g.read_mem, data, resolve=exports.get)
+    bad = [(n, s, e, v) for n, s, e, v in results if v not in ("ok", "thunks")]
+    if bad:
+        g.close()
+        for n, s, e, v in bad[:10]:
+            print(f"  {v:<10} {n:<8} {s:#010x}-{e:#010x}")
+        print(f"pools: the guest is not verifiably running {a.exe} ({len(bad)} chunk(s) "
+              "mismatched or unreadable) - no pool reading from this map is trustworthy.")
+        sys.exit(1)
+    rows = read_pools(g.read_mem, pc, ph)
+    g.close()
+    print(f"pools: guest identity confirmed against {a.exe}")
+    total = sum(r for r, _, _ in rows)
+    print(f"{len(rows)} pools, {total / 1048576:.2f} MiB real (malloc'd), largest first:")
+    for real, payload, name in rows:
+        if real >= a.min_bytes:
+            print(f"  {real / 1048576:7.2f} MiB real  {payload / 1048576:7.2f} MiB payload  {name}")
+
+
 def cmd_memstats(a):
     g = GdbRemote(a.host, a.port)
     exports = pe_exports(g.read_mem, KERNEL_BASE)
@@ -979,6 +1130,8 @@ def main():
     s.set_defaults(func=cmd_verify_image)
 
     s = sub.add_parser("memstats"); s.set_defaults(func=cmd_memstats)
+    s = sub.add_parser("pools"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
+    s.add_argument("--min-bytes", type=lambda x: int(x, 0), default=16384); s.set_defaults(func=cmd_pools)
 
     a = p.parse_args()
     try:

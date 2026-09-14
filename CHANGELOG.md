@@ -5,6 +5,39 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — Xbox builds use upstream's low-memory mode; the first map now fits, and it is on screen (X3, divergence #51)
+
+`tools/xbox-cc.sh` compiles every Xbox translation unit with
+`XASH_LOW_MEMORY=1` (upstream's own level-1 mode, MotoMAGX's; the
+protocol is unchanged, level 2 would change it). Measured on `c0a0` under
+`ref_soft`: image 27.1 → 16.1 MiB (`cl` 3.4 → 2.1 MiB, `sv` 2.4 → 0.7,
+`net` 1.6 → 0.3, `mod_known` 1.5 → 0.4, `ref_soft`'s `r_images` 2.4 →
+0.3, `g_studio` 1.8 → 0.2), and the map that ran the console out of
+memory in `CL_InitEdicts` now spawns with 12.6 MiB free and rides the
+tram to `c0a0a` with 11.6 MiB free. Captured off the GPU's scan-out: the
+inside of the tram car, lit and textured, at 640x480 in software - X5's
+"recognisable map" (its frame-time half is next). Sweep baseline moves to
+202 ok / 29 failing: `engine/platform/posix/con_posix.c` is entirely
+`#if !XASH_LOW_MEMORY` and now compiles empty (not linked on Xbox anyway).
+
+### Added — `tools/xemu-debug.py pools`: where a map's heap actually goes
+
+Reads the engine's own pool table (`zone.c`'s `poolchain`, located via
+the map's `_poolcount`/`_poolchain`) and lists pools largest first.
+`memstats` says how much; this says what. Found in review, twice: it
+runs the full `verify-image` identity check against the linked PE
+(`--exe`) before reading a byte, refuses an empty or unprintable table,
+and binds the map to that PE without a sidecar - every output segment's
+extent in the map's own section table must equal the PE section's
+VirtualSize within one 16-byte alignment (a map from a different link is
+off by whole functions). This project's own first dump read a credible
+"0 pools" from a stale map. `c0a0` up: `ref_soft zone` 12.1
+MiB (surface cache ~2.9 + the map's textures as 16-bit texels with mips
+and alpha copies), the BSP 3.3, client edicts 2.7 (`max_edicts 900`),
+`SoundLib` 2.6 (PCM), client static 1.8, models ~1.3 - 26 of the 30 MiB
+of heap. X3's plan entry ranks the next levers from these numbers.
+Unit-tested (`Pools`).
+
 ### Added — `ref_soft` on the Xbox, and the first frame on its screen (X5, divergence #50)
 
 Upstream's software rasterizer (`ref/soft` + `ref/common`) now compiles

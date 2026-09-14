@@ -326,6 +326,18 @@ ENGINE_DEFINES=(
 	                              # video.cfg (`r_refdll ""`) then selects soft
 	                              # through R_Init()'s own loop, ref_null
 	                              # staying the last resort it always was.
+	-DXASH_LOW_MEMORY=1           # X3: upstream's own low-memory mode, level 1
+	                              # (the level MotoMAGX ships with, wscript:288;
+	                              # level 2 changes the protocol, 1 does not -
+	                              # netchan.h:82-101's own comments). Shrinks
+	                              # exactly what X5's first map ran the 64 MiB
+	                              # console out of: SINGLEPLAYER_BACKUP 64->4 and
+	                              # NUM_PACKET_ENTITIES 256->64 (the failing
+	                              # cls.packet_entities allocation), NET_MAX_FRAGMENT
+	                              # 65535->32768, MAX_MODELS 4096->1024
+	                              # (mod_known), MAX_VISIBLE_PACKET 512->256,
+	                              # MAX_STATIC_ENTITIES 3096->128, and ref_soft's
+	                              # MAX_TEXTURES 8192->1024 (r_local.h:49).
 )
 
 # ref/<module>/*.c and ref/common/*.c (X5): renderer modules are built by
