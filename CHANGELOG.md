@@ -5,7 +5,7 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
-### Fixed — deps/hlsdk: don't refuse gamedir "valve" on NXDK (divergence #44)
+### Fixed — deps/hlsdk: exempt exactly "valve" on NXDK, not a prefix match (divergence #44)
 
 Found via live boot debugging of X7.4 step 2's first real combined
 server+client+freevgui build: the boot reliably executed a `quit`
@@ -25,20 +25,20 @@ Fixed in `deps/hlsdk` (an owned fork, direct commit, not a patch):
 `UTIL_IsValveGameDirectory()` gained a new `NXDK` arm, alongside the
 existing `_STATIC_ENGINE_LINK` one (Ferrum56's own bypass for the
 identical tension, kept untouched and independent - reusing that macro
-directly would have pulled in unrelated Rust-FFI code paths). Scoped to
-Resonance3D's own real, intended per-title gamedirs
-(`valve`/`gearbox`/`bshift` - HL/Blue Shift/Op4), not every
-Valve-prefixed directory - a first version that returned `false`
-unconditionally would have silently accepted mod directories this fork
-does not ship (`cstrike`/`tfc`/etc.), a real gap caught in review.
-Verified live: read the actual compiled machine code at the resolved
-runtime address in a running boot (an unconditional `return false;`,
-byte-identical for the client and server copies), then re-tested the
-full boot - the `quit`-at-~2.5s is gone, and the boot now demonstrably
-reaches `R_Init()`'s real renderer-selection code before hitting a new,
-later, separate, well-understood gap (`video.cfg` needs
-`r_refdll "null"` for this milestone's headless renderer). See
-divergence #44.
+directly would have pulled in unrelated Rust-FFI code paths). Final
+shape, after two real review rounds: exempts exactly `valve` (this
+checkout's own title - Blue Shift/Op4 have their own separate SDK
+checkouts, `deps/hlsdk-bshift`/`deps/hlsdk-opfor`, and need the
+identical fix in their own copy when their own bring-up starts) by
+full case-insensitive equality, not a prefix match (an earlier version
+would also have silently accepted `valve_custom`, or `gearbox`/`bshift`
+in this same checkout, which don't belong here). Verified live: read
+the actual compiled machine code at the resolved runtime address in a
+running boot, then re-tested the full boot - the `quit`-at-~2.5s is
+gone, and the boot now demonstrably reaches `R_Init()`'s real
+renderer-selection code before hitting a new, later, separate,
+well-understood gap (`video.cfg` needs `r_refdll "null"` for this
+milestone's headless renderer). See divergence #44.
 
 ### Fixed — tools/xemu-debug.py: a killed continue/step desyncs the next connection
 
