@@ -24,7 +24,10 @@ inside of the tram car, lit and textured, at 640x480 in software - X5's
 
 Reads the engine's own pool table (`zone.c`'s `poolchain`, located via
 the map's `_poolcount`/`_poolchain`) and lists pools largest first.
-`memstats` says how much; this says what. `c0a0` up: `ref_soft zone` 12.1
+`memstats` says how much; this says what. Found in review: it runs the
+full `verify-image` identity check against the linked PE (`--exe`) before
+reading a byte, and refuses an empty or unprintable table - this
+project's own first dump read a credible "0 pools" from a stale map. `c0a0` up: `ref_soft zone` 12.1
 MiB (surface cache ~2.9 + the map's textures as 16-bit texels with mips
 and alpha copies), the BSP 3.3, client edicts 2.7 (`max_edicts 900`),
 `SoundLib` 2.6 (PCM), client static 1.8, models ~1.3 - 26 of the 30 MiB

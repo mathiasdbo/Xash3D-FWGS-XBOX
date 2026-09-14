@@ -140,13 +140,16 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  - available pages and busy pages per usage
                                  (stack, pool, image, contiguous, ...) - with a
                                  self-check that they sum to the 64 MiB.
-  pools --map <file> [--min-bytes N]
+  pools --map <file> --exe <pe> [--min-bytes N]
                                 The engine's own memory pools (zone.c's
                                  poolchain, located via the map's _poolcount/
                                  _poolchain), largest first - which subsystem a
                                  map's heap actually went to (ref_soft zone, the
                                  BSP, edicts, SoundLib, ...). memstats says how
-                                 much; this says what.
+                                 much; this says what. Runs the full verify-image
+                                 identity check against <pe> first and refuses
+                                 to read anything if it fails - a stale map's
+                                 addresses once produced a credible "0 pools".
 
 Addresses are hex, with or without 0x.
 """
@@ -888,8 +891,9 @@ def read_pools(read, poolcount_addr, poolchain_addr):
     which subsystem a map's heap actually went to."""
     count = struct.unpack("<I", read(poolcount_addr, 4))[0]
     base = struct.unpack("<I", read(poolchain_addr, 4))[0]
-    if not base or count > 4096:
-        raise RuntimeError(f"implausible pool table: base={base:#x} count={count}")
+    if not base or not count or count > 4096:
+        raise RuntimeError(f"implausible pool table: base={base:#x} count={count} - "
+                           "a stale map's addresses read exactly like this")
     rows = []
     for i in range(count):
         d = read(base + i * MEMPOOL_SIZE, MEMPOOL_SIZE)
@@ -897,7 +901,11 @@ def read_pools(read, poolcount_addr, poolchain_addr):
         if not fname:
             continue
         name = d[32:96].split(b"\0")[0].decode(errors="replace")
+        if not name or not name.isprintable():
+            raise RuntimeError(f"pool {i} has an unprintable name {name!r} - not a pool table")
         rows.append((real, total, name))
+    if not rows:
+        raise RuntimeError(f"{count} pool slot(s) and none live - not a pool table, or nothing allocated yet")
     rows.sort(reverse=True)
     return rows
 
@@ -908,9 +916,25 @@ def cmd_pools(a):
         pc, ph = syms["_poolcount"], syms["_poolchain"]
     except KeyError:
         raise RuntimeError(f"{a.map} has no _poolcount/_poolchain - is it this build's map?")
+    with open(a.exe, "rb") as f:
+        data = f.read()
     g = GdbRemote(a.host, a.port)
+    # Identity first, every time: the first pool dump of this project read
+    # "0 pools" from a stale map's addresses and looked like a result. The
+    # map is only as good as the guest matching the PE it was linked with.
+    exports = pe_exports(g.read_mem, KERNEL_BASE)
+    results = verify_image(g.read_mem, data, resolve=exports.get)
+    bad = [(n, s, e, v) for n, s, e, v in results if v not in ("ok", "thunks")]
+    if bad:
+        g.close()
+        for n, s, e, v in bad[:10]:
+            print(f"  {v:<10} {n:<8} {s:#010x}-{e:#010x}")
+        print(f"pools: the guest is not verifiably running {a.exe} ({len(bad)} chunk(s) "
+              "mismatched or unreadable) - no pool reading from this map is trustworthy.")
+        sys.exit(1)
     rows = read_pools(g.read_mem, pc, ph)
     g.close()
+    print(f"pools: guest identity confirmed against {a.exe}")
     total = sum(r for r, _, _ in rows)
     print(f"{len(rows)} pools, {total / 1048576:.2f} MiB real (malloc'd), largest first:")
     for real, payload, name in rows:
@@ -1042,7 +1066,7 @@ def main():
     s.set_defaults(func=cmd_verify_image)
 
     s = sub.add_parser("memstats"); s.set_defaults(func=cmd_memstats)
-    s = sub.add_parser("pools"); s.add_argument("--map", required=True)
+    s = sub.add_parser("pools"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
     s.add_argument("--min-bytes", type=lambda x: int(x, 0), default=16384); s.set_defaults(func=cmd_pools)
 
     a = p.parse_args()

@@ -357,6 +357,23 @@ class Pools(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             xd.read_pools(_mem_reader(bytes(img), 0x400000), 0x400010, 0x400014)
 
+    def test_stale_map_shape_zero_count_nonzero_base_is_an_error_not_zero_pools(self):
+        # Codex review: exactly what a stale map's addresses read as in this
+        # project's own first dump - a plausible nonzero "base", a zero
+        # "count" - must not print "0 pools, 0.00 MiB" as if measured.
+        import struct
+        img = bytearray(0x100); struct.pack_into("<II", img, 0x10, 0, 0x500000)
+        with self.assertRaises(RuntimeError):
+            xd.read_pools(_mem_reader(bytes(img), 0x400000), 0x400010, 0x400014)
+
+    def test_all_slots_freed_or_unprintable_names_are_errors(self):
+        read, pc, ph = self._image([("freed", 1, 1, 0)])
+        with self.assertRaises(RuntimeError):
+            xd.read_pools(read, pc, ph)
+        read, pc, ph = self._image([("\x01\x02junk", 5, 5, 0x1234)])
+        with self.assertRaises(RuntimeError):
+            xd.read_pools(read, pc, ph)
+
     def test_load_map_symbols_reads_data_sections_too(self):
         import tempfile, os
         with tempfile.NamedTemporaryFile("w", suffix=".map", delete=False) as f:
