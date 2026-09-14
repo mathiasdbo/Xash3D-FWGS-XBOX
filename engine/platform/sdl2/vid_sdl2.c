@@ -916,21 +916,29 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 	// success, the same "successful no-op" contract a real dedicated
 	// server's own skip already relies on elsewhere in this codebase.
 	// refState.desktopBitsPixel is the only state this function would
-	// otherwise set that anything reads later, and only ref/gl ever
-	// reads it - never ref_null, this milestone's only active renderer -
-	// so leaving it at its zero-initialised default is safe here.
+	// otherwise set that anything reads later on its own, and only
+	// ref/gl ever reads it - never ref_null, this milestone's only
+	// active renderer.
 	//
-	// host.renderinfo_changed is NOT safe to skip, though (found in
-	// review): window_width/window_height carry FCVAR_VIDRESTART, so
-	// registering them in VID_Init already marks this flag true before
-	// R_Init_Video ever runs. The normal (non-Xbox) body below clears it
-	// at its own very end; returning early here without doing the same
-	// would leave it standing, and Host_Frame's own real per-frame
-	// VID_CheckChanges() call reads it every frame - seeing it still
-	// true, it would call VID_SetMode() -> VID_CreateWindow() ->
-	// SDL_CreateWindow(), reaching the exact same broken driver this
-	// early return exists to avoid, on literally the next real frame.
-	host.renderinfo_changed = false;
+	// refState.width/height and host.renderinfo_changed are NOT safe to
+	// leave alone, though (both found in review): R_SaveVideoMode() is
+	// the only place refState.width/height ever get set, and skipping it
+	// leaves them at zero - client code that assumes a real screen size
+	// (crosshair scaling, overview setup, SCR_VidInit) reads them
+	// unconditionally once a client/map is active. And
+	// window_width/window_height carry FCVAR_VIDRESTART, so registering
+	// them in VID_Init already marks host.renderinfo_changed true before
+	// R_Init_Video ever runs - left standing, Host_Frame's own real
+	// per-frame VID_CheckChanges() call would see it and reach the same
+	// broken driver a different way. R_SaveVideoMode() with real,
+	// non-zero dimensions fixes both at once: it sets refState.width/
+	// height to real values (640x480, the same placeholder default
+	// refState's own static initializer above already uses) and clears
+	// renderinfo_changed itself when given non-zero args - matching
+	// exactly what the normal (non-Xbox) body below eventually does via
+	// VID_SetMode()'s own real call to it, just without ever touching
+	// SDL video to get there.
+	R_SaveVideoMode( 640, 480, 640, 480, false );
 	return true;
 #endif
 
@@ -1002,6 +1010,23 @@ rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mod
 {
 	rserr_t err;
 
+#if XASH_XBOX
+	// Codex review, round 2: R_Init_Video's and VID_SetMode's own
+	// XASH_XBOX arms both call into this function too (VID_SetMode ->
+	// R_ChangeDisplaySettings -> VID_CreateWindow -> SDL_CreateWindow),
+	// but so does the independently registered `vid_setmode` console
+	// command (VID_Mode_f, vid_common.c) - a real path to the same
+	// broken SDL Xbox driver that bypasses both of those guards
+	// entirely. This is the actual single choke point every route to
+	// window creation shares, so guard it here directly rather than
+	// trying to catch every caller individually. Real, non-zero
+	// dimensions again (not just an early return), for the same reason
+	// as the other two arms - cheap and idempotent if refState already
+	// holds them (R_SaveVideoMode's own early-out).
+	R_SaveVideoMode( 640, 480, 640, 480, false );
+	return rserr_ok;
+#endif
+
 	if( !host.hWnd )
 		err = VID_CreateWindow( width, height, window_mode );
 	else
@@ -1034,10 +1059,12 @@ qboolean VID_SetMode( void )
 	// site never letting host.renderinfo_changed stand: any FUTURE real
 	// cvar change that legitimately re-sets it (window_width/
 	// window_height carry FCVAR_VIDRESTART) would otherwise reach this
-	// function and, from here, the exact same broken SDL Xbox video
-	// driver R_Init_Video already avoids - so refuse it here too, not
-	// just at the one call site found live.
-	host.renderinfo_changed = false;
+	// function's own SDL_GetDesktopDisplayMode() call below (needed to
+	// resolve a default width/height) and, further down,
+	// R_ChangeDisplaySettings() - so refuse it here too, not just at the
+	// one call site found live, with the same real, non-zero dimensions
+	// R_Init_Video's own arm already establishes.
+	R_SaveVideoMode( 640, 480, 640, 480, false );
 	return true;
 #endif
 	int width = window_width.value;

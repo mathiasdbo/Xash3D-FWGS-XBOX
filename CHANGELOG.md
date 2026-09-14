@@ -53,8 +53,19 @@ the same broken driver a different way. Fixed, with defense in depth
 Re-tested live: the stack overflow still happens, at the same point,
 with the identical signature - ruling this out as the actual cause
 rather than leaving it unconfirmed; it remains a genuinely separate,
-open problem. See divergences #45/#46 and `docs/r3d/fork-plan.md`'s
-X7.4 step 2 for the full account.
+open problem.
+
+A second Codex review round found two more real gaps: the independent
+`vid_setmode` console command bypassed every guard by calling
+`R_ChangeDisplaySettings()` directly, and every Xbox arm left
+`refState.width`/`height` at zero (real client code reads them
+unconditionally once active). Fixed together - every arm, including a
+new one added directly in `R_ChangeDisplaySettings()` itself (the
+actual single choke point all routes share), now establishes real,
+non-zero dimensions via `R_SaveVideoMode()` instead of a bare
+`return true`. Re-tested live a third time: the stack overflow still
+happens, identically - ruling out this round too. See divergences
+#45/#46 and `docs/r3d/fork-plan.md`'s X7.4 step 2 for the full account.
 
 ### Fixed — deps/hlsdk: exempt exactly "valve" on NXDK, not a prefix match (divergence #44)
 
