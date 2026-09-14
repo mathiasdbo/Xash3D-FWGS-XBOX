@@ -29,11 +29,13 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
    scripts survive; kill and relaunch xemu before a verification that
    matters.
 3. Before trusting ANY breakpoint address taken from a linker map, run
-   `verify-image <the linked .exe> --map <its map>`: it compares guest
-   bytes at sampled public symbols against the file. xemu boots whatever
-   `dvd_path` in its xemu.toml names - not necessarily the ISO you just
-   packed - and a stale image makes every address lie consistently
-   (breakpoints still "hit", on the wrong functions).
+   `verify-image <the linked .exe>`: it compares EVERY file-backed byte
+   of the read-only sections (.text, .rdata) against guest memory. xemu
+   boots whatever `dvd_path` in its xemu.toml names - not necessarily the
+   ISO you just packed - and a stale image makes every address lie
+   consistently (breakpoints still "hit", on the wrong functions). A
+   sampled check cannot rule that out: a build that differs only where
+   it was not sampled passes, which is why there is no sampling mode.
 
 ## The address model (read from the guest's own page tables, `vmap`)
 
@@ -113,13 +115,18 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
   screenshot <out.png>          Alias for fbdump.
   break <addr> [--steps N]      Software breakpoint, continue, single-step N
                                  (see the launch-timing caveat above).
-  verify-image <exe> --map <file> [--samples N] | --addr A [B ...]
-                                Compare 16 guest bytes at N public .text
-                                 symbols sampled from the map (default 12),
-                                 or at explicit addresses, against the linked
-                                 PE. Exit 0 = all match; 1 = the guest is not
-                                 running this file (check xemu's dvd_path);
-                                 2 = nothing readable, no verdict.
+  verify-image <exe> [--chunk N] Compare EVERY file-backed byte of the linked
+                                 PE's read-only sections (.text, .rdata - not
+                                 .data, which changes at runtime) with guest
+                                 memory, N bytes per read (default 0x8000).
+                                 Exit 0 = identity, every byte matches; 1 =
+                                 the guest is not running this file (check
+                                 xemu's dvd_path); 2 = some bytes unreadable,
+                                 no identity verdict.
+  verify-image <exe> --addr A [B ...]
+                                Spot check 16 bytes at explicit addresses -
+                                 shows one breakpoint address disagreeing,
+                                 but a pass here is NOT image identity.
 
 Addresses are hex, with or without 0x.
 """
@@ -683,30 +690,105 @@ def cmd_break(a):
     g.close()
 
 
-def pe_read_va(data, va, length):
-    """Bytes of a 32-bit PE image file at virtual address `va` (ImageBase +
-    RVA, the same 0x10000-based addresses the linker map and the guest use),
-    or None when `va` falls in no section."""
+_IMAGE_SCN_MEM_WRITE = 0x80000000
+
+
+def pe_sections(data):
+    """(name, va, file_bytes, writable) per section of a 32-bit PE image
+    file, with `va` = ImageBase + RVA (the 0x10000-based addresses the
+    linker map and the guest use) and `file_bytes` the section's raw
+    file-backed contents (never more than its virtual size)."""
     pe = struct.unpack_from("<I", data, 0x3c)[0]
     nsec = struct.unpack_from("<H", data, pe + 6)[0]
     optsz = struct.unpack_from("<H", data, pe + 20)[0]
     imgbase = struct.unpack_from("<I", data, pe + 24 + 28)[0]
-    rva = va - imgbase
+    out = []
     for i in range(nsec):
         o = pe + 24 + optsz + i * 40
-        vsize, sva, rsize, rptr = struct.unpack_from("<IIII", data, o + 8)
-        if sva <= rva < sva + vsize:
-            off = rptr + (rva - sva)
-            return data[off:off + length]
+        name = data[o:o + 8].rstrip(b"\0").decode(errors="replace")
+        vsize, rva, rsize, rptr = struct.unpack_from("<IIII", data, o + 8)
+        chars = struct.unpack_from("<I", data, o + 36)[0]
+        raw = data[rptr:rptr + min(vsize, rsize)]
+        out.append((name, imgbase + rva, raw, bool(chars & _IMAGE_SCN_MEM_WRITE)))
+    return out
+
+
+def pe_read_va(data, va, length):
+    """Bytes of the PE file at virtual address `va`, or None when `va` is
+    not file-backed (outside every section, or in a section's zero-filled
+    tail)."""
+    for _name, sva, raw, _w in pe_sections(data):
+        if sva <= va < sva + len(raw):
+            return raw[va - sva:va - sva + length]
     return None
 
 
-def verify_image(read, data, addrs, length=16):
-    """Compare guest bytes (via `read(addr, n)`) with the PE file's bytes at
-    each address. Returns (matched, mismatched, unreadable) address lists.
-    A mismatch means the guest is not running this file - a stale ISO, a
-    stale xemu dvd_path, a different build - and every breakpoint address
-    taken from this file's map is then meaningless."""
+def verify_image(read, data, chunk=0x8000):
+    """Compare EVERY file-backed byte of the PE's read-only sections (.text,
+    .rdata, ... - anything without IMAGE_SCN_MEM_WRITE, since writable data
+    legitimately changes at runtime) against guest memory, `chunk` bytes per
+    read. Returns a list of (section, start_va, end_va, verdict) per chunk,
+    verdict in {"ok", "mismatch", "unreadable"}. Only "every chunk ok" is
+    identity; a single mismatch means the guest is not running this file
+    (stale ISO, stale xemu dvd_path, a different build), and an unreadable
+    chunk is "not measured", never "matches" - the whole point of this
+    check is that a stale image makes breakpoints hit consistently on the
+    wrong functions, so partial coverage would just move the blind spot."""
+    results = []
+    for name, sva, raw, writable in pe_sections(data):
+        if writable or not raw:
+            continue
+        for off in range(0, len(raw), chunk):
+            expect = raw[off:off + chunk]
+            start = sva + off
+            try:
+                got = read(start, len(expect))
+            except Exception:
+                verdict = "unreadable"
+            else:
+                if got == expect:
+                    verdict = "ok"
+                elif _only_kernel_thunks_differ(expect, got, start):
+                    verdict = "thunks"
+                else:
+                    verdict = "mismatch"
+            results.append((name, start, start + len(expect), verdict))
+    return results
+
+
+_KERNEL_LO, _KERNEL_HI = 0x80010000, 0x80040000
+
+
+def _only_kernel_thunks_differ(expect, got, start):
+    """True when every differing byte sits in a dword-aligned kernel import
+    thunk that the Xbox loader legitimately patched: the file holds the
+    ordinal (`0x800000NN`, libxboxkrnl's `__imp_*` table in .rdata) and the
+    guest holds the resolved kernel address (0x8001xxxx-0x8003xxxx). Any
+    other difference is a real mismatch."""
+    if len(expect) != len(got):
+        return False
+    i = 0
+    while i < len(expect):
+        if expect[i] == got[i]:
+            i += 1
+            continue
+        d = (start + i) & ~3
+        o = d - start
+        if o < 0 or o + 4 > len(expect):
+            return False
+        f = struct.unpack_from("<I", expect, o)[0]
+        g = struct.unpack_from("<I", got, o)[0]
+        if not (f & 0xFFFFFE00 == 0x80000000 and _KERNEL_LO <= g < _KERNEL_HI):
+            return False
+        i = o + 4
+    return True
+
+
+def verify_addrs(read, data, addrs, length=16):
+    """Spot check: (matched, mismatched, unreadable) address lists for 16
+    bytes at each explicit address. A passing spot check is NOT identity -
+    use verify_image() for that; this exists to point at one specific
+    breakpoint address and see it disagree."""
     matched, mismatched, unreadable = [], [], []
     for a in addrs:
         expect = pe_read_va(data, a, length)
@@ -725,36 +807,43 @@ def verify_image(read, data, addrs, length=16):
 def cmd_verify_image(a):
     with open(a.exe, "rb") as f:
         data = f.read()
+    g = GdbRemote(a.host, a.port)
     if a.addr:
         addrs = [parse_hex(x) for x in a.addr]
-        labels = {x: f"{x:#010x}" for x in addrs}
-    else:
-        entries = load_map(a.map)
-        if not entries:
-            raise RuntimeError(f"no .text symbols found in {a.map}")
-        step = max(1, len(entries) // a.samples)
-        picked = entries[::step][:a.samples]
-        addrs = [e[0] for e in picked]
-        labels = {e[0]: f"{e[0]:#010x} {e[1]}" for e in picked}
-    g = GdbRemote(a.host, a.port)
-    matched, mismatched, unreadable = verify_image(g.read_mem, data, addrs)
+        matched, mismatched, unreadable = verify_addrs(g.read_mem, data, addrs)
+        g.close()
+        for x in matched:
+            print(f"  ok         {x:#010x}")
+        for x in mismatched:
+            print(f"  MISMATCH   {x:#010x}")
+        for x in unreadable:
+            print(f"  unreadable {x:#010x}")
+        print(f"verify-image: spot check of {len(addrs)} address(es): {len(matched)} match, "
+              f"{len(mismatched)} mismatch, {len(unreadable)} unreadable. A spot check "
+              "is not image identity - run without --addr for that.")
+        sys.exit(1 if mismatched else (2 if not matched else 0))
+    results = verify_image(g.read_mem, data, chunk=a.chunk)
     g.close()
-    for x in matched:
-        print(f"  ok        {labels[x]}")
-    for x in mismatched:
-        print(f"  MISMATCH  {labels[x]}")
-    for x in unreadable:
-        print(f"  unreadable {labels[x]}")
-    print(f"verify-image: {len(matched)} match, {len(mismatched)} mismatch, "
-          f"{len(unreadable)} unreadable of {len(addrs)} sampled against {a.exe}")
-    if mismatched:
+    total = sum(e - s for _n, s, e, _v in results)
+    by = {"ok": 0, "thunks": 0, "mismatch": 0, "unreadable": 0}
+    for name, s, e, v in results:
+        by[v] += e - s
+        if v == "thunks":
+            print(f"  ok         {name:<8} {s:#010x}-{e:#010x} (differs only in loader-patched "
+                  "kernel import thunks: ordinal in file, kernel address in guest)")
+        elif v != "ok":
+            print(f"  {v:<10} {name:<8} {s:#010x}-{e:#010x}")
+    print(f"verify-image: {by['ok'] + by['thunks']} of {total} read-only image bytes match "
+          f"{a.exe}; {by['mismatch']} mismatch, {by['unreadable']} unreadable")
+    if by["mismatch"]:
         print("verify-image: the guest is NOT running this file. Check what xemu "
               "actually boots (dvd_path in xemu.toml) against the ISO you just "
               "packed - breakpoints from this map are meaningless until it is.")
         sys.exit(1)
-    if not matched:
-        print("verify-image: nothing could be compared - no verdict.")
+    if by["unreadable"] or not total:
+        print("verify-image: not every byte could be compared - no identity verdict.")
         sys.exit(2)
+    print("verify-image: identity confirmed - every file-backed read-only byte matches.")
 
 
 def main():
@@ -790,8 +879,8 @@ def main():
     s = sub.add_parser("break"); s.add_argument("addr"); s.add_argument("--steps", type=int, default=20)
     s.add_argument("--timeout", type=int, default=60); s.set_defaults(func=cmd_break)
 
-    s = sub.add_parser("verify-image"); s.add_argument("exe"); s.add_argument("--map")
-    s.add_argument("--addr", nargs="*"); s.add_argument("--samples", type=int, default=12)
+    s = sub.add_parser("verify-image"); s.add_argument("exe")
+    s.add_argument("--addr", nargs="*"); s.add_argument("--chunk", type=lambda x: int(x, 0), default=0x8000)
     s.set_defaults(func=cmd_verify_image)
 
     a = p.parse_args()

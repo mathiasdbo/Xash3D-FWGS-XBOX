@@ -1080,9 +1080,18 @@ run: the old build's own function at the new build's `COM_LoadLevel`
 address happened to also be reached at ~4.2s, so nothing looked off
 until a milestone two instructions away refused to fire. **Rule: the
 first thing a live session does after packing a new image is
-`tools/xemu-debug.py verify-image <linked .exe> --map <map>` (added for
-this; exit 1 on any mismatch), and a breakpoint result is not evidence
-until that has passed on the same running guest.** Two smaller lessons
+`tools/xemu-debug.py verify-image <linked .exe>` (added for this; it
+compares EVERY file-backed byte of the read-only sections, exit 1 on
+any mismatch), and a breakpoint result is not evidence until that has
+passed on the same running guest.** Its first version sampled 12
+symbols and was rightly rejected in Codex review: a stale build that
+differs only where it was not sampled passes a sample, which is the
+same blind spot in a smaller coat. The full comparison found one real
+subtlety worth knowing: the last 25 KiB of `.rdata` legitimately differ
+- libxboxkrnl's `__imp_*` kernel thunk table holds ordinals
+(`0x800000NN`) in the file and the resolved `0x8001xxxx-0x8003xxxx`
+kernel addresses in the guest, patched by the loader - so the tool
+recognises exactly that dword shape and nothing else. Two smaller lessons
 from the same day, both real: (1) a client-side `cont()` timeout does
 not stop the guest, and a stop-reply that arrives after the client gave
 up is delivered to the NEXT connection's handshake - `GdbRemote` drains

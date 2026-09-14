@@ -32,10 +32,16 @@ verification above replaces it.
 
 ### Added — `tools/xemu-debug.py verify-image`
 
-Compares guest bytes at sampled public symbols (or explicit addresses)
-against the linked PE, exit 1 on any mismatch - the check that would
-have caught the stale ISO on the first post-fix run. Unit-tested
-(`tools/test_xemu_debug.py`, `VerifyImage`). The tool's own launch
+Compares every file-backed byte of the linked PE's read-only sections
+(`.text`, `.rdata`) against guest memory, exit 1 on any mismatch - the
+check that would have caught the stale ISO on the first post-fix run.
+The Xbox loader's in-place kernel-import thunk patch (ordinal in the
+file, kernel address in the guest) is recognised by its exact dword
+shape and nothing else. A first, sampled version was rejected in review
+as unable to rule out a build differing where it was not sampled.
+`--addr` remains as an explicitly-labelled spot check. Unit-tested
+(`tools/test_xemu_debug.py`, `VerifyImage`, including the
+single-changed-byte and thunk cases). The tool's own launch
 notes no longer claim breakpoints do not survive `system_reset`; they
 do (`lessons.md`), which is exactly why stale ones are dangerous.
 

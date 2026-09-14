@@ -3674,8 +3674,13 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    the first thing a live session runs after packing an image.
 
    **The real result, on the guest confirmed byte-for-byte to be running
-   the fixed PE (`verify-image`, 12/12 sampled symbols match; the bytes
-   at `SV_ExecLoadLevel` are the file's own `call SV_SetStringArrayMode`):
+   the fixed PE (`verify-image`: all 6,405,867 file-backed bytes of
+   `.text` and `.rdata` match the linked `xbe-build.exe`, the only
+   differences being the 99 dword kernel-import thunks the loader
+   patches from ordinal to kernel address, which the tool recognises as
+   such - a first, sampled version of the check was rejected in Codex
+   review as unable to rule out a build differing where it was not
+   sampled, and rewritten to cover every byte):
    every named exit of this step, in order, with `Sys_Error`/`Host_Error`/
    `SV_SysError` armed throughout and never hit.** From `map c0a0` at
    ~4.2 s: `SV_SpawnServer('c0a0')` 4.31 s → `Mod_LoadWorld` 4.36 →
