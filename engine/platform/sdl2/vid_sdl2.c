@@ -26,6 +26,10 @@ GNU General Public License for more details.
 #include <vrtld.h>
 #endif // XASH_PSVITA
 
+#if XASH_XBOX
+#include <hal/video.h> // XVideoSetMode - see R_Init_Video's XASH_XBOX arm
+#endif // XASH_XBOX
+
 static vidmode_t *vidmodes = NULL;
 static int num_vidmodes = 0;
 static void GL_SetupAttributes( void );
@@ -386,8 +390,19 @@ static void VID_GetWindowSizeInPixels( SDL_Window *window, SDL_Renderer *rendere
 #if SDL_VERSION_ATLEAST( 2, 26, 0 )
 	SDL_GetWindowSizeInPixels( window, w, h );
 #else
+	// sw.renderer is NULL in software mode unless -sdl_renderer was given
+	// (VID_CreateWindow) - the window surface is blitted directly then, and
+	// *w/*h already hold the window size. SDL_GetRendererOutputSize( NULL )
+	// only "works" on a release SDL2 because its CHECK_RENDERER_MAGIC
+	// returns -1 without touching the outputs; nxdk's SDL2 is built with
+	// SDL_ASSERT_LEVEL 2, where that same check is an SDL_assert, and on a
+	// console with no assertion prompt that ends in abort() and a reboot
+	// loop (X5, measured live: the boot restarted every 2.9 s from here).
 	if( glw_state.software )
-		SDL_GetRendererOutputSize( renderer, w, h );
+	{
+		if( renderer )
+			SDL_GetRendererOutputSize( renderer, w, h );
+	}
 	else
 		SDL_GL_GetDrawableSize( window, w, h );
 #endif
@@ -899,47 +914,37 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 	SDL_DisplayMode display_mode;
 
 #if XASH_XBOX
-	// No real VIDEO_XBOX backend exists yet (planned for X5) - divergence
-	// #14 already named this exact call chain (CL_Init -> VID_Init ->
-	// vid_sdl2.c -> SDL_CreateWindow) as reaching nxdk's real but
-	// incomplete SDL_xbvideo.c driver once a real Xbox entry point
-	// existed, and left the fix undecided until that happened. It has:
-	// confirmed live, this function's own very first real SDL video call
-	// (SDL_GetCurrentDisplayMode below, which lazily inits SDL's video
-	// subsystem) reaches SDL_xbvideo.c's pixelFormatSelector and hits its
-	// own unconditional assert(0) - real, unfinished driver code, not
-	// something this fork wrote. X7.4's own milestone is a headless boot
-	// with ref_null - no real window or video mode is meaningful yet on
-	// this target - so mirror CL_Init's own existing
-	// `host.type == HOST_DEDICATED` short-circuit, narrowed to video
-	// only: skip every real SDL video/window call below and report
-	// success, the same "successful no-op" contract a real dedicated
-	// server's own skip already relies on elsewhere in this codebase.
-	// refState.desktopBitsPixel is the only state this function would
-	// otherwise set that anything reads later on its own, and only
-	// ref/gl ever reads it - never ref_null, this milestone's only
-	// active renderer.
-	//
-	// refState.width/height and host.renderinfo_changed are NOT safe to
-	// leave alone, though (both found in review): R_SaveVideoMode() is
-	// the only place refState.width/height ever get set, and skipping it
-	// leaves them at zero - client code that assumes a real screen size
-	// (crosshair scaling, overview setup, SCR_VidInit) reads them
-	// unconditionally once a client/map is active. And
-	// window_width/window_height carry FCVAR_VIDRESTART, so registering
-	// them in VID_Init already marks host.renderinfo_changed true before
-	// R_Init_Video ever runs - left standing, Host_Frame's own real
-	// per-frame VID_CheckChanges() call would see it and reach the same
-	// broken driver a different way. R_SaveVideoMode() with real,
-	// non-zero dimensions fixes both at once: it sets refState.width/
-	// height to real values (640x480, the same placeholder default
-	// refState's own static initializer above already uses) and clears
-	// renderinfo_changed itself when given non-zero args - matching
-	// exactly what the normal (non-Xbox) body below eventually does via
-	// VID_SetMode()'s own real call to it, just without ever touching
-	// SDL video to get there.
-	R_SaveVideoMode( 640, 480, 640, 480, false );
-	return true;
+	// X5, the route decided in fork-plan.md: nxdk's own SDL2 Xbox video
+	// driver, not a vid_xbox.c yet. Divergence #46's three early returns
+	// used to skip every SDL video call here because the driver's very
+	// first touch - SDL_GetCurrentDisplayMode below, lazily running
+	// SDL_xbvideo.c's XBOX_VideoInit - hit pixelFormatSelector()'s
+	// assert(0). Read properly (SDL_xbframebuffer_c.h:31-46), that assert
+	// is not unfinished driver code: it fires only when XVideoGetMode()
+	// reports a bpp other than 15/16/32, i.e. when NO video mode has been
+	// set yet - the driver expects the title to have called XVideoSetMode()
+	// first, exactly as every nxdk sample does before touching SDL video.
+	// So set one. 640x480x32 is what pixelFormatSelector maps to
+	// SDL_PIXELFORMAT_RGB888 and what SDL_XBOX_CreateWindowFramebuffer
+	// then hands SW_CreateBuffer as the window surface (4 bytes/pixel,
+	// one of the two widths ref_soft's blitter tables accept).
+	if( !XVideoSetMode( 640, 480, 32, REFRESH_DEFAULT ))
+	{
+		Con_Printf( S_ERROR "%s: XVideoSetMode( 640, 480, 32 ) failed\n", __func__ );
+		return false;
+	}
+
+	// The driver has exactly one window, always the framebuffer's own
+	// size (XBOX_CreateWindow overwrites w/h and forces FULLSCREEN, and
+	// XBOX_SetDisplayMode is a no-op) - a retail video.cfg's 1920x1080
+	// fullscreen request would only send VID_SetMode() through
+	// VID_GuessFullscreenMode/SDL_SetWindowDisplayMode looking for a mode
+	// the driver never lists. Ask for what the hardware is actually
+	// showing, windowed, and let the common path below do the rest
+	// unchanged.
+	Cvar_DirectSetValue( &window_width, 640 );
+	Cvar_DirectSetValue( &window_height, 480 );
+	Cvar_DirectSetValue( &vid_fullscreen, WINDOW_MODE_WINDOWED );
 #endif
 
 	SDL_GetCurrentDisplayMode( VID_GetDisplayIndex( __func__, NULL ), &display_mode );
@@ -1010,23 +1015,6 @@ rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mod
 {
 	rserr_t err;
 
-#if XASH_XBOX
-	// Codex review, round 2: R_Init_Video's and VID_SetMode's own
-	// XASH_XBOX arms both call into this function too (VID_SetMode ->
-	// R_ChangeDisplaySettings -> VID_CreateWindow -> SDL_CreateWindow),
-	// but so does the independently registered `vid_setmode` console
-	// command (VID_Mode_f, vid_common.c) - a real path to the same
-	// broken SDL Xbox driver that bypasses both of those guards
-	// entirely. This is the actual single choke point every route to
-	// window creation shares, so guard it here directly rather than
-	// trying to catch every caller individually. Real, non-zero
-	// dimensions again (not just an early return), for the same reason
-	// as the other two arms - cheap and idempotent if refState already
-	// holds them (R_SaveVideoMode's own early-out).
-	R_SaveVideoMode( 640, 480, 640, 480, false );
-	return rserr_ok;
-#endif
-
 	if( !host.hWnd )
 		err = VID_CreateWindow( width, height, window_mode );
 	else
@@ -1053,20 +1041,6 @@ qboolean VID_SetMode( void )
 {
 	rserr_t	err;
 
-#if XASH_XBOX
-	// Same reasoning as R_Init_Video's own XASH_XBOX arm above, applied
-	// as defense in depth rather than relying solely on that one call
-	// site never letting host.renderinfo_changed stand: any FUTURE real
-	// cvar change that legitimately re-sets it (window_width/
-	// window_height carry FCVAR_VIDRESTART) would otherwise reach this
-	// function's own SDL_GetDesktopDisplayMode() call below (needed to
-	// resolve a default width/height) and, further down,
-	// R_ChangeDisplaySettings() - so refuse it here too, not just at the
-	// one call site found live, with the same real, non-zero dimensions
-	// R_Init_Video's own arm already establishes.
-	R_SaveVideoMode( 640, 480, 640, 480, false );
-	return true;
-#endif
 	int width = window_width.value;
 	int height = window_height.value;
 

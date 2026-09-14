@@ -1681,6 +1681,51 @@ earlier claim that `ref/null` "lets the rest of the client boot path
 (`SV_Init`, `CL_Init`, menu init, the frame loop) be verified" was too
 strong: `SV_Init` yes, `CL_Init` only up to its client-module load.
 
+**The decided route, built and measured, 2026-09-14 (divergence #50):
+the first frame this fork has ever put on the Xbox's own scan-out is
+Half-Life's loading screen, drawn by `ref_soft` at 640x480.** In order:
+`ref/soft` + `ref/common` compile clean for Xbox once `tools/xbox-cc.sh`
+gives `ref/` sources `REF_DLL=1` and their own include directories ahead
+of the engine's (the 20/20 failure under the plain sweep was the
+engine's `engine/client/ref_common.h` shadowing `ref/common/ref_common.h`,
+not a platform gap); linked raw they collide with the engine and
+`ref_null` on 20 symbols, so `tools/xbox-ref-isolate.sh` renames every
+defined symbol `soft_*` the way the SDK is isolated, `ref/soft/
+exports.txt` names `_soft_GetRefAPI` for the table's `GetRefAPI` row,
+and the build is 0 duplicate / 0 undefined at 6.76 MB. Divergence #46's
+three bypasses are gone: nxdk's driver only asserted because no video
+mode had been set, so `R_Init_Video`'s Xbox arm calls `XVideoSetMode(
+640, 480, 32 )` and the common path runs unchanged - one window, forced
+to the framebuffer's size, `SW_CreateBuffer` handed a 640x480 RGB888
+surface, `SDL_UpdateWindowSurface` copying into nxdk's real framebuffer.
+Two real things stood between that and a picture, both found live:
+`VID_GetWindowSizeInPixels` calls `SDL_GetRendererOutputSize( NULL )` in
+software mode (an SDL_assert under nxdk's `SDL_ASSERT_LEVEL 2`, whose
+promptless fallback aborts - the boot rebooted every 2.9 s with no
+`Sys_Error`; guarded, a genuine upstream latent bug worth sending up),
+and, because that is the second silent SDL-assert failure this port has
+paid a session for, `Xbox_Init` now installs an assertion handler that
+turns any of them into a `Sys_Error` naming condition/file/line. The
+frame was captured while halted on the return of the second
+`SDL_XBOX_UpdateWindowFramebuffer`, read physically from PCRTC START
+(`.sweep/x5-shots/halted-frame2.png`, kept out of the repo: it is
+Valve's art). **Then `c0a0` runs the console out of memory** -
+`_Mem_Alloc` in `CL_InitEdicts` (`cl_game.c:1002`) at 8.6 s with 249
+pages (0.97 MiB) free: VirtualMemory 30.8 MiB and climbing, Image 27.1
+MiB (19.1 with `ref_null`: `ref_soft`'s `vid` tables 2.5 MiB,
+`r_images` 2.4, `g_studio` 1.8, `r_leafkeys` 0.5, `gDecalPool` 0.2),
+Stack 3.0, Contiguous 2.0. X7.4 step 4 had 17.4 MiB left after the same
+map with `ref_null`; `ref_soft` needs ~7.6 MiB more image and ~8.5 MiB
+more heap for it - over by a few MiB. **So X5's exit line ("a
+recognisable map, in software", `c1a3`/`crossfire` frame times) is
+blocked on X3/X8's memory work, and this is that work's first real
+brief**: the engine-side PC-sized statics X8 already names (`cl` 3.4
+MiB, `sv` 2.4, `net` 1.6, `mod_known` 1.5, `frame_ents` 0.7,
+`s_knownSfx` 0.6) plus `ref_soft`'s own, against a load that peaks
+above 31 MiB of heap. Every number above is from the kernel's own page
+counters (`tools/xemu-debug.py memstats`), on a guest `verify-image`
+confirmed byte-for-byte first.
+
 **[from PS3]** The change their roadmap forced in this plan.
 
 **Do not route this through SDL's window surface.** Write

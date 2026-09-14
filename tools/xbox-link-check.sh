@@ -110,6 +110,13 @@ if [ "$CLIENT_MAIN" -eq 1 ]; then
 	# `_main` once XBOX_CLIENT_MAIN=1 makes XASH_ENABLE_MAIN real.
 	ENGINE_OBJS=$(echo "$ENGINE_OBJS" | grep -v '_platform_xbox_xbox_main\.obj$')
 fi
+# Raw ref/soft and ref/common objects (a `tools/xbox-sweep.sh ref/soft` run,
+# or a by-hand tools/xbox-cc.sh of one file, drops them into $SCRATCH under
+# these names) must never reach the link: the module is linked ONLY in its
+# isolated form (below), and the raw copies re-create exactly the 20
+# duplicate symbols isolation exists to remove - measured, X5, when
+# leftovers from a compile experiment sat next to the isolated set.
+ENGINE_OBJS=$(echo "$ENGINE_OBJS" | grep -v '/ref_\(soft\|common\)_[^/]*\.obj$')
 
 # Third-party scope: found compiling, X1, 2026-09-08. Each of these four
 # submodules' own wscript names its real source list - not everything
@@ -559,6 +566,50 @@ if ! tools/xbox-cc.sh ref/null/r_context.c -Iref/common -o "$REF_NULL_OBJ" 2>"$S
 fi
 STUB_GAME_OBJS="$STUB_GAME_OBJS $REF_NULL_EXPORTS_OBJ $REF_NULL_OBJ"
 echo "xbox-link-check: ref_null registered in the static library table (real GetRefAPI)." >&2
+
+# ref_soft: X5 proper. upstream's own software rasterizer (ref/soft, 20
+# files) plus the ref/common sources every ref module links (ref/soft/
+# wscript: `use = ['ref_common', ...]`), each compiled through
+# tools/xbox-cc.sh's ref/ rule (REF_DLL=1, ref/soft + ref/common ahead of
+# the engine's include set - see the comment there for why the order is
+# not optional). Registered under the name R_GetRendererName() derives
+# from "soft" ("ref_%s", ref_common.c:622 under XASH_STATIC_LIBS), and
+# auto-tried by R_Init()'s own renderer loop because tools/xbox-cc.sh now
+# compiles the engine with XASH_REF_SOFT_ENABLED=1 - so a disc's retail
+# video.cfg with `r_refdll ""` selects it without any config edit, and
+# ref_null stays what it always was: the last resort after every real
+# option, never the default.
+REF_SOFT_EXPORTS_C="$SCRATCH/gen/generated_lib_ref_soft_exports.c"
+if [ ! -f "$REF_SOFT_EXPORTS_C" ]; then
+	echo "xbox-link-check: $REF_SOFT_EXPORTS_C does not exist." >&2
+	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
+	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	exit 1
+fi
+REF_SOFT_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$REF_SOFT_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
+if ! tools/xbox-cc.sh "$REF_SOFT_EXPORTS_C" -o "$REF_SOFT_EXPORTS_OBJ" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+	echo "xbox-link-check: generated_lib_ref_soft_exports.c failed to compile:" >&2
+	cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+	exit 2
+fi
+# Isolated, not linked raw: measured on the first attempt, ref/soft's own
+# objects next to the engine and ref_null produce 20 duplicate symbols
+# (R_Init/R_Shutdown, the Tri* API, _Mem_Alloc/_Mem_Free/_Mem_Realloc,
+# six convar_t definitions the engine also owns, and GetRefAPI itself) -
+# tools/xbox-ref-isolate.sh's header has the list and the reasoning. It
+# compiles the module fresh and renames every defined symbol soft_*;
+# ref/soft/exports.txt's second column ("_soft_GetRefAPI") is what makes
+# the generated table's "GetRefAPI" row resolve to this module's copy.
+if ! REF_SOFT_ISO_DIR="$(bash tools/xbox-ref-isolate.sh soft)"; then
+	echo "xbox-link-check: tools/xbox-ref-isolate.sh soft failed - see above." >&2
+	exit 2
+fi
+REF_SOFT_OBJS="$REF_SOFT_EXPORTS_OBJ"
+for o in "$REF_SOFT_ISO_DIR"/*.obj; do
+	[ -f "$o" ] && REF_SOFT_OBJS="$REF_SOFT_OBJS $o"
+done
+STUB_GAME_OBJS="$STUB_GAME_OBJS $REF_SOFT_OBJS"
+echo "xbox-link-check: ref_soft registered in the static library table (real, isolated GetRefAPI)." >&2
 
 for f in stub_game/server/server_stub.c "$SCRATCH/gen/generated_lib_server_exports.c" "$SCRATCH/gen/generated_lib_client_exports.c"; do
 	if [ ! -f "$f" ]; then

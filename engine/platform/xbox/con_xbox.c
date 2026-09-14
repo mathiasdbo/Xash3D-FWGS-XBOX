@@ -18,6 +18,7 @@ GNU General Public License for more details.
 #if XASH_XBOX
 
 #include <xboxkrnl/xboxkrnl.h>
+#include <SDL.h> // SDL_SetAssertionHandler - see Xbox_SDLAssertionHandler
 
 /*
 ====================
@@ -42,9 +43,35 @@ nothing useful", but "does not exist to call". Nothing here needs
 replacing, only excluding.
 ====================
 */
+/*
+====================
+Xbox_SDLAssertionHandler
+
+nxdk's SDL2 is built with SDL_ASSERT_LEVEL 2, so every SDL_assert in it is
+live - and SDL's default handler for a failed one wants to ASK the user
+(SDL_PromptAssertion: a message box, else a stdin prompt). A console has
+neither. Measured twice: divergence #49's assert hung the boot for good
+(the prompt never returned), and X5's first picture attempt aborted and
+rebooted every 2.9 s (the stdin fallback gave up with SDL_ASSERTION_ABORT)
+- both silent, both costing a live debugging session to even name the
+assert. This handler turns any of them into the one line the log channel
+was built for, then the same Sys_Error every other fatal boot problem
+already takes. It does not IGNORE anything: an assert is still fatal, it
+is just no longer a mystery.
+====================
+*/
+static SDL_AssertState SDLCALL Xbox_SDLAssertionHandler( const SDL_AssertData *data, void *userdata )
+{
+	( void )userdata;
+	Sys_Error( "SDL assertion failed: %s\n  at %s:%d (%s)\n",
+		data->condition, data->filename, data->linenum, data->function );
+	return SDL_ASSERTION_ABORT; // unreachable, Sys_Error does not return
+}
+
 void Xbox_Init( qboolean con_showalways )
 {
 	( void )con_showalways;
+	SDL_SetAssertionHandler( Xbox_SDLAssertionHandler, NULL );
 }
 
 void Xbox_Shutdown( void )
