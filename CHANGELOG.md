@@ -22,8 +22,13 @@ nxdk's `CreateThread(..., 0, ...)` - including the thread crt0 runs
 `main()` on - inherits that XBE header value: the whole engine was on
 64 KiB. Upstream assumes Windows' 1 MiB and already raises the stack on
 its own small-default ports (DOS 512 KiB, Emscripten 16 MiB). Every
-`nxdk-link` call in `tools/xbox-game-link-check.sh` and
-`tools/xbox-link-check.sh` now passes `-stack:1048576`.
+`nxdk-link` call in `tools/xbox-game-link-check.sh`,
+`tools/xbox-link-check.sh` and `tools/xbox-dedicated-link-check.sh` now
+passes `-stack:1048576` (the dedicated tool was missed at first - found
+in review; its flag is verified to propagate, though that target's own
+boot could not be re-verified: its link currently fails on a separate,
+pre-existing `_lib_ref_null_exports` undefined symbol, identically with
+or without the flag).
 
 Verified in the PE (`SizeOfStackReserve`) and XBE (`SizeOfStackCommit`)
 headers, then live: 300 consecutive counted `Host_Frame` calls with no

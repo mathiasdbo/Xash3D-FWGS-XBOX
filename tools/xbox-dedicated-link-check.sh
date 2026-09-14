@@ -171,7 +171,15 @@ done
 
 LOG="$SCRATCH/link.txt"
 LINK_OUT="${XBE_OUT:-$SCRATCH/resonance3d-dedicated.exe}"
+# 1 MiB main-thread stack, overriding nxdk-link's own -stack:65536 default -
+# same value and full reasoning as tools/xbox-game-link-check.sh's
+# XBOX_STACK_SIZE. Found in review: this target compiles net_ws.c too, and
+# its own frame path (Host_ServerFrame -> SV_ReadPackets -> NET_GetPacket
+# -> NET_QueuePacket) reaches the exact same 65535-byte stack buffer that
+# overflows a 64 KiB stack on the first frame.
+XBOX_STACK_SIZE=1048576
 deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
+	-stack:"$XBOX_STACK_SIZE" \
 	-out:"$LINK_OUT" "@$RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
 
