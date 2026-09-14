@@ -42,8 +42,19 @@ before hitting a new, reproducible kernel bugcheck (`KeBugCheckEx(0x1E`
 `KMODE_EXCEPTION_NOT_HANDLED, 0xC00000FD` `STATUS_STACK_OVERFLOW`) a
 short time into `Host_Frame`'s real logic - a genuine stack overflow,
 precisely characterized but not yet root-caused, real separate
-follow-up work for a future session. See divergences #45/#46 and
-`docs/r3d/fork-plan.md`'s X7.4 step 2 for the full account.
+follow-up work for a future session.
+
+Codex review of the video-init fix found a real, separate invariant
+bug in it: the early return skipped clearing `host.renderinfo_changed`
+(already forced true by `VID_Init`'s own cvar registration), which
+would have let `Host_Frame`'s own per-frame `VID_CheckChanges` reach
+the same broken driver a different way. Fixed, with defense in depth
+(`VID_SetMode()` itself also guarded, not just the one call site).
+Re-tested live: the stack overflow still happens, at the same point,
+with the identical signature - ruling this out as the actual cause
+rather than leaving it unconfirmed; it remains a genuinely separate,
+open problem. See divergences #45/#46 and `docs/r3d/fork-plan.md`'s
+X7.4 step 2 for the full account.
 
 ### Fixed — deps/hlsdk: exempt exactly "valve" on NXDK, not a prefix match (divergence #44)
 

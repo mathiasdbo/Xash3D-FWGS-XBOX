@@ -919,6 +919,18 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 	// otherwise set that anything reads later, and only ref/gl ever
 	// reads it - never ref_null, this milestone's only active renderer -
 	// so leaving it at its zero-initialised default is safe here.
+	//
+	// host.renderinfo_changed is NOT safe to skip, though (found in
+	// review): window_width/window_height carry FCVAR_VIDRESTART, so
+	// registering them in VID_Init already marks this flag true before
+	// R_Init_Video ever runs. The normal (non-Xbox) body below clears it
+	// at its own very end; returning early here without doing the same
+	// would leave it standing, and Host_Frame's own real per-frame
+	// VID_CheckChanges() call reads it every frame - seeing it still
+	// true, it would call VID_SetMode() -> VID_CreateWindow() ->
+	// SDL_CreateWindow(), reaching the exact same broken driver this
+	// early return exists to avoid, on literally the next real frame.
+	host.renderinfo_changed = false;
 	return true;
 #endif
 
@@ -1015,6 +1027,19 @@ Set the described video mode
 qboolean VID_SetMode( void )
 {
 	rserr_t	err;
+
+#if XASH_XBOX
+	// Same reasoning as R_Init_Video's own XASH_XBOX arm above, applied
+	// as defense in depth rather than relying solely on that one call
+	// site never letting host.renderinfo_changed stand: any FUTURE real
+	// cvar change that legitimately re-sets it (window_width/
+	// window_height carry FCVAR_VIDRESTART) would otherwise reach this
+	// function and, from here, the exact same broken SDL Xbox video
+	// driver R_Init_Video already avoids - so refuse it here too, not
+	// just at the one call site found live.
+	host.renderinfo_changed = false;
+	return true;
+#endif
 	int width = window_width.value;
 	int height = window_height.value;
 

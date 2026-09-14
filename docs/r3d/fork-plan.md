@@ -3416,6 +3416,21 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    real per-frame call graph past input processing) is precisely
    characterized with real, decoded evidence rather than guessed at, and
    is real, separate, dedicated follow-up work for a future session.
+
+   **One real hypothesis for the stack overflow was checked live and
+   ruled out, not left open on a guess.** Codex review of the video-init
+   fix (divergence #46) found a real, separate invariant bug in it: the
+   early return skipped clearing `host.renderinfo_changed`, which
+   `VID_Init`'s own cvar registration already forces true - left
+   standing, `Host_Frame`'s own real per-frame `VID_CheckChanges` call
+   would see it and try to create a real window on literally the next
+   frame, reaching the same broken driver a different way. Fixed (both
+   the one call site and, as defense in depth, `VID_SetMode()` itself).
+   Re-tested live after the fix: the stack overflow still happens, at
+   the same point, with the identical bugcheck signature - ruling this
+   out as the actual cause, not merely leaving it unconfirmed. The
+   overflow is confirmed to be a genuinely separate, still-unresolved
+   problem.
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's
