@@ -1724,7 +1724,12 @@ MiB, `sv` 2.4, `net` 1.6, `mod_known` 1.5, `frame_ents` 0.7,
 `s_knownSfx` 0.6) plus `ref_soft`'s own, against a load that peaks
 above 31 MiB of heap. Every number above is from the kernel's own page
 counters (`tools/xemu-debug.py memstats`), on a guest `verify-image`
-confirmed byte-for-byte first.
+confirmed byte-for-byte first. Two review findings closed on the way
+(divergence #50): later mode changes are clamped to the driver's one
+640x480 framebuffer at `R_ChangeDisplaySettings`, and the link check no
+longer links any engine object the sweep's new manifest does not vouch
+for - the class of stale-build false pass that adding
+`XASH_REF_SOFT_ENABLED` would otherwise have invited.
 
 **[from PS3]** The change their roadmap forced in this plan.
 

@@ -31,7 +31,23 @@ aborts and the boot rebooted every 2.9 s with no error printed. Guarded
 (an upstream latent bug). And `Xbox_Init` now installs an SDL assertion
 handler that routes any failed `SDL_assert` into `Sys_Error` with its
 condition/file/line - after divergence #49's hang and this abort, the
-second and third live sessions spent on a silent SDL assert.
+second and third live sessions spent on a silent SDL assert. Found in
+review: every later mode change (`vid_setmode`, a cvar restart) is now
+clamped to the one 640x480 framebuffer nxdk's driver has, at the
+`R_ChangeDisplaySettings` choke point, instead of reaching the driver's
+own size assert.
+
+### Changed — the Xbox link check only links objects the sweep vouches for
+
+`tools/xbox-sweep.sh` now writes `sweep-manifest.txt` (the
+`tools/xbox-cc.sh` checksum it compiled with, then `OK`/`FAIL` per file,
+deleting a now-failing source's stale object), and
+`tools/xbox-link-check.sh` refuses any engine object the manifest does
+not list OK, any manifest from a different driver checksum, and any
+object older than its source or the driver. Found in review: it used to
+link whatever `*.obj` sat in `.sweep/`, so a build could pass "0
+duplicate, 0 undefined" on objects predating a source edit or a new `-D`
+- exactly what adding `XASH_REF_SOFT_ENABLED` would have hidden.
 
 ### Verified — X7.4 step 4 closed: a map loads, the tram changes level, saves land on the HDD
 

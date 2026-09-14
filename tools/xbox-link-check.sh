@@ -97,6 +97,57 @@ if [ -z "$ENGINE_OBJS" ]; then
 	exit 1
 fi
 
+# Freshness gate (Codex review, X5): an object in $SCRATCH is only evidence
+# of what its source and tools/xbox-cc.sh's flags were WHEN IT WAS BUILT.
+# Linking whatever sits there could report "0 duplicate, 0 undefined" on an
+# engine that predates this checkout's source edits, or a -D added to the
+# driver since (XASH_REF_SOFT_ENABLED, the change that made this bite), or
+# a source that now fails and whose old object survived. So every engine
+# object linked here must be listed OK by tools/xbox-sweep.sh's own
+# manifest, that manifest must name the SAME tools/xbox-cc.sh (by
+# checksum) that is on disk now, and the object must be newer than both
+# its source and the driver. Two objects are compiled by this script's
+# own callers rather than the sweep and are exempted by name:
+# engine_common_launcher.obj (--client-main, compiled with
+# XASH_ENABLE_MAIN=1 by the caller) and ref_null_r_context.obj (below).
+MANIFEST="$SCRATCH/sweep-manifest.txt"
+if [ ! -f "$MANIFEST" ]; then
+	echo "xbox-link-check: $MANIFEST does not exist - run tools/xbox-sweep.sh" >&2
+	echo "  (the canonical five-directory sweep) first; this script refuses to" >&2
+	echo "  link objects no sweep vouches for." >&2
+	exit 1
+fi
+DRIVER_SUM_NOW="$(cksum tools/xbox-cc.sh | awk '{print $1}')"
+DRIVER_SUM_THEN="$(awk '$1 == "DRIVER" { print $3; exit }' "$MANIFEST")"
+if [ "$DRIVER_SUM_NOW" != "$DRIVER_SUM_THEN" ]; then
+	echo "xbox-link-check: tools/xbox-cc.sh changed since the sweep that produced" >&2
+	echo "  $MANIFEST (checksum $DRIVER_SUM_THEN then, $DRIVER_SUM_NOW now) - every" >&2
+	echo "  object may carry stale flags. Re-run the sweep." >&2
+	exit 1
+fi
+STALE=0
+for o in $ENGINE_OBJS; do
+	case "$(basename "$o")" in
+		engine_common_launcher.obj|ref_null_r_context.obj) continue ;;
+	esac
+	src="$(awk -v obj="$o" '$1 == "OK" && $3 == obj { print $2; exit }' "$MANIFEST")"
+	if [ -z "$src" ]; then
+		echo "xbox-link-check: $o is not listed OK in the sweep manifest - stale," >&2
+		echo "  failed since, or never swept. Refusing to link it." >&2
+		STALE=$((STALE + 1))
+		continue
+	fi
+	if [ "$src" -nt "$o" ] || [ tools/xbox-cc.sh -nt "$o" ]; then
+		echo "xbox-link-check: $o is older than $src or tools/xbox-cc.sh - re-sweep." >&2
+		STALE=$((STALE + 1))
+	fi
+done
+if [ "$STALE" -ne 0 ]; then
+	echo "xbox-link-check: $STALE stale or unvouched engine object(s) - not linking." >&2
+	exit 1
+fi
+echo "xbox-link-check: every engine object is vouched for by the sweep manifest and newer than its source and driver." >&2
+
 if [ "$CLIENT_MAIN" -eq 1 ]; then
 	LAUNCHER_OBJ="$SCRATCH/engine_common_launcher.obj"
 	if [ ! -f "$LAUNCHER_OBJ" ]; then

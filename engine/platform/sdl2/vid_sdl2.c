@@ -1015,6 +1015,32 @@ rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mod
 {
 	rserr_t err;
 
+#if XASH_XBOX
+	// The single choke point every mode change shares - VID_SetMode from a
+	// cvar restart, the `vid_setmode W H` console command (VID_Mode_f,
+	// vid_common.c) which never passes through R_Init_Video's cvar pinning
+	// at all (Codex review, round 1). nxdk's driver has exactly one
+	// framebuffer, the mode XVideoSetMode() set, and its present path
+	// asserts the SDL surface is no larger than it
+	// (SDL_xbframebuffer.c:90-91) - a `vid_setmode 800 600` would create a
+	// larger software surface and hit that assert on the next frame. So
+	// every request becomes the mode the hardware is actually in, windowed
+	// (fullscreen would only send VID_SetScreenResolution hunting for a
+	// display mode the driver never lists), and the cvars are re-pinned so
+	// the next VID_SetMode does not ask again.
+	if( width != 640 || height != 480 || window_mode != WINDOW_MODE_WINDOWED )
+	{
+		Con_Printf( S_WARN "%s: %dx%d %s requested; Xbox runs the mode XVideoSetMode set, 640x480 windowed\n",
+			__func__, width, height, window_mode == WINDOW_MODE_WINDOWED ? "windowed" : "fullscreen" );
+		width = 640;
+		height = 480;
+		window_mode = WINDOW_MODE_WINDOWED;
+		Cvar_DirectSetValue( &window_width, width );
+		Cvar_DirectSetValue( &window_height, height );
+		Cvar_DirectSetValue( &vid_fullscreen, window_mode );
+	}
+#endif
+
 	if( !host.hWnd )
 		err = VID_CreateWindow( width, height, window_mode );
 	else
