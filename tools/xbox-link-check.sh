@@ -106,10 +106,14 @@ fi
 # object linked here must be listed OK by tools/xbox-sweep.sh's own
 # manifest, that manifest must name the SAME tools/xbox-cc.sh (by
 # checksum) that is on disk now, and the object must be newer than both
-# its source and the driver. Two objects are compiled by this script's
-# own callers rather than the sweep and are exempted by name:
+# its source and the driver. Three objects are compiled by this script
+# or its callers rather than the sweep and are exempted by name:
 # engine_common_launcher.obj (--client-main, compiled with
-# XASH_ENABLE_MAIN=1 by the caller) and ref_null_r_context.obj (below).
+# XASH_ENABLE_MAIN=1 by the caller), ref_null_r_context.obj (below), and
+# engine_common_net_chan.obj - net_chan.c is in the sweep's tracked
+# failing baseline (bzlib.h) and this script recompiles it itself with
+# bzip2's include path further down; a leftover from that step is
+# exactly what the manifest, by design, marks FAIL.
 MANIFEST="$SCRATCH/sweep-manifest.txt"
 if [ ! -f "$MANIFEST" ]; then
 	echo "xbox-link-check: $MANIFEST does not exist - run tools/xbox-sweep.sh" >&2
@@ -152,7 +156,7 @@ if [ -n "$REMOVED" ]; then
 fi
 for o in $ENGINE_OBJS; do
 	case "$(basename "$o")" in
-		engine_common_launcher.obj|ref_null_r_context.obj) continue ;;
+		engine_common_launcher.obj|ref_null_r_context.obj|engine_common_net_chan.obj) continue ;;
 	esac
 	src="$(awk -v obj="$o" '$1 == "OK" && $3 == obj { print $2; exit }' "$MANIFEST")"
 	if [ -z "$src" ]; then
