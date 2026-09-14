@@ -3503,26 +3503,43 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    with real, live evidence: `CL_Init` passes, `UI_LoadProgs` loads and
    activates the real menu, `Host_Frame` runs, sustained. X7.4 step 2 is
    closed.**
-3. **A writable rootdir exists before the first map loads** (specialist
-   review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
-   (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's
-   hardcoded cwd `D:\` (`deps/nxdk/lib/xboxrt/libc_extensions/direct.c:70-99`),
-   which is the disc: read-only. The very first level transition -
-   `c0a0` to `c0a0a`, the tram, minutes into step 4 - goes through
-   `SV_ChangeLevel` → `SaveGameState( true )` (`engine/server/sv_save.c:2065`),
-   which writes `.HL1`/`.HL2` under `<gamedir>/save/` and fails on a
-   read-only root. Upstream already has the mechanism: `-rodir <path>`
-   (`filesystem_engine.c:344`) splits a read-only game tree from a
-   writable root. So: mount a writable drive for the title (nxdk's
-   `nxMountDrive` onto the title's `E:\UDATA\<TitleID>` or the kernel's
-   `T:`/`U:` per-title partitions - decide by reading nxdk, not from
-   memory), make it the rootdir, and pass `-rodir D:\` through whatever
-   command-line mechanism the Xbox launcher gives `Sys_GetParmFromCmdLine`
-   today (`engine/common/system.c:228`; check what `xbox_main.c`/the
-   launcher actually feeds it before assuming a `+`/`-` line exists).
-   `gameinfo.txt`/`video.cfg` write failures (`filesystem/gameinfo.c:172-177`)
-   are log noise on a read-only root and stay that way; the save path is
-   the one that stops the game.
+3. **A writable rootdir exists before the first map loads - CLOSED.**
+   (specialist review - a bring-up blocker, not X8 polish). Was:
+   `FS_DetermineRootDirectory` (`engine/common/filesystem_engine.c`)
+   resolved to nxdk's guaranteed-mounted `D:\` (X0.5's own real fix -
+   the disc), which becomes `fs_rootdir`, upstream's own name for the
+   WRITABLE root - and an XISO is permanently read-only. The very first
+   level transition - `c0a0` to `c0a0a`, the tram, minutes into step 4 -
+   goes through `SV_ChangeLevel` → `SaveGameState( true )`
+   (`engine/server/sv_save.c:2065`), which writes `.HL1`/`.HL2` under
+   `<gamedir>/save/` and would have failed on a read-only root.
+
+   **Fixed and verified live - see divergence #48 for the full account.**
+   `-rodir` genuinely cannot arrive via argv or `getenv()` on this
+   platform (checked directly, not assumed: nxdk's own crt0 hardcodes
+   `argc=0` into `main()`, and `getenv()` is a real, unconditional
+   `NULL` stub), so both `FS_DetermineRootDirectory` and
+   `FS_DetermineReadOnlyRootDirectory` needed their own direct
+   `XASH_XBOX` arms rather than threading a synthetic command line
+   through. `E:` (confirmed against `hal/fileio.c`'s own partition
+   table to be the real `\Device\Harddisk0\Partition1\`, the same
+   partition every retail title's own `E:\UDATA\<title ID>\` save path
+   already uses - not invented for this fork) is mounted and
+   `E:\UDATA\<title ID>\` (the title ID read from this XBE's own real
+   certificate) created if missing, then returned as `fs_rootdir`; `D:\`
+   moves to `fs_rodir`, the read-only overlay it was always meant to be.
+   Verified live: a fresh boot reads `fs_rootdir` as
+   `E:/UDATA/FFFF0002` and `fs_rodir` as `D:` directly out of guest
+   memory - the real global the entire filesystem module writes
+   through, not inferred - `nxMountDrive('E', ...)` confirmed to
+   genuinely run and return success (alongside the pre-existing
+   `nxMountDrive('D', "\Device\CdRom0\")` automount hook also confirmed
+   still succeeding on this real disc-boot XISO), and `Host_Frame` is
+   still reached with no `Sys_Error` anywhere in the path. A real write
+   actually landing under this directory remains step 4's own exit
+   test - `gameinfo.txt`/`video.cfg` writes are log noise either way and
+   stay that way; the save path was the one that would have stopped the
+   game.
 4. **A map loads.** `map c0a0` via `+map` in the disc's `video.cfg`/`config`
    path (upstream's own startup-command mechanism, no engine change).
    Exit: `SV_SpawnServer` completes, `pfnServerActivate` runs, entities
@@ -3530,17 +3547,21 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    client receives the world, and it does so with `ref/null` (no picture,
    headless). Then the tram: `c0a0` → `c0a0a` through `SV_ChangeLevel`,
    which is the real test of step 3. Memory again, via the same
-   `MmQueryStatistics` print, before and after the load. One more thing
-   to watch from the specialist review, because it fails silently: the
-   main thread has a 64 KB stack (`deps/nxdk/bin/nxdk-link:11`,
-   `-stack:65536`), the engine already had to make
-   `SV_PutClientInServer.msg_buf` (197 KB) static to survive it, and the
-   SDK was written against MSVC's 1 MB - `nodes.cpp` (node graph build on
-   first load of a map) and `CSave`/`CRestore` are the first suspects. If
-   a load dies with no message and `tools/xemu-debug.py` shows ESP below
-   the stack's base, that is what it is; raising `-stack:` in
-   `xbox-link-check.sh` is the cheap fix and must be measured, not
-   assumed adequate.
+   `MmQueryStatistics` print, before and after the load. **The specialist
+   review's own stack-size warning here is resolved, not still open**:
+   this row originally flagged the main thread's 64 KB stack
+   (`deps/nxdk/bin/nxdk-link:11`'s own `-stack:65536` default) as a
+   silent-failure risk against the SDK's real, large stack frames
+   (`SV_PutClientInServer.msg_buf`, 197 KB, already made static to
+   survive it; `nodes.cpp`'s node graph build; `CSave`/`CRestore`) -
+   confirmed real and root-caused earlier, not at a map load but at the
+   very first `Host_Frame` (`NET_QueuePacket`'s own 65535-byte stack
+   buffer), fixed by measuring and raising the link stack to 1 MiB
+   (divergence #47, `tools/xbox-check-stack.sh` asserts it on every
+   linked PE/XBE now). `nodes.cpp`/`CSave`/`CRestore` may still be worth
+   watching at a real map load - 1 MiB is not infinite - but the
+   specific "raise `-stack:`, cheap fix, must be measured" action item
+   is done.
 5. **On screen** is X5 (`vid_xbox.c` + `ref_soft`), which this step
    unblocks: X5's exit line ("a recognisable map, in software") needs a
    game module to have something to draw.
