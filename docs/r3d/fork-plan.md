@@ -3474,9 +3474,28 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    `gameui.dllFuncs.pfnSetActiveMenu( fActive )` only after its own
    `gameui.hInstance` null-guard. A breakpoint on mainui's OWN function
    fired with `fActive=1`, called from `_UI_SetActiveMenu + 0x3b` -
-   exactly that call site, past the guard, real proof the menu itself
-   activated, not just that the engine's dispatcher was entered. With
-   the menu genuinely active, a further stability check found no new
+   exactly that call site, past the guard, real proof the request
+   reached mainui. **Codex review, round 2, correctly pushed further**:
+   that request only sets `uiStatic.nextFrameActive = true` -
+   `BaseMenu.cpp`'s own comment says opening the main menu is
+   deliberately deferred to the next `UI_UpdateMenu()` call, so the
+   entry hit alone did not yet prove the menu became active. Two more
+   things checked directly, not inferred: a breakpoint on mainui's own
+   `UI_Main_Menu()` (the real, deferred "open the menu" function,
+   `menu_main->Show()`) fired - the deferral genuinely resolves: and a
+   clean, repeated read of mainui's own `UI_IsVisible()` return value
+   (five consecutive samples, each matched to its real return address)
+   read `EAX=1` every time. (The first two attempts at this specific
+   check produced a false `EAX=0` reading and were not trusted or
+   reported as real - a missing single-step-over-the-breakpoint before
+   re-arming, compounded by stale breakpoints surviving a `system_reset`
+   from earlier in the same session, desynced the read; a full xemu
+   process restart, not just a guest reset, plus correct step hygiene,
+   is what actually clears the debugger's own breakpoint list and gives
+   a trustworthy result - the exact persistence property divergence #47's
+   own lesson entry already documents, now confirmed to bite the SAME
+   investigation a second time.) With the menu confirmed genuinely
+   active, not just requested, a further stability check found no new
    failure: 2000
    consecutive counted `Host_Frame` calls in 8.3s. **All three of the
    milestone's own named indicators are now independently confirmed
