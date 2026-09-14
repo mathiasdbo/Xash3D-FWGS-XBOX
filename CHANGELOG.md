@@ -5,6 +5,32 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — Xbox no longer hangs entering gameplay: unsupported SDL2 relative mouse mode (divergence #49)
+
+X7.4 step 4, a bring-up blocker: the first time this fork's boot ever
+reached a `key_menu`→`key_game` transition (the menu closing for a real
+map load), the engine hung permanently instead of continuing. Traced
+live to `IN_SetRelativeMouseMode()` calling `SDL_SetRelativeMouseMode()`,
+which asserts `mouse->WarpMouse` is set inside SDL2's own
+`ShouldUseRelativeModeWarp()` - and Xbox's SDL2 video driver never
+registers a `WarpMouse` or `SetRelativeMouseMode` callback, since a
+console has no OS mouse cursor for either to warp. With no interactive
+way to answer SDL's own assertion prompt on a console, the failure
+manifests as an unrecoverable hang rather than a clean abort.
+
+`IN_SetRelativeMouseMode()` now skips the SDL relative-mode calls on
+Xbox specifically (`#if XASH_SDL >= 2 && !XASH_XBOX`), while still
+tracking its own grab state normally - the gamepad is Xbox's real aim
+input, not a warped mouse cursor. Verified live: the previously-stuck
+boot now reaches `SV_ExecLoadLevel` immediately instead of hanging.
+
+The statically linked Half-Life client DLL has its own, independent
+copy of this same unguarded call (`deps/hlsdk/cl_dll/inputw32.cpp`'s
+`IN_SetMouseRelative`, reached from every `key_menu`/`key_console` to
+`key_game` transition, not only the first) - found in review and
+fixed the same way, directly in this fork's owned `deps/hlsdk`
+checkout.
+
 ### Fixed — a real writable rootdir, split from the read-only disc (divergence #48)
 
 X7.4 step 3, a bring-up blocker: `FS_DetermineRootDirectory` resolved

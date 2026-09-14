@@ -3576,6 +3576,103 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    watching at a real map load - 1 MiB is not infinite - but the
    specific "raise `-stack:`, cheap fix, must be measured" action item
    is done.
+   **Step 4 is NOT yet closed, but a real, reproducible, root-caused boot
+   blocker on this exact path was found and fixed live, 2026-09-14.**
+   Injecting `map c0a0` at boot (`.sweep/boot-attempt/disc/valve/
+   userconfig.cfg` - test-only, gitignored, matching the file's own
+   documented purpose, no engine change needed) reliably reached
+   `SV_Map_f`→`SV_ValidateMap`→`COM_LoadLevel` at ~4.2s every attempt,
+   which genuinely queued `GameState->nextstate = STATE_LOAD_LEVEL`
+   (confirmed by a direct read of `host.game.nextstate`, live, immediately
+   after `COM_LoadLevel` returns) - but the engine then never processed
+   it: `SV_ExecLoadLevel` never fired even after 450+ real seconds of
+   patient waiting, and `Host_RunFrame` itself never returned to its own
+   caller in `COM_Frame`'s state-machine loop (`engine/common/
+   host_state.c`), confirmed with a single breakpoint on the real return
+   address read off the stack, with proper single-step-past-breakpoint
+   hygiene, on a freshly relaunched emulator (no stale-breakpoint
+   ambiguity). Single-stepping forward from `Host_RunFrame`'s entry
+   (thousands of real instruction steps, no tight loop ever detected)
+   traced the live call chain all the way down through
+   `Host_RunFrame`→`Host_Frame`→`XRcon_Frame` (a fast, correctly-disabled
+   no-op)→`SCR_BeginLoadingPlaque`→`UI_SetActiveMenu(false)`→
+   `UI_CloseMenu`→`IN_CheckMouseState`→`IN_SetRelativeMouseMode(true)`→
+   `SDL_SetRelativeMouseMode`, and resolved the addresses it kept
+   executing at to real SDL2 internals: `SDL_PromptAssertion`,
+   `SDL_AtomicCAS`, `SDL_AtomicLock` - SDL's own internal-assertion
+   machinery, not application code. Root cause, read from SDL's own
+   vendored source (`deps/nxdk/lib/sdl/SDL2/src/events/SDL_mouse.c:765-774`,
+   `ShouldUseRelativeModeWarp()`): `SDL_assert(mouse->WarpMouse)` fires
+   unconditionally whenever `mouse->SetRelativeMouseMode` is unset, and
+   the real Xbox SDL2 video driver (`deps/nxdk/lib/sdl/SDL2/src/video/
+   xbox/SDL_xb{video,events,framebuffer}.c` - confirmed by grep, not
+   assumed) never registers either callback; the console has no OS mouse
+   cursor for either to warp in the first place. With no interactive way
+   to answer SDL's own assertion prompt on a console, the failure is not
+   a clean abort - it manifests as exactly what was observed, an
+   unrecoverable hang. This is the first time in this fork's history any
+   live boot has reached `key_menu`→`key_game` transition code at all
+   (every earlier X7.4 milestone stopped at or before the menu staying
+   up), so the gap was invisible until this exact step. `IN_CheckMouseState`
+   (`engine/client/input/input.c`) reaches this call because `XASH_XBOX`
+   implies `XASH_WIN32` (divergence #7), taking `IN_CheckMouseState`'s
+   Win32 branch (`use_raw_input = (m_rawinput.value &&
+   clgame.client_dll_uses_sdl) || clgame.dllFuncs.pfnLookEvent != NULL`)
+   rather than the `#else` branch's "always true" comment, which does not
+   describe Xbox. **Caught and corrected in Codex review, round 1**: an
+   earlier version of this entry additionally claimed the left operand
+   (`m_rawinput`'s own `"1"` default) was what made that expression true -
+   false, since `clgame.client_dll_uses_sdl` is unconditionally excluded
+   on Xbox (`engine/client/dll_int/cl_game.c:4013-4019`, `!XASH_XBOX` in
+   its own compile guard) and stays at its zero-initialised `false`,
+   making the left operand `1 && 0 = 0` regardless of the cvar. Whether
+   the right operand (`pfnLookEvent != NULL`) is what actually makes the
+   expression true was not independently verified live - no code in this
+   tree (`deps/hlsdk`, `compat/`, `3rdparty/`, checked by grep) defines
+   `IN_ClientLookEvent`, the export this field resolves - so the precise
+   reason this specific boolean evaluates true on Xbox is left an open
+   question rather than asserted without evidence; only the call
+   actually happening is claimed here, and that IS independently
+   confirmed by direct address resolution in the live single-step trace
+   above, not by this expression's analysis. Fixed the same way as every other "Xbox is the first target to hit
+   this SDL/vid_sdl2 gap" case already in this ledger
+   (`Platform_GetMouseGrab`/`SetMouseGrab`, `SDLash_InitCursors`, divergence
+   #46's `R_Init_Video`): a local, Xbox-only guard at the real call site,
+   not a change to shared PC-facing logic, and not a patch to the
+   vendored `deps/nxdk` SDL2 source (out of this project's ownership,
+   unlike `engine/`). `IN_SetRelativeMouseMode` now skips the
+   `SDL_SetRelativeMouseMode`/`SDL_GetRelativeMouseState` calls under
+   `#if XASH_SDL >= 2 && !XASH_XBOX`, while still tracking `s_bRawInput`
+   state normally either way - Xbox's primary aim input is the gamepad,
+   not a warped OS mouse cursor. **Codex review, round 2, found a real
+   second call site to the identical broken function**: the statically
+   linked client DLL's own `IN_SetMouseRelative()`
+   (`deps/hlsdk/cl_dll/inputw32.cpp`), reachable on every
+   `key_menu`/`key_console`→`key_game` transition once the client module
+   is loaded, not only the very first one this session traced - fixed
+   the same way, directly in this fork's owned `deps/hlsdk` checkout
+   (same precedent as divergence #44), committed and pushed to that
+   submodule's own remote before bumping this repo's pointer. See
+   divergence #49 for the full account, including what remains
+   unverified live (the client DLL's own call path specifically, since
+   step 4 has not yet progressed far enough to test a menu/console
+   reopen after a map is active). **Verified live, real, not guessed**:
+   with the fix built and a fresh XISO repackaged, the identical boot
+   sequence now reaches `SV_ExecLoadLevel` at ~4.2s - immediately, not
+   after any wait - confirming the state-machine transition that was
+   stuck is now processed correctly, and this holds unchanged after the
+   `deps/hlsdk` rebuild too. `SV_ExecLoadLevel`'s exit test
+   (`SV_SpawnServer` completing) was NOT reached within a further patient
+   900-second wait;
+   single-stepping past `SV_ExecLoadLevel`'s entry shows real, legitimate
+   forward progress through `FS_FixFileCase`/`FS_Search_DIR`
+   (`filesystem/dir.c`) and this fork's own `r3d_native_path`
+   (`compat/xbox/xbox_posix_io.c`) - case-insensitive filesystem lookups,
+   not a loop - so this is a second, separate, still-open question (a
+   real performance characteristic of first-time directory-entry caching
+   under xemu's disc-I/O emulation, a genuine bug in that caching, or
+   simply more real time needed than tested so far) for the next session
+   to continue, not a repeat of this same hang.
 5. **On screen** is X5 (`vid_xbox.c` + `ref_soft`), which this step
    unblocks: X5's exit line ("a recognisable map, in software") needs a
    game module to have something to draw.

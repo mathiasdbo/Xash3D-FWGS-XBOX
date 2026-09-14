@@ -216,28 +216,37 @@ void IN_SetRelativeMouseMode( qboolean set )
 
 	if( set && !s_bRawInput )
 	{
-#if XASH_SDL >= 2
+#if XASH_SDL >= 2 && !XASH_XBOX
+		// NXDK's SDL2 video driver (engine/platform/xbox, backed by
+		// deps/nxdk's vendored SDL2 port) never registers a WarpMouse or
+		// SetRelativeMouseMode callback - SDL_SetRelativeMouseMode's own
+		// ShouldUseRelativeModeWarp() (SDL_mouse.c) hits
+		// SDL_assert(mouse->WarpMouse) the first time this runs, which on
+		// a console with no interactive assertion prompt manifests as an
+		// unrecoverable hang. Xbox has no OS mouse cursor for this SDL
+		// feature to warp anyway - primary aim input is the gamepad, same
+		// reasoning as Platform_GetMouseGrab/SetMouseGrab in con_xbox.c.
 		SDL_GetRelativeMouseState( NULL, NULL );
 #if XASH_SDL == 2
 		SDL_SetRelativeMouseMode( SDL_TRUE );
 #else // XASH_SDL != 2
 		SDL_SetWindowRelativeMouseMode( host.hWnd, true );
 #endif // XASH_SDL != 2
-#endif // XASH_SDL >= 2
+#endif // XASH_SDL >= 2 && !XASH_XBOX
 		s_bRawInput = true;
 		if( verbose )
 			Con_Printf( "%s: true\n", __func__ );
 	}
 	else if( !set && s_bRawInput )
 	{
-#if XASH_SDL >= 2
+#if XASH_SDL >= 2 && !XASH_XBOX
 		SDL_GetRelativeMouseState( NULL, NULL );
 #if XASH_SDL == 2
 		SDL_SetRelativeMouseMode( SDL_FALSE );
 #else // XASH_SDL != 2
 		SDL_SetWindowRelativeMouseMode( host.hWnd, false );
 #endif // XASH_SDL != 2
-#endif // XASH_SDL >= 2
+#endif // XASH_SDL >= 2 && !XASH_XBOX
 
 		s_bRawInput = false;
 		if( verbose )
