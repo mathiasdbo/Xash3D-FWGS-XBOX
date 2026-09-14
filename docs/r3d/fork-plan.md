@@ -3525,21 +3525,35 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    table to be the real `\Device\Harddisk0\Partition1\`, the same
    partition every retail title's own `E:\UDATA\<title ID>\` save path
    already uses - not invented for this fork) is mounted and
-   `E:\UDATA\<title ID>\` (the title ID read from this XBE's own real
-   certificate) created if missing, then returned as `fs_rootdir`; `D:\`
-   moves to `fs_rodir`, the read-only overlay it was always meant to be.
-   Verified live: a fresh boot reads `fs_rootdir` as
-   `E:/UDATA/FFFF0002` and `fs_rodir` as `D:` directly out of guest
-   memory - the real global the entire filesystem module writes
-   through, not inferred - `nxMountDrive('E', ...)` confirmed to
-   genuinely run and return success (alongside the pre-existing
-   `nxMountDrive('D', "\Device\CdRom0\")` automount hook also confirmed
-   still succeeding on this real disc-boot XISO), and `Host_Frame` is
-   still reached with no `Sys_Error` anywhere in the path. A real write
-   actually landing under this directory remains step 4's own exit
-   test - `gameinfo.txt`/`video.cfg` writes are log noise either way and
-   stay that way; the save path was the one that would have stopped the
-   game.
+   `E:\UDATA\<title ID>\<gamedir>\` created if missing, then returned as
+   `fs_rootdir`; `D:\` moves to `fs_rodir`, the read-only overlay it was
+   always meant to be. **Codex review, round 1, caught a real gap in
+   the title ID itself**: `cxbe` (this project's own XBE-building tool,
+   from `deps/nxdk`) hardcodes the certificate's `TitleID` to the same
+   `0xFFFF0002` for every XBE it builds (its own `// TODO: generate in
+   the form CX-9999`) - confirmed live, the first boot's own
+   `fs_rootdir` read back with no per-title distinction at all, meaning
+   every future title this fork ships would have collided on the
+   identical writable root. Fixed by namespacing one level further
+   under `XASH_GAMEDIR`, the same compile-time per-title name
+   `launcher.c` already relies on for the identical purpose (same
+   `"valve"` default - X7.6's own real per-title build wiring does not
+   exist for any translation unit yet). Verified live, after the fix: a
+   fresh boot reads `fs_rootdir` as `E:/UDATA/FFFF0002/valve` and
+   `fs_rodir` as `D:` directly out of guest memory - the real global the
+   entire filesystem module writes through, not inferred -
+   `nxMountDrive('E', ...)` confirmed to genuinely run and return
+   success (alongside the pre-existing `nxMountDrive('D',
+   "\Device\CdRom0\")` automount hook also confirmed still succeeding
+   on this real disc-boot XISO), and `Host_Frame` is still reached with
+   no `Sys_Error` anywhere in the path. A real, unique certificate
+   `TitleID` per title (cxbe's own real fix) would let this drop the
+   extra directory level later - X7.6's job, once a second title
+   actually exists to test isolation against, not invented ahead of
+   that. A real write actually landing under this directory remains
+   step 4's own exit test - `gameinfo.txt`/`video.cfg` writes are log
+   noise either way and stay that way; the save path was the one that
+   would have stopped the game.
 4. **A map loads.** `map c0a0` via `+map` in the disc's `video.cfg`/`config`
    path (upstream's own startup-command mechanism, no engine change).
    Exit: `SV_SpawnServer` completes, `pfnServerActivate` runs, entities

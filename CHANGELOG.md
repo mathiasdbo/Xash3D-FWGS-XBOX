@@ -21,17 +21,22 @@ stub), so both `FS_DetermineRootDirectory` and
 arms. `E:` (confirmed against `hal/fileio.c`'s own partition table to
 be `\Device\Harddisk0\Partition1\`, the same partition every retail
 title's own `E:\UDATA\<title ID>\` save path already uses) is mounted
-and `E:\UDATA\<title ID>\` (the real title ID, from this XBE's own
-certificate) created if missing, then returned as `fs_rootdir`; `D:\`
-moves to `fs_rodir`, the read-only overlay.
+and `E:\UDATA\<title ID>\<gamedir>\` created if missing, then returned
+as `fs_rootdir`; `D:\` moves to `fs_rodir`, the read-only overlay. The
+extra `<gamedir>` level (found in review): `cxbe`, this project's own
+XBE-building tool, hardcodes the same certificate `TitleID` for every
+XBE it builds (its own `// TODO`), which a first live check confirmed
+would collide across future titles - namespaced under `XASH_GAMEDIR`
+instead, the same compile-time per-title name `launcher.c` already
+relies on for the identical purpose.
 
-Verified live: a fresh boot reads `fs_rootdir` as `E:/UDATA/FFFF0002`
-and `fs_rodir` as `D:` directly out of guest memory - the real global
-the filesystem module writes through - `nxMountDrive('E', ...)`
-confirmed to genuinely run and succeed, and `Host_Frame` is still
-reached with no `Sys_Error` anywhere in the path. A real write landing
-under this directory remains X7.4 step 4's own exit test. See
-divergence #48.
+Verified live, after the fix: a fresh boot reads `fs_rootdir` as
+`E:/UDATA/FFFF0002/valve` and `fs_rodir` as `D:` directly out of guest
+memory - the real global the filesystem module writes through -
+`nxMountDrive('E', ...)` confirmed to genuinely run and succeed, and
+`Host_Frame` is still reached with no `Sys_Error` anywhere in the path.
+A real write landing under this directory remains X7.4 step 4's own
+exit test. See divergence #48.
 
 ### Verified — X7.4 step 2's boot milestone is closed: all three indicators confirmed live
 

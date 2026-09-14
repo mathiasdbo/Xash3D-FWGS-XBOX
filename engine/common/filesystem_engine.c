@@ -307,15 +307,36 @@ static qboolean FS_DetermineRootDirectory( char *out, size_t size )
 	// data (confirmed against hal/fileio.c's own partition table -
 	// getPartitionIndex maps 'E' to \Device\Harddisk0\Partition1\, the
 	// same real hardware layout every retail title's own E:\UDATA\<title
-	// ID>\ save path already uses), then use exactly that real,
-	// hardware-standard layout - the title ID read from this XBE's own
-	// certificate (CURRENT_XBE_HEADER, winnt.h), not hardcoded or
-	// guessed. CreateDirectoryA has no FILE_OPEN_IF-style "create if
-	// missing, else succeed" mode (winapi/filemanip.c:274-299 always uses
-	// FILE_CREATE), so both path levels are created unconditionally and
+	// ID>\ save path already uses), then use that real, hardware-standard
+	// layout - EXCEPT the title ID itself. Codex review, round 1, caught
+	// a real gap: cxbe (deps/nxdk/tools/cxbe/Xbe.cpp:275) hardcodes
+	// dwTitleId = 0xFFFF0002 into every certificate this project's own
+	// tools generate (its own comment: "TODO: generate in the form
+	// CX-9999" - a real, separate, not-yet-done nxdk tooling gap, not
+	// invented here), so reading it back gives every title THIS fork
+	// ever builds the exact same value, not a real per-title namespace -
+	// confirmed live below, not assumed. Namespaced under it instead,
+	// with the one thing genuinely known at this point in the project's
+	// real timeline: XASH_GAMEDIR, the exact same compile-time per-title
+	// name launcher.c already relies on for the identical "which title
+	// is this build" purpose (defaulted the same way, "valve", since
+	// X7.6's own real per-title `-D` build wiring does not exist yet
+	// either - see docs/r3d/fork-plan.md's X7.6). Whoever wires that up
+	// needs to pass it to this translation unit too, not just
+	// launcher.c's; a real, unique certificate TitleID per title
+	// (cxbe's own real fix) would let this drop the extra directory
+	// level entirely and is worth doing at that same point, not before -
+	// no title but "valve" exists to test isolation against today.
+	// CreateDirectoryA has no FILE_OPEN_IF-style "create if missing, else
+	// succeed" mode (winapi/filemanip.c:274-299 always uses FILE_CREATE),
+	// so every path level is created unconditionally and
 	// GetLastError()'s ERROR_ALREADY_EXISTS is the one failure this
 	// genuinely expects and ignores - a real, empty HDD partition on a
-	// first boot needs UDATA\ created too, not just the per-title leaf.
+	// first boot needs UDATA\ and the title-ID level created too, not
+	// just the per-game leaf.
+#ifndef XASH_GAMEDIR
+#define XASH_GAMEDIR "valve" // !!! Same default as engine/common/launcher.c - keep both in sync !!!
+#endif
 	{
 		string xbox_rootdir;
 		DWORD title_id;
@@ -327,12 +348,21 @@ static qboolean FS_DetermineRootDirectory( char *out, size_t size )
 		}
 
 		title_id = CURRENT_XBE_HEADER->CertificateHeader->TitleID;
-		Q_snprintf( xbox_rootdir, sizeof( xbox_rootdir ), "E:\\UDATA\\%08X", title_id );
+		Q_snprintf( xbox_rootdir, sizeof( xbox_rootdir ), "E:\\UDATA\\%08X\\" XASH_GAMEDIR, title_id );
 
 		if( !CreateDirectoryA( "E:\\UDATA", NULL ) && GetLastError() != ERROR_ALREADY_EXISTS )
 		{
 			Sys_Error( "couldn't create E:\\UDATA - error %lu", GetLastError( ));
 			return false;
+		}
+		{
+			string title_dir;
+			Q_snprintf( title_dir, sizeof( title_dir ), "E:\\UDATA\\%08X", title_id );
+			if( !CreateDirectoryA( title_dir, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS )
+			{
+				Sys_Error( "couldn't create %s - error %lu", title_dir, GetLastError( ));
+				return false;
+			}
 		}
 		if( !CreateDirectoryA( xbox_rootdir, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS )
 		{
