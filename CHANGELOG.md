@@ -12,9 +12,14 @@ Following the stack-size fix, the milestone's third named indicator -
 inferred from the frame loop surviving. A breakpoint on its own return
 address shows `EAX = 1` on a fresh boot: it genuinely loads
 `3rdparty/mainui` (statically linked, `GetMenuAPI` resolves in the real
-link) and `GetMenuAPI()` succeeds. `SCR_Init`'s next line then runs
-`UI_SetActiveMenu( true )` (not the console fallback, which only fires
-on failure) - confirmed by its own breakpoint, `fActive=1`. With the
+link) and `GetMenuAPI()` succeeds. Activation confirmed past the
+engine's own `UI_SetActiveMenu` dispatcher, not just its entry (Codex
+review: an entry breakpoint alone cannot rule out `gameui.hInstance`
+being null and the call taking its own early-return path one line
+later): a breakpoint on `3rdparty/mainui`'s own, separately-linked
+`UI_SetActiveMenu(int)` fired with `fActive=1`, called from the
+engine's dispatcher at exactly its `pfnSetActiveMenu(...)` call site,
+past the null-guard - real proof the menu itself activated. With the
 menu genuinely active, a further stability check found no new failure:
 2000 consecutive counted `Host_Frame` calls in 8.3s.
 

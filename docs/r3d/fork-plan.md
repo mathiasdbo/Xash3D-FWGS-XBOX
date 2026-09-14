@@ -3462,11 +3462,22 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    1` on a fresh boot: it genuinely loads `3rdparty/mainui` (statically
    linked - `GetMenuAPI` resolves from `3rdparty_mainui_udll_int.obj`
    in the real link, confirmed in the map) and its own `GetMenuAPI()`
-   call inside succeeds. `SCR_Init`'s own next line then runs
-   `UI_SetActiveMenu( true )` (not the console fallback, which only
-   fires when `UI_LoadProgs` fails) - confirmed by a breakpoint on that
-   call too, `fActive=1`. With the menu genuinely active, not just
-   loaded, a further stability check found no new failure: 2000
+   call inside succeeds. **Activation confirmed past the engine's own
+   `UI_SetActiveMenu`, not just its entry (Codex review, round 1: an
+   entry breakpoint alone does not prove activation - `gameui.hInstance`
+   could be null and the call would still reach that same entry point,
+   just take its own early-return path one line later without ever
+   calling into mainui at all).** `3rdparty/mainui` has its own,
+   separately-linked `UI_SetActiveMenu(int)` (`BaseMenu.cpp`, a distinct
+   C++-mangled symbol in the real map, not the engine's C one) - the
+   engine's own version calls into it via
+   `gameui.dllFuncs.pfnSetActiveMenu( fActive )` only after its own
+   `gameui.hInstance` null-guard. A breakpoint on mainui's OWN function
+   fired with `fActive=1`, called from `_UI_SetActiveMenu + 0x3b` -
+   exactly that call site, past the guard, real proof the menu itself
+   activated, not just that the engine's dispatcher was entered. With
+   the menu genuinely active, a further stability check found no new
+   failure: 2000
    consecutive counted `Host_Frame` calls in 8.3s. **All three of the
    milestone's own named indicators are now independently confirmed
    with real, live evidence: `CL_Init` passes, `UI_LoadProgs` loads and
