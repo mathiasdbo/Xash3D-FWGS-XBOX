@@ -5,6 +5,40 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Verified — X7.4 step 4 closed: a map loads, the tram changes level, saves land on the HDD
+
+On the fixed build (divergence #49), booting with `map c0a0` runs the
+whole step-4 chain in under two seconds - `SV_SpawnServer`,
+`Mod_LoadWorld`, `SV_SpawnEntities` (every classname resolved), the game
+DLL's `ServerActivate`, `SV_SendServerdata`/`CL_ParseServerData`,
+`SV_PutClientInServer`, `CL_SignonReply` - then rides the tram
+unattended: `c0a0` → `c0a0a` at 47 s and `c0a0a` → `c0a0b` at 94 s
+through `SV_ChangeLevel`/`SaveGameState`, with `Sys_Error`/`Host_Error`
+armed and never hit. The emulated HDD holds the real save files
+(`E:\UDATA\FFFF0002\valve\save\c0a0.HL1`, 41,644 bytes, and siblings) -
+divergence #48's writable rootdir, proven by its first real write.
+Mapped title memory: 26.4 MiB with the menu up, 41.4 MiB with `c0a0`
+received (+15.0 MiB) - X8's opening number.
+
+### Corrected — PR #58's "verified live" was measured against a stale ISO
+
+xemu's `dvd_path` named a pre-fix copy of the disc image next to the
+freshly packed one, so every post-fix run booted the old build: its
+"reaches `SV_ExecLoadLevel` immediately" hit an unrelated function at
+that address, and its "`SV_SpawnServer` never reached, slow filesystem
+lookups" finding was an artifact, not a real characteristic. Divergence
+#49, the X7.4 plan entry and `lessons.md` now say so; the real
+verification above replaces it.
+
+### Added — `tools/xemu-debug.py verify-image`
+
+Compares guest bytes at sampled public symbols (or explicit addresses)
+against the linked PE, exit 1 on any mismatch - the check that would
+have caught the stale ISO on the first post-fix run. Unit-tested
+(`tools/test_xemu_debug.py`, `VerifyImage`). The tool's own launch
+notes no longer claim breakpoints do not survive `system_reset`; they
+do (`lessons.md`), which is exactly why stale ones are dangerous.
+
 ### Fixed — Xbox no longer hangs entering gameplay: unsupported SDL2 relative mouse mode (divergence #49)
 
 X7.4 step 4, a bring-up blocker: the first time this fork's boot ever

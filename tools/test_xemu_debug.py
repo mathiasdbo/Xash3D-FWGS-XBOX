@@ -174,5 +174,65 @@ class HandshakeSynchronization(unittest.TestCase):
         self.assertLess(time.time() - started, 1.5, "must fail near the deadline, not hang indefinitely")
 
 
+def _fake_pe(imgbase, sections):
+    """Minimal 32-bit PE: `sections` is [(rva, raw_bytes)], each mapped at
+    ImageBase+rva with the raw bytes placed at a file offset of our choosing."""
+    import struct
+    nsec = len(sections)
+    optsz = 224
+    hdr_end = 0x40 + 4 + 20 + optsz + nsec * 40
+    data = bytearray(hdr_end)
+    struct.pack_into("<I", data, 0x3c, 0x40)
+    data[0x40:0x44] = b"PE\0\0"
+    struct.pack_into("<H", data, 0x40 + 6, nsec)
+    struct.pack_into("<H", data, 0x40 + 20, optsz)
+    struct.pack_into("<I", data, 0x40 + 24 + 28, imgbase)
+    body = bytearray()
+    for i, (rva, raw) in enumerate(sections):
+        o = 0x40 + 24 + optsz + i * 40
+        rptr = hdr_end + len(body)
+        struct.pack_into("<IIII", data, o + 8, len(raw), rva, len(raw), rptr)
+        body += raw
+    return bytes(data + body)
+
+
+class VerifyImage(unittest.TestCase):
+    """verify_image() exists because a whole round of 'verified live' results
+    was taken against an ISO xemu was not actually booting: every mapped
+    address still hit a breakpoint, just in the wrong function. The tool
+    must call a byte mismatch a mismatch, and must never turn 'could not
+    read' into 'matches'."""
+
+    def setUp(self):
+        self.text = bytes(range(0x100)) * 4
+        self.pe = _fake_pe(0x10000, [(0x1000, self.text)])
+        self.base = 0x11000
+
+    def test_pe_read_va_maps_imagebase_plus_rva_to_file_bytes(self):
+        self.assertEqual(xd.pe_read_va(self.pe, self.base + 0x10, 4), self.text[0x10:0x14])
+        self.assertIsNone(xd.pe_read_va(self.pe, 0x5000, 4), "outside every section is None, not garbage")
+
+    def test_matching_guest_is_reported_as_match(self):
+        read = _mem_reader(self.text, self.base)
+        m, mm, u = xd.verify_image(read, self.pe, [self.base, self.base + 0x80])
+        self.assertEqual((len(m), mm, u), (2, [], []))
+
+    def test_stale_image_is_a_mismatch_not_a_match(self):
+        stale = bytes(reversed(self.text))
+        read = _mem_reader(stale, self.base)
+        m, mm, u = xd.verify_image(read, self.pe, [self.base, self.base + 0x80])
+        self.assertEqual((m, len(mm), u), ([], 2, []))
+
+    def test_unreadable_guest_memory_is_neither_match_nor_mismatch(self):
+        read = _mem_reader(self.text, self.base, fail={self.base + 0x80})
+        m, mm, u = xd.verify_image(read, self.pe, [self.base, self.base + 0x80])
+        self.assertEqual((m, mm, u), ([self.base], [], [self.base + 0x80]))
+
+    def test_address_outside_the_file_is_unreadable(self):
+        read = _mem_reader(self.text, self.base)
+        m, mm, u = xd.verify_image(read, self.pe, [0x5000])
+        self.assertEqual((m, mm, u), ([], [], [0x5000]))
+
+
 if __name__ == "__main__":
     unittest.main()

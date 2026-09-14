@@ -22,10 +22,18 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
    built for. Recommended.
 2. `xemu.exe -s` (xemu forwards unknown flags to QEMU). Do NOT rely on
    `-S`: xemu's GUI resumes the machine on its own shortly after creating
-   it, and neither software nor hardware breakpoints survive a
-   `system_reset` (the XBE is reloaded over them). Catching a sub-second
-   boot path live is not something this tool can promise; reading the
-   aftermath is.
+   it. Catching a sub-second boot path live is done by connecting first,
+   then `mon system_reset`, then arming: Z0 breakpoints are emulator-
+   process state and DO survive both a reconnect and a `system_reset`
+   (docs/r3d/lessons.md) - which also means stale ones from earlier
+   scripts survive; kill and relaunch xemu before a verification that
+   matters.
+3. Before trusting ANY breakpoint address taken from a linker map, run
+   `verify-image <the linked .exe> --map <its map>`: it compares guest
+   bytes at sampled public symbols against the file. xemu boots whatever
+   `dvd_path` in its xemu.toml names - not necessarily the ISO you just
+   packed - and a stale image makes every address lie consistently
+   (breakpoints still "hit", on the wrong functions).
 
 ## The address model (read from the guest's own page tables, `vmap`)
 
@@ -105,6 +113,13 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
   screenshot <out.png>          Alias for fbdump.
   break <addr> [--steps N]      Software breakpoint, continue, single-step N
                                  (see the launch-timing caveat above).
+  verify-image <exe> --map <file> [--samples N] | --addr A [B ...]
+                                Compare 16 guest bytes at N public .text
+                                 symbols sampled from the map (default 12),
+                                 or at explicit addresses, against the linked
+                                 PE. Exit 0 = all match; 1 = the guest is not
+                                 running this file (check xemu's dvd_path);
+                                 2 = nothing readable, no verdict.
 
 Addresses are hex, with or without 0x.
 """
@@ -668,6 +683,80 @@ def cmd_break(a):
     g.close()
 
 
+def pe_read_va(data, va, length):
+    """Bytes of a 32-bit PE image file at virtual address `va` (ImageBase +
+    RVA, the same 0x10000-based addresses the linker map and the guest use),
+    or None when `va` falls in no section."""
+    pe = struct.unpack_from("<I", data, 0x3c)[0]
+    nsec = struct.unpack_from("<H", data, pe + 6)[0]
+    optsz = struct.unpack_from("<H", data, pe + 20)[0]
+    imgbase = struct.unpack_from("<I", data, pe + 24 + 28)[0]
+    rva = va - imgbase
+    for i in range(nsec):
+        o = pe + 24 + optsz + i * 40
+        vsize, sva, rsize, rptr = struct.unpack_from("<IIII", data, o + 8)
+        if sva <= rva < sva + vsize:
+            off = rptr + (rva - sva)
+            return data[off:off + length]
+    return None
+
+
+def verify_image(read, data, addrs, length=16):
+    """Compare guest bytes (via `read(addr, n)`) with the PE file's bytes at
+    each address. Returns (matched, mismatched, unreadable) address lists.
+    A mismatch means the guest is not running this file - a stale ISO, a
+    stale xemu dvd_path, a different build - and every breakpoint address
+    taken from this file's map is then meaningless."""
+    matched, mismatched, unreadable = [], [], []
+    for a in addrs:
+        expect = pe_read_va(data, a, length)
+        if expect is None:
+            unreadable.append(a)
+            continue
+        try:
+            got = read(a, length)
+        except Exception:
+            unreadable.append(a)
+            continue
+        (matched if got == expect else mismatched).append(a)
+    return matched, mismatched, unreadable
+
+
+def cmd_verify_image(a):
+    with open(a.exe, "rb") as f:
+        data = f.read()
+    if a.addr:
+        addrs = [parse_hex(x) for x in a.addr]
+        labels = {x: f"{x:#010x}" for x in addrs}
+    else:
+        entries = load_map(a.map)
+        if not entries:
+            raise RuntimeError(f"no .text symbols found in {a.map}")
+        step = max(1, len(entries) // a.samples)
+        picked = entries[::step][:a.samples]
+        addrs = [e[0] for e in picked]
+        labels = {e[0]: f"{e[0]:#010x} {e[1]}" for e in picked}
+    g = GdbRemote(a.host, a.port)
+    matched, mismatched, unreadable = verify_image(g.read_mem, data, addrs)
+    g.close()
+    for x in matched:
+        print(f"  ok        {labels[x]}")
+    for x in mismatched:
+        print(f"  MISMATCH  {labels[x]}")
+    for x in unreadable:
+        print(f"  unreadable {labels[x]}")
+    print(f"verify-image: {len(matched)} match, {len(mismatched)} mismatch, "
+          f"{len(unreadable)} unreadable of {len(addrs)} sampled against {a.exe}")
+    if mismatched:
+        print("verify-image: the guest is NOT running this file. Check what xemu "
+              "actually boots (dvd_path in xemu.toml) against the ISO you just "
+              "packed - breakpoints from this map are meaningless until it is.")
+        sys.exit(1)
+    if not matched:
+        print("verify-image: nothing could be compared - no verdict.")
+        sys.exit(2)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -700,6 +789,10 @@ def main():
 
     s = sub.add_parser("break"); s.add_argument("addr"); s.add_argument("--steps", type=int, default=20)
     s.add_argument("--timeout", type=int, default=60); s.set_defaults(func=cmd_break)
+
+    s = sub.add_parser("verify-image"); s.add_argument("exe"); s.add_argument("--map")
+    s.add_argument("--addr", nargs="*"); s.add_argument("--samples", type=int, default=12)
+    s.set_defaults(func=cmd_verify_image)
 
     a = p.parse_args()
     try:
