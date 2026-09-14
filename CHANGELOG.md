@@ -5,6 +5,68 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — Host_Frame reached for the first time ever (divergences #45, #46)
+
+Continuing live boot debugging from divergence #44's fix, the boot
+advanced further and hit two new, real, sequential failures:
+
+`R_Init()`'s renderer selection failed with "Can't initialize any
+renderer" - its cross-platform bruteforce list never includes `"null"`
+on any platform by design, and this milestone's boot-test disc's
+`video.cfg` (copied from real retail Half-Life assets) explicitly sets
+`r_refdll ""`, overriding any compiled cvar default. Fixed with a real,
+`XASH_XBOX`-gated last-resort attempt to load `ref_null` explicitly
+after every other option fails (divergence #45) - `ref_null` is already
+confirmed statically linked into this build, so this is a real, working
+fallback, not a guess.
+
+That unblocked renderer selection but immediately exposed the next
+failure: `R_Init_Video()`'s very first SDL call lazily inits SDL's
+video subsystem, reaching nxdk's real `SDL_xbvideo.c` driver and
+hitting its own unconditional `assert(0)` in `pixelFormatSelector` -
+exactly the `CL_Init` → `VID_Init` → `vid_sdl2.c` → `SDL_CreateWindow`
+chain divergence #14 already anticipated, back when no real Xbox binary
+existed to reach it, deliberately left undecided between two named
+options. Fixed by choosing the one matching this milestone's own
+headless-boot goal: mirror `CL_Init`'s own established
+`Host_IsDedicated()`-equivalent short-circuit, narrowed to video only,
+rather than committing to a real video-mode default that belongs to
+X5's own planned `VIDEO_XBOX` backend (divergence #46).
+
+With both fixes together, live-verified: the boot demonstrably reaches
+`Host_Frame` (`Host_RunFrame` → `Host_Frame`, confirmed by breakpoint
+hit and real caller resolution) - X7.4's own actual boot milestone, not
+just its link-only gate. A single-step trace of `Host_Frame`'s first
+~400 real instructions shows entirely normal per-frame processing
+before hitting a new, reproducible kernel bugcheck (`KeBugCheckEx(0x1E`
+`KMODE_EXCEPTION_NOT_HANDLED, 0xC00000FD` `STATUS_STACK_OVERFLOW`) a
+short time into `Host_Frame`'s real logic - a genuine stack overflow,
+precisely characterized but not yet root-caused, real separate
+follow-up work for a future session.
+
+Codex review of the video-init fix found a real, separate invariant
+bug in it: the early return skipped clearing `host.renderinfo_changed`
+(already forced true by `VID_Init`'s own cvar registration), which
+would have let `Host_Frame`'s own per-frame `VID_CheckChanges` reach
+the same broken driver a different way. Fixed, with defense in depth
+(`VID_SetMode()` itself also guarded, not just the one call site).
+Re-tested live: the stack overflow still happens, at the same point,
+with the identical signature - ruling this out as the actual cause
+rather than leaving it unconfirmed; it remains a genuinely separate,
+open problem.
+
+A second Codex review round found two more real gaps: the independent
+`vid_setmode` console command bypassed every guard by calling
+`R_ChangeDisplaySettings()` directly, and every Xbox arm left
+`refState.width`/`height` at zero (real client code reads them
+unconditionally once active). Fixed together - every arm, including a
+new one added directly in `R_ChangeDisplaySettings()` itself (the
+actual single choke point all routes share), now establishes real,
+non-zero dimensions via `R_SaveVideoMode()` instead of a bare
+`return true`. Re-tested live a third time: the stack overflow still
+happens, identically - ruling out this round too. See divergences
+#45/#46 and `docs/r3d/fork-plan.md`'s X7.4 step 2 for the full account.
+
 ### Fixed — deps/hlsdk: exempt exactly "valve" on NXDK, not a prefix match (divergence #44)
 
 Found via live boot debugging of X7.4 step 2's first real combined

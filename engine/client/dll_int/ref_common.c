@@ -839,6 +839,28 @@ qboolean R_Init( void )
 		}
 	}
 
+#if XASH_XBOX
+	if( !success )
+	{
+		// "null" is deliberately never part of ref.short_names above (a
+		// silent headless fallback would hide a real problem on every
+		// other platform), but this milestone has no other renderer
+		// implemented for Xbox at all - ref_gl/ref_soft are not real
+		// options here yet, so a last-resort "null" attempt, only after
+		// every real option above has already failed, is correct rather
+		// than hiding anything. Needs to be a real attempt here, not just
+		// a different compiled default for r_refdll above: a disc's own
+		// video.cfg can (and, for real retail Half-Life assets copied
+		// as-is, does - divergence #44) explicitly set r_refdll to ""
+		// itself, which overrides any compiled default before this
+		// function ever runs.
+		success = R_LoadRenderer( "null", false );
+
+		if( success )
+			Cvar_DirectSet( &r_refdll, "null" );
+	}
+#endif
+
 	if( !success )
 	{
 		Sys_Error( "Can't initialize any renderer. Check your video drivers!\n" );
