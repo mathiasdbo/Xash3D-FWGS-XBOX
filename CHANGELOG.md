@@ -5,6 +5,45 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Verified — X7.4 step 2's boot milestone is closed: all three indicators confirmed live
+
+Following the stack-size fix, the milestone's third named indicator -
+`UI_LoadProgs` loading the menu - was confirmed directly instead of
+inferred from the frame loop surviving. A breakpoint on its own return
+address shows `EAX = 1` on a fresh boot: it genuinely loads
+`3rdparty/mainui` (statically linked, `GetMenuAPI` resolves in the real
+link) and `GetMenuAPI()` succeeds. Activation confirmed past the
+engine's own `UI_SetActiveMenu` dispatcher, not just its entry (Codex
+review: an entry breakpoint alone cannot rule out `gameui.hInstance`
+being null and the call taking its own early-return path one line
+later): a breakpoint on `3rdparty/mainui`'s own, separately-linked
+`UI_SetActiveMenu(int)` fired with `fActive=1`, called from the
+engine's dispatcher at exactly its `pfnSetActiveMenu(...)` call site,
+past the null-guard - real proof the request reached mainui. Codex
+review, round 2, correctly pushed further: that request only defers
+opening the menu to the next `UI_UpdateMenu()` call
+(`3rdparty/mainui/BaseMenu.cpp`'s own comment says so). Checked
+directly, not inferred: a breakpoint on mainui's own `UI_Main_Menu()`
+(the real, deferred open) fired, and a clean, repeated read of mainui's
+own `UI_IsVisible()` - five consecutive samples, each matched to its
+real return address - read `EAX=1` every time. (Two earlier attempts at
+this specific check produced a false `EAX=0` and were not trusted: a
+missing single-step-over-the-breakpoint before re-arming, compounded by
+stale breakpoints surviving a `system_reset` from earlier in the same
+session, desynced the read - a full xemu process restart plus correct
+step hygiene is what actually clears the debugger's own breakpoint
+list. Same persistence property `docs/r3d/lessons.md` already
+documents (found while root-causing divergence #46's stack overflow),
+confirmed to bite the same investigation a second time.) With the menu
+confirmed genuinely active, not just requested, a further stability
+check found no new failure: 2000 consecutive counted `Host_Frame` calls
+in 8.3s.
+
+All three of the milestone's own named indicators are now independently
+confirmed with real, live evidence: `CL_Init` passes, `UI_LoadProgs`
+loads and activates the real menu, `Host_Frame` runs, sustained. X7.4
+step 2 is closed. No code changed - `docs/r3d/fork-plan.md` updated.
+
 ### Fixed — the engine's main thread ran on a 64 KiB stack; now 1 MiB (divergence #47)
 
 Root cause of the stack-overflow bugcheck divergence #46 left open,

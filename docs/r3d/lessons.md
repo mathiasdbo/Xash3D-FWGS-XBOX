@@ -1028,3 +1028,31 @@ the platform's runtime actually hands the main thread - upstream's own
 small-default ports (DOS, Emscripten) had already had to raise it
 explicitly, and that precedent was sitting in `scripts/waifulib/` the
 whole time.
+
+**The Z0-breakpoint-persistence gotcha above bit the SAME investigation
+a second time, days later, once careful address-tracking stopped being
+enough on its own.** Verifying `UI_IsVisible()`'s real return value
+(confirming the menu genuinely activates, not just that a request
+reached it) produced a clean, confident-looking `EAX=0` (false) twice
+in a row - real breakpoints, real matched return addresses, no obvious
+red flag. It was wrong both times: a missing single-step-over-the-
+just-hit-breakpoint before re-arming and continuing (the CPU, still
+sitting exactly at the breakpoint's own address, re-triggers instantly
+with zero real execution - `esp` unchanged before and after `cont()` is
+the tell), compounded by unrelated stale breakpoints from an earlier
+script in the same session surviving a `system_reset` in between. A
+`system_reset` clears guest CPU/memory state but NOT the debugger's own
+Z0 breakpoint list, which is emulator-process state, not guest state -
+so once a live investigation has run more than a handful of throwaway
+scripts, each setting breakpoints at dynamically-read return addresses
+that are impractical to track and remove exhaustively, **the reliable
+fix stops being "remember to clean up" and becomes "kill and relaunch
+the whole emulator process before the next verification that actually
+matters"** - a genuinely fresh gdbstub has an empty breakpoint list by
+construction, which no amount of careful bookkeeping in the client
+script can guarantee once the session has been running for a while.
+The real, correct answer (`EAX=1`, confirmed on the first read after a
+full process restart) was the OPPOSITE of both contaminated reads -
+worth remembering next to the original lesson: a clean-looking result
+from a live debugging session is not the same as a result from a clean
+session.
