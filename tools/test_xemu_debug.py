@@ -127,13 +127,16 @@ class DrainStaleConnectionState(unittest.TestCase):
         self.conn = object.__new__(xd.GdbRemote)
         self.conn.sock = self.client
 
-    def test_stale_bytes_from_a_prior_session_are_discarded(self):
+    def test_stale_packet_is_acked_before_the_stub_releases_its_next_reply(self):
+        # A real stub withholds whatever it queues next until the previous
+        # packet is acked (see _recv's own comment on this) - this stub
+        # stand-in enforces exactly that ordering, so a regression back to
+        # a raw, unacked byte read would hang here instead of passing.
         stale_stop_reply = b"$T02thread:p01.01;#03"
         self.stub.sendall(stale_stop_reply)
-        time.sleep(0.05)  # let it land in the client socket's receive buffer
         self.conn._drain_stale()
-        # Nothing left to drain a second time - it was really consumed.
-        self.stub.settimeout(0.1)
+        self.stub.settimeout(1)
+        self.assertEqual(self.stub.recv(64), b"+", "the drained packet must be acked")
         self.stub.sendall(b"$OK#9a")
         self.conn.sock.settimeout(1)
         self.assertEqual(self.conn.sock.recv(64), b"$OK#9a")

@@ -170,27 +170,31 @@ class GdbRemote:
         # A prior connection that sent 'c'/'s' and then disconnected before
         # a stop-reply arrived (script killed, timed out, or crashed) leaves
         # that reply queued in the stub. The stub delivers it as the FIRST
-        # bytes on the NEXT connection, ahead of whatever that connection
+        # packet on the NEXT connection, ahead of whatever that connection
         # actually asked for - shifting every subsequent reply on this
         # connection by one packet (the real qSupported reply then shows up
         # later as an "<unexpected packet>" in an unrelated read). Discard
-        # anything already sitting in the socket before we send our own
-        # first command, so a fresh connection always starts in sync.
-        self.sock.settimeout(0.2)
-        discarded = b""
+        # anything already queued before we send our own first command, so
+        # a fresh connection always starts in sync. Goes through _recv's
+        # own framing/checksum parsing rather than a raw byte read: every
+        # complete packet drained here still gets the "+" ack _recv always
+        # sends, since an unacked packet can make the stub hold back
+        # whatever it queues next (see _recv's own comment below) - the
+        # exact bug this drain exists to fix would otherwise just move one
+        # packet over instead of actually going away.
+        drained = 0
         try:
             while True:
-                chunk = self.sock.recv(4096)
-                if not chunk:
+                pkt = self._recv(timeout=0.2)
+                if pkt is None:
                     break
-                discarded += chunk
+                drained += 1
         except socket.timeout:
             pass
-        if discarded:
+        if drained:
             sys.stderr.write(
-                f"xemu-debug: discarded {len(discarded)} stale byte(s) left over from a "
-                "previous connection (likely an unacknowledged continue/step reply): "
-                f"{discarded[:120]!r}\n")
+                f"xemu-debug: discarded {drained} stale packet(s) left over from a "
+                "previous connection (likely an unacknowledged continue/step reply)\n")
 
     @staticmethod
     def _checksum(data):
