@@ -32,7 +32,8 @@ missing single-step-over-the-breakpoint before re-arming, compounded by
 stale breakpoints surviving a `system_reset` from earlier in the same
 session, desynced the read - a full xemu process restart plus correct
 step hygiene is what actually clears the debugger's own breakpoint
-list. Same persistence property divergence #47 already documents,
+list. Same persistence property `docs/r3d/lessons.md` already
+documents (found while root-causing divergence #46's stack overflow),
 confirmed to bite the same investigation a second time.) With the menu
 confirmed genuinely active, not just requested, a further stability
 check found no new failure: 2000 consecutive counted `Host_Frame` calls

@@ -3492,8 +3492,9 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    from earlier in the same session, desynced the read; a full xemu
    process restart, not just a guest reset, plus correct step hygiene,
    is what actually clears the debugger's own breakpoint list and gives
-   a trustworthy result - the exact persistence property divergence #47's
-   own lesson entry already documents, now confirmed to bite the SAME
+   a trustworthy result - the exact persistence property
+   `docs/r3d/lessons.md` already documents (found while root-causing
+   divergence #46's stack overflow), now confirmed to bite the SAME
    investigation a second time.) With the menu confirmed genuinely
    active, not just requested, a further stability check found no new
    failure: 2000
