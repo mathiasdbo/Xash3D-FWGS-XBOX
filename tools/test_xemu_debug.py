@@ -174,5 +174,187 @@ class HandshakeSynchronization(unittest.TestCase):
         self.assertLess(time.time() - started, 1.5, "must fail near the deadline, not hang indefinitely")
 
 
+def _fake_pe(imgbase, sections):
+    """Minimal 32-bit PE: `sections` is [(name, rva, raw_bytes, writable)],
+    each mapped at ImageBase+rva with the raw bytes placed at a file offset
+    of our choosing."""
+    import struct
+    nsec = len(sections)
+    optsz = 224
+    hdr_end = 0x40 + 4 + 20 + optsz + nsec * 40
+    data = bytearray(hdr_end)
+    struct.pack_into("<I", data, 0x3c, 0x40)
+    data[0x40:0x44] = b"PE\0\0"
+    struct.pack_into("<H", data, 0x40 + 6, nsec)
+    struct.pack_into("<H", data, 0x40 + 20, optsz)
+    struct.pack_into("<I", data, 0x40 + 24 + 28, imgbase)
+    body = bytearray()
+    for i, (name, rva, raw, writable) in enumerate(sections):
+        o = 0x40 + 24 + optsz + i * 40
+        data[o:o + 8] = name.encode().ljust(8, b"\0")
+        rptr = hdr_end + len(body)
+        struct.pack_into("<IIII", data, o + 8, len(raw), rva, len(raw), rptr)
+        struct.pack_into("<I", data, o + 36, 0x80000000 if writable else 0x60000020)
+        body += raw
+    return bytes(data + body)
+
+
+class VerifyImage(unittest.TestCase):
+    """verify_image() exists because a whole round of 'verified live' results
+    was taken against an ISO xemu was not actually booting: every mapped
+    address still hit a breakpoint, just in the wrong function. Codex review
+    of its first version found that sampling 12 symbols certifies a stale
+    build whose differences lie elsewhere - so the check covers every
+    file-backed read-only byte, a mismatch anywhere is a mismatch, and
+    'could not read' is never 'matches'."""
+
+    def setUp(self):
+        self.text = bytes(range(0x100)) * 8          # 2 KiB of "code"
+        self.rdata = bytes(range(0xff, -1, -1)) * 2   # 512 B read-only data
+        self.data = b"\x11" * 256                     # writable, must be ignored
+        self.pe = _fake_pe(0x10000, [(".text", 0x1000, self.text, False),
+                                     (".rdata", 0x2000, self.rdata, False),
+                                     (".data", 0x3000, self.data, True)])
+        self.image = bytearray(0x4000)
+        self.image[0x1000:0x1000 + len(self.text)] = self.text
+        self.image[0x2000:0x2000 + len(self.rdata)] = self.rdata
+        self.image[0x3000:0x3000 + len(self.data)] = b"\x22" * 256  # runtime-modified .data
+
+    def _read(self, image, fail=()):
+        return _mem_reader(bytes(image), 0x10000, fail)
+
+    def _verdicts(self, results):
+        return sorted({v for _n, _s, _e, v in results})
+
+    def test_identical_readonly_sections_are_identity_even_if_data_changed(self):
+        res = xd.verify_image(self._read(self.image), self.pe, chunk=0x200)
+        self.assertEqual(self._verdicts(res), ["ok"])
+        self.assertEqual(sum(e - s for _n, s, e, _v in res), len(self.text) + len(self.rdata),
+                         "every read-only byte is covered, and only those")
+
+    def test_a_single_changed_byte_far_from_any_symbol_is_a_mismatch(self):
+        stale = bytearray(self.image)
+        stale[0x1000 + 0x6f3] ^= 0xff   # one byte, mid-.text - the partial-change case
+        res = xd.verify_image(self._read(stale), self.pe, chunk=0x200)
+        bad = [(s, e) for _n, s, e, v in res if v == "mismatch"]
+        self.assertEqual(bad, [(0x11600, 0x11800)], "exactly the chunk holding the changed byte")
+
+    def test_a_changed_rdata_byte_is_a_mismatch_too(self):
+        stale = bytearray(self.image)
+        stale[0x2000 + 3] ^= 0x01
+        res = xd.verify_image(self._read(stale), self.pe, chunk=0x200)
+        self.assertIn("mismatch", self._verdicts(res))
+
+    def _thunk_fixture(self):
+        import struct
+        # An __imp_ table: the file holds ordinals 0x80000034.., the loader
+        # writes kernel addresses over them. Put two in .rdata and patch them
+        # with what a (fake) running kernel exports for those ordinals.
+        pe_rdata = bytearray(self.rdata)
+        struct.pack_into("<II", pe_rdata, 0x40, 0x80000034, 0x800000a1)
+        pe = _fake_pe(0x10000, [(".text", 0x1000, self.text, False),
+                                (".rdata", 0x2000, bytes(pe_rdata), False)])
+        image = bytearray(self.image)
+        image[0x2000:0x2000 + len(pe_rdata)] = pe_rdata
+        struct.pack_into("<II", image, 0x2040, 0x80012cdc, 0x80014368)
+        resolve = {0x34: 0x80012cdc, 0xa1: 0x80014368, 0x35: 0x80012d10}.get
+        return pe, image, resolve
+
+    def test_loader_patched_kernel_thunks_resolved_by_the_kernel_are_not_a_mismatch(self):
+        pe, image, resolve = self._thunk_fixture()
+        res = xd.verify_image(self._read(image), pe, chunk=0x200, resolve=resolve)
+        self.assertEqual([(s, v) for _n, s, _e, v in res if v != "ok"], [(0x12000, "thunks")])
+
+    def test_thunk_holding_a_different_kernel_function_is_a_mismatch(self):
+        import struct
+        pe, image, resolve = self._thunk_fixture()
+        # Codex review round 2: the slot for ordinal 0x34 holding the address of
+        # ordinal 0x35 - a valid, in-range kernel address, but the wrong import -
+        # is exactly what a stale build with a different import looks like.
+        wrong = bytearray(image); struct.pack_into("<I", wrong, 0x2040, resolve(0x35))
+        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(wrong), pe, chunk=0x200, resolve=resolve)))
+
+    def test_thunk_differences_without_a_resolver_are_mismatches(self):
+        pe, image, _resolve = self._thunk_fixture()
+        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(image), pe, chunk=0x200)))
+
+    def test_non_thunk_difference_next_to_a_thunk_is_still_a_mismatch(self):
+        import struct
+        pe, image, resolve = self._thunk_fixture()
+        image2 = bytearray(image); image2[0x2000 + 0x10] ^= 0x01
+        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(image2), pe, chunk=0x200, resolve=resolve)))
+        image3 = bytearray(image); struct.pack_into("<I", image3, 0x2040, 0x00401000)
+        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(image3), pe, chunk=0x200, resolve=resolve)))
+
+    def test_spot_check_exit_code_never_succeeds_with_unreadable_addresses(self):
+        self.assertEqual(xd.spot_check_exit_code([1, 2], [], []), 0)
+        self.assertEqual(xd.spot_check_exit_code([1], [2], []), 1)
+        self.assertEqual(xd.spot_check_exit_code([1], [], [2]), 2, "one unreadable is not a clean pass")
+        self.assertEqual(xd.spot_check_exit_code([1], [2], [3]), 1, "a mismatch outranks unreadable")
+        self.assertEqual(xd.spot_check_exit_code([], [], []), 2)
+
+
+    def test_unreadable_chunk_is_reported_not_counted_as_ok(self):
+        res = xd.verify_image(self._read(self.image, fail={0x11400}), self.pe, chunk=0x200)
+        self.assertEqual([(s, v) for _n, s, _e, v in res if v != "ok"], [(0x11400, "unreadable")])
+
+    def test_spot_check_reports_match_mismatch_and_unreadable_separately(self):
+        stale = bytearray(self.image)
+        stale[0x1000 + 0x80] ^= 0xff
+        m, mm, u = xd.verify_addrs(self._read(stale, fail={0x11100}), self.pe,
+                                   [0x11000, 0x11080, 0x11100, 0x5000])
+        self.assertEqual((m, mm, u), ([0x11000], [0x11080], [0x11100, 0x5000]))
+
+    def test_pe_read_va_maps_imagebase_plus_rva_to_file_bytes(self):
+        self.assertEqual(xd.pe_read_va(self.pe, 0x11010, 4), self.text[0x10:0x14])
+        self.assertIsNone(xd.pe_read_va(self.pe, 0x5000, 4), "outside every section is None, not garbage")
+
+
+def _fake_kernel(base, ord_base, func_rvas, globals_rva=0x3000):
+    """A fake xboxkrnl.exe image mapped at `base`: MZ/PE headers, an export
+    directory (ordinal-only, like the real kernel) and a data area."""
+    import struct
+    img = bytearray(0x4000)
+    img[:2] = b"MZ"
+    struct.pack_into("<I", img, 0x3c, 0x80)
+    img[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<H", img, 0x80 + 20, 224)
+    exp_rva = 0x1000
+    struct.pack_into("<II", img, 0x80 + 24 + 96, exp_rva, 40)
+    funcs_rva = exp_rva + 40
+    struct.pack_into("<IIII", img, exp_rva + 16, ord_base, len(func_rvas), 0, funcs_rva)
+    for i, rva in enumerate(func_rvas):
+        struct.pack_into("<I", img, funcs_rva + i * 4, rva)
+    return img
+
+
+class KernelExportsAndMemstats(unittest.TestCase):
+    BASE = 0x80010000
+
+    def test_exports_map_ordinals_to_addresses_and_skip_holes(self):
+        img = _fake_kernel(self.BASE, 1, [0x2000, 0, 0x2100])
+        exp = xd.pe_exports(_mem_reader(bytes(img), self.BASE), self.BASE)
+        self.assertEqual(exp, {1: self.BASE + 0x2000, 3: self.BASE + 0x2100})
+
+    def test_garbage_at_the_kernel_base_raises_instead_of_guessing(self):
+        with self.assertRaises(RuntimeError):
+            xd.pe_exports(_mem_reader(b"\0" * 0x1000, self.BASE), self.BASE)
+
+    def test_memstats_reads_available_and_per_usage_pages_through_mmglobaldata(self):
+        import struct
+        img = _fake_kernel(self.BASE, 100, [0, 0, 0x3000])   # ordinal 102 = MmGlobalData at rva 0x3000
+        avail_va, usage_va = self.BASE + 0x3100, self.BASE + 0x3200
+        struct.pack_into("<8I", img, 0x3000, 0, 0, avail_va, usage_va, 0, 0, 0, 0)
+        struct.pack_into("<I", img, 0x3100, 9000)
+        usage = [0, 300, 40, 20, 500, 4000, 100, 1500, 0, 900, 24]
+        struct.pack_into("<11I", img, 0x3200, *usage)
+        read = _mem_reader(bytes(img), self.BASE)
+        exp = xd.pe_exports(read, self.BASE)
+        available, by = xd.kernel_memstats(read, exp.get)
+        self.assertEqual(available, 9000)
+        self.assertEqual(by["Image"], 1500)
+        self.assertEqual(sum(by.values()) + available, 16384, "fixture is a consistent 64 MiB machine")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3576,8 +3576,10 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    watching at a real map load - 1 MiB is not infinite - but the
    specific "raise `-stack:`, cheap fix, must be measured" action item
    is done.
-   **Step 4 is NOT yet closed, but a real, reproducible, root-caused boot
-   blocker on this exact path was found and fixed live, 2026-09-14.**
+   **CLOSED, 2026-09-14 - see the end of this entry for the real,
+   verified chain and the tram. First, the real, reproducible,
+   root-caused boot blocker on this exact path, found and fixed live the
+   same day.**
    Injecting `map c0a0` at boot (`.sweep/boot-attempt/disc/valve/
    userconfig.cfg` - test-only, gitignored, matching the file's own
    documented purpose, no engine change needed) reliably reached
@@ -3656,23 +3658,73 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    divergence #49 for the full account, including what remains
    unverified live (the client DLL's own call path specifically, since
    step 4 has not yet progressed far enough to test a menu/console
-   reopen after a map is active). **Verified live, real, not guessed**:
-   with the fix built and a fresh XISO repackaged, the identical boot
-   sequence now reaches `SV_ExecLoadLevel` at ~4.2s - immediately, not
-   after any wait - confirming the state-machine transition that was
-   stuck is now processed correctly, and this holds unchanged after the
-   `deps/hlsdk` rebuild too. `SV_ExecLoadLevel`'s exit test
-   (`SV_SpawnServer` completing) was NOT reached within a further patient
-   900-second wait;
-   single-stepping past `SV_ExecLoadLevel`'s entry shows real, legitimate
-   forward progress through `FS_FixFileCase`/`FS_Search_DIR`
-   (`filesystem/dir.c`) and this fork's own `r3d_native_path`
-   (`compat/xbox/xbox_posix_io.c`) - case-insensitive filesystem lookups,
-   not a loop - so this is a second, separate, still-open question (a
-   real performance characteristic of first-time directory-entry caching
-   under xemu's disc-I/O emulation, a genuine bug in that caching, or
-   simply more real time needed than tested so far) for the next session
-   to continue, not a repeat of this same hang.
+   reopen after a map is active).
+
+   **What PR #58 called "verified live" was measured against the wrong
+   binary, and is retracted here.** xemu's `xemu.toml` `dvd_path` named
+   `resonance3d-x74-boot.iso`, a pre-fix copy next to the freshly packed
+   `.sweep/boot-attempt/iso`; every post-fix run booted the old build.
+   Its "reaches `SV_ExecLoadLevel` immediately" was the old build's
+   unrelated function at that address, and the "`SV_SpawnServer` never
+   reached, slow `FS_FixFileCase` lookups" finding was an artifact of
+   tracing that wrong image - never real. Caught by a milestone two
+   instructions past the "hit" refusing to fire, then reading the guest's
+   own bytes at the address and finding them not the file's
+   (`lessons.md`). `tools/xemu-debug.py verify-image` now exists and is
+   the first thing a live session runs after packing an image.
+
+   **The real result, on the guest confirmed byte-for-byte to be running
+   the fixed PE (`verify-image`: all 6,405,867 file-backed bytes of
+   `.text` and `.rdata` match the linked `xbe-build.exe`, the only
+   differences being the 99 dword kernel-import thunks the loader
+   patches from ordinal to kernel address, which the tool recognises as
+   such - a first, sampled version of the check was rejected in Codex
+   review as unable to rule out a build differing where it was not
+   sampled, and rewritten to cover every byte):
+   every named exit of this step, in order, with `Sys_Error`/`Host_Error`/
+   `SV_SysError` armed throughout and never hit.** From `map c0a0` at
+   ~4.2 s: `SV_SpawnServer('c0a0')` 4.31 s → `Mod_LoadWorld` 4.36 →
+   `SV_SpawnEntities` 4.46 (every classname resolved - the generated
+   export table's real test passed, no `Sys_Error`) → `SV_ActivateServer`
+   and the game DLL's own `ServerActivate` 4.94 → `SV_New_f` /
+   `SV_SendServerdata` / `CL_ParseServerData` 5.08-5.10 (the client
+   receives the world, headless, `ref_null`) → `SV_PutClientInServer` and
+   `CL_SignonReply` 5.77, second `CL_SignonReply` 8.65. **Then the tram,
+   unattended: `COM_ChangeLevel('c0a0a')` at 47.08 s → `SV_ExecChangeLevel`
+   → `SV_ChangeLevel` → `SaveGameState` → `SV_SpawnServer('c0a0a')` 47.19 s,
+   and again `c0a0a` → `c0a0b` at 94.14 s** - step 3's real test, passed:
+   the emulated HDD image (`xbox_hdd.qcow2`, read from the host afterwards)
+   holds FATX directory entries `UDATA` → `FFFF0002` → `valve` → `save` →
+   `c0a0.HL1` (41,644 bytes), `c0a0.HL2` (4,153), `c0a0.HL3` (8),
+   `c0a0a.HL1` (41,951), `c0a0a.HL2` (4,153), `c0a0a.HL3` (4) - real
+   writes, real sizes, under exactly the writable root divergence #48
+   built. **Memory, the number this step asked for - the kernel's own
+   page counters, the very fields `MmQueryStatistics` reports, read
+   through the exported `MmGlobalData` (`tools/xemu-debug.py memstats`,
+   added for this after Codex review rejected a mapped-address-space
+   proxy as not the stated criterion), self-checked to sum to exactly
+   16384 pages = 64 MiB at both points**: with the menu up before the
+   map, 8,308 pages available (32.45 MiB) against 8,076 busy (31.55 MiB:
+   Image 4,891 = 19.11 MiB, VirtualMemory 1,869 = 7.30 MiB, Stack 771 =
+   3.01 MiB, Contiguous 513 = 2.00 MiB, page tables/pool/FsCache 32);
+   once `c0a0` is received, 4,458 available (17.41 MiB) against 11,926
+   busy (46.59 MiB) - **the first map costs +3,850 pages = +15.04 MiB,
+   all of it `VirtualMemory` (+3,846) plus 4 page-table pages; Image,
+   Stack and Contiguous do not move.** The mapped-address view agrees
+   (title address space 26.41 → 41.43 MiB: the engine's main arena at
+   `0x1330000` grows 1.25 → 9.19 MiB and ~7.3 MiB of new heap arenas
+   appear at `0x7f0b0000-0x7f977000`), but it is the diagnostic, not the
+   gate. 17.4 MiB free after one map, on a 19.1 MiB image, is X8's
+   opening brief - alongside step 1's 16.5 MiB-at-entry estimate, now
+   measured at 19.1 MiB with the real client and freevgui linked in.
+   `nodes.cpp`/`CSave`/`CRestore` did not overflow the 1 MiB stack across
+   three maps and two saves. The client DLL's own `IN_ActivateMouse`
+   (the caller of divergence #49's second guarded site) is hit at 4.31 s
+   on the menu-close transition and the chain continues through it, so
+   both guards are exercised on this binary. Not done here, deliberately:
+   watching a menu/console REOPEN after the map is active needs input,
+   which this headless boot has none of - it is X5/X7.3 territory, the
+   first time a gamepad exists to press.
 5. **On screen** is X5 (`vid_xbox.c` + `ref_soft`), which this step
    unblocks: X5's exit line ("a recognisable map, in software") needs a
    game module to have something to draw.

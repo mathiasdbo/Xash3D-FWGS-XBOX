@@ -1056,3 +1056,49 @@ full process restart) was the OPPOSITE of both contaminated reads -
 worth remembering next to the original lesson: a clean-looking result
 from a live debugging session is not the same as a result from a clean
 session.
+
+**A "verified live" result taken against the wrong binary looks exactly
+like a real one - every breakpoint still hits, on the wrong function -
+and the only defence is to check the guest's bytes against the file
+before trusting a single mapped address.** After divergence #49's fix
+was built, packed into `.sweep/boot-attempt/iso` and "verified" (the
+previously-hung boot "now reached `SV_ExecLoadLevel` immediately"), the
+next milestone - `SV_SpawnServer`, called two instructions later in the
+same function - never fired in 900 seconds, and a single-step trace
+from the "`SV_ExecLoadLevel`" hit showed a seven-instruction function
+returning into the middle of `COM_LoadLevel`. Not the source's
+`SV_ExecLoadLevel` at all. The linked PE (`xbe-build.exe`) and the
+mapped one were byte-identical in `.text`, so the map was right; the
+GUEST was wrong: reading the 20 bytes at that address out of guest
+memory gave `cmp [global],0 ; setne al ; ret`, not the file's `call
+SV_SetStringArrayMode`. xemu's `xemu.toml` `dvd_path` named
+`resonance3d-x74-boot.iso` - a copy from before the fix, sitting next to
+the freshly packed `iso` - so every post-fix run had booted the old
+build, and PR #58's "verified live" claim was made against it (corrected
+in divergence #49). The tell was available from the very first post-fix
+run: the old build's own function at the new build's `COM_LoadLevel`
+address happened to also be reached at ~4.2s, so nothing looked off
+until a milestone two instructions away refused to fire. **Rule: the
+first thing a live session does after packing a new image is
+`tools/xemu-debug.py verify-image <linked .exe>` (added for this; it
+compares EVERY file-backed byte of the read-only sections, exit 1 on
+any mismatch), and a breakpoint result is not evidence until that has
+passed on the same running guest.** Its first version sampled 12
+symbols and was rightly rejected in Codex review: a stale build that
+differs only where it was not sampled passes a sample, which is the
+same blind spot in a smaller coat. The full comparison found one real
+subtlety worth knowing: the last 25 KiB of `.rdata` legitimately differ
+- libxboxkrnl's `__imp_*` kernel thunk table holds ordinals
+(`0x800000NN`) in the file and the resolved `0x8001xxxx-0x8003xxxx`
+kernel addresses in the guest, patched by the loader - so the tool
+recognises exactly that dword shape and nothing else. Two smaller lessons
+from the same day, both real: (1) a client-side `cont()` timeout does
+not stop the guest, and a stop-reply that arrives after the client gave
+up is delivered to the NEXT connection's handshake - `GdbRemote` drains
+and discards it (with a warning) rather than misreading it as a reply
+to the new command, so "discarded 1 stale packet" on connect means the
+previous probe's breakpoint DID eventually fire, unseen; (2) with the
+right image booting, X7.4 step 4's whole chain ran in under two seconds
+and the tram changelevel followed in 43 - the "900-second slowness"
+being explained as first-time directory scanning was another artifact
+of tracing the wrong binary, never a real finding.

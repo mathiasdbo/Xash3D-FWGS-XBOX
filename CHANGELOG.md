@@ -5,6 +5,55 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Verified — X7.4 step 4 closed: a map loads, the tram changes level, saves land on the HDD
+
+On the fixed build (divergence #49), booting with `map c0a0` runs the
+whole step-4 chain in under two seconds - `SV_SpawnServer`,
+`Mod_LoadWorld`, `SV_SpawnEntities` (every classname resolved), the game
+DLL's `ServerActivate`, `SV_SendServerdata`/`CL_ParseServerData`,
+`SV_PutClientInServer`, `CL_SignonReply` - then rides the tram
+unattended: `c0a0` → `c0a0a` at 47 s and `c0a0a` → `c0a0b` at 94 s
+through `SV_ChangeLevel`/`SaveGameState`, with `Sys_Error`/`Host_Error`
+armed and never hit. The emulated HDD holds the real save files
+(`E:\UDATA\FFFF0002\valve\save\c0a0.HL1`, 41,644 bytes, and siblings) -
+divergence #48's writable rootdir, proven by its first real write.
+Memory, from the kernel's own page counters (the `MmQueryStatistics`
+fields, read through `MmGlobalData`; `tools/xemu-debug.py memstats`):
+32.45 MiB available with the menu up, 17.41 MiB with `c0a0` received -
+the first map costs +15.04 MiB, all `VirtualMemory`; the 19.11 MiB image,
+3.01 MiB of stacks and 2.00 MiB contiguous do not move. X8's opening
+numbers.
+
+### Corrected — PR #58's "verified live" was measured against a stale ISO
+
+xemu's `dvd_path` named a pre-fix copy of the disc image next to the
+freshly packed one, so every post-fix run booted the old build: its
+"reaches `SV_ExecLoadLevel` immediately" hit an unrelated function at
+that address, and its "`SV_SpawnServer` never reached, slow filesystem
+lookups" finding was an artifact, not a real characteristic. Divergence
+#49, the X7.4 plan entry and `lessons.md` now say so; the real
+verification above replaces it.
+
+### Added — `tools/xemu-debug.py verify-image` and `memstats`
+
+`verify-image` compares every file-backed byte of the linked PE's
+read-only sections (`.text`, `.rdata`) against guest memory, exit 1 on
+any mismatch - the check that would have caught the stale ISO on the
+first post-fix run. The Xbox loader's in-place kernel-import thunk patch
+(ordinal in the file, kernel address in the guest) is accepted only when
+the guest dword is exactly what the running kernel's own export table
+gives for that ordinal - a different in-range kernel function in the
+same slot is a mismatch. Two earlier versions were rejected in review: a
+12-symbol sample (cannot rule out a build differing elsewhere) and an
+"any kernel address" thunk rule (cannot rule out a different import).
+`--addr` remains as an explicitly-labelled spot check, exit 2 whenever
+any requested address was unreadable. `memstats` reads the kernel's own
+page counters through the exported `MmGlobalData`, with a self-check
+that available + busy is the 64 MiB. Both unit-tested
+(`tools/test_xemu_debug.py`: `VerifyImage`, `KernelExportsAndMemstats`). The tool's own launch
+notes no longer claim breakpoints do not survive `system_reset`; they
+do (`lessons.md`), which is exactly why stale ones are dangerous.
+
 ### Fixed — Xbox no longer hangs entering gameplay: unsupported SDL2 relative mouse mode (divergence #49)
 
 X7.4 step 4, a bring-up blocker: the first time this fork's boot ever
