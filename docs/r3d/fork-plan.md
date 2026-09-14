@@ -3326,24 +3326,58 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    code, e.g. `_memset`/`__Mem_Alloc` activity), the breakpoint
    mechanism itself is confirmed working (an immediate, exact hit with
    correct single-step progression at a known-hot address), but a
-   breakpoint at the real, map-resolved `Host_Frame` address never fires
-   across 150+ real, uninterrupted seconds of continue time. Every async
-   pause instead lands at the exact same instruction - the Xbox kernel's
-   own idle/ready-queue-poll loop (`sti; nop; nop; cli; cmp ebp,[ebp+0];
-   je ...`), identified by disassembling the bytes at the repeatedly-
-   observed EIP, with the same `EBX`/`EBP` values every time. Landing on
-   the identical instruction across independent async disconnect-
-   triggered halts, over many real seconds, is real evidence the CPU
-   spends the overwhelming majority of its time there, not that it was
-   merely sampled there once: **some thread the game needs is genuinely
-   blocked on a kernel wait that is never signaled, somewhere before
-   `Host_Frame` - not crashed, not making forward progress either.**
-   Finding which wait call blocks it (the caller site of the one real
-   engine activity glimpsed, or a breakpoint on the kernel's own
-   wait/dispatch entry points) is real, separate, targeted follow-up
-   work - not yet started. **X7.4 step 2 is therefore NOT closed**: the
-   link-only exit gate is met, but the boot milestone (`CL_Init` passes,
-   `UI_LoadProgs` loads the menu, `Host_Frame` runs) is not.
+   breakpoint at the real, map-resolved `Host_Frame` address never fired
+   across 150+ real, uninterrupted seconds of continue time on that
+   attempt. Every async pause landed at the exact same instruction - the
+   Xbox kernel's own idle/ready-queue-poll loop (`sti; nop; nop; cli;
+   cmp ebp,[ebp+0]; je ...`). **Corrected, found by following the trail
+   further rather than stopping at that observation: this was NOT a
+   thread genuinely stuck on an unsignaled kernel wait, as an earlier
+   version of this section concluded.** A `usbh_pooling_hubs()`
+   micro-benchmark (single-stepped, 20 calls in 0.07s) that looked
+   healthy turned out to be misleading in the other direction too - the
+   real bottleneck was self-inflicted: several throwaway diagnostic
+   scripts across this investigation each set a software breakpoint via
+   the raw GDB `Z0` packet and then exited without clearing it (`z0`),
+   and those breakpoints persist on the QEMU target across BOTH
+   reconnects and `system_reset` (a real, useful, now-documented xemu
+   gdbstub property, not a bug in it) - so later scripts kept re-hitting
+   stale, forgotten breakpoints from earlier ones and misreading the
+   result as "stuck here." Once every address this investigation had
+   ever armed was swept and explicitly cleared, `SDL_XBOX_JoystickInit`
+   (nxdk's own real, intentional ~500ms USB-controller-enumeration-
+   settle loop, `deps/nxdk/lib/sdl/SDL2/src/joystick/xbox/
+   SDL_xboxjoystick.c:195-199`) was confirmed to return normally in
+   ~2.2s, exactly as designed - never the blocker at all.
+
+   **The real blocker, found by tracing the actual `quit` command's own
+   call chain** (`Cmd_ExecuteString`→`CL_Quit_f`→`Sys_Quit("command")`,
+   firing reliably ~2.5-3.3s into every attempt, restarting the whole
+   `Host_InitCommon` sequence from scratch each time - not a crash,
+   `Sys_Main`'s own C code never loops, so something outside it, likely
+   nxdk's own exit handling, was relaunching the XBE): `cdll_int.cpp`'s
+   `Initialize()` calls `Sys_Quit` whenever `CL_InitClient()` returns
+   false, and `CL_InitClient()` was returning false because
+   `UTIL_IsValveGameDirectory()` - a real, deliberate HL SDK safety
+   check meant to stop a mod's compiled DLL from running inside a real
+   Valve game's own retail install - correctly, as designed, refused to
+   proceed the moment it saw our disc's real retail Half-Life assets
+   sitting in a directory named `valve`. **Fixed in `deps/hlsdk` (this
+   fork's own owned submodule, direct commit, not a patch) - see
+   divergence #44** for the full account, including live verification of
+   the actual compiled machine code and the re-tested boot result: the
+   `quit`-at-~2.5s is gone, and the boot now demonstrably advances
+   further, reaching `R_Init()`'s real renderer-selection code before
+   erroring with "Can't initialize any renderer" - a new, later, well-
+   understood, separate gap (this milestone's headless `ref_null` needs
+   `r_refdll "null"` set in `video.cfg`; the real retail `video.cfg` this
+   boot-test disc carries never needed to set it, since real Half-Life
+   always has a real GPU renderer to fall back to). **X7.4 step 2 is
+   therefore still NOT closed, but is real, measured progress further
+   than any previous attempt**: the link-only exit gate is met, one real
+   quit-triggering bug is fixed and verified, and the next concrete
+   blocker (getting a real renderer, even a headless one, selected) is
+   precisely identified rather than guessed at.
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's

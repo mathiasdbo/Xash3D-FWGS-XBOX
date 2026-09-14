@@ -942,10 +942,56 @@ EIP and recognizing the self-referential list-empty check
 Landing on the EXACT SAME instruction on independent async
 disconnect-triggered halts, over many real seconds, is strong evidence
 the CPU is spending the overwhelming majority of its time there, not
-that it was merely sampled there once - meaning some thread the game
-needs is genuinely blocked on a kernel wait that is never signaled,
-somewhere before `Host_Frame`, not crashed and not making forward
-progress either. Finding WHICH wait call blocks it needs the caller
-site of the one real engine activity glimpsed (`_memset`/`Mem_Alloc`)
-or a breakpoint on the kernel's own wait/dispatch entry points - real,
-separate, targeted follow-up work, not concluded here.**
+that it was merely sampled there once. **This conclusion turned out to
+be wrong in an instructive way - corrected below, not deleted, because
+the wrong turn itself is the lesson.**
+
+**Software breakpoints set via the raw GDB `Z0` packet persist on the
+QEMU/xemu target across BOTH a client reconnect AND a full
+`system_reset` from the monitor - a real, useful xemu gdbstub property,
+not a bug, but one that quietly wrecked the very next round of this
+same investigation.** Chasing the "genuinely blocked" hypothesis above
+meant setting and clearing many breakpoints across many short-lived
+throwaway scripts (one Python process per probe, each opening a fresh
+`GdbRemote` connection) - and more than one of those scripts exited
+after its own probe without ever removing the breakpoint it had just
+set (`z0`). Because those breakpoints stayed armed - through later
+reconnects, and through more than one `system_reset` in between -
+LATER, unrelated probes kept re-triggering them and misreported real
+forward progress as "stuck here again," including one at the exact
+return address of a function (`usbh_pooling_hubs`) that had already
+been directly proven to return quickly. Once every address the whole
+investigation had EVER armed was enumerated and explicitly swept clean
+(`z0` for each, checking the reply rather than assuming it worked), the
+picture changed completely: nxdk's own SDL2 Xbox joystick driver's
+real, intentional ~500ms USB-enumeration-settle loop
+(`SDL_xboxjoystick.c:195-199`) - the thing the "genuinely blocked"
+theory above had settled on as the likely culprit - was confirmed to
+return normally in ~2.2s, never the blocker at all. **A breakpoint
+debugging session that spans multiple short-lived client processes
+against the SAME long-running target needs its own bookkeeping of
+every address it has ever armed, checked and cleared explicitly before
+trusting a "stuck here" result - the target does not forget a
+breakpoint just because the client that set it exited, or because the
+guest itself was reset.**
+
+**The real blocker, found only by following the ACTUAL "it quit" signal
+to its real source instead of stopping at "it's stuck": a real
+`Sys_Quit("command")` was firing reliably ~2.5-3.3s into every attempt,
+restarting the whole init sequence from scratch each time - easy to
+mistake for a fixed-point hang if you only ever sample CPU state, not
+control flow.** Tracing its actual call chain (`Cmd_ExecuteString` →
+`CL_Quit_f` → `Sys_Quit`, each hop confirmed by reading the real return
+address and arguments off the stack at a breakpoint, the same
+caller-and-arguments technique documented earlier in this file) led
+straight to a real, deliberate HL SDK safety check
+(`UTIL_IsValveGameDirectory()`) refusing to run because this fork's own
+real retail Half-Life assets sit in a directory literally named
+`valve` - see divergence #44. **A command that quits the process
+cleanly, on a fixed schedule, driven by real application logic, can
+look identical from the outside to a genuine hang if the only evidence
+gathered is "where is the CPU right now" - reading WHAT commands
+actually get executed (breaking on `Cmd_ExecuteString`/`Cbuf_AddText*`
+and decoding their real string arguments) is what actually distinguishes
+the two, and is worth reaching for before concluding "stuck" from
+register samples alone, however consistent those samples look.**
