@@ -623,7 +623,14 @@ for f in $ENGINE_OBJS $THIRDPARTY_OBJS $MAINUI_OBJS $STUB_GAME_OBJS "${LIBS[@]}"
 done
 
 LOG="$SCRATCH/link-check.txt"
+# 1 MiB main-thread stack, overriding nxdk-link's own -stack:65536 default -
+# same value and full reasoning as tools/xbox-game-link-check.sh's
+# XBOX_STACK_SIZE (a 64 KiB stack cannot hold NET_QueuePacket's own
+# 65535-byte frame; found live, X7.4 step 2). Kept in step here so an
+# engine-only --xbe boot test measures the same binary shape.
+XBOX_STACK_SIZE=1048576
 deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
+	-stack:"$XBOX_STACK_SIZE" \
 	-out:"$SCRATCH/link-check.exe" "@$RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
 
@@ -652,6 +659,14 @@ if [ "$OTHER_ERR" -gt 0 ] || { [ "$LINK_STATUS" -ne 0 ] && [ "$TOTAL_ERR" -eq 0 
 	echo "link-check: REGRESSION - nxdk-link failed (exit $LINK_STATUS) for a reason other than duplicate/undefined symbols." >&2
 	echo "  Full log: $LOG" >&2
 	tail -n 20 "$LOG" >&2
+	exit 1
+fi
+
+# The -stack: override is measured on the actual output, not trusted from
+# the flag - see tools/xbox-check-stack.sh and divergence #47. nxdk-link
+# emits no output while undefined symbols remain, so only an output that
+# exists is checked.
+if [ -f "$SCRATCH/link-check.exe" ] && ! tools/xbox-check-stack.sh "$SCRATCH/link-check.exe" "$XBOX_STACK_SIZE"; then
 	exit 1
 fi
 
@@ -758,6 +773,7 @@ if [ -n "$XBE_OUT" ]; then
 	XBE_EXE="$SCRATCH/xbe-build.exe"
 	# shellcheck disable=SC2086
 	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
+		-stack:"$XBOX_STACK_SIZE" \
 		-out:"$XBE_EXE" "@$RESPONSE" > "$SCRATCH/xbe-link.txt" 2>&1
 	XBE_LINK_STATUS=$?
 	if [ "$XBE_LINK_STATUS" -ne 0 ] || [ ! -f "$XBE_EXE" ]; then
@@ -765,6 +781,12 @@ if [ -n "$XBE_OUT" ]; then
 		echo "  this is not the same 63 (or N) parked symbols; something else broke. See:" >&2
 		echo "  $SCRATCH/xbe-link.txt" >&2
 		tail -n 20 "$SCRATCH/xbe-link.txt" >&2
+		exit 1
+	fi
+
+	# Measured stack check on the PE that is about to become the XBE -
+	# see tools/xbox-check-stack.sh and divergence #47.
+	if ! tools/xbox-check-stack.sh "$XBE_EXE" "$XBOX_STACK_SIZE"; then
 		exit 1
 	fi
 
@@ -781,6 +803,11 @@ if [ -n "$XBE_OUT" ]; then
 	fi
 	if [ ! -f "$XBE_OUT" ]; then
 		echo "link-check: cxbe reported success but $XBE_OUT does not exist." >&2
+		exit 1
+	fi
+	# And on the XBE header itself (SizeOfStackCommit, the value nxdk's
+	# CreateThread(..., 0, ...) hands every thread) - divergence #47.
+	if ! tools/xbox-check-stack.sh "$XBE_OUT" "$XBOX_STACK_SIZE"; then
 		exit 1
 	fi
 	# XBEH, the real magic header every valid .xbe starts with - checked,

@@ -3431,6 +3431,33 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    out as the actual cause, not merely leaving it unconfirmed. The
    overflow is confirmed to be a genuinely separate, still-unresolved
    problem.
+
+   **Root-caused and fixed - see divergence #47.** Not recursion at
+   all: the bugcheck's own ESP was only ~2 KiB below `Host_Frame`'s
+   entry ESP, which pointed at a single frame that could never fit.
+   Caught live at nxdk's own `_xlibc_check_stack`, armed only after the
+   first `Host_Frame` (during init it probes 32 KiB for every console
+   command, hundreds of times): the first frame's `NET_QueuePacket`
+   (`engine/common/net_ws.c`) asks for a 0x10100-byte frame - its
+   `byte buf[NET_MAX_FRAGMENT]`, 65535 bytes - and the check raises
+   `EXCEPTION_STACK_OVERFLOW` as `NONCONTINUABLE`, which is exactly the
+   `KeBugCheckEx(0x1E, 0xC00000FD)` observed. It could never fit
+   because the whole engine was running on a 64 KiB stack: `nxdk-link`
+   hardcodes `-stack:65536`, and nxdk's `CreateThread(..., 0, ...)` -
+   including the thread crt0 runs `main()` on - inherits that XBE
+   header value. Upstream assumes Windows' 1 MiB and already raises the
+   stack explicitly on its own small-default ports (DOS 512 KiB,
+   Emscripten 16 MiB). Fixed by passing `-stack:1048576` at every
+   `nxdk-link` call in this fork's own link tools; verified in the PE
+   and XBE headers, then live: **300 consecutive counted `Host_Frame`
+   calls with no failure breakpoint firing, and a 75-second free run
+   with nothing armed ending in the kernel's between-frames idle loop,
+   not the bugcheck.** X7.4 step 2's boot milestone now holds for real:
+   `CL_Init` passes and `Host_Frame` runs, sustained. Not separately
+   re-verified this round, and deliberately not claimed: that
+   `UI_LoadProgs` loaded the menu - the milestone's own third named
+   indicator - which is the next thing to confirm directly rather than
+   infer from the frame loop surviving.
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's

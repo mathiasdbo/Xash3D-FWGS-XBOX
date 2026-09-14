@@ -171,7 +171,15 @@ done
 
 LOG="$SCRATCH/link.txt"
 LINK_OUT="${XBE_OUT:-$SCRATCH/resonance3d-dedicated.exe}"
+# 1 MiB main-thread stack, overriding nxdk-link's own -stack:65536 default -
+# same value and full reasoning as tools/xbox-game-link-check.sh's
+# XBOX_STACK_SIZE. Found in review: this target compiles net_ws.c too, and
+# its own frame path (Host_ServerFrame -> SV_ReadPackets -> NET_GetPacket
+# -> NET_QueuePacket) reaches the exact same 65535-byte stack buffer that
+# overflows a 64 KiB stack on the first frame.
+XBOX_STACK_SIZE=1048576
 deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
+	-stack:"$XBOX_STACK_SIZE" \
 	-out:"$LINK_OUT" "@$RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
 
@@ -193,6 +201,12 @@ fi
 
 echo "xbox-dedicated-link-check: clean link, 0 duplicate, 0 undefined."
 
+# The -stack: override is measured on the actual output, not trusted from
+# the flag - see tools/xbox-check-stack.sh and divergence #47.
+if ! tools/xbox-check-stack.sh "$LINK_OUT" "$XBOX_STACK_SIZE"; then
+	exit 1
+fi
+
 # $LINK_OUT above is a raw PE .exe, not an XBE - nxdk-link's own output
 # format. A real .xbe needs cxbe's separate conversion pass (same
 # two-step tools/xbox-link-check.sh already uses); unlike that script this
@@ -212,6 +226,10 @@ if [ -n "$XBE_OUT" ]; then
 	fi
 	if [ ! -f "$XBE_OUT" ]; then
 		echo "xbox-dedicated-link-check: cxbe reported success but $XBE_OUT does not exist." >&2
+		exit 1
+	fi
+	# And on the XBE header itself (SizeOfStackCommit) - divergence #47.
+	if ! tools/xbox-check-stack.sh "$XBE_OUT" "$XBOX_STACK_SIZE"; then
 		exit 1
 	fi
 	# cmp against a literal 4-byte file, not a command-substitution capture
