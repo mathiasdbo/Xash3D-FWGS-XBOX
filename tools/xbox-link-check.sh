@@ -97,6 +97,85 @@ if [ -z "$ENGINE_OBJS" ]; then
 	exit 1
 fi
 
+# Freshness gate (Codex review, X5): an object in $SCRATCH is only evidence
+# of what its source and tools/xbox-cc.sh's flags were WHEN IT WAS BUILT.
+# Linking whatever sits there could report "0 duplicate, 0 undefined" on an
+# engine that predates this checkout's source edits, or a -D added to the
+# driver since (XASH_REF_SOFT_ENABLED, the change that made this bite), or
+# a source that now fails and whose old object survived. So every engine
+# object linked here must be listed OK by tools/xbox-sweep.sh's own
+# manifest, that manifest must name the SAME tools/xbox-cc.sh (by
+# checksum) that is on disk now, and the object must be newer than both
+# its source and the driver. Three objects are compiled by this script
+# or its callers rather than the sweep and are exempted by name:
+# engine_common_launcher.obj (--client-main, compiled with
+# XASH_ENABLE_MAIN=1 by the caller), ref_null_r_context.obj (below), and
+# engine_common_net_chan.obj - net_chan.c is in the sweep's tracked
+# failing baseline (bzlib.h) and this script recompiles it itself with
+# bzip2's include path further down; a leftover from that step is
+# exactly what the manifest, by design, marks FAIL.
+MANIFEST="$SCRATCH/sweep-manifest.txt"
+if [ ! -f "$MANIFEST" ]; then
+	echo "xbox-link-check: $MANIFEST does not exist - run tools/xbox-sweep.sh" >&2
+	echo "  (the canonical five-directory sweep) first; this script refuses to" >&2
+	echo "  link objects no sweep vouches for." >&2
+	exit 1
+fi
+DRIVER_SUM_NOW="$(cksum tools/xbox-cc.sh | awk '{print $1}')"
+DRIVER_SUM_THEN="$(awk '$1 == "DRIVER" { print $3; exit }' "$MANIFEST")"
+if [ "$DRIVER_SUM_NOW" != "$DRIVER_SUM_THEN" ]; then
+	echo "xbox-link-check: tools/xbox-cc.sh changed since the sweep that produced" >&2
+	echo "  $MANIFEST (checksum $DRIVER_SUM_THEN then, $DRIVER_SUM_NOW now) - every" >&2
+	echo "  object may carry stale flags. Re-run the sweep." >&2
+	exit 1
+fi
+STALE=0
+# The manifest must describe THIS checkout's source set, not just the
+# objects that happen to exist (Codex review, round 2): a source deleted
+# since the sweep leaves a manifest-approved object behind with nothing to
+# be newer than, and a source added since the sweep has no object at all
+# and never enters the per-object loop below. So enumerate the current
+# sources with the sweep's own rule (find *.c/*.cpp under the canonical
+# directories), and require every one of them to have a manifest line
+# (OK or FAIL) and every manifest source to still exist.
+SWEEP_DIRS="engine filesystem public common compat 3rdparty/library_suffix/src"
+# shellcheck disable=SC2086
+CURRENT_SRCS="$(find $SWEEP_DIRS \( -name '*.c' -o -name '*.cpp' \) 2>/dev/null | sort)"
+MANIFEST_SRCS="$(awk '$1 == "OK" || $1 == "FAIL" { print $2 }' "$MANIFEST" | sort)"
+ADDED="$(comm -23 <(printf '%s\n' "$CURRENT_SRCS") <(printf '%s\n' "$MANIFEST_SRCS"))"
+REMOVED="$(comm -13 <(printf '%s\n' "$CURRENT_SRCS") <(printf '%s\n' "$MANIFEST_SRCS"))"
+if [ -n "$ADDED" ]; then
+	echo "xbox-link-check: source(s) present now but absent from the sweep manifest - swept before they existed:" >&2
+	printf '  %s\n' $ADDED >&2
+	STALE=$((STALE + $(printf '%s\n' "$ADDED" | wc -l)))
+fi
+if [ -n "$REMOVED" ]; then
+	echo "xbox-link-check: manifest source(s) that no longer exist - their objects are orphans:" >&2
+	printf '  %s\n' $REMOVED >&2
+	STALE=$((STALE + $(printf '%s\n' "$REMOVED" | wc -l)))
+fi
+for o in $ENGINE_OBJS; do
+	case "$(basename "$o")" in
+		engine_common_launcher.obj|ref_null_r_context.obj|engine_common_net_chan.obj) continue ;;
+	esac
+	src="$(awk -v obj="$o" '$1 == "OK" && $3 == obj { print $2; exit }' "$MANIFEST")"
+	if [ -z "$src" ]; then
+		echo "xbox-link-check: $o is not listed OK in the sweep manifest - stale," >&2
+		echo "  failed since, or never swept. Refusing to link it." >&2
+		STALE=$((STALE + 1))
+		continue
+	fi
+	if [ "$src" -nt "$o" ] || [ tools/xbox-cc.sh -nt "$o" ]; then
+		echo "xbox-link-check: $o is older than $src or tools/xbox-cc.sh - re-sweep." >&2
+		STALE=$((STALE + 1))
+	fi
+done
+if [ "$STALE" -ne 0 ]; then
+	echo "xbox-link-check: $STALE stale or unvouched engine object(s) - not linking." >&2
+	exit 1
+fi
+echo "xbox-link-check: every engine object is vouched for by the sweep manifest and newer than its source and driver." >&2
+
 if [ "$CLIENT_MAIN" -eq 1 ]; then
 	LAUNCHER_OBJ="$SCRATCH/engine_common_launcher.obj"
 	if [ ! -f "$LAUNCHER_OBJ" ]; then
@@ -110,6 +189,13 @@ if [ "$CLIENT_MAIN" -eq 1 ]; then
 	# `_main` once XBOX_CLIENT_MAIN=1 makes XASH_ENABLE_MAIN real.
 	ENGINE_OBJS=$(echo "$ENGINE_OBJS" | grep -v '_platform_xbox_xbox_main\.obj$')
 fi
+# Raw ref/soft and ref/common objects (a `tools/xbox-sweep.sh ref/soft` run,
+# or a by-hand tools/xbox-cc.sh of one file, drops them into $SCRATCH under
+# these names) must never reach the link: the module is linked ONLY in its
+# isolated form (below), and the raw copies re-create exactly the 20
+# duplicate symbols isolation exists to remove - measured, X5, when
+# leftovers from a compile experiment sat next to the isolated set.
+ENGINE_OBJS=$(echo "$ENGINE_OBJS" | grep -v '/ref_\(soft\|common\)_[^/]*\.obj$')
 
 # Third-party scope: found compiling, X1, 2026-09-08. Each of these four
 # submodules' own wscript names its real source list - not everything
@@ -559,6 +645,50 @@ if ! tools/xbox-cc.sh ref/null/r_context.c -Iref/common -o "$REF_NULL_OBJ" 2>"$S
 fi
 STUB_GAME_OBJS="$STUB_GAME_OBJS $REF_NULL_EXPORTS_OBJ $REF_NULL_OBJ"
 echo "xbox-link-check: ref_null registered in the static library table (real GetRefAPI)." >&2
+
+# ref_soft: X5 proper. upstream's own software rasterizer (ref/soft, 20
+# files) plus the ref/common sources every ref module links (ref/soft/
+# wscript: `use = ['ref_common', ...]`), each compiled through
+# tools/xbox-cc.sh's ref/ rule (REF_DLL=1, ref/soft + ref/common ahead of
+# the engine's include set - see the comment there for why the order is
+# not optional). Registered under the name R_GetRendererName() derives
+# from "soft" ("ref_%s", ref_common.c:622 under XASH_STATIC_LIBS), and
+# auto-tried by R_Init()'s own renderer loop because tools/xbox-cc.sh now
+# compiles the engine with XASH_REF_SOFT_ENABLED=1 - so a disc's retail
+# video.cfg with `r_refdll ""` selects it without any config edit, and
+# ref_null stays what it always was: the last resort after every real
+# option, never the default.
+REF_SOFT_EXPORTS_C="$SCRATCH/gen/generated_lib_ref_soft_exports.c"
+if [ ! -f "$REF_SOFT_EXPORTS_C" ]; then
+	echo "xbox-link-check: $REF_SOFT_EXPORTS_C does not exist." >&2
+	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
+	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	exit 1
+fi
+REF_SOFT_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$REF_SOFT_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
+if ! tools/xbox-cc.sh "$REF_SOFT_EXPORTS_C" -o "$REF_SOFT_EXPORTS_OBJ" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+	echo "xbox-link-check: generated_lib_ref_soft_exports.c failed to compile:" >&2
+	cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+	exit 2
+fi
+# Isolated, not linked raw: measured on the first attempt, ref/soft's own
+# objects next to the engine and ref_null produce 20 duplicate symbols
+# (R_Init/R_Shutdown, the Tri* API, _Mem_Alloc/_Mem_Free/_Mem_Realloc,
+# six convar_t definitions the engine also owns, and GetRefAPI itself) -
+# tools/xbox-ref-isolate.sh's header has the list and the reasoning. It
+# compiles the module fresh and renames every defined symbol soft_*;
+# ref/soft/exports.txt's second column ("_soft_GetRefAPI") is what makes
+# the generated table's "GetRefAPI" row resolve to this module's copy.
+if ! REF_SOFT_ISO_DIR="$(bash tools/xbox-ref-isolate.sh soft)"; then
+	echo "xbox-link-check: tools/xbox-ref-isolate.sh soft failed - see above." >&2
+	exit 2
+fi
+REF_SOFT_OBJS="$REF_SOFT_EXPORTS_OBJ"
+for o in "$REF_SOFT_ISO_DIR"/*.obj; do
+	[ -f "$o" ] && REF_SOFT_OBJS="$REF_SOFT_OBJS $o"
+done
+STUB_GAME_OBJS="$STUB_GAME_OBJS $REF_SOFT_OBJS"
+echo "xbox-link-check: ref_soft registered in the static library table (real, isolated GetRefAPI)." >&2
 
 for f in stub_game/server/server_stub.c "$SCRATCH/gen/generated_lib_server_exports.c" "$SCRATCH/gen/generated_lib_client_exports.c"; do
 	if [ ! -f "$f" ]; then

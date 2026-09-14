@@ -204,13 +204,15 @@ if [ ! -f "$GEN_DIR/generated_library_tables.h" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_client_exports.c" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_menu_exports.c" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ] \
-	|| [ ! -f "$GEN_DIR/generated_lib_ref_null_exports.c" ]; then
+	|| [ ! -f "$GEN_DIR/generated_lib_ref_null_exports.c" ] \
+	|| [ ! -f "$GEN_DIR/generated_lib_ref_soft_exports.c" ]; then
 	GEN_STALE=1
 elif [ "$REPO/stub_game/server/exports.txt" -nt "$GEN_DIR/generated_lib_server_exports.c" ] \
 	|| [ "$REPO/stub_game/client/exports.txt" -nt "$GEN_DIR/generated_lib_client_exports.c" ] \
 	|| [ "$REPO/3rdparty/mainui/exports.txt" -nt "$GEN_DIR/generated_lib_menu_exports.c" ] \
 	|| [ "$REPO/filesystem/exports.txt" -nt "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ] \
-	|| [ "$REPO/ref/null/exports.txt" -nt "$GEN_DIR/generated_lib_ref_null_exports.c" ]; then
+	|| [ "$REPO/ref/null/exports.txt" -nt "$GEN_DIR/generated_lib_ref_null_exports.c" ] \
+	|| [ "$REPO/ref/soft/exports.txt" -nt "$GEN_DIR/generated_lib_ref_soft_exports.c" ]; then
 	GEN_STALE=1
 fi
 if [ "$GEN_STALE" = "1" ]; then
@@ -220,6 +222,7 @@ if [ "$GEN_STALE" = "1" ]; then
 		"menu:$REPO/3rdparty/mainui/exports.txt" \
 		"filesystem_stdio:$REPO/filesystem/exports.txt" \
 		"ref_null:$REPO/ref/null/exports.txt" \
+		"ref_soft:$REPO/ref/soft/exports.txt" \
 		> /dev/null
 fi
 
@@ -313,7 +316,37 @@ ENGINE_DEFINES=(
 	                              # src/joystick/xbox drivers. common/defaults.h:33
 	                              # then selects VIDEO_SDL / INPUT_SDL / SOUND_SDL,
 	                              # which is why no new backend enum is needed.
+	-DXASH_REF_SOFT_ENABLED=1     # X5: waf sets this per configured renderer
+	                              # (build/c4che/engine_cache.py shows the PC
+	                              # build's own value); it only puts "soft" in
+	                              # R_CollectRendererNames()'s auto-try list
+	                              # (ref_common.c:709). ref/soft + ref/common
+	                              # are compiled and linked by
+	                              # tools/xbox-link-check.sh; a disc's retail
+	                              # video.cfg (`r_refdll ""`) then selects soft
+	                              # through R_Init()'s own loop, ref_null
+	                              # staying the last resort it always was.
 )
+
+# ref/<module>/*.c and ref/common/*.c (X5): renderer modules are built by
+# ref/<module>/wscript with REF_DLL=1 (NOT ENGINE_DLL - common/cvardef.h:96
+# and engine/ref_api.h:661 both branch on which one is set) and with
+# ref/<module> + ref/common ahead of the engine's include set. The order
+# matters for one concrete reason: `#include "ref_common.h"` from
+# ref/soft/r_local.h must resolve to ref/common/ref_common.h, but
+# engine/client/ref_common.h (the ENGINE's own file of the same name) is
+# already on OUR_INCLUDES via engine/client - with the engine set first, the
+# wrong header wins and every ref/soft file fails with `unknown type name
+# 'cl_entity_t'` twenty lines into r_local.h, which looks like a missing
+# platform header and is not.
+REF_INCLUDES=()
+case "${SRC#"$REPO"/}" in
+	ref/*)
+		REF_MODULE="$(printf '%s' "${SRC#"$REPO"/}" | cut -d/ -f2)"
+		REF_INCLUDES=( -I "$REPO/ref/$REF_MODULE" -I "$REPO/ref/common" )
+		ENGINE_DEFINES=( "${ENGINE_DEFINES[@]/-DENGINE_DLL=1/-DREF_DLL=1}" )
+		;;
+esac
 
 # XBOX_DEDICATED=1 (env, opt-in): X2 W5's dedicated Xbox target -
 # engine/wscript's own "# basic build: dedicated only" source set
@@ -404,6 +437,7 @@ exec clang \
 	-D__STDC__=1 \
 	-U__STDC_NO_THREADS__ \
 	"${ENGINE_DEFINES[@]}" \
+	"${REF_INCLUDES[@]}" \
 	"${OUR_INCLUDES[@]}" \
 	"${NXDK_INCLUDES[@]}" \
 	-c "$SRC" -o "$OUT" "$@"

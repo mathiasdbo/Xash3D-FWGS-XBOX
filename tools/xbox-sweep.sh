@@ -80,6 +80,29 @@ if ! : > "$RAW"; then
 	exit 1
 fi
 
+# One line per file, "OK <src> <obj>" or "FAIL <src> <obj>", plus a header
+# naming the compiler driver whose flags produced the OK objects. This is
+# what tools/xbox-link-check.sh links against: found in Codex review (X5)
+# that the link check discovered whatever *.obj happened to sit in
+# $SCRATCH and could report "0 duplicate, 0 undefined" on objects an
+# earlier sweep left behind - stale against their source, against a
+# define added to tools/xbox-cc.sh since, or surviving a source that now
+# fails to compile (the object was written in place and never removed).
+# Per-directory sweeps append to a manifest a full sweep started, so the
+# canonical five-directory run and a later single-directory refresh both
+# leave one consistent list. Written through one persistent descriptor
+# (tools/xbox-game-isolate.sh's measured reason: reopening for append per
+# line lost entries on this host).
+MANIFEST="$SCRATCH/sweep-manifest.txt"
+if [ "${XBOX_SWEEP_APPEND_MANIFEST:-0}" != "1" ]; then
+	if ! : > "$MANIFEST"; then
+		echo "xbox-sweep: cannot write $MANIFEST" >&2
+		exit 1
+	fi
+	printf 'DRIVER tools/xbox-cc.sh %s\n' "$(cksum "$REPO/tools/xbox-cc.sh" | awk '{print $1}')" >> "$MANIFEST"
+fi
+exec 5>> "$MANIFEST"
+
 ok=0
 fail=0
 mute=0
@@ -112,7 +135,12 @@ for d in "$@"; do
 		if [ "$status" -eq 0 ]; then
 			ok=$(( ok + 1 ))
 			d_ok=$(( d_ok + 1 ))
+			printf 'OK %s %s\n' "$f" "$obj" >&5
 		else
+			# A source that now fails must not leave its previous, successful
+			# object behind for the link to pick up (see the manifest comment).
+			rm -f "$obj"
+			printf 'FAIL %s %s\n' "$f" "$obj" >&5
 			# Checked before the generic "error:" count, not folded into it:
 			# found in review, xbox-cc.sh's own preflight (the library_suffix
 			# auto-patch step) can fail with text that itself contains

@@ -5,6 +5,50 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `ref_soft` on the Xbox, and the first frame on its screen (X5, divergence #50)
+
+Upstream's software rasterizer (`ref/soft` + `ref/common`) now compiles
+for Xbox (`tools/xbox-cc.sh` gives `ref/` sources `REF_DLL=1` and their
+own include directories first - the 20/20 sweep failure was the engine's
+`ref_common.h` shadowing the module's), is isolated by the new
+`tools/xbox-ref-isolate.sh` (every defined symbol renamed `soft_*`, the
+way the SDK is; raw next to the engine it collides on 20 names), and is
+registered as `ref_soft` with `XASH_REF_SOFT_ENABLED=1`, so a retail
+`video.cfg` selects it through `R_Init()`'s own loop. Divergence #46's
+three video bypasses are gone: nxdk's SDL2 driver only asserted because
+no mode was set, so `R_Init_Video` sets 640x480x32 and the common path
+runs. Measured on the real scan-out: Half-Life's loading screen, drawn
+by `ref_soft`. The first map then runs the 64 MiB console out of memory
+(`CL_InitEdicts`, 0.97 MiB free; `ref_soft` costs ~7.6 MiB of statics
+and ~8.5 MiB more heap than `ref_null`) - X5's exit is blocked on X3/X8's
+memory work, with its first real numbers.
+
+### Fixed — two SDL-assert landmines on Xbox
+
+`VID_GetWindowSizeInPixels` called `SDL_GetRendererOutputSize` with a NULL
+renderer in software mode; a release SDL2 shrugs, nxdk's (assertions on)
+aborts and the boot rebooted every 2.9 s with no error printed. Guarded
+(an upstream latent bug). And `Xbox_Init` now installs an SDL assertion
+handler that routes any failed `SDL_assert` into `Sys_Error` with its
+condition/file/line - after divergence #49's hang and this abort, the
+second and third live sessions spent on a silent SDL assert. Found in
+review: every later mode change (`vid_setmode`, a cvar restart) is now
+clamped to the one 640x480 framebuffer nxdk's driver has, at the
+`R_ChangeDisplaySettings` choke point, instead of reaching the driver's
+own size assert.
+
+### Changed — the Xbox link check only links objects the sweep vouches for
+
+`tools/xbox-sweep.sh` now writes `sweep-manifest.txt` (the
+`tools/xbox-cc.sh` checksum it compiled with, then `OK`/`FAIL` per file,
+deleting a now-failing source's stale object), and
+`tools/xbox-link-check.sh` refuses any engine object the manifest does
+not list OK, any manifest from a different driver checksum, and any
+object older than its source or the driver. Found in review: it used to
+link whatever `*.obj` sat in `.sweep/`, so a build could pass "0
+duplicate, 0 undefined" on objects predating a source edit or a new `-D`
+- exactly what adding `XASH_REF_SOFT_ENABLED` would have hidden.
+
 ### Verified — X7.4 step 4 closed: a map loads, the tram changes level, saves land on the HDD
 
 On the fixed build (divergence #49), booting with `map c0a0` runs the

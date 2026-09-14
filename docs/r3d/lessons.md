@@ -1091,7 +1091,48 @@ subtlety worth knowing: the last 25 KiB of `.rdata` legitimately differ
 - libxboxkrnl's `__imp_*` kernel thunk table holds ordinals
 (`0x800000NN`) in the file and the resolved `0x8001xxxx-0x8003xxxx`
 kernel addresses in the guest, patched by the loader - so the tool
-recognises exactly that dword shape and nothing else. Two smaller lessons
+recognises exactly that dword shape and nothing else.
+
+**An `SDL_assert` on nxdk is a landmine with no bang: SDL's own
+handler wants to ASK someone, and a console has nobody to ask.** nxdk
+builds SDL2 with `SDL_ASSERT_LEVEL 2`, so every `SDL_assert` in it is
+live - unlike the release SDL2 a PC build links, where the same checks
+compile to nothing. When one fails, `SDL_PromptAssertion` tries a
+message box (none on Xbox), then a stdin prompt (none either) and gives
+up with `SDL_ASSERTION_ABORT` -> `abort()` -> reboot; or, depending on
+what the failing path was doing, simply never returns. Divergence #49
+was the never-returns case (a hang that took a session to name); X5's
+first picture attempt was the abort case (a boot restarting every 2.9 s
+with NO `Sys_Error`, nothing on any log tier - `SW_CreateBuffer` was
+simply never reached and the milestones before it kept repeating). Both
+were engine code calling an SDL API in a way a release SDL tolerates
+(`SDL_GetRendererOutputSize( NULL )` returns -1 quietly in release; it
+asserts in debug). **Two rules.** (1) A boot that restarts on a fixed
+short period with no error printed is an `abort()`: arm
+`SDL_PromptAssertion` (and `abort`/`exit`/`Sys_Quit`) after the last
+milestone that does fire, and read the `SDL_AssertData` off the stack
+at the prompt - condition, file, line, function are all right there
+(`tools/xemu-debug.py`'s `stack`/`mem` do it; the halted-frame script in
+this session read them in one shot). (2) Do not let it happen a third
+time: `Xbox_Init` installs an SDL assertion handler that routes the
+assert into `Sys_Error` with those same fields, so the NEXT one is a
+one-line error on the log channel, still fatal, no session spent.
+
+**A framebuffer capture has to be taken while the guest is halted at the
+moment you mean, or it shows whatever was on screen fifty seconds
+later.** `tools/xemu-debug.py screenshot` reads 1.2 MB over the stub -
+~50 s per frame here - so a time-based "shoot at t=3 s / t=12 s"
+schedule captured the nxdk boot splash three times and looked, for a
+whole round, like "the title never draws" (it did; the mode was set at
+3.8 s and the process was gone again by 8.6 s). PCRTC START still
+pointing at the splash's `0x3d040` buffer was the tell - a title that
+has set a mode points it at a fresh contiguous allocation. What worked:
+break on the RETURN of `SDL_XBOX_UpdateWindowFramebuffer` (entry, read
+`[esp]`, break there, continue), then read PCRTC START and the frame
+physically over the halted stub, however long that takes. Also from
+this round: a `mon system_reset` issued by a connect-and-disconnect
+client leaves xemu stopped at the reset vector (`EIP=0xfff0`); send the
+reset and a `c` on one connection before disconnecting. Two smaller lessons
 from the same day, both real: (1) a client-side `cont()` timeout does
 not stop the guest, and a stop-reply that arrives after the client gave
 up is delivered to the NEXT connection's handshake - `GdbRemote` drains
