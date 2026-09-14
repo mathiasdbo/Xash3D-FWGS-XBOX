@@ -3615,11 +3615,26 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    (every earlier X7.4 milestone stopped at or before the menu staying
    up), so the gap was invisible until this exact step. `IN_CheckMouseState`
    (`engine/client/input/input.c`) reaches this call because `XASH_XBOX`
-   implies `XASH_WIN32` (divergence #7) - taking that branch's
-   `use_raw_input = (m_rawinput.value && clgame.client_dll_uses_sdl) ||
-   ...` condition, true by `m_rawinput`'s own "1" default - not the
-   `#else` branch's "always true" comment, which does not apply to Xbox.
-   Fixed the same way as every other "Xbox is the first target to hit
+   implies `XASH_WIN32` (divergence #7), taking `IN_CheckMouseState`'s
+   Win32 branch (`use_raw_input = (m_rawinput.value &&
+   clgame.client_dll_uses_sdl) || clgame.dllFuncs.pfnLookEvent != NULL`)
+   rather than the `#else` branch's "always true" comment, which does not
+   describe Xbox. **Caught and corrected in Codex review, round 1**: an
+   earlier version of this entry additionally claimed the left operand
+   (`m_rawinput`'s own `"1"` default) was what made that expression true -
+   false, since `clgame.client_dll_uses_sdl` is unconditionally excluded
+   on Xbox (`engine/client/dll_int/cl_game.c:4013-4019`, `!XASH_XBOX` in
+   its own compile guard) and stays at its zero-initialised `false`,
+   making the left operand `1 && 0 = 0` regardless of the cvar. Whether
+   the right operand (`pfnLookEvent != NULL`) is what actually makes the
+   expression true was not independently verified live - no code in this
+   tree (`deps/hlsdk`, `compat/`, `3rdparty/`, checked by grep) defines
+   `IN_ClientLookEvent`, the export this field resolves - so the precise
+   reason this specific boolean evaluates true on Xbox is left an open
+   question rather than asserted without evidence; only the call
+   actually happening is claimed here, and that IS independently
+   confirmed by direct address resolution in the live single-step trace
+   above, not by this expression's analysis. Fixed the same way as every other "Xbox is the first target to hit
    this SDL/vid_sdl2 gap" case already in this ledger
    (`Platform_GetMouseGrab`/`SetMouseGrab`, `SDLash_InitCursors`, divergence
    #46's `R_Init_Video`): a local, Xbox-only guard at the real call site,
