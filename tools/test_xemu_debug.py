@@ -328,6 +328,49 @@ def _fake_kernel(base, ord_base, func_rvas, globals_rva=0x3000):
     return img
 
 
+class Pools(unittest.TestCase):
+    """read_pools() attributes a map's heap per engine pool - the number
+    memstats cannot give. It must skip freed slots and refuse garbage."""
+
+    def _image(self, pools):
+        import struct
+        base = 0x400000
+        img = bytearray(0x1000 + len(pools) * xd.MEMPOOL_SIZE)
+        struct.pack_into("<I", img, 0x10, len(pools))   # poolcount at base+0x10
+        struct.pack_into("<I", img, 0x14, base + 0x1000)  # poolchain at base+0x14
+        for i, (name, real, payload, fname) in enumerate(pools):
+            o = 0x1000 + i * xd.MEMPOOL_SIZE
+            struct.pack_into("<8I", img, o, 0, 0, payload, real, 0, fname, 0, 0)
+            img[o + 32:o + 32 + len(name)] = name.encode()
+        return _mem_reader(bytes(img), base), base + 0x10, base + 0x14
+
+    def test_pools_sorted_largest_first_skipping_freed_slots(self):
+        read, pc, ph = self._image([("Zone Engine", 400, 380, 0x1234),
+                                    ("freed", 999999, 999999, 0),
+                                    ("ref_soft zone", 12000, 11900, 0x1234)])
+        self.assertEqual(xd.read_pools(read, pc, ph),
+                         [(12000, 11900, "ref_soft zone"), (400, 380, "Zone Engine")])
+
+    def test_garbage_table_raises_instead_of_walking_memory(self):
+        import struct
+        img = bytearray(0x100); struct.pack_into("<II", img, 0x10, 100000, 0x500000)
+        with self.assertRaises(RuntimeError):
+            xd.read_pools(_mem_reader(bytes(img), 0x400000), 0x400010, 0x400014)
+
+    def test_load_map_symbols_reads_data_sections_too(self):
+        import tempfile, os
+        with tempfile.NamedTemporaryFile("w", suffix=".map", delete=False) as f:
+            f.write(" 0001:00001000       _R_Init            0000000000012000     x.obj\n")
+            f.write(" 0003:00002000       _poolchain         0000000000af6774     engine_common_zone.obj\n")
+            path = f.name
+        try:
+            syms = xd.load_map_symbols(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(syms["_poolchain"], 0xaf6774)
+        self.assertEqual(syms["_R_Init"], 0x12000)
+
+
 class KernelExportsAndMemstats(unittest.TestCase):
     BASE = 0x80010000
 

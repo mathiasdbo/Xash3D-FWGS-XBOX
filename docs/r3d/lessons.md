@@ -1132,7 +1132,24 @@ break on the RETURN of `SDL_XBOX_UpdateWindowFramebuffer` (entry, read
 physically over the halted stub, however long that takes. Also from
 this round: a `mon system_reset` issued by a connect-and-disconnect
 client leaves xemu stopped at the reset vector (`EIP=0xfff0`); send the
-reset and a `c` on one connection before disconnecting. Two smaller lessons
+reset and a `c` on one connection before disconnecting.
+
+**"Out of memory" has two questions, and the kernel answers only the
+first.** `memstats` (the `MmQueryStatistics` counters) says HOW MUCH is
+gone - `VirtualMemory` 30 MiB, 0.97 MiB free - and stops there; every
+lever after that would have been a guess. The engine already keeps the
+answer to WHAT: `zone.c`'s `poolchain` is an array of named pools with
+running `totalsize`/`realsize`, one per subsystem and one per loaded
+model, readable straight out of guest memory at the map's `_poolcount`/
+`_poolchain` (now `tools/xemu-debug.py pools`). One dump with the map
+up turned "the map needs 30 MiB" into "`ref_soft zone` 12 MiB, the BSP 3,
+edicts 3, sounds 3, ..." - which is a work list, not a mystery - and
+turned `XASH_LOW_MEMORY=1` from a hopeful flag into a measured 11 MiB of
+image (statics, from the linker map's symbol deltas) that made the map
+fit. Take both readings at the same halted breakpoint, on a
+`verify-image`-confirmed guest, and re-derive the pool addresses from the
+CURRENT map: the first dump read 0 pools because the addresses came from
+the map of the build before. Two smaller lessons
 from the same day, both real: (1) a client-side `cont()` timeout does
 not stop the guest, and a stop-reply that arrives after the client gave
 up is delivered to the NEXT connection's handshake - `GdbRemote` drains

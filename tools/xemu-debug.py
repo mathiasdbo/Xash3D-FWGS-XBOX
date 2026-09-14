@@ -140,6 +140,13 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  - available pages and busy pages per usage
                                  (stack, pool, image, contiguous, ...) - with a
                                  self-check that they sum to the 64 MiB.
+  pools --map <file> [--min-bytes N]
+                                The engine's own memory pools (zone.c's
+                                 poolchain, located via the map's _poolcount/
+                                 _poolchain), largest first - which subsystem a
+                                 map's heap actually went to (ref_soft zone, the
+                                 BSP, edicts, SoundLib, ...). memstats says how
+                                 much; this says what.
 
 Addresses are hex, with or without 0x.
 """
@@ -855,6 +862,62 @@ def kernel_memstats(read, resolve):
     return available, dict(zip(MM_USAGE_NAMES, usage))
 
 
+def load_map_symbols(path):
+    """Every symbol in an lld-link map, any section: name -> VA. (load_map()
+    keeps only .text, which is what `sym` wants; data symbols live in 0003.)"""
+    out = {}
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 4 or ":" not in parts[0]:
+                continue
+            try:
+                out[parts[1]] = int(parts[2], 16)
+            except ValueError:
+                continue
+    return out
+
+
+MEMPOOL_SIZE = 96   # engine/common/zone.c mempool_t, 32-bit: 8 x 4-byte fields + name[64]
+
+
+def read_pools(read, poolcount_addr, poolchain_addr):
+    """The engine's own memory pools (zone.c's poolchain array): a list of
+    (real_bytes, payload_bytes, name), largest first, skipping freed slots
+    (filename == NULL). Attribution the kernel's page counters cannot give:
+    which subsystem a map's heap actually went to."""
+    count = struct.unpack("<I", read(poolcount_addr, 4))[0]
+    base = struct.unpack("<I", read(poolchain_addr, 4))[0]
+    if not base or count > 4096:
+        raise RuntimeError(f"implausible pool table: base={base:#x} count={count}")
+    rows = []
+    for i in range(count):
+        d = read(base + i * MEMPOOL_SIZE, MEMPOOL_SIZE)
+        _chain, _small, total, real, _last, fname, _line, _flags = struct.unpack_from("<8I", d, 0)
+        if not fname:
+            continue
+        name = d[32:96].split(b"\0")[0].decode(errors="replace")
+        rows.append((real, total, name))
+    rows.sort(reverse=True)
+    return rows
+
+
+def cmd_pools(a):
+    syms = load_map_symbols(a.map)
+    try:
+        pc, ph = syms["_poolcount"], syms["_poolchain"]
+    except KeyError:
+        raise RuntimeError(f"{a.map} has no _poolcount/_poolchain - is it this build's map?")
+    g = GdbRemote(a.host, a.port)
+    rows = read_pools(g.read_mem, pc, ph)
+    g.close()
+    total = sum(r for r, _, _ in rows)
+    print(f"{len(rows)} pools, {total / 1048576:.2f} MiB real (malloc'd), largest first:")
+    for real, payload, name in rows:
+        if real >= a.min_bytes:
+            print(f"  {real / 1048576:7.2f} MiB real  {payload / 1048576:7.2f} MiB payload  {name}")
+
+
 def cmd_memstats(a):
     g = GdbRemote(a.host, a.port)
     exports = pe_exports(g.read_mem, KERNEL_BASE)
@@ -979,6 +1042,8 @@ def main():
     s.set_defaults(func=cmd_verify_image)
 
     s = sub.add_parser("memstats"); s.set_defaults(func=cmd_memstats)
+    s = sub.add_parser("pools"); s.add_argument("--map", required=True)
+    s.add_argument("--min-bytes", type=lambda x: int(x, 0), default=16384); s.set_defaults(func=cmd_pools)
 
     a = p.parse_args()
     try:
