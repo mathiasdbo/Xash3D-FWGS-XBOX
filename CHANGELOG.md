@@ -17,13 +17,18 @@ reply arrives one packet late and surfaces as an unrelated
 `<unexpected packet: ...>` later on, making a live target look broken
 when the tool's own prior invocation caused the desync.
 
-`GdbRemote.__init__` now drains and discards anything already queued in
-the socket before sending its first command, and `cont()`/`step()` raise
-a clear error on a local read timeout instead of an uncaught
-`socket.timeout` traceback, explaining that the `c`/`s` was already sent
-and is not undone. Covered by `tools/test_xemu_debug.py`'s
-`DrainStaleConnectionState` (a loopback `socketpair()`, no emulator
-needed). See `docs/r3d/lessons.md` for the full account, including the
+`GdbRemote.__init__` now runs a real handshake: send `qSupported`, then
+keep discarding and acking (an unacked packet can make a real stub
+withhold whatever it queues next) anything that isn't actually the
+`qSupported` reply - told apart by shape, not guessed from a fixed delay
+- until the real reply arrives or a bounded deadline is hit.
+`cont()`/`step()` raise a clear error on a local read timeout instead of
+an uncaught `socket.timeout` traceback, explaining that the `c`/`s` was
+already sent and is not undone. Covered by `tools/test_xemu_debug.py`'s
+`HandshakeSynchronization` (a loopback `socketpair()`, no emulator
+needed; a stale packet, a real reply arriving after a real delay, and no
+reply ever arriving are each exercised directly). See
+`docs/r3d/lessons.md` for the full account, including the
 real (still open) finding this fix made possible: the boot reaches a
 genuinely alive, non-crashed state but does not reach `Host_Frame` within
 150+ real seconds - the CPU spends that time in the kernel's own

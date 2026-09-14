@@ -899,19 +899,29 @@ an `<unexpected packet: ...>` in an unrelated `monitor()` call - so
 "the debugger looks broken" and "the breakpoint never fires" were, for
 several attempts, actually "my own tooling killed the connection and
 desynced the next one," not a fact about the guest. **Fixed properly**
-(not worked around): `GdbRemote.__init__` now drains and discards any
-bytes already sitting in the socket before sending its own first
-command (`_drain_stale`, `tools/test_xemu_debug.py`'s
-`DrainStaleConnectionState` reproduces this with a loopback
-`socketpair()`, no emulator needed), and `cont()`/`step()` now catch a
-local read timeout and raise a clear `RuntimeError` explaining that the
-`c`/`s` was already sent and NOT undone - use the script's own
-`--timeout`, not an external process-killer, and prefer `mon "cont"` /
-`mon "info registers"` (the QEMU monitor passthrough) when a raw GDB
-stop-reply proves unreliable for a given target. **Never let a
-debugger's own retry/timeout wrapper close the transport out from under
-a request that is still genuinely in flight on the target side - the
-target does not know the client gave up, and the next session inherits
+(not worked around, and not with a guessed timing window either - two
+Codex review rounds on the fix itself found real gaps in both a first,
+raw-byte drain and a second, fixed-200ms-window version):
+`GdbRemote.__init__` now runs a real handshake (`_handshake`) that sends
+its own `qSupported` and keeps discarding - acking each one, since an
+unacked packet can make a real stub withhold whatever it queues next -
+anything that isn't actually the `qSupported` reply (told apart by
+shape: a stop-reply/console/error packet always starts with one of
+`S`/`T`/`W`/`X`/`O`/`E`, or is exactly `OK`; a real `qSupported` reply
+never does) until the real reply arrives or a bounded deadline is hit,
+instead of assuming a fixed window of silence proves the connection
+starts clean (`tools/test_xemu_debug.py`'s `HandshakeSynchronization`
+covers a stale packet, a real reply arriving after a real delay, and no
+reply ever arriving, over a loopback `socketpair()` - no emulator
+needed). `cont()`/`step()` now also catch a local read timeout and raise
+a clear `RuntimeError` explaining that the `c`/`s` was already sent and
+NOT undone - use the script's own `--timeout`, not an external
+process-killer, and prefer `mon "cont"` / `mon "info registers"` (the
+QEMU monitor passthrough) when a raw GDB stop-reply proves unreliable
+for a given target. **Never let a debugger's own retry/timeout wrapper
+close the transport out from under a request that is still genuinely in
+flight on the target side - the target does not know the client gave
+up, and the next session inherits
 the mess.**
 
 **With that fixed, the real result for X7.4 step 2's first boot

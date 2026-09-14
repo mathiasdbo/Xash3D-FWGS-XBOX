@@ -3320,7 +3320,7 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    `continue`-timeout or log-channel silence). Along the way, a real bug
    in the tool itself produced several false "the breakpoint never
    fires" readings - see `docs/r3d/lessons.md`'s entry on
-   `_drain_stale` for the full account - fixed before trusting any
+   `_handshake` for the full account - fixed before trusting any
    further result from it. With the fixed tool: the guest is confirmed
    genuinely alive (never `HLT`, real varied EIPs inside genuine engine
    code, e.g. `_memset`/`__Mem_Alloc` activity), the breakpoint

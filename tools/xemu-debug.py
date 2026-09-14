@@ -113,6 +113,7 @@ import re
 import socket
 import struct
 import sys
+import time
 import zlib
 
 DEFAULT_HOST = "127.0.0.1"
@@ -163,38 +164,48 @@ _HEXWORD_RE = re.compile(r"0x([0-9a-fA-F]{8})")
 class GdbRemote:
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=10):
         self.sock = socket.create_connection((host, port), timeout=timeout)
-        self._drain_stale()
-        self.cmd("qSupported:multiprocess+;swbreak+;hwbreak+")
+        self._handshake()
 
-    def _drain_stale(self):
+    def _handshake(self, deadline=2.0):
         # A prior connection that sent 'c'/'s' and then disconnected before
         # a stop-reply arrived (script killed, timed out, or crashed) leaves
-        # that reply queued in the stub. The stub delivers it as the FIRST
+        # that reply queued in the stub, which delivers it as the FIRST
         # packet on the NEXT connection, ahead of whatever that connection
-        # actually asked for - shifting every subsequent reply on this
-        # connection by one packet (the real qSupported reply then shows up
-        # later as an "<unexpected packet>" in an unrelated read). Discard
-        # anything already queued before we send our own first command, so
-        # a fresh connection always starts in sync. Goes through _recv's
-        # own framing/checksum parsing rather than a raw byte read: every
-        # complete packet drained here still gets the "+" ack _recv always
-        # sends, since an unacked packet can make the stub hold back
-        # whatever it queues next (see _recv's own comment below) - the
-        # exact bug this drain exists to fix would otherwise just move one
-        # packet over instead of actually going away.
-        drained = 0
-        try:
-            while True:
-                pkt = self._recv(timeout=0.2)
-                if pkt is None:
-                    break
-                drained += 1
-        except socket.timeout:
-            pass
-        if drained:
-            sys.stderr.write(
-                f"xemu-debug: discarded {drained} stale packet(s) left over from a "
-                "previous connection (likely an unacknowledged continue/step reply)\n")
+        # actually asked for - shifting every subsequent reply by one packet
+        # (the real qSupported reply then shows up later as an "<unexpected
+        # packet>" in an unrelated read). A fixed window of silence is not
+        # proof the connection starts clean - the stale reply can legitimately
+        # arrive after that window closes - so instead of guessing a delay,
+        # send qSupported and keep discarding (acking each one, since an
+        # unacked packet can make the stub hold back whatever it queues next
+        # - see _recv's own comment on this) anything that isn't actually the
+        # qSupported reply, until one arrives or `deadline` is exhausted. A
+        # stop-reply/console-output/error packet always starts with one of
+        # S/T/W/X/O/E, or is exactly "OK" - none of those is how a real
+        # qSupported reply starts ("PacketSize=...;qXfer:...", confirmed
+        # against xemu's own gdbstub), so shape alone reliably tells a stale
+        # packet apart from the one actually being waited for here.
+        self._send("qSupported:multiprocess+;swbreak+;hwbreak+")
+        start = time.monotonic()
+        discarded = 0
+        while True:
+            remaining = deadline - (time.monotonic() - start)
+            try:
+                pkt = self._recv(timeout=max(remaining, 0.001))
+            except socket.timeout:
+                pkt = None
+            if pkt is None:
+                raise RuntimeError(
+                    f"no qSupported reply within {deadline}s (discarded {discarded} "
+                    "stale packet(s) first) - the connection may still be desynced")
+            if pkt == "OK" or pkt[:1] in ("S", "T", "W", "X", "O", "E"):
+                discarded += 1
+                continue
+            if discarded:
+                sys.stderr.write(
+                    f"xemu-debug: discarded {discarded} stale packet(s) left over from a "
+                    "previous connection (likely an unacknowledged continue/step reply)\n")
+            return pkt
 
     @staticmethod
     def _checksum(data):
