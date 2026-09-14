@@ -3698,13 +3698,25 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    `c0a0.HL1` (41,644 bytes), `c0a0.HL2` (4,153), `c0a0.HL3` (8),
    `c0a0a.HL1` (41,951), `c0a0a.HL2` (4,153), `c0a0a.HL3` (4) - real
    writes, real sizes, under exactly the writable root divergence #48
-   built. **Memory, the number this step asked for**: mapped title
-   address space (`info mem`, everything below `0x80000000`, summed) is
-   26.41 MiB with the menu up before the map, 41.43 MiB once `c0a0` is
-   received - **+15.0 MiB for the first map**, of which the engine's main
-   arena at `0x1330000` grows 1.25 → 9.19 MiB and ~7.3 MiB of new heap
-   arenas appear at `0x7f0b0000-0x7f977000`. Against the 64 MiB console
-   that is X8's opening brief, alongside step 1's 16.5 MiB-at-entry.
+   built. **Memory, the number this step asked for - the kernel's own
+   page counters, the very fields `MmQueryStatistics` reports, read
+   through the exported `MmGlobalData` (`tools/xemu-debug.py memstats`,
+   added for this after Codex review rejected a mapped-address-space
+   proxy as not the stated criterion), self-checked to sum to exactly
+   16384 pages = 64 MiB at both points**: with the menu up before the
+   map, 8,308 pages available (32.45 MiB) against 8,076 busy (31.55 MiB:
+   Image 4,891 = 19.11 MiB, VirtualMemory 1,869 = 7.30 MiB, Stack 771 =
+   3.01 MiB, Contiguous 513 = 2.00 MiB, page tables/pool/FsCache 32);
+   once `c0a0` is received, 4,458 available (17.41 MiB) against 11,926
+   busy (46.59 MiB) - **the first map costs +3,850 pages = +15.04 MiB,
+   all of it `VirtualMemory` (+3,846) plus 4 page-table pages; Image,
+   Stack and Contiguous do not move.** The mapped-address view agrees
+   (title address space 26.41 → 41.43 MiB: the engine's main arena at
+   `0x1330000` grows 1.25 → 9.19 MiB and ~7.3 MiB of new heap arenas
+   appear at `0x7f0b0000-0x7f977000`), but it is the diagnostic, not the
+   gate. 17.4 MiB free after one map, on a 19.1 MiB image, is X8's
+   opening brief - alongside step 1's 16.5 MiB-at-entry estimate, now
+   measured at 19.1 MiB with the real client and freevgui linked in.
    `nodes.cpp`/`CSave`/`CRestore` did not overflow the 1 MiB stack across
    three maps and two saves. The client DLL's own `IN_ActivateMouse`
    (the caller of divergence #49's second guarded site) is hit at 4.31 s

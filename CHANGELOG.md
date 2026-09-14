@@ -17,8 +17,12 @@ through `SV_ChangeLevel`/`SaveGameState`, with `Sys_Error`/`Host_Error`
 armed and never hit. The emulated HDD holds the real save files
 (`E:\UDATA\FFFF0002\valve\save\c0a0.HL1`, 41,644 bytes, and siblings) -
 divergence #48's writable rootdir, proven by its first real write.
-Mapped title memory: 26.4 MiB with the menu up, 41.4 MiB with `c0a0`
-received (+15.0 MiB) - X8's opening number.
+Memory, from the kernel's own page counters (the `MmQueryStatistics`
+fields, read through `MmGlobalData`; `tools/xemu-debug.py memstats`):
+32.45 MiB available with the menu up, 17.41 MiB with `c0a0` received -
+the first map costs +15.04 MiB, all `VirtualMemory`; the 19.11 MiB image,
+3.01 MiB of stacks and 2.00 MiB contiguous do not move. X8's opening
+numbers.
 
 ### Corrected — PR #58's "verified live" was measured against a stale ISO
 
@@ -30,18 +34,23 @@ lookups" finding was an artifact, not a real characteristic. Divergence
 #49, the X7.4 plan entry and `lessons.md` now say so; the real
 verification above replaces it.
 
-### Added — `tools/xemu-debug.py verify-image`
+### Added — `tools/xemu-debug.py verify-image` and `memstats`
 
-Compares every file-backed byte of the linked PE's read-only sections
-(`.text`, `.rdata`) against guest memory, exit 1 on any mismatch - the
-check that would have caught the stale ISO on the first post-fix run.
-The Xbox loader's in-place kernel-import thunk patch (ordinal in the
-file, kernel address in the guest) is recognised by its exact dword
-shape and nothing else. A first, sampled version was rejected in review
-as unable to rule out a build differing where it was not sampled.
-`--addr` remains as an explicitly-labelled spot check. Unit-tested
-(`tools/test_xemu_debug.py`, `VerifyImage`, including the
-single-changed-byte and thunk cases). The tool's own launch
+`verify-image` compares every file-backed byte of the linked PE's
+read-only sections (`.text`, `.rdata`) against guest memory, exit 1 on
+any mismatch - the check that would have caught the stale ISO on the
+first post-fix run. The Xbox loader's in-place kernel-import thunk patch
+(ordinal in the file, kernel address in the guest) is accepted only when
+the guest dword is exactly what the running kernel's own export table
+gives for that ordinal - a different in-range kernel function in the
+same slot is a mismatch. Two earlier versions were rejected in review: a
+12-symbol sample (cannot rule out a build differing elsewhere) and an
+"any kernel address" thunk rule (cannot rule out a different import).
+`--addr` remains as an explicitly-labelled spot check, exit 2 whenever
+any requested address was unreadable. `memstats` reads the kernel's own
+page counters through the exported `MmGlobalData`, with a self-check
+that available + busy is the 64 MiB. Both unit-tested
+(`tools/test_xemu_debug.py`: `VerifyImage`, `KernelExportsAndMemstats`). The tool's own launch
 notes no longer claim breakpoints do not survive `system_reset`; they
 do (`lessons.md`), which is exactly why stale ones are dangerous.
 

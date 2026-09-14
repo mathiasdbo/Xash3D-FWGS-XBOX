@@ -245,10 +245,11 @@ class VerifyImage(unittest.TestCase):
         res = xd.verify_image(self._read(stale), self.pe, chunk=0x200)
         self.assertIn("mismatch", self._verdicts(res))
 
-    def test_loader_patched_kernel_thunks_are_not_a_mismatch(self):
+    def _thunk_fixture(self):
         import struct
         # An __imp_ table: the file holds ordinals 0x80000034.., the loader
-        # writes kernel addresses over them. Put one in .rdata and patch it.
+        # writes kernel addresses over them. Put two in .rdata and patch them
+        # with what a (fake) running kernel exports for those ordinals.
         pe_rdata = bytearray(self.rdata)
         struct.pack_into("<II", pe_rdata, 0x40, 0x80000034, 0x800000a1)
         pe = _fake_pe(0x10000, [(".text", 0x1000, self.text, False),
@@ -256,14 +257,42 @@ class VerifyImage(unittest.TestCase):
         image = bytearray(self.image)
         image[0x2000:0x2000 + len(pe_rdata)] = pe_rdata
         struct.pack_into("<II", image, 0x2040, 0x80012cdc, 0x80014368)
-        res = xd.verify_image(self._read(image), pe, chunk=0x200)
+        resolve = {0x34: 0x80012cdc, 0xa1: 0x80014368, 0x35: 0x80012d10}.get
+        return pe, image, resolve
+
+    def test_loader_patched_kernel_thunks_resolved_by_the_kernel_are_not_a_mismatch(self):
+        pe, image, resolve = self._thunk_fixture()
+        res = xd.verify_image(self._read(image), pe, chunk=0x200, resolve=resolve)
         self.assertEqual([(s, v) for _n, s, _e, v in res if v != "ok"], [(0x12000, "thunks")])
-        # ...but a non-ordinal difference in the same chunk is still a mismatch,
-        # and so is an ordinal replaced by something outside the kernel.
+
+    def test_thunk_holding_a_different_kernel_function_is_a_mismatch(self):
+        import struct
+        pe, image, resolve = self._thunk_fixture()
+        # Codex review round 2: the slot for ordinal 0x34 holding the address of
+        # ordinal 0x35 - a valid, in-range kernel address, but the wrong import -
+        # is exactly what a stale build with a different import looks like.
+        wrong = bytearray(image); struct.pack_into("<I", wrong, 0x2040, resolve(0x35))
+        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(wrong), pe, chunk=0x200, resolve=resolve)))
+
+    def test_thunk_differences_without_a_resolver_are_mismatches(self):
+        pe, image, _resolve = self._thunk_fixture()
+        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(image), pe, chunk=0x200)))
+
+    def test_non_thunk_difference_next_to_a_thunk_is_still_a_mismatch(self):
+        import struct
+        pe, image, resolve = self._thunk_fixture()
         image2 = bytearray(image); image2[0x2000 + 0x10] ^= 0x01
-        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(image2), pe, chunk=0x200)))
+        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(image2), pe, chunk=0x200, resolve=resolve)))
         image3 = bytearray(image); struct.pack_into("<I", image3, 0x2040, 0x00401000)
-        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(image3), pe, chunk=0x200)))
+        self.assertIn("mismatch", self._verdicts(xd.verify_image(self._read(image3), pe, chunk=0x200, resolve=resolve)))
+
+    def test_spot_check_exit_code_never_succeeds_with_unreadable_addresses(self):
+        self.assertEqual(xd.spot_check_exit_code([1, 2], [], []), 0)
+        self.assertEqual(xd.spot_check_exit_code([1], [2], []), 1)
+        self.assertEqual(xd.spot_check_exit_code([1], [], [2]), 2, "one unreadable is not a clean pass")
+        self.assertEqual(xd.spot_check_exit_code([1], [2], [3]), 1, "a mismatch outranks unreadable")
+        self.assertEqual(xd.spot_check_exit_code([], [], []), 2)
+
 
     def test_unreadable_chunk_is_reported_not_counted_as_ok(self):
         res = xd.verify_image(self._read(self.image, fail={0x11400}), self.pe, chunk=0x200)
@@ -279,6 +308,52 @@ class VerifyImage(unittest.TestCase):
     def test_pe_read_va_maps_imagebase_plus_rva_to_file_bytes(self):
         self.assertEqual(xd.pe_read_va(self.pe, 0x11010, 4), self.text[0x10:0x14])
         self.assertIsNone(xd.pe_read_va(self.pe, 0x5000, 4), "outside every section is None, not garbage")
+
+
+def _fake_kernel(base, ord_base, func_rvas, globals_rva=0x3000):
+    """A fake xboxkrnl.exe image mapped at `base`: MZ/PE headers, an export
+    directory (ordinal-only, like the real kernel) and a data area."""
+    import struct
+    img = bytearray(0x4000)
+    img[:2] = b"MZ"
+    struct.pack_into("<I", img, 0x3c, 0x80)
+    img[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<H", img, 0x80 + 20, 224)
+    exp_rva = 0x1000
+    struct.pack_into("<II", img, 0x80 + 24 + 96, exp_rva, 40)
+    funcs_rva = exp_rva + 40
+    struct.pack_into("<IIII", img, exp_rva + 16, ord_base, len(func_rvas), 0, funcs_rva)
+    for i, rva in enumerate(func_rvas):
+        struct.pack_into("<I", img, funcs_rva + i * 4, rva)
+    return img
+
+
+class KernelExportsAndMemstats(unittest.TestCase):
+    BASE = 0x80010000
+
+    def test_exports_map_ordinals_to_addresses_and_skip_holes(self):
+        img = _fake_kernel(self.BASE, 1, [0x2000, 0, 0x2100])
+        exp = xd.pe_exports(_mem_reader(bytes(img), self.BASE), self.BASE)
+        self.assertEqual(exp, {1: self.BASE + 0x2000, 3: self.BASE + 0x2100})
+
+    def test_garbage_at_the_kernel_base_raises_instead_of_guessing(self):
+        with self.assertRaises(RuntimeError):
+            xd.pe_exports(_mem_reader(b"\0" * 0x1000, self.BASE), self.BASE)
+
+    def test_memstats_reads_available_and_per_usage_pages_through_mmglobaldata(self):
+        import struct
+        img = _fake_kernel(self.BASE, 100, [0, 0, 0x3000])   # ordinal 102 = MmGlobalData at rva 0x3000
+        avail_va, usage_va = self.BASE + 0x3100, self.BASE + 0x3200
+        struct.pack_into("<8I", img, 0x3000, 0, 0, avail_va, usage_va, 0, 0, 0, 0)
+        struct.pack_into("<I", img, 0x3100, 9000)
+        usage = [0, 300, 40, 20, 500, 4000, 100, 1500, 0, 900, 24]
+        struct.pack_into("<11I", img, 0x3200, *usage)
+        read = _mem_reader(bytes(img), self.BASE)
+        exp = xd.pe_exports(read, self.BASE)
+        available, by = xd.kernel_memstats(read, exp.get)
+        self.assertEqual(available, 9000)
+        self.assertEqual(by["Image"], 1500)
+        self.assertEqual(sum(by.values()) + available, 16384, "fixture is a consistent 64 MiB machine")
 
 
 if __name__ == "__main__":

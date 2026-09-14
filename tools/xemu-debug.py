@@ -123,10 +123,23 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  the guest is not running this file (check
                                  xemu's dvd_path); 2 = some bytes unreadable,
                                  no identity verdict.
+                                 libxboxkrnl's __imp_ thunk table in .rdata
+                                 legitimately differs (ordinal in the file,
+                                 loader-patched kernel address in the guest):
+                                 each such dword must equal what the running
+                                 kernel's own export table gives for that
+                                 ordinal, or it is a mismatch.
   verify-image <exe> --addr A [B ...]
                                 Spot check 16 bytes at explicit addresses -
                                  shows one breakpoint address disagreeing,
-                                 but a pass here is NOT image identity.
+                                 but a pass here is NOT image identity. Exit
+                                 1 = any mismatch, 2 = any unreadable.
+  memstats                      The kernel's own page counters, read through
+                                 the exported MmGlobalData (ordinal 102): the
+                                 numbers MmQueryStatistics (ordinal 181) reports
+                                 - available pages and busy pages per usage
+                                 (stack, pool, image, contiguous, ...) - with a
+                                 self-check that they sum to the 64 MiB.
 
 Addresses are hex, with or without 0x.
 """
@@ -723,7 +736,32 @@ def pe_read_va(data, va, length):
     return None
 
 
-def verify_image(read, data, chunk=0x8000):
+KERNEL_BASE = 0x80010000
+
+
+def pe_exports(read, base):
+    """Ordinal -> virtual address of every export of the PE image mapped at
+    `base` in the guest (used for xboxkrnl.exe at KERNEL_BASE, whose
+    exports are by ordinal only). Raises RuntimeError if the headers do not
+    parse - the caller must then say "no verdict", never guess."""
+    hdr = read(base, 0x400)
+    if hdr[:2] != b"MZ":
+        raise RuntimeError(f"no MZ header at {base:#x}")
+    pe = struct.unpack_from("<I", hdr, 0x3c)[0]
+    if hdr[pe:pe + 4] != b"PE\0\0":
+        raise RuntimeError(f"no PE signature at {base + pe:#x}")
+    exp_rva, exp_size = struct.unpack_from("<II", hdr, pe + 24 + 96)
+    if not exp_rva:
+        raise RuntimeError("image has no export directory")
+    d = read(base + exp_rva, 40)
+    ord_base, nfuncs, _nnames, funcs_rva = struct.unpack_from("<IIII", d, 16)
+    if not (0 < nfuncs < 4096):
+        raise RuntimeError(f"implausible export count {nfuncs}")
+    funcs = struct.unpack(f"<{nfuncs}I", read(base + funcs_rva, nfuncs * 4))
+    return {ord_base + i: base + rva for i, rva in enumerate(funcs) if rva}
+
+
+def verify_image(read, data, chunk=0x8000, resolve=None):
     """Compare EVERY file-backed byte of the PE's read-only sections (.text,
     .rdata, ... - anything without IMAGE_SCN_MEM_WRITE, since writable data
     legitimately changes at runtime) against guest memory, `chunk` bytes per
@@ -748,7 +786,7 @@ def verify_image(read, data, chunk=0x8000):
             else:
                 if got == expect:
                     verdict = "ok"
-                elif _only_kernel_thunks_differ(expect, got, start):
+                elif resolve is not None and _only_kernel_thunks_differ(expect, got, start, resolve):
                     verdict = "thunks"
                 else:
                     verdict = "mismatch"
@@ -756,15 +794,15 @@ def verify_image(read, data, chunk=0x8000):
     return results
 
 
-_KERNEL_LO, _KERNEL_HI = 0x80010000, 0x80040000
-
-
-def _only_kernel_thunks_differ(expect, got, start):
+def _only_kernel_thunks_differ(expect, got, start, resolve):
     """True when every differing byte sits in a dword-aligned kernel import
     thunk that the Xbox loader legitimately patched: the file holds the
     ordinal (`0x800000NN`, libxboxkrnl's `__imp_*` table in .rdata) and the
-    guest holds the resolved kernel address (0x8001xxxx-0x8003xxxx). Any
-    other difference is a real mismatch."""
+    guest holds EXACTLY the address the running kernel exports for that
+    ordinal (`resolve(ordinal)`, read from xboxkrnl's own export table) -
+    not merely some kernel address, which a stale build importing a
+    different function through the same slot would also satisfy. Any other
+    difference is a real mismatch."""
     if len(expect) != len(got):
         return False
     i = 0
@@ -778,10 +816,60 @@ def _only_kernel_thunks_differ(expect, got, start):
             return False
         f = struct.unpack_from("<I", expect, o)[0]
         g = struct.unpack_from("<I", got, o)[0]
-        if not (f & 0xFFFFFE00 == 0x80000000 and _KERNEL_LO <= g < _KERNEL_HI):
+        if f & 0xFFFFFE00 != 0x80000000 or resolve(f & 0x1FF) != g:
             return False
         i = o + 4
     return True
+
+
+def spot_check_exit_code(matched, mismatched, unreadable):
+    """1 = something disagreed; 2 = something could not be compared (no
+    clean verdict, even if everything else matched); 0 = every requested
+    address matched."""
+    if mismatched:
+        return 1
+    if unreadable or not matched:
+        return 2
+    return 0
+
+
+MM_USAGE_NAMES = ("Unknown", "Stack", "VirtualPageTable", "SystemPageTable", "Pool",
+                  "VirtualMemory", "SystemMemory", "Image", "FsCache", "Contiguous",
+                  "Debugger")
+MM_GLOBAL_DATA_ORDINAL = 102
+
+
+def kernel_memstats(read, resolve):
+    """The kernel's own page accounting - the same counters
+    MmQueryStatistics (xboxkrnl ordinal 181) reports, read directly through
+    the exported MmGlobalData (ordinal 102): *AvailablePages, and
+    AllocatedPagesByUsage[MmMaximumUsage] (4 KiB pages, per MMPFN_BUSY_TYPE).
+    Returns (available_pages, {usage: pages})."""
+    gd = resolve(MM_GLOBAL_DATA_ORDINAL)
+    if gd is None:
+        raise RuntimeError("kernel does not export MmGlobalData (ordinal 102)")
+    fields = struct.unpack("<8I", read(gd, 32))
+    avail_ptr, usage_ptr = fields[2], fields[3]
+    available = struct.unpack("<I", read(avail_ptr, 4))[0]
+    usage = struct.unpack(f"<{len(MM_USAGE_NAMES)}I", read(usage_ptr, 4 * len(MM_USAGE_NAMES)))
+    return available, dict(zip(MM_USAGE_NAMES, usage))
+
+
+def cmd_memstats(a):
+    g = GdbRemote(a.host, a.port)
+    exports = pe_exports(g.read_mem, KERNEL_BASE)
+    available, usage = kernel_memstats(g.read_mem, exports.get)
+    g.close()
+    busy = sum(usage.values())
+    print(f"available pages: {available:6d}  ({available * 4 / 1024:8.2f} MiB)")
+    print(f"busy pages:      {busy:6d}  ({busy * 4 / 1024:8.2f} MiB), by usage:")
+    for name, pages in usage.items():
+        if pages:
+            print(f"  {name:<17}{pages:6d}  ({pages * 4 / 1024:8.2f} MiB)")
+    total = available + busy
+    print(f"available + busy = {total} pages = {total * 4 / 1024:.2f} MiB"
+          + ("  (= the 64 MiB console, counters consistent)" if total == 16384 else
+             "  (NOT 16384: counters inconsistent or not a 64 MiB machine - do not trust)"))
 
 
 def verify_addrs(read, data, addrs, length=16):
@@ -821,8 +909,15 @@ def cmd_verify_image(a):
         print(f"verify-image: spot check of {len(addrs)} address(es): {len(matched)} match, "
               f"{len(mismatched)} mismatch, {len(unreadable)} unreadable. A spot check "
               "is not image identity - run without --addr for that.")
-        sys.exit(1 if mismatched else (2 if not matched else 0))
-    results = verify_image(g.read_mem, data, chunk=a.chunk)
+        sys.exit(spot_check_exit_code(matched, mismatched, unreadable))
+    try:
+        exports = pe_exports(g.read_mem, KERNEL_BASE)
+    except (RuntimeError, struct.error) as e:
+        g.close()
+        print(f"verify-image: cannot read the running kernel's export table ({e}) - "
+              "kernel import thunks cannot be resolved, no identity verdict.")
+        sys.exit(2)
+    results = verify_image(g.read_mem, data, chunk=a.chunk, resolve=exports.get)
     g.close()
     total = sum(e - s for _n, s, e, _v in results)
     by = {"ok": 0, "thunks": 0, "mismatch": 0, "unreadable": 0}
@@ -882,6 +977,8 @@ def main():
     s = sub.add_parser("verify-image"); s.add_argument("exe")
     s.add_argument("--addr", nargs="*"); s.add_argument("--chunk", type=lambda x: int(x, 0), default=0x8000)
     s.set_defaults(func=cmd_verify_image)
+
+    s = sub.add_parser("memstats"); s.set_defaults(func=cmd_memstats)
 
     a = p.parse_args()
     try:
