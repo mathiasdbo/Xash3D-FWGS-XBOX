@@ -126,6 +126,30 @@ if [ "$DRIVER_SUM_NOW" != "$DRIVER_SUM_THEN" ]; then
 	exit 1
 fi
 STALE=0
+# The manifest must describe THIS checkout's source set, not just the
+# objects that happen to exist (Codex review, round 2): a source deleted
+# since the sweep leaves a manifest-approved object behind with nothing to
+# be newer than, and a source added since the sweep has no object at all
+# and never enters the per-object loop below. So enumerate the current
+# sources with the sweep's own rule (find *.c/*.cpp under the canonical
+# directories), and require every one of them to have a manifest line
+# (OK or FAIL) and every manifest source to still exist.
+SWEEP_DIRS="engine filesystem public common compat 3rdparty/library_suffix/src"
+# shellcheck disable=SC2086
+CURRENT_SRCS="$(find $SWEEP_DIRS \( -name '*.c' -o -name '*.cpp' \) 2>/dev/null | sort)"
+MANIFEST_SRCS="$(awk '$1 == "OK" || $1 == "FAIL" { print $2 }' "$MANIFEST" | sort)"
+ADDED="$(comm -23 <(printf '%s\n' "$CURRENT_SRCS") <(printf '%s\n' "$MANIFEST_SRCS"))"
+REMOVED="$(comm -13 <(printf '%s\n' "$CURRENT_SRCS") <(printf '%s\n' "$MANIFEST_SRCS"))"
+if [ -n "$ADDED" ]; then
+	echo "xbox-link-check: source(s) present now but absent from the sweep manifest - swept before they existed:" >&2
+	printf '  %s\n' $ADDED >&2
+	STALE=$((STALE + $(printf '%s\n' "$ADDED" | wc -l)))
+fi
+if [ -n "$REMOVED" ]; then
+	echo "xbox-link-check: manifest source(s) that no longer exist - their objects are orphans:" >&2
+	printf '  %s\n' $REMOVED >&2
+	STALE=$((STALE + $(printf '%s\n' "$REMOVED" | wc -l)))
+fi
 for o in $ENGINE_OBJS; do
 	case "$(basename "$o")" in
 		engine_common_launcher.obj|ref_null_r_context.obj) continue ;;
