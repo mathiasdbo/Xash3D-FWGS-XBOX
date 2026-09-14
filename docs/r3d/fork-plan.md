@@ -3372,12 +3372,50 @@ subsystem is simply absent and `IN_Init` finds no device, silently.
    understood, separate gap (this milestone's headless `ref_null` needs
    `r_refdll "null"` set in `video.cfg`; the real retail `video.cfg` this
    boot-test disc carries never needed to set it, since real Half-Life
-   always has a real GPU renderer to fall back to). **X7.4 step 2 is
-   therefore still NOT closed, but is real, measured progress further
-   than any previous attempt**: the link-only exit gate is met, one real
-   quit-triggering bug is fixed and verified, and the next concrete
-   blocker (getting a real renderer, even a headless one, selected) is
-   precisely identified rather than guessed at.
+   always has a real GPU renderer to fall back to).
+
+   **Both fixed, and `Host_Frame` reached for the first time ever in
+   this fork's history - see divergences #45 and #46 for the full
+   account.** `R_Init()` gained a real, Xbox-only last-resort attempt to
+   load `ref_null` explicitly once every other option has failed
+   (divergence #45), which unblocked renderer selection but immediately
+   exposed the next real failure: `R_Init_Video()`'s own very first SDL
+   call lazily auto-init's SDL's video subsystem, reaching nxdk's real,
+   currently-compiling `SDL_xbvideo.c` driver and hitting its own
+   unconditional `assert(0)` - exactly the call chain (`CL_Init` →
+   `VID_Init` → `vid_sdl2.c` → `SDL_CreateWindow`) divergence #14
+   already anticipated back when no real Xbox binary existed to reach
+   it, deliberately left undecided between its two named options.
+   X7.4, with a real running boot, is where that decision actually
+   needed making: mirrored `CL_Init`'s own established
+   `Host_IsDedicated()`-equivalent short-circuit, narrowed to video
+   only, matching this milestone's own headless-boot goal rather than
+   committing to a real video-mode default that belongs to X5's own
+   planned `VIDEO_XBOX` backend (divergence #46).
+
+   With both fixes together, live-verified, not guessed: the boot
+   demonstrably reaches `Host_Frame` (`Host_RunFrame` → `Host_Frame`,
+   confirmed by breakpoint hit and by the real caller resolving
+   correctly) - **this milestone's own actual boot exit criterion, not
+   just the link-only gate.** A single-step trace of `Host_Frame`'s own
+   first ~400 real instructions shows entirely normal per-frame
+   processing (`Platform_DoubleTime` → `Con_DPrintf` →
+   `Host_InputFrame` → `IN_CheckMouseState`) before hitting the NEW
+   blocker this same live boot then found, reproducibly: a real kernel
+   bugcheck (`KeBugCheckEx(0x1E` `KMODE_EXCEPTION_NOT_HANDLED,
+   0xC00000FD` `STATUS_STACK_OVERFLOW, ...)`, decoded directly off the
+   kernel's own bugcheck stack frame) a short time after entering
+   `Host_Frame`'s real logic - a genuine stack overflow, not yet
+   root-caused. **X7.4 step 2 is therefore still NOT closed - the boot
+   does not yet SUSTAIN running past its first real frame - but this is
+   the furthest this fork has ever reached, by a wide margin**: the
+   link-only exit gate is met, `CL_Init` passes, and `Host_Frame` itself
+   is confirmed reached and running real logic for the first time ever.
+   The next concrete blocker (root-causing the stack overflow - what
+   specifically overflows the stack, and why, somewhere in `Host_Frame`'s
+   real per-frame call graph past input processing) is precisely
+   characterized with real, decoded evidence rather than guessed at, and
+   is real, separate, dedicated follow-up work for a future session.
 3. **A writable rootdir exists before the first map loads** (specialist
    review - a bring-up blocker, not X8 polish). `FS_DetermineRootDirectory`
    (`engine/common/filesystem_engine.c:266-278`) resolves to nxdk's

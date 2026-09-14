@@ -897,6 +897,31 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 {
 	string safe;
 	SDL_DisplayMode display_mode;
+
+#if XASH_XBOX
+	// No real VIDEO_XBOX backend exists yet (planned for X5) - divergence
+	// #14 already named this exact call chain (CL_Init -> VID_Init ->
+	// vid_sdl2.c -> SDL_CreateWindow) as reaching nxdk's real but
+	// incomplete SDL_xbvideo.c driver once a real Xbox entry point
+	// existed, and left the fix undecided until that happened. It has:
+	// confirmed live, this function's own very first real SDL video call
+	// (SDL_GetCurrentDisplayMode below, which lazily inits SDL's video
+	// subsystem) reaches SDL_xbvideo.c's pixelFormatSelector and hits its
+	// own unconditional assert(0) - real, unfinished driver code, not
+	// something this fork wrote. X7.4's own milestone is a headless boot
+	// with ref_null - no real window or video mode is meaningful yet on
+	// this target - so mirror CL_Init's own existing
+	// `host.type == HOST_DEDICATED` short-circuit, narrowed to video
+	// only: skip every real SDL video/window call below and report
+	// success, the same "successful no-op" contract a real dedicated
+	// server's own skip already relies on elsewhere in this codebase.
+	// refState.desktopBitsPixel is the only state this function would
+	// otherwise set that anything reads later, and only ref/gl ever
+	// reads it - never ref_null, this milestone's only active renderer -
+	// so leaving it at its zero-initialised default is safe here.
+	return true;
+#endif
+
 	SDL_GetCurrentDisplayMode( VID_GetDisplayIndex( __func__, NULL ), &display_mode );
 
 	refState.desktopBitsPixel = SDL_BITSPERPIXEL( display_mode.format );
