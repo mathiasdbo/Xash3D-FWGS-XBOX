@@ -155,6 +155,14 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  (the full verify-image comparison). A stale
                                  map's addresses once produced a credible
                                  "0 pools".
+  fps --map <file> --exe <pe> [--seconds N]
+                                Wall-clock frame rate: host.framecount read
+                                 twice N seconds apart (default 30), plus the
+                                 engine's own host.pureframetime (the last
+                                 frame's CPU time without Host_Autosleep's
+                                 sleep). Field offsets are from tools/
+                                 xbox-offsetof.sh, not counted by hand. Same
+                                 two identity checks as pools first.
 
 Addresses are hex, with or without 0x.
 """
@@ -374,7 +382,22 @@ class GdbRemote:
         except socket.timeout:
             raise RuntimeError(f"no stop-reply within {timeout}s for single-step") from None
 
-    def close(self):
+    def close(self, resume=True):
+        # xemu stops the VM when a gdb client connects and does NOT resume it
+        # on a bare socket close, nor on a gdb detach ('D' - tried, measured:
+        # EIP identical across two `regs` 3 s apart). Only a continue does.
+        # Measured first as: a `regs` followed by 30 s of nothing left
+        # host.framecount frozen at the same value in two separate boots,
+        # "frame counter did not advance". The monitor's own `cont` resumes
+        # the VM and answers synchronously (no outstanding 'c' packet to
+        # turn into a stale stop-reply on the next connection), so every
+        # command resumes on the way out, and the guest runs between two
+        # CLI invocations exactly as it would with no debugger at all.
+        if resume:
+            try:
+                self.monitor("cont", timeout=2.0)
+            except Exception:
+                pass
         self.sock.close()
 
 
@@ -1006,6 +1029,56 @@ def cmd_pools(a):
             print(f"  {real / 1048576:7.2f} MiB real  {payload / 1048576:7.2f} MiB payload  {name}")
 
 
+def frame_rate(frames_before, frames_after, seconds):
+    """(fps, ms per frame) from two readings of a frame counter `seconds`
+    apart. Raises rather than dividing into nonsense: a counter that did not
+    move means the guest is halted, hung, or not running this build."""
+    if seconds <= 0:
+        raise RuntimeError("non-positive interval")
+    frames = (frames_after - frames_before) & 0xFFFFFFFF
+    if frames == 0:
+        raise RuntimeError(f"frame counter did not advance in {seconds:.1f}s - halted, hung, or the wrong address")
+    fps = frames / seconds
+    return fps, 1000.0 / fps
+
+
+HOST_FRAMECOUNT_OFF, HOST_PUREFRAMETIME_OFF = 596, 624   # tools/xbox-offsetof.sh common.h host_parm_t ...
+
+
+def cmd_fps(a):
+    """Wall-clock frame rate from host.framecount, plus the engine's own last
+    pure frame time (host.pureframetime, the frame's CPU time without the
+    sleep Host_Autosleep inserts). Reads are two brief stops of the guest,
+    negligible against the interval."""
+    syms = load_map_symbols(a.map)
+    try:
+        host = syms["_host"]
+    except KeyError:
+        raise RuntimeError(f"{a.map} has no _host symbol")
+    with open(a.exe, "rb") as f:
+        data = f.read()
+    bad = map_matches_pe(a.map, data)
+    if bad:
+        print(f"fps: {a.map} is not the map of {a.exe} - section extents differ."); sys.exit(1)
+    g = GdbRemote(a.host, a.port)
+    exports = pe_exports(g.read_mem, KERNEL_BASE)
+    results = verify_image(g.read_mem, data, resolve=exports.get)
+    if any(v not in ("ok", "thunks") for _n, _s, _e, v in results):
+        g.close(); print("fps: the guest is not verifiably running this PE - no reading."); sys.exit(1)
+    fc0 = struct.unpack("<I", g.read_mem(host + HOST_FRAMECOUNT_OFF, 4))[0]
+    g.close()
+    t0 = time.monotonic()
+    time.sleep(a.seconds)
+    g = GdbRemote(a.host, a.port)
+    fc1 = struct.unpack("<I", g.read_mem(host + HOST_FRAMECOUNT_OFF, 4))[0]
+    pure = struct.unpack("<d", g.read_mem(host + HOST_PUREFRAMETIME_OFF, 8))[0]
+    g.close()
+    elapsed = time.monotonic() - t0
+    fps, ms = frame_rate(fc0, fc1, elapsed)
+    print(f"fps: {fc1 - fc0} frames in {elapsed:.1f}s = {fps:.1f} fps, {ms:.1f} ms/frame (wall); "
+          f"host.pureframetime (last frame, no sleep) = {pure * 1000:.1f} ms")
+
+
 def cmd_memstats(a):
     g = GdbRemote(a.host, a.port)
     exports = pe_exports(g.read_mem, KERNEL_BASE)
@@ -1132,6 +1205,8 @@ def main():
     s = sub.add_parser("memstats"); s.set_defaults(func=cmd_memstats)
     s = sub.add_parser("pools"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
     s.add_argument("--min-bytes", type=lambda x: int(x, 0), default=16384); s.set_defaults(func=cmd_pools)
+    s = sub.add_parser("fps"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
+    s.add_argument("--seconds", type=float, default=30.0); s.set_defaults(func=cmd_fps)
 
     a = p.parse_args()
     try:

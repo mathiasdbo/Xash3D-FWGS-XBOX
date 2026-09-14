@@ -415,6 +415,30 @@ void VID_SaveWindowSize( int width, int height )
 
 	VID_GetWindowSizeInPixels( host.hWnd, sw.renderer, &render_w, &render_h );
 	VID_SetDisplayTransform( &render_w, &render_h );
+#if XASH_XBOX
+	// ref_soft's R_SetDisplayTransform refuses any scale ("scale transform
+	// not supported" - it has no upscaling blit), so VID_SetDisplayTransform
+	// leaves render_w/h at the window size and vid_scale does nothing on
+	// the SDL surface path. The console has no 320x240 video mode either
+	// (nxdk's table is 640x480/720x480 and the HD modes), so the only
+	// half-resolution this hardware can do is the one fork-plan.md's X5
+	// names - R_SaveVideoMode( 640, 480, 320, 240 ): render into the
+	// top-left quadrant of the 640x480 surface, unscaled, which halves the
+	// rasterizer's work and its surface cache and is exactly what a frame-
+	// time measurement at 320x240 has to measure. Presentation of that
+	// quadrant at full screen is vid_xbox.c's 2x2 blit, the planned final
+	// path, not this one. Honour vid_scale (a pixel scale: render = window
+	// / scale, integer only, so 2.0 is 320x240) here, on Xbox only.
+	{
+		const float scale = Cvar_VariableValue( "vid_scale" ); // vid_common.c's own cvar, static there
+		if( scale > 1.0f && scale == (int)scale )
+		{
+			render_w = width / (int)scale;
+			render_h = height / (int)scale;
+			Con_Printf( "%s: Xbox render target %dx%d (vid_scale %g), presented unscaled\n", __func__, render_w, render_h, scale );
+		}
+	}
+#endif
 	R_SaveVideoMode( width, height, render_w, render_h, maximized );
 }
 

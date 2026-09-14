@@ -428,6 +428,22 @@ class Pools(unittest.TestCase):
         self.assertEqual(syms["_R_Init"], 0x12000)
 
 
+class FrameRate(unittest.TestCase):
+    def test_fps_and_ms_from_two_counter_readings(self):
+        fps, ms = xd.frame_rate(1000, 1300, 30.0)
+        self.assertAlmostEqual(fps, 10.0); self.assertAlmostEqual(ms, 100.0)
+
+    def test_counter_wraparound_is_handled(self):
+        fps, _ = xd.frame_rate(0xFFFFFFF0, 0x10, 2.0)
+        self.assertAlmostEqual(fps, 16.0)
+
+    def test_a_counter_that_did_not_move_is_an_error_not_zero_fps(self):
+        with self.assertRaises(RuntimeError):
+            xd.frame_rate(500, 500, 30.0)
+        with self.assertRaises(RuntimeError):
+            xd.frame_rate(500, 600, 0.0)
+
+
 class KernelExportsAndMemstats(unittest.TestCase):
     BASE = 0x80010000
 

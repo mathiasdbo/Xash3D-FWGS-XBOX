@@ -5,6 +5,41 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — frame-time measurement: `xemu-debug.py fps`, `tools/xbox-offsetof.sh`, and a 320x240 render target on Xbox (X5, divergence #52)
+
+`fps` reads `host.framecount` twice N seconds apart (wall-clock fps and
+ms/frame) plus the engine's own `host.pureframetime` (the last frame's
+CPU time without `Host_Autosleep`'s sleep), after the same two identity
+checks as `pools`. The field offsets come from the new
+`tools/xbox-offsetof.sh <header> <type> <field>`, which compiles a probe
+through `tools/xbox-cc.sh` and reads `offsetof`/`sizeof` out of clang's
+own error text - the Xbox build's exact flags and ABI, no hand-counted
+layouts (`XASH_LOW_MEMORY` had just moved `host_parm_t`'s fields).
+
+Found doing it: a read-only debugger connection pauses xemu's VM and a
+socket close (or a gdb detach) does not resume it - only a continue
+does. Every `xemu-debug.py` command now resumes the guest through the
+monitor on the way out, so the guest runs between two CLI invocations
+as if no debugger were attached. Two frame-rate runs had reported the
+counter frozen at the same value in two separate boots: the driver's
+first `regs` pausing the guest at the same moment each time, not a hang.
+
+`vid_scale` cannot give a 320x240 render on `ref_soft` (it refuses any
+scale transform) and the console has no 320x240 video mode, so the Xbox
+video arm honours an integer `vid_scale` itself: `vid_scale 2.0` renders
+320x240 into the top-left of the 640x480 surface, unscaled - the
+`R_SaveVideoMode( 640, 480, 320, 240 )` lever the plan names, which is
+what a frame-time measurement at that resolution has to measure.
+Presenting it full-screen is `vid_xbox.c`'s 2x2 blit, the planned final
+path.
+
+Measured (xemu, `ref_soft`, spawn view, wall fps / `pureframetime`):
+`c0a0` 18.3 fps / 52.5 ms at 640x480, 25.9 / 37.4 at 320x240; `c1a3`
+28.5 / 34.7 and 43.0 / 23.5; `crossfire` 22.2 / 44.7 and 29.1 / 34.3.
+CPU-bound throughout (wall and pure agree), with a fixed full-window
+`SDL_ConvertPixels` per frame that `vid_xbox.c` will delete. X5's exit
+line is met under emulation; the console repeat is pending hardware.
+
 ### Changed — Xbox builds use upstream's low-memory mode; the first map now fits, and it is on screen (X3, divergence #51)
 
 `tools/xbox-cc.sh` compiles every Xbox translation unit with

@@ -1149,7 +1149,38 @@ image (statics, from the linker map's symbol deltas) that made the map
 fit. Take both readings at the same halted breakpoint, on a
 `verify-image`-confirmed guest, and re-derive the pool addresses from the
 CURRENT map: the first dump read 0 pools because the addresses came from
-the map of the build before. Two smaller lessons
+the map of the build before.
+
+**A read-only debugger connection freezes the guest, and xemu does not
+thaw it when the client leaves.** Measuring frame rate as "read
+`host.framecount`, wait 30 s, read it again" reported "frame counter did
+not advance" twice, in two separate boots, with the SAME count (631)
+both times - which looked like a deterministic hang 45 s into the map
+and was nothing of the kind. QEMU's gdbstub stops the VM the moment a
+client connects; a bare socket close does not resume it, and neither
+does a proper gdb detach (`D` - tried, EIP and ESP identical across two
+`regs` 3 s apart). Only a continue does: the `c` packet, or the
+monitor's own `cont`. So every earlier "connect, read, disconnect"
+(`regs`, `mem`, `screenshot`) had been leaving the guest paused, and 631
+was simply the frame the driver script's first `regs` landed on each
+time. `GdbRemote.close()` now sends `mon cont` on the way out (a
+synchronous reply, so no outstanding `c` becomes a stale stop-reply for
+the next connection), and the guest runs between two CLI invocations as
+if no debugger were attached. **The tell was the same number twice**: a
+hang lands where the code takes it; a pause lands where the clock takes
+it, and a fixed script schedule makes the clock repeatable.
+
+**Struct offsets for live reads come from the compiler, not from
+counting fields.** `host.framecount`'s offset (596 in this build) was
+needed to read the counter, and `host_parm_t` starts with a `game_status_t`
+whose two `MAX_QPATH` arrays had just changed size with
+`XASH_LOW_MEMORY=1` - the hand-counted offset X7.4 used for
+`nextstate` would have been wrong by 32 bytes on this build.
+`tools/xbox-offsetof.sh <header> <type> <field>` compiles a one-line
+probe through `tools/xbox-cc.sh` (so every real `-D` applies) that
+fails on purpose with `char (*)[N]` in the error text, and prints N.
+Zero guesswork, one second, and it is what `xemu-debug.py fps` is
+calibrated with. Two smaller lessons
 from the same day, both real: (1) a client-side `cont()` timeout does
 not stop the guest, and a stop-reply that arrives after the client gave
 up is delivered to the NEXT connection's handshake - `GdbRemote` drains

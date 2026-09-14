@@ -1790,10 +1790,44 @@ while halted, ~400 frames in: the inside of the Black Mesa tram car -
 lit, textured, seats, rail, the intro credits overlaid - at 640x480 in
 software (`.sweep/x5-shots/halted-map-c0a0-tram.png`, Valve's art, not
 committed). **A recognisable Half-Life map, rendered in software: the
-first half of this milestone's exit line.** The second half - frame
-time on `c1a3` and `crossfire` at 640x480 and 320x240 from the X0
-counters, X9's baseline - is the next item. X3's entry above has where
+first half of this milestone's exit line.** X3's entry above has where
 the memory went and where the next MiB are.
+
+**The second half, measured 2026-09-14 (divergence #52): frame time on
+`c1a3` and `crossfire` at 640x480 and 320x240.** Read by the debugger
+from the engine's own counters (`host.framecount` over 30 s of wall
+clock, and `host.pureframetime`, the last frame's CPU time without
+`Host_Autosleep`'s sleep; `tools/xemu-debug.py fps`, offsets from
+`tools/xbox-offsetof.sh`), on a `verify-image`-confirmed guest, `ref_soft`,
+`XASH_LOW_MEMORY=1`, the map's own spawn view with no input:
+
+| map | render | wall fps | ms/frame (wall) | `pureframetime` | free after load |
+|---|---|---|---|---|---|
+| `c0a0` (tram, pre-changelevel) | 640x480 | 18.3 | 54.5 | 52.5 ms | 11.8 MiB |
+| `c1a3` | 640x480 | 28.5 | 35.1 | 34.7 ms | 7.7 MiB |
+| `crossfire` | 640x480 | 22.2 | 45.1 | 44.7 ms | 8.7 MiB |
+| `c0a0` | 320x240 | 25.9 | 38.6 | 37.4 ms | 13.7 MiB |
+| `c1a3` | 320x240 | 43.0 | 23.3 | 23.5 ms | 9.4 MiB |
+| `crossfire` | 320x240 | 29.1 | 34.4 | 34.3 ms | 10.6 MiB |
+
+Read it right: (1) wall and pure agree to the millisecond at every
+point - the frame is CPU-bound, nothing is sleeping, so these are the
+rasterizer's real costs plus a fixed per-frame tax that does not shrink
+with the render size: the 640x480 `SDL_ConvertPixels` of the whole
+window surface into the framebuffer (`SDL_XBOX_UpdateWindowFramebuffer`),
+which `vid_xbox.c` deletes - the 320x240 numbers therefore UNDERSTATE
+the rasterizer's own gain. (2) These are xemu's numbers, not the
+console's: the CPU is emulated (TCG), not cycle-accurate to a 733 MHz
+Pentium III; the ratios between rows are the evidence, the absolute
+values await a real Xbox. (3) The "X0 counters" this line was written
+against - the per-subsystem `rdtsc` ruler and a frame-time log line -
+were never built; the counters read here are the engine's own, through
+the debugger, the same instrument every other number in this plan came
+from. (4) `c1a3` leaves 7.7 MiB free at 640x480 - the memory ceiling is
+now closer than the frame-time floor, and X3's ranked levers are the
+next spend. **X5's exit line is met under emulation**; the hardware
+repeat of this table is the first thing to do when a console is on the
+desk, and X9's `ref/nv2a` has its baseline.
 
 **[from PS3]** The change their roadmap forced in this plan.
 
