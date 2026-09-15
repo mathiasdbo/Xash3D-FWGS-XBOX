@@ -26,11 +26,20 @@ frame-rate runs had reported the counter frozen at the same value in two
 separate boots: the driver's first `regs` pausing the guest at the same
 moment each time, not a hang.
 
-Map identity, made real (review): section extents are not identity, but
-lld writes the same link timestamp into a map's header and the PE's COFF
-header, so `tools/xbox-game-link-check.sh --xbe` now emits the map from
-the XBE's own link and places it beside the XBE, and `pools`/`fps` bind
-`--map` to `--exe` by that timestamp (then the extents) before reading.
+Map identity, made real (review, two rounds): section extents are not
+identity, so `tools/xbox-game-link-check.sh --xbe` emits the map from the
+XBE's own link and places it beside the XBE. The first binding scheme
+(the link timestamp lld writes into both the map header and the PE's
+COFF header) was itself rejected in round 2 - it is wall-clock SECONDS,
+so two links in the same second collide, and with equal section extents
+too (an ordinary equal-size substitution) a stale map would still bind.
+Replaced with a SHA-256 sidecar (`xbe-build.exe.identity`, written next
+to the exe with the exact hash of it and of its own map); `pools`/`fps`
+require both hashes to match the files on disk before reading anything -
+verified live, tampering included. The same round found `close()`'s
+resume-on-exit could not distinguish "resumed" from "the stub gave no
+reply at all" (both were an empty string); `monitor()` now raises on
+that case specifically, so the warning and nonzero exit are real.
 
 `vid_scale` cannot give a 320x240 render on `ref_soft` (it refuses any
 scale transform) and the console has no 320x240 video mode, so the Xbox

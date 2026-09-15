@@ -638,6 +638,19 @@ if [ -n "$XBE_OUT" ]; then
 		exit 1
 	fi
 	cp "$XBE_MAP" "${XBE_OUT%.xbe}.map" || exit 1
+	# Identity sidecar for tools/xemu-debug.py's pools/fps (Codex review, X5
+	# round 2: the link TIMESTAMP this used to bind on is wall-clock
+	# SECONDS - two links finishing in the same second collide, and with
+	# equal section extents too - an ordinary equal-size substitution - a
+	# stale map would still have bound). SHA-256 of the exact bytes of
+	# xbe-build.exe (the --exe those tools take) and of its own map,
+	# written next to xbe-build.exe as <exe>.identity: content hashes
+	# cannot collide the way a timestamp can, and they bind the map's
+	# actual content, not just a header field.
+	printf 'sha256_exe=%s\nsha256_map=%s\n' \
+		"$(sha256sum "$XBE_EXE" | cut -d' ' -f1)" \
+		"$(sha256sum "$XBE_MAP" | cut -d' ' -f1)" \
+		> "$XBE_EXE.identity" || exit 1
 	MAGIC=$(head -c 4 "$XBE_OUT")
 	if [ "$MAGIC" != "XBEH" ]; then
 		echo "xbox-game-link-check: $XBE_OUT does not start with the XBEH magic" >&2

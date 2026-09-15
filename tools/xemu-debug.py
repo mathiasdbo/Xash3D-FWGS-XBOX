@@ -148,16 +148,16 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  BSP, edicts, SoundLib, ...). memstats says how
                                  much; this says what. Two identity checks first,
                                  refusing to read anything if either fails: the
-                                 map must be <pe>'s own - the link timestamp
-                                 lld writes into the map header and into the
-                                 PE's COFF header must be equal (use the map the
-                                 XBE's own link wrote beside it; a map from a
-                                 second link of the same inputs has no shared
-                                 identity), plus every output segment's extent
-                                 matching the PE section's VirtualSize - and the
-                                 guest must be running <pe> (the full
-                                 verify-image comparison). A stale map's
-                                 addresses once produced a credible "0 pools".
+                                 map must be <pe>'s own - a SHA-256 sidecar
+                                 (<pe>.identity, written by tools/
+                                 xbox-game-link-check.sh --xbe next to xbe-build.exe)
+                                 names the exact hash of that exe and of its
+                                 own map; both must match the files on disk,
+                                 plus every output segment's extent matching
+                                 the PE section's VirtualSize - and the guest
+                                 must be running <pe> (the full verify-image
+                                 comparison). A stale map's addresses once
+                                 produced a credible "0 pools".
   fps --map <file> --exe <pe> [--seconds N]
                                 Wall-clock frame rate: host.framecount read
                                  twice N seconds apart (default 30), plus the
@@ -331,8 +331,18 @@ class GdbRemote:
         return bytes.fromhex(r)
 
     def monitor(self, command, timeout=10):
-        # Reply is a stream of "O<hex>" console-output packets ended by a
-        # bare "OK" or "E<code>"; those two are exact/prefix matches, not hex.
+        """Reply is a stream of "O<hex>" console-output packets ended by a
+        bare "OK" or "E<code>" - those two are exact/prefix matches, not
+        hex. Raises RuntimeError if the stream ends (timeout or the peer
+        closing) before either terminator arrives: Codex review found that
+        an empty string from a genuine "OK" with no output and an empty
+        string from "the connection just ended" were the same return value,
+        so close()'s resume check (a bare `mon cont`, no console output)
+        could not tell "resumed" from "no reply came back" - which is
+        exactly the silent-pause failure this file exists to catch. `E...`
+        is still returned as text (with the code appended), not raised:
+        callers that want to inspect a real, definite stub-reported error
+        can, but they cannot mistake "no reply" for one."""
         r = self.cmd(f"qRcmd,{command.encode().hex()}", timeout=timeout)
         out = ""
         while r is not None and r != "OK" and not r.startswith("E"):
@@ -344,7 +354,10 @@ class GdbRemote:
             else:
                 out += f"<unexpected packet: {r!r}>\n"
             r = self._recv(timeout)
-        if r is not None and r.startswith("E"):
+        if r is None:
+            raise RuntimeError(f"monitor {command!r}: no OK/E reply within {timeout}s "
+                               f"(partial output: {out[:200]!r})")
+        if r.startswith("E"):
             out += f"<monitor error: {r}>\n"
         return out
 
@@ -971,34 +984,65 @@ def pe_section_sizes(data):
     return [struct.unpack_from("<I", data, pe + 24 + optsz + i * 40 + 8)[0] for i in range(nsec)]
 
 
-def map_timestamp(path):
-    """The `Timestamp is XXXXXXXX` value lld writes into a map's header - the
-    same value it writes into the PE's COFF TimeDateStamp in the SAME link
-    (measured: default-mapped.exe 0x6aa882da == its map; the XBE's separate
-    link of identical inputs, 3 s earlier, 0x6aa882d7). None if absent."""
+def sidecar_path(exe_path):
+    """The identity sidecar tools/xbox-game-link-check.sh --xbe writes next
+    to xbe-build.exe: <exe>.identity, two lines "sha256_exe=<hex>" and
+    "sha256_map=<hex>" over the exact bytes of that exe and its map, from
+    the same link. Content hashes, not the link timestamp: Codex review
+    (X5, round 2) found the timestamp is wall-clock SECONDS, so two links
+    finishing in the same second - concrete under a fast rebuild loop -
+    could share it, and with section extents also equal (an ordinary
+    equal-size substitution) a stale map would still bind."""
+    return exe_path + ".identity"
+
+
+def read_sidecar(path):
+    """{"sha256_exe": hex, "sha256_map": hex} from a sidecar file, or None
+    if it does not exist. Malformed content is an error, not a silent
+    skip - a sidecar that exists but cannot be read is not "no opinion"."""
+    if not os.path.exists(path):
+        return None
+    out = {}
     with open(path, "r", errors="replace") as f:
-        head = f.read(4096)
-    m = re.search(r"Timestamp is ([0-9a-fA-F]{1,8})", head)
-    return int(m.group(1), 16) if m else None
+        for line in f:
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                out[k] = v
+    for k in ("sha256_exe", "sha256_map"):
+        if k not in out or len(out[k]) != 64:
+            raise RuntimeError(f"{path}: malformed sidecar, missing or bad {k}")
+    return out
 
 
-def pe_timestamp(data):
-    pe = struct.unpack_from("<I", data, 0x3c)[0]
-    return struct.unpack_from("<I", data, pe + 8)[0]
+def sha256_hex(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
 
 
-def map_matches_pe(map_path, data):
-    """Bind a linker map to a PE without a sidecar. Identity is the link
-    timestamp lld writes into BOTH artifacts (Codex review, round 1 of X5's
-    frame-time work: section extents alone are not identity - equal-size
-    substitutions are a normal link outcome). The section-extent check
-    stays as a second, structural guard. Returns a list of mismatches
-    (segment, map_value, pe_value) - segment 0 carries the timestamp
-    comparison; empty means bound."""
+def map_matches_pe(map_path, data, exe_path=None):
+    """Bind a linker map to a PE. Identity is the sidecar's SHA-256 of the
+    exact PE bytes and the exact map bytes (see sidecar_path) - a content
+    hash cannot collide the way a wall-clock timestamp can, and it binds
+    the map's actual content, not just its header. No sidecar (an exe not
+    produced by tools/xbox-game-link-check.sh --xbe, or --map pointed at
+    something else) is refused, not silently trusted on section extents
+    alone; the extent check stays as a second, structural guard on top.
+    `exe_path` names the file `data` was read from, for locating the
+    sidecar - omit only in tests that construct `data` in memory. Returns
+    a list of mismatches (segment, found, expected); segment 0 carries
+    the sidecar/hash checks. Empty means bound."""
     bad = []
-    ts_map, ts_pe = map_timestamp(map_path), pe_timestamp(data)
-    if ts_map is None or ts_map != ts_pe:
-        bad.append((0, ts_map if ts_map is not None else -1, ts_pe))
+    sidecar = read_sidecar(sidecar_path(exe_path)) if exe_path else None
+    if sidecar is None:
+        bad.append((0, "no sidecar", sidecar_path(exe_path) if exe_path else "(--exe path unknown)"))
+    else:
+        h_exe = sha256_hex(data)
+        if h_exe != sidecar["sha256_exe"]:
+            bad.append((0, h_exe[:16] + "...", sidecar["sha256_exe"][:16] + "..."))
+        with open(map_path, "rb") as f:
+            h_map = sha256_hex(f.read())
+        if h_map != sidecar["sha256_map"]:
+            bad.append((0, h_map[:16] + "...", sidecar["sha256_map"][:16] + "..."))
     extents = map_section_extents(map_path)
     sizes = pe_section_sizes(data)
     if not extents:
@@ -1055,7 +1099,7 @@ def cmd_pools(a):
         data = f.read()
     # Two identities, every time (check_identity): the first pool dump of
     # this project read "0 pools" from a stale map's addresses and looked
-    # like a result. The map must be THIS PE's map (link timestamp, then
+    # like a result. The map must be THIS PE's map (a SHA-256 sidecar, then
     # section extents), and the guest must be running this PE.
     with GdbRemote(a.host, a.port) as g:
         check_identity(g, a, data, "pools")
@@ -1118,17 +1162,18 @@ def struct_offset(header, type_name, field, expect_size):
 
 def check_identity(g, a, data, what):
     """The two identity checks every measuring command runs first: the map
-    is the PE's own (link timestamp + section extents), and the guest is
+    is the PE's own (a SHA-256 sidecar + section extents), and the guest is
     running that PE (the full read-only image comparison)."""
-    bad = map_matches_pe(a.map, data)
+    bad = map_matches_pe(a.map, data, exe_path=a.exe)
     if bad:
-        for seg, mv, pv in bad:
-            if seg == 0 and pv:
-                print(f"  link timestamp: map {mv:#x}, PE {pv:#x}")
+        for seg, found, expected in bad:
+            if seg == 0:
+                print(f"  identity: found {found}, expected {expected}")
             else:
-                print(f"  segment {seg:04x}: map extent {mv:#x}, PE section size {pv:#x}")
+                print(f"  segment {seg:04x}: map extent {found:#x}, PE section size {expected:#x}")
         print(f"{what}: {a.map} is not the map of {a.exe} (use the map the XBE's own link wrote "
-              "beside it - tools/xbox-game-link-check.sh --xbe does). No reading.")
+              "beside it - tools/xbox-game-link-check.sh --xbe does, with its .identity sidecar "
+              "next to xbe-build.exe). No reading.")
         sys.exit(1)
     exports = pe_exports(g.read_mem, KERNEL_BASE)
     results = verify_image(g.read_mem, data, resolve=exports.get)
