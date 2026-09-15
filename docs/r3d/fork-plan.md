@@ -2954,14 +2954,21 @@ to link against, rather than excluding VGUI-dependent code from the build
 at all. No SDK-side changes to `deps/hlsdk` were needed for this -
 `VGUI_*.h` stayed exactly as upstream ships them.
 
-One engine-side prerequisite the client module has that the stub never
-exercised, from the specialist review: `cl_dll/inputw32.cpp:31-33,148`
-drives the gamepad through `SDL_GameController`, so the engine's Xbox
-`SDL_Init` (`engine/platform/sdl2/sys_sdl2.c:151-152`, currently
-`SDL_INIT_TIMER | SDL_INIT_EVENTS` only) must add
-`SDL_INIT_GAMECONTROLLER` before `IN_Init` runs. X6's "gamepad is free"
-line is only true once that flag is there; without it the controller
-subsystem is simply absent and `IN_Init` finds no device, silently.
+**Corrected, X6 review, 2026-09-15: the prerequisite below was wrong,
+disproved by both the actual code and a live controller test.** An earlier
+specialist review claimed the client module needs
+`engine/platform/sdl2/sys_sdl2.c`'s Xbox `SDL_Init`
+(`SDL_INIT_TIMER | SDL_INIT_EVENTS` only) to add `SDL_INIT_GAMECONTROLLER`
+up front, because `cl_dll/inputw32.cpp:31-33,148` drives the gamepad
+through `SDL_GameController`. It does not need to: `IN_Init` already calls
+`Joy_Init` → `Platform_JoyInit` (`engine/client/input/in_joy.c:619`), which
+calls `SDL_InitSubSystem( SDL_INIT_GAMECONTROLLER )` itself on demand
+(`engine/platform/sdl2/joy_sdl2.c:370-371`) - and `IN_Init` runs before the
+client module loads, so the subsystem is already up by the time
+`inputw32.cpp` touches it. X6's live test (main menu navigated with a real
+gamepad, no `sys_sdl2.c` change made) confirms this end to end. No engine
+change needed here; delete this bullet's original claim rather than carry
+it forward as a live prerequisite.
 
 ### X7.4 — Half-Life first: server, then client, each a boot milestone
 
