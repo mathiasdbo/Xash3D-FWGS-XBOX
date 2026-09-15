@@ -377,7 +377,8 @@ class Pools(unittest.TestCase):
     def _map_file(self, rows):
         import tempfile
         f = tempfile.NamedTemporaryFile("w", suffix=".map", delete=False)
-        f.write(" x\n\n Start         Length     Name                   Class\n")
+        # _fake_pe leaves the COFF TimeDateStamp at 0; the map says the same.
+        f.write(" x\n\n Timestamp is 00000000 (never)\n\n Start         Length     Name                   Class\n")
         for seg, off, length, name in rows:
             f.write(f" {seg:04x}:{off:08x} {length:08x}H {name:<22} DATA\n")
         f.write(" 0001:00000010       _R_Init            0000000000012010     x.obj\n")
@@ -426,6 +427,104 @@ class Pools(unittest.TestCase):
             os.unlink(path)
         self.assertEqual(syms["_poolchain"], 0xaf6774)
         self.assertEqual(syms["_R_Init"], 0x12000)
+
+
+class ResumeOnClose(unittest.TestCase):
+    """close() must resume the guest through the monitor and REPORT when it
+    could not - a guest left paused after a read-only command was the
+    silent failure behind two false 'frame counter did not advance' runs."""
+
+    def setUp(self):
+        self.client, self.stub = socket.socketpair()
+        self.addCleanup(self.stub.close)
+        self.conn = object.__new__(xd.GdbRemote)
+        self.conn.sock = self.client
+
+    def _stub_reply(self, reply):
+        def serve():
+            self.stub.recv(4096)          # the qRcmd,<hex 'cont'> packet
+            self.stub.sendall(reply)
+        t = threading.Thread(target=serve); t.start(); return t
+
+    def test_close_sends_monitor_cont_and_returns_true_on_ok(self):
+        t = self._stub_reply(b"+$OK#9a")
+        self.assertTrue(self.conn.close()); t.join()
+
+    def test_close_returns_false_and_warns_when_the_stub_refuses(self):
+        import io, contextlib
+        t = self._stub_reply(b"+$E01#a6")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertFalse(self.conn.close())
+        t.join()
+        self.assertIn("still PAUSED", err.getvalue())
+
+    def test_context_manager_turns_a_refused_resume_into_an_error(self):
+        import io, contextlib
+        t = self._stub_reply(b"+$E01#a6")
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                with self.conn:
+                    pass
+        t.join()
+
+
+class MapBinding(unittest.TestCase):
+    def _pe_with_timestamp(self, ts, text):
+        import struct
+        pe = bytearray(_fake_pe(0x10000, [(".text", 0x1000, text, False)]))
+        struct.pack_into("<I", pe, 0x40 + 8, ts)
+        return bytes(pe)
+
+    def _map(self, ts, text_len):
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".map", delete=False)
+        f.write(f" x\n\n Timestamp is {ts:08x} (whenever)\n\n Start         Length     Name                   Class\n")
+        f.write(f" 0001:00000000 {text_len:08x}H .text                  CODE\n")
+        f.close(); return f.name
+
+    def test_same_link_timestamp_binds(self):
+        import os
+        text = bytes(range(256)) * 4
+        path = self._map(0x6aa882da, len(text))
+        try:
+            self.assertEqual(xd.map_matches_pe(path, self._pe_with_timestamp(0x6aa882da, text)), [])
+        finally:
+            os.unlink(path)
+
+    def test_a_different_links_map_with_identical_section_sizes_is_refused(self):
+        # Codex review round 1: equal-size substitutions are a normal link
+        # outcome; section extents alone are not identity. The timestamp is.
+        import os
+        text = bytes(range(256)) * 4
+        path = self._map(0x6aa882d7, len(text))
+        try:
+            bad = xd.map_matches_pe(path, self._pe_with_timestamp(0x6aa882da, text))
+            self.assertEqual([b[0] for b in bad], [0], "the timestamp row, and only it, must fail")
+        finally:
+            os.unlink(path)
+
+    def test_a_map_without_a_timestamp_cannot_bind(self):
+        import os, tempfile
+        text = bytes(range(256)) * 4
+        f = tempfile.NamedTemporaryFile("w", suffix=".map", delete=False)
+        f.write(" x\n Start         Length     Name                   Class\n 0001:00000000 00000400H .text CODE\n"); f.close()
+        try:
+            self.assertNotEqual(xd.map_matches_pe(f.name, self._pe_with_timestamp(1, text)), [])
+        finally:
+            os.unlink(f.name)
+
+
+class OffsetProbe(unittest.TestCase):
+    def test_parses_the_probe_tools_one_line(self):
+        self.assertEqual(xd.parse_offsetof("host_parm_t.framecount offset=596 size=4\n"), (596, 4))
+        # MSYS2 bash launched from Windows Python answers CRLF - measured.
+        self.assertEqual(xd.parse_offsetof("host_parm_t.framecount offset=596 size=4\r\n"), (596, 4))
+
+    def test_anything_else_is_an_error_not_an_address(self):
+        for text in ("", "error: something", "offset=596", "host_parm_t.framecount offset=x size=4"):
+            with self.assertRaises(RuntimeError):
+                xd.parse_offsetof(text)
 
 
 class FrameRate(unittest.TestCase):

@@ -10,19 +10,27 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 `fps` reads `host.framecount` twice N seconds apart (wall-clock fps and
 ms/frame) plus the engine's own `host.pureframetime` (the last frame's
 CPU time without `Host_Autosleep`'s sleep), after the same two identity
-checks as `pools`. The field offsets come from the new
+checks as `pools`. The field offsets are computed at run time by the new
 `tools/xbox-offsetof.sh <header> <type> <field>`, which compiles a probe
 through `tools/xbox-cc.sh` and reads `offsetof`/`sizeof` out of clang's
-own error text - the Xbox build's exact flags and ABI, no hand-counted
-layouts (`XASH_LOW_MEMORY` had just moved `host_parm_t`'s fields).
+own error text - the Xbox build's exact flags and ABI, no constants in
+the tool (`XASH_LOW_MEMORY` had just moved `host_parm_t`'s fields; review
+rightly refused a copied number with no drift check).
 
 Found doing it: a read-only debugger connection pauses xemu's VM and a
 socket close (or a gdb detach) does not resume it - only a continue
-does. Every `xemu-debug.py` command now resumes the guest through the
-monitor on the way out, so the guest runs between two CLI invocations
-as if no debugger were attached. Two frame-rate runs had reported the
-counter frozen at the same value in two separate boots: the driver's
-first `regs` pausing the guest at the same moment each time, not a hang.
+does. Every `xemu-debug.py` command is now a context-managed connection
+that resumes the guest through the monitor on every exit, exceptions
+included, and reports with a nonzero exit if the stub refused. Two
+frame-rate runs had reported the counter frozen at the same value in two
+separate boots: the driver's first `regs` pausing the guest at the same
+moment each time, not a hang.
+
+Map identity, made real (review): section extents are not identity, but
+lld writes the same link timestamp into a map's header and the PE's COFF
+header, so `tools/xbox-game-link-check.sh --xbe` now emits the map from
+the XBE's own link and places it beside the XBE, and `pools`/`fps` bind
+`--map` to `--exe` by that timestamp (then the extents) before reading.
 
 `vid_scale` cannot give a 320x240 render on `ref_soft` (it refuses any
 scale transform) and the console has no 320x240 video mode, so the Xbox
@@ -32,6 +40,17 @@ video arm honours an integer `vid_scale` itself: `vid_scale 2.0` renders
 what a frame-time measurement at that resolution has to measure.
 Presenting it full-screen is `vid_xbox.c`'s 2x2 blit, the planned final
 path.
+
+That 320x240 render is now presented full-screen: `SW_UnlockBuffer`'s
+Xbox arm expands it 2x2 (nearest, in place, one expanded row per group
+and `memcpy` for the rest) before the driver's own copy. Costs measured
+at `c1a3`: 43.0 fps render-only, 36.7 with a divide-per-pixel version,
+32.7 with the `memcpy` version kept - slower under xemu, where the
+guest's `div` becomes one native instruction and `memcpy` is emulated
+step by step, and the right choice for a Pentium III, where a `div` per
+output pixel is ~16 ms a frame. Bilinear is the GPU's job
+(`vid_xbox.c`). The engine's own `cl_showfps 2` counter draws on the
+Xbox screen through `ref_soft` and agrees with the tool.
 
 Measured (xemu, `ref_soft`, spawn view, wall fps / `pureframetime`):
 `c0a0` 18.3 fps / 52.5 ms at 640x480, 25.9 / 37.4 at 320x240; `c1a3`

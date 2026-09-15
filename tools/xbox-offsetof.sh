@@ -21,21 +21,25 @@ HEADER="${1:?usage: xbox-offsetof.sh <header> <type> <field>}"
 TYPE="${2:?usage: xbox-offsetof.sh <header> <type> <field>}"
 FIELD="${3:?usage: xbox-offsetof.sh <header> <type> <field>}"
 mkdir -p "$REPO/.sweep/tmp"
-PROBE="$REPO/.sweep/tmp/offsetof_probe.c"
-cat > "$PROBE" <<EOF
-#include <stddef.h>
-#include "$HEADER"
-char (*offset_probe)[offsetof($TYPE, $FIELD)] = 1;
-char (*size_probe)[sizeof(((${TYPE} *)0)->$FIELD)] = 1;
-EOF
-OUT="$(tools/xbox-cc.sh "$PROBE" -o "$REPO/.sweep/tmp/offsetof_probe.obj" 2>&1)"
-# clang prints the error line (carrying the type) BEFORE the echoed source
-# line that names the probe, so look one line back from the probe's name.
-OFF="$(printf '%s\n' "$OUT" | grep -B1 "(\*offset_probe)" | grep -o "char (\*)\[[0-9]*\]" | head -1 | grep -o "[0-9]*")"
-SZ="$(printf '%s\n' "$OUT" | grep -B1 "(\*size_probe)" | grep -o "char (\*)\[[0-9]*\]" | head -1 | grep -o "[0-9]*")"
-if [ -z "$OFF" ] || [ -z "$SZ" ]; then
-	echo "xbox-offsetof: could not read the offset from clang's output:" >&2
-	printf '%s\n' "$OUT" | head -20 >&2
-	exit 1
-fi
+
+# One probe per number and a bash regex over the whole output: no grep, tr
+# or head, and no dependence on line endings. Launched from MSYS2's own
+# bash by tools/xemu-debug.py (Python subprocess), clang's diagnostics
+# arrived CRLF and the external-tool grep chain this used to have matched
+# nothing, while the same chain on the same text from Git Bash worked -
+# measured, twice. Bash's own =~ sees `char (*)[N]` either way.
+probe() { # <expression-with-a-value>: prints N from clang's `char (*)[N]`
+	local src="$REPO/.sweep/tmp/offsetof_probe.c" out
+	printf '#include <stddef.h>\n#include "%s"\nchar (*probe)[%s] = 1;\n' "$HEADER" "$1" > "$src"
+	out="$(tools/xbox-cc.sh "$src" -o "$REPO/.sweep/tmp/offsetof_probe.obj" 2>&1)"
+	if [[ $out =~ char\ \(\*\)\[([0-9]+)\] ]]; then
+		printf '%s\n' "${BASH_REMATCH[1]}"
+		return 0
+	fi
+	echo "xbox-offsetof: no 'char (*)[N]' in clang's output for '$1':" >&2
+	printf '%s\n' "$out" >&2
+	return 1
+}
+OFF="$(probe "offsetof($TYPE, $FIELD)")" || exit 1
+SZ="$(probe "sizeof(((${TYPE} *)0)->$FIELD)")" || exit 1
 echo "$TYPE.$FIELD offset=$OFF size=$SZ"

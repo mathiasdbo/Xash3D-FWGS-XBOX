@@ -229,6 +229,53 @@ void SW_UnlockBuffer( void )
 		return;
 	}
 
+#if XASH_XBOX
+	// Xbox render target smaller than the window (VID_SaveWindowSize's
+	// vid_scale arm, e.g. 320x240 in the 640x480 surface): expand it to the
+	// full surface in place, nearest-neighbour, bottom-up and right-to-left
+	// so no source pixel is overwritten before it is read. Integer scales
+	// only, 4 bytes/pixel only (the driver's RGB888 surface). Cost is one
+	// write per output pixel; a bilinear filter costs the CPU four reads and
+	// a blend per output pixel, which is a good part of what rendering at
+	// 320x240 saved - the NV2A does that filter for free on a textured
+	// quad, and that is vid_xbox.c's present path, not this one.
+	if( sw.win->format->BytesPerPixel == 4 && sw.width < sw.win->w && sw.height < sw.win->h
+		&& sw.win->w % sw.width == 0 && sw.win->h % sw.height == 0 && sw.win->w / sw.width == sw.win->h / sw.height )
+	{
+		const int scale = sw.win->w / sw.width;
+		const int pitch = sw.win->pitch / 4;
+		uint32_t *px = (uint32_t *)sw.win->pixels;
+		int y;
+
+		// Bottom-up: output row y comes from small row y / scale, which sits
+		// above it (or IS it, for y == 0), so every read happens before the
+		// write that would clobber it. The last output row of each group is
+		// expanded from the source (right-to-left, no division - one read
+		// per `scale` writes); the group's other rows are memcpy'd from it.
+		// A first version divided per output pixel and cost c0a0 ~3 ms/frame
+		// under TCG; measured, then removed.
+		for( y = sw.win->h - 1; y >= 0; y-- )
+		{
+			uint32_t *dst = px + y * pitch;
+
+			if( y % scale == scale - 1 || y == sw.win->h - 1 )
+			{
+				const uint32_t *src = px + ( y / scale ) * pitch;
+				int sx, k, x = sw.win->w - 1;
+
+				for( sx = sw.width - 1; sx >= 0; sx-- )
+				{
+					const uint32_t v = src[sx];
+					for( k = 0; k < scale; k++ )
+						dst[x--] = v;
+				}
+			}
+			else
+				memcpy( dst, dst + pitch, sw.win->w * 4 );
+		}
+	}
+#endif
+
 	// already blitted
 	SDL_UnlockSurface( sw.win );
 

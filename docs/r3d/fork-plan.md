@@ -1810,6 +1810,32 @@ clock, and `host.pureframetime`, the last frame's CPU time without
 | `c1a3` | 320x240 | 43.0 | 23.3 | 23.5 ms | 9.4 MiB |
 | `crossfire` | 320x240 | 29.1 | 34.4 | 34.3 ms | 10.6 MiB |
 
+The 320x240 rows above are the render alone (the quadrant, unscaled).
+Presented full-screen by the Xbox arm's 2x2 nearest expansion in
+`SW_UnlockBuffer` (in place, before the driver's own copy), measured
+twice because the first version taught something:
+
+| map | present step | wall fps | ms/frame |
+|---|---|---|---|
+| `c0a0` | a division per output pixel | 24.1 | 41.6 |
+| `c1a3` | " | 36.7 | 27.2 |
+| `crossfire` | " | 27.2 | 36.8 |
+| `c0a0` | one expanded row per group + `memcpy` | 22.5 | 44.5 |
+| `c1a3` | " | 32.7 | 30.6 |
+| `crossfire` | " | 23.9 | 41.8 |
+
+The division-free version is the one kept, and it is the SLOWER one
+under xemu: TCG turns the guest's `div` into one native instruction,
+while nxdk's `memcpy` runs emulated instruction by instruction - the
+emulator ranks this micro-optimisation backwards. On the target a `div`
+per output pixel is ~12 M cycles a frame (~16 ms at 733 MHz) and
+`rep movsd` streams the 1.2 MB in ~2 ms, so the choice is made on the
+hardware's known costs, not the emulator's verdict - and it is one
+more reason the absolute numbers here await a console. The engine's own
+on-screen counter (`cl_showfps 2`, drawn by `ref_soft`) reads the same
+values the tool does (27 / 24 fps on `crossfire` for the two versions,
+captured), so a frame rate can be read off the TV without a debugger.
+
 Read it right: (1) wall and pure agree to the millisecond at every
 point - the frame is CPU-bound, nothing is sleeping, so these are the
 rasterizer's real costs plus a fixed per-frame tax that does not shrink
