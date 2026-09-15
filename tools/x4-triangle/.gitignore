@@ -1,0 +1,10 @@
+*.iso
+*.inl
+*.c.d
+*.exe
+bin/
+
+# The root .gitignore blanket-ignores "Makefile" (generated build outputs
+# elsewhere in the tree); this one is a real, hand-written source file in
+# nxdk's own sample style, needed to build this program.
+!Makefile

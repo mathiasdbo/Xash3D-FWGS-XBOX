@@ -1630,6 +1630,69 @@ inside the engine costs a week of not knowing which half is broken.
 **Exit:** a triangle, on hardware, from a program small enough to read in one
 sitting.
 
+**Under xemu, 2026-09-15.** `tools/x4-triangle/` (~280-line `main.c`, two
+`.cg` shaders) boots on Xbox, sets 640x480, uploads a vertex buffer and one
+Cg-compiled vertex/pixel shader pair through `pb_begin`/`pb_end`, and draws
+one triangle textured with an 8x8 checkerboard - all via pbkit, matching
+`deps/nxdk/samples/triangle/main.c`'s shape (unmodified) plus texture setup
+read from `deps/nxdk/samples/mesh/main.c`, the one shipped nxdk sample that
+actually binds a texture (attribute slot 9 for texcoord0, the real
+`NV097_SET_TEXTURE_*` register values for a working stage 0). Runs at a
+steady 61-63 fps under emulation. The exit line's "on hardware" is not yet
+met - this has only run under xemu, and per this project's own verification
+rule that is not a substitute for a real console.
+
+**A real, unresolved finding, exactly the "getting it wrong here costs an
+afternoon" this section warned about.** The demo uploads BOTH a linear
+(row-major) and a Morton-swizzled copy of the same checkerboard and can bind
+either (`X4_TEXTURE_SWIZZLED` in `main.c`). The linear copy
+(`LU_IMAGE_A8R8G8B8` + `IMAGE_RECT`/pitch) renders correctly. The swizzled
+copy (`SZ_A8R8G8B8` + log2 `BASE_SIZE_U`/`V`, the actual NV2A hardware
+swizzle path and X4's real point) renders as a flat fill of texel (0,0)
+instead. **What was actually checked, stated narrowly (correction, Codex
+review, 2026-09-15 - the first version of this paragraph overclaimed):** the
+on-screen `g_tex_format`/`g_tex_phys` readout is this program printing back
+the dword it just computed, not a GPU-register readback, so "matches this
+file's own derivation bit for bit" only shows the arithmetic is
+self-consistent - it cannot catch a wrong field position or a consistently
+wrong encoder that happens to agree with itself. Likewise, the
+guest-memory comparison via `tools/xemu-debug.py xp` only shows the uploaded
+bytes match THIS implementation's own idea of Morton order, not that NV2A
+expects that exact layout. **Neither check rules out anything, including a
+program-side defect - a second round of the same review caught this
+paragraph still narrowing the diagnosis ("not an obviously-wrong field")
+after saying the checks couldn't establish that.** They rule out nothing at
+all beyond "the arithmetic this program performs is internally consistent."
+The cause could equally be a genuine xemu swizzled-fetch gap, a field this
+program has wrong in a way self-consistency can't catch, or the Morton
+algorithm itself (shared with
+`tools/asset-studio/src/utils/TextureOpt.cpp`'s `morton2D`/`Part1By1`, XB's
+own baker swizzle) not matching what NV2A expects - genuinely, fully open,
+not narrowed toward any of the three. **X9's own exit criterion already
+names this precise risk** ("verify on hardware that XB's fix produced a
+correct swizzle, since xemu is not validation for this") - this is that
+check's first data point, one phase early. Next real Xbox session: flip
+`X4_TEXTURE_SWIZZLED` to 1, rebuild, and see what actually happens.
+
+**This is not X4 closed, and this commit does not claim it is.** X4's own
+exit line needs "on hardware," which has not happened, and its main point -
+texture swizzling - does not work under the only environment available this
+session. Deferred rather than fixed here because there is no real Xbox in
+this environment to test against, and guessing at a further register fix
+with no way to observe its effect is exactly what this project's own rules
+forbid ("Confirm every assumption by reading the code or observing the
+hardware. Never from memory, never by analogy," "After two failed attempts,
+stop and escalate with data. Not with a fresh hypothesis") - two independent
+attempts (this session's own investigation, and the nv2a-xbox-specialist
+review) already found no additional register or field missing by static
+analysis. What this commit is: a working linear-textured bring-up milestone,
+committed with its one real defect left enabled-but-unbound and fully
+documented, matching how this project's own history ships incremental,
+honestly-flagged progress rather than holding work until a phase fully
+closes (compare the several "not yet fixed," "first real crash fixed," "step
+N complete" entries already in `CHANGELOG.md`). The next Xbox session is
+what closes X4, not this one.
+
 ## X5 — `ref/soft` on the framebuffer
 
 **Route decided, 2026-09-11 — reuses nxdk's SDL2 port, not `vid_xbox.c`.**
@@ -4218,9 +4281,18 @@ known to be correct, consuming the format XB decided.
 - ~~Fix `swizzleNV2A` on DXT blocks (`TextureOpt.cpp:110-132`)~~ **Moved to
   XB, 2026-09-07: this line duplicated XB's DXT block-row fix and left the
   plan asserting two owners for the same bug.** `TextureOpt.cpp` is
-  `tools/asset-studio`, the PC baker — X9 never touches it, and XB already
-  lists this fix. What belongs here instead: verify on hardware that XB's
-  fix produced a correct swizzle, since xemu is not validation for this.
+  `tools/asset-studio`, the PC baker — X9 never touches it, XB is where the
+  fix belongs, and XB's own section below already names the problem
+  correctly. What belongs here instead: verify on hardware that XB's fix
+  produced a correct swizzle, since xemu is not validation for this. **Still
+  wrong as of 2026-09-15's X4 specialist review: `UiPacker.cpp:379` calls
+  `swizzleNV2A` on DXT1 blocks unconditionally for Xbox output, and
+  `TextureOpt.cpp:110-132` is unchanged.** Nobody has actually fixed this
+  yet — "XB already lists this fix" meant "XB's todo list", not "XB's done
+  list", and this bullet's own past-tense "XB's fix" read like the latter.
+  Corrected here so this doesn't get counted as closed a second time; the
+  real fix (linear-by-block-row layout for `D3DFMT_DXT1`, no Morton step)
+  is still XB's work, not started.
 - Aspect ratio: implement `R_SetDisplayTransform`'s separate `scale_x`/
   `scale_y` and feed a display aspect rather than pixel dimensions.
   `V_AdjustFov` (`cl_view.c:252`) returns early on 640×480, which is exactly
