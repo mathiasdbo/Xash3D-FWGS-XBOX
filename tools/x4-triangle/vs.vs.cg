@@ -1,0 +1,31 @@
+/*
+ * X4 vertex shader: pass position through the viewport matrix, forward the
+ * texture coordinate untouched. Modelled on deps/nxdk/samples/mesh/vs.vs.cg
+ * (TEXCOORD passthrough) and deps/nxdk/samples/triangle/vs.vs.cg (viewport
+ * transform) - see docs/r3d/fork-plan.md's X4 section.
+ */
+struct vIn {
+	float4 texcoord : TEXCOORD;
+	float4 position : POSITION;
+};
+
+struct vOut {
+	float4 pos  : POSITION;
+	float2 tex0 : TEXCOORD0;
+};
+
+vOut main(
+	vIn              I,
+	uniform float4x4 m_viewport
+	)
+{
+	vOut   result;
+	float4 position;
+
+	position = mul(float4(I.position.xyz, 1.0f), m_viewport);
+	position.xyz = position.xyz / position.w;
+
+	result.tex0 = I.texcoord.xy;
+	result.pos = position;
+	return result;
+}

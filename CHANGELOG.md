@@ -5,6 +5,27 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/x4-triangle`: standalone NV2A bring-up, one textured triangle (X4)
+
+A separate, minimal (~280-line) XBE outside the engine entirely: initialises
+pbkit, sets 640x480, and draws one triangle textured with an 8x8
+checkerboard via a Cg-compiled vertex/pixel shader pair, matching
+`deps/nxdk/samples/triangle/main.c`'s structure with texture setup read from
+`deps/nxdk/samples/mesh/main.c` (attribute slot 9 for texcoord0, working
+`NV097_SET_TEXTURE_*` register values for stage 0). Boots and renders at
+61-63 fps under xemu; not yet run on real hardware.
+
+Uploads both a linear and a Morton-swizzled copy of the texture
+(`tools/asset-studio/src/utils/TextureOpt.cpp`'s `morton2D`/`Part1By1`
+algorithm, ported to C) and can bind either
+(`X4_TEXTURE_SWIZZLED` in `main.c`). Ships with the linear copy bound by
+default - verified correct under xemu. The swizzled copy renders as a flat
+fill instead, despite its `NV097_SET_TEXTURE_FORMAT` encoding and its
+uploaded bytes both being independently verified correct by direct
+guest-memory and on-screen readback; see `docs/r3d/fork-plan.md`'s X4
+section for the full account and X9's related exit criterion. Recorded as
+an open finding for the first real-hardware session, not treated as closed.
+
 ### Added — frame-time measurement: `xemu-debug.py fps`, `tools/xbox-offsetof.sh`, and a 320x240 render target on Xbox (X5, divergence #52)
 
 `fps` reads `host.framecount` twice N seconds apart (wall-clock fps and

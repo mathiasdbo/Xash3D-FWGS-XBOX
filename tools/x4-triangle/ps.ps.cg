@@ -1,0 +1,16 @@
+/*
+ * X4 pixel shader: sample the swizzled texture directly, no lighting.
+ * Same struct/sampler shape as deps/nxdk/samples/mesh/ps.ps.cg, minus its
+ * second (normal map) sampler - this demo has one texture stage.
+ */
+struct vOut {
+	float2 tex0 : TEXCOORD0;
+};
+
+float4 main(
+	vOut              I,
+	uniform sampler2D colorMap
+	) : COLOR
+{
+	return tex2D(colorMap, I.tex0.xy);
+}
