@@ -173,7 +173,11 @@ int main(void)
          * NV2A actually expects - exactly the class of question
          * docs/r3d/fork-plan.md's X9 section already flags ("xemu is not
          * validation... be ready for the bug to be in the bake"). Flip this
-         * to 1 and rebuild on a real Xbox to find out which. */
+         * to 1 and rebuild on a real Xbox to find out which. Committing
+         * this program with that path known-broken-but-disabled is not the
+         * same as calling X4 done: its own exit line needs "on hardware,"
+         * which has not happened here, and this is deliberately deferred,
+         * not fixed - see fork-plan.md's X4 section for why. */
 #define X4_TEXTURE_SWIZZLED 0
         p = pb_begin();
 #if X4_TEXTURE_SWIZZLED

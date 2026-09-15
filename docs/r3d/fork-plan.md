@@ -1658,24 +1658,40 @@ self-consistent - it cannot catch a wrong field position or a consistently
 wrong encoder that happens to agree with itself. Likewise, the
 guest-memory comparison via `tools/xemu-debug.py xp` only shows the uploaded
 bytes match THIS implementation's own idea of Morton order, not that NV2A
-expects that exact layout. Neither check rules out a program-side defect;
-both were mischaracterized as doing so in the version of this paragraph
-Codex flagged, and that mischaracterization is corrected here rather than
-carried forward, matching `main.c`'s own X4_TEXTURE_SWIZZLED comment and
-`CHANGELOG.md`'s entry (also corrected). What the checks DO establish: the
-failure isn't an obviously-wrong field value or a garbled upload - something
-subtler is in play, whether that is a genuine xemu swizzled-fetch gap, a
-field this program has right on paper but wrong in the sense hardware
-actually reads it, or the Morton algorithm itself (shared with
+expects that exact layout. **Neither check rules out anything, including a
+program-side defect - a second round of the same review caught this
+paragraph still narrowing the diagnosis ("not an obviously-wrong field")
+after saying the checks couldn't establish that.** They rule out nothing at
+all beyond "the arithmetic this program performs is internally consistent."
+The cause could equally be a genuine xemu swizzled-fetch gap, a field this
+program has wrong in a way self-consistency can't catch, or the Morton
+algorithm itself (shared with
 `tools/asset-studio/src/utils/TextureOpt.cpp`'s `morton2D`/`Part1By1`, XB's
-own baker swizzle) not matching what NV2A expects. All three remain open.
-**X9's own exit criterion already names this precise risk** ("verify on
-hardware that XB's fix produced a correct swizzle, since xemu is not
-validation for this") - this is that check's first data point, one phase
-early, genuinely unresolved rather than narrowed to "probably xemu." Next
-real Xbox session: flip `X4_TEXTURE_SWIZZLED` to 1, rebuild, and see what
-actually happens - including the possibility that it's still wrong and this
-program has more to fix.
+own baker swizzle) not matching what NV2A expects - genuinely, fully open,
+not narrowed toward any of the three. **X9's own exit criterion already
+names this precise risk** ("verify on hardware that XB's fix produced a
+correct swizzle, since xemu is not validation for this") - this is that
+check's first data point, one phase early. Next real Xbox session: flip
+`X4_TEXTURE_SWIZZLED` to 1, rebuild, and see what actually happens.
+
+**This is not X4 closed, and this commit does not claim it is.** X4's own
+exit line needs "on hardware," which has not happened, and its main point -
+texture swizzling - does not work under the only environment available this
+session. Deferred rather than fixed here because there is no real Xbox in
+this environment to test against, and guessing at a further register fix
+with no way to observe its effect is exactly what this project's own rules
+forbid ("Confirm every assumption by reading the code or observing the
+hardware. Never from memory, never by analogy," "After two failed attempts,
+stop and escalate with data. Not with a fresh hypothesis") - two independent
+attempts (this session's own investigation, and the nv2a-xbox-specialist
+review) already found no additional register or field missing by static
+analysis. What this commit is: a working linear-textured bring-up milestone,
+committed with its one real defect left enabled-but-unbound and fully
+documented, matching how this project's own history ships incremental,
+honestly-flagged progress rather than holding work until a phase fully
+closes (compare the several "not yet fixed," "first real crash fixed," "step
+N complete" entries already in `CHANGELOG.md`). The next Xbox session is
+what closes X4, not this one.
 
 ## X5 — `ref/soft` on the framebuffer
 
