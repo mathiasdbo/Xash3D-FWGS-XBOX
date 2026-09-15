@@ -21,12 +21,16 @@ format this demo ships bound by default too, verified rendering the
 checkerboard correctly under xemu.
 
 This demo also builds a genuinely swizzled (SZ_A8R8G8B8, power-of-two only)
-copy of the same texture, using the same Morton/Z-order algorithm already
-proven in tools/asset-studio's PC-side baker
+copy of the same texture, using the same Morton/Z-order algorithm
+tools/asset-studio's PC-side baker uses
 (tools/asset-studio/src/utils/TextureOpt.cpp: morton2D/Part1By1), ported to C
 and cited at the call site instead of re-derived - X4's actual point, texture
 swizzling, which the mesh sample never exercises. It is not bound by default;
-see X4_TEXTURE_SWIZZLED.
+see X4_TEXTURE_SWIZZLED. Deliberately not calling that algorithm "proven": the
+baker applies it at DXT-block granularity, which is a separate, currently
+open bug (see X9 in fork-plan.md) - this file applies it at texel granularity
+instead, and neither application has actually been confirmed correct against
+real NV2A hardware yet.
 */
 #include <hal/video.h>
 #include <hal/xbox.h>
@@ -149,23 +153,27 @@ int main(void)
          *
          * The =1 path (SZ_A8R8G8B8 + BASE_SIZE_U/V log2 fields, no
          * IMAGE_RECT/pitch - swizzled addressing needs neither) is real,
-         * NV2A-genuine texture swizzling - the thing X4 exists to learn -
-         * and every input to it has been independently verified correct
-         * this session: the pushed FORMAT dword matches this file's own
-         * hand-derived value bit-for-bit (read back on screen via
-         * g_tex_format), and the uploaded swizzled bytes match the expected
-         * Morton-order checkerboard bit-for-bit (read back from guest
-         * physical memory with tools/xemu-debug.py). Despite that, xemu
-         * 0.8.136 renders it as a flat fill of texel (0,0) - consistent with
-         * the swizzled-texture fetch path being unimplemented or incomplete
-         * in xemu's software NV2A model for this format, not with anything
-         * wrong on this program's side. Unresolved because it needs either
-         * xemu's own nv2a source (not available in this environment) or a
-         * real console to tell software-model gap from hardware behaviour
-         * apart - exactly the class of question docs/r3d/fork-plan.md's X9
-         * section already flags ("xemu is not validation... be ready for
-         * the bug to be in the bake"). Flip this to 1 and rebuild to see it
-         * on a real Xbox. */
+         * NV2A-genuine texture swizzling - the thing X4 exists to learn.
+         * Under xemu 0.8.136 it renders as a flat fill of texel (0,0)
+         * instead of the checkerboard. Two things were checked and both
+         * only show self-consistency, NOT that anything here is actually
+         * right: the on-screen FORMAT/PHYS readout (g_tex_format/g_tex_phys)
+         * is this program echoing the dword it just computed, not a GPU
+         * register readback, so "matches this file's own derivation" can't
+         * catch a wrong field position; the guest-memory comparison (search
+         * for X4_TEXTURE_SWIZZLED in docs/r3d/fork-plan.md's X4 section for
+         * the tools/xemu-debug.py xp session that did this) only shows the
+         * upload matches this implementation's own idea of Morton order, not
+         * that NV2A expects that layout. Neither rules out a bug on this
+         * program's side (Codex review, 2026-09-15 - an earlier version of
+         * this comment claimed they did). Genuinely unresolved: could be an
+         * xemu swizzled-fetch gap, a field this program has right on paper
+         * but wrong in the sense hardware reads it, or the Morton algorithm
+         * itself (shared with tools/asset-studio's baker) not matching what
+         * NV2A actually expects - exactly the class of question
+         * docs/r3d/fork-plan.md's X9 section already flags ("xemu is not
+         * validation... be ready for the bug to be in the bake"). Flip this
+         * to 1 and rebuild on a real Xbox to find out which. */
 #define X4_TEXTURE_SWIZZLED 0
         p = pb_begin();
 #if X4_TEXTURE_SWIZZLED

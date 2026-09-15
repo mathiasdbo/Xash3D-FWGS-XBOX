@@ -1649,23 +1649,33 @@ either (`X4_TEXTURE_SWIZZLED` in `main.c`). The linear copy
 (`LU_IMAGE_A8R8G8B8` + `IMAGE_RECT`/pitch) renders correctly. The swizzled
 copy (`SZ_A8R8G8B8` + log2 `BASE_SIZE_U`/`V`, the actual NV2A hardware
 swizzle path and X4's real point) renders as a flat fill of texel (0,0)
-instead - despite both of its inputs being independently verified correct
-this session: the pushed `NV097_SET_TEXTURE_FORMAT` dword matches this
-file's own field-by-field derivation bit for bit (read back on screen), and
-the uploaded bytes match the expected Morton-order checkerboard bit for bit
-(read back from guest physical memory with `tools/xemu-debug.py xp`). That
-rules out a register-encoding or swizzle-algorithm bug on this program's
-side and points at xemu 0.8.136's software NV2A model having an incomplete
-or unimplemented swizzled-texture fetch path for this case - but "points
-at," not "proves": xemu's own `nv2a` device source was not available in this
-environment to confirm it, and the swizzle algorithm reused here
-(`tools/asset-studio/src/utils/TextureOpt.cpp`'s `morton2D`/`Part1By1`, XB's
-own baker swizzle) is exactly what X9 will need to have actually worked on
-real Xbox output. **X9's own exit criterion already names this precise risk**
-("verify on hardware that XB's fix produced a correct swizzle, since xemu is
-not validation for this") - this is that check's first data point, one phase
-early. Next real Xbox session: flip `X4_TEXTURE_SWIZZLED` to 1, rebuild, and
-see whether the flat fill was xemu-only or is real.
+instead. **What was actually checked, stated narrowly (correction, Codex
+review, 2026-09-15 - the first version of this paragraph overclaimed):** the
+on-screen `g_tex_format`/`g_tex_phys` readout is this program printing back
+the dword it just computed, not a GPU-register readback, so "matches this
+file's own derivation bit for bit" only shows the arithmetic is
+self-consistent - it cannot catch a wrong field position or a consistently
+wrong encoder that happens to agree with itself. Likewise, the
+guest-memory comparison via `tools/xemu-debug.py xp` only shows the uploaded
+bytes match THIS implementation's own idea of Morton order, not that NV2A
+expects that exact layout. Neither check rules out a program-side defect;
+both were mischaracterized as doing so in the version of this paragraph
+Codex flagged, and that mischaracterization is corrected here rather than
+carried forward, matching `main.c`'s own X4_TEXTURE_SWIZZLED comment and
+`CHANGELOG.md`'s entry (also corrected). What the checks DO establish: the
+failure isn't an obviously-wrong field value or a garbled upload - something
+subtler is in play, whether that is a genuine xemu swizzled-fetch gap, a
+field this program has right on paper but wrong in the sense hardware
+actually reads it, or the Morton algorithm itself (shared with
+`tools/asset-studio/src/utils/TextureOpt.cpp`'s `morton2D`/`Part1By1`, XB's
+own baker swizzle) not matching what NV2A expects. All three remain open.
+**X9's own exit criterion already names this precise risk** ("verify on
+hardware that XB's fix produced a correct swizzle, since xemu is not
+validation for this") - this is that check's first data point, one phase
+early, genuinely unresolved rather than narrowed to "probably xemu." Next
+real Xbox session: flip `X4_TEXTURE_SWIZZLED` to 1, rebuild, and see what
+actually happens - including the possibility that it's still wrong and this
+program has more to fix.
 
 ## X5 — `ref/soft` on the framebuffer
 

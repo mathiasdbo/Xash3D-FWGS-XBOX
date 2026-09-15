@@ -19,12 +19,17 @@ Uploads both a linear and a Morton-swizzled copy of the texture
 (`tools/asset-studio/src/utils/TextureOpt.cpp`'s `morton2D`/`Part1By1`
 algorithm, ported to C) and can bind either
 (`X4_TEXTURE_SWIZZLED` in `main.c`). Ships with the linear copy bound by
-default - verified correct under xemu. The swizzled copy renders as a flat
-fill instead, despite its `NV097_SET_TEXTURE_FORMAT` encoding and its
-uploaded bytes both being independently verified correct by direct
-guest-memory and on-screen readback; see `docs/r3d/fork-plan.md`'s X4
-section for the full account and X9's related exit criterion. Recorded as
-an open finding for the first real-hardware session, not treated as closed.
+default - verified correct under xemu (the checkerboard is visibly on
+screen). The swizzled copy renders as a flat fill instead. Its
+`NV097_SET_TEXTURE_FORMAT` encoding and uploaded bytes were checked for
+self-consistency (the pushed dword matches this file's own derivation, the
+uploaded bytes match this file's own Morton expectation) but that does not
+rule out a program-side defect - corrected in `docs/r3d/fork-plan.md`'s X4
+section after Codex review pointed out the original write-up overclaimed
+this. Genuinely unresolved whether the cause is an xemu limitation, a field
+this program has wrong in a way self-consistency can't catch, or the shared
+Morton algorithm not matching real NV2A behaviour; recorded as an open
+finding for the first real-hardware session, not treated as closed.
 
 ### Added — frame-time measurement: `xemu-debug.py fps`, `tools/xbox-offsetof.sh`, and a 320x240 render target on Xbox (X5, divergence #52)
 
