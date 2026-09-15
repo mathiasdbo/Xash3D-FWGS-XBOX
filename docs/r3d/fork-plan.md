@@ -1960,19 +1960,22 @@ is faster" is an opinion.
 
 **Exit:** the menu is navigable with a controller.
 
-**Met under emulation, 2026-09-15.** No code changed to close this - the
-plumbing this section already named was correct and needed no work:
-`engine/client/input/in_joy.c`'s `Joy_Init()` runs unconditionally for any
-non-dedicated build (`input.c`'s `IN_Init`), `joy_enable` defaults on, SDL's
-`GameController` subsystem self-initialises with no Xbox-specific gate
-(`joy_sdl2.c`), and `3rdparty/mainui`'s own `Gamepad.cpp` is the same code
-the psvita/nswitch ports already rely on (`divergences.md`). This session's
-work was entirely verification: confirming the above by reading the code,
-then a live human test - a real host gamepad, already bound in xemu's own
-config (`[input.bindings] port1_driver = 'usb-xbox-gamepad'`) - navigated
-the WON main menu and started a new game with it. **Not yet confirmed on
-real hardware** - per this project's own rule, xemu is not validation, and
-that check is still open, same as X4's.
+**Met under emulation, not yet closed, 2026-09-15.** No code change was
+needed - the plumbing this section already named was correct: the exit
+criterion is only met under xemu, not on hardware, and per this project's
+own rule that means X6 stays open, not closed (correction, Codex review -
+an earlier version of this entry said "closed" while saying exactly this in
+the same paragraph). `engine/client/input/in_joy.c`'s `Joy_Init()` runs
+unconditionally for any non-dedicated build (`input.c`'s `IN_Init`),
+`joy_enable` defaults on, SDL's `GameController` subsystem self-initialises
+with no Xbox-specific gate (`joy_sdl2.c`), and `3rdparty/mainui`'s own
+`Gamepad.cpp` is the same code the psvita/nswitch ports already rely on
+(`divergences.md`). This session's work was entirely verification:
+confirming the above by reading the code, then a live human test - a real
+host gamepad, already bound in xemu's own config
+(`[input.bindings] port1_driver = 'usb-xbox-gamepad'`) - navigated the WON
+main menu and started a new game with it. What closes X6: the same test,
+on a real Xbox.
 
 An unrelated curiosity hit while preparing for this test, left unresolved
 because it turned out not to matter: `.sweep/boot-attempt/
