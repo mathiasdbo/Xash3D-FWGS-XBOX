@@ -377,42 +377,66 @@ class Pools(unittest.TestCase):
     def _map_file(self, rows):
         import tempfile
         f = tempfile.NamedTemporaryFile("w", suffix=".map", delete=False)
-        f.write(" x\n\n Start         Length     Name                   Class\n")
+        # _fake_pe leaves the COFF TimeDateStamp at 0; the map says the same.
+        f.write(" x\n\n Timestamp is 00000000 (never)\n\n Start         Length     Name                   Class\n")
         for seg, off, length, name in rows:
             f.write(f" {seg:04x}:{off:08x} {length:08x}H {name:<22} DATA\n")
         f.write(" 0001:00000010       _R_Init            0000000000012010     x.obj\n")
         f.close()
         return f.name
 
+    def _bound(self, exe_path, map_path, pe):
+        """Write a matching sidecar so map_matches_pe's extent check (the
+        second, structural guard) can be exercised on its own, with the
+        sidecar/hash check already satisfied."""
+        with open(map_path, "rb") as f:
+            h_map = xd.sha256_hex(f.read())
+        with open(xd.sidecar_path(exe_path), "w") as f:
+            f.write(f"sha256_exe={xd.sha256_hex(pe)}\nsha256_map={h_map}\n")
+
     def test_map_binds_to_its_own_pe_within_one_alignment_quantum(self):
-        import os
+        import os, tempfile
         text = bytes(range(256)) * 4            # 1024 bytes
         rdata = b"\x55" * 300
         pe = _fake_pe(0x10000, [(".text", 0x1000, text, False), (".rdata", 0x2000, rdata, False)])
+        exe_path = os.path.join(tempfile.gettempdir(), "xemu_debug_test_exe1.exe")
+        with open(exe_path, "wb") as f:
+            f.write(pe)
         # .text listed 6 bytes short (trailing alignment fill), .rdata exact
         path = self._map_file([(1, 0, 1024 - 6, ".text"), (2, 0, 300, ".rdata")])
+        self._bound(exe_path, path, pe)
         try:
-            self.assertEqual(xd.map_matches_pe(path, pe), [])
+            self.assertEqual(xd.map_matches_pe(path, pe, exe_path=exe_path), [])
         finally:
-            os.unlink(path)
+            os.unlink(path); os.unlink(exe_path); os.unlink(xd.sidecar_path(exe_path))
 
     def test_a_map_from_a_different_link_is_refused(self):
-        # Codex review round 2: a CURRENT PE with a stale-but-valid map must
-        # not be accepted - .text of a different link is off by whole functions.
-        import os
+        # A CURRENT PE with a stale-but-valid (matching-sidecar) map must
+        # not be accepted - .text of a different link is off by whole
+        # functions, caught by the extent check even when hashes are wired
+        # up to agree (a contrived case; real ones fail on the hash first).
+        import os, tempfile
         text = bytes(range(256)) * 4
         pe = _fake_pe(0x10000, [(".text", 0x1000, text, False)])
-        for length in (1024 - 16, 1024 + 1, 700):
-            path = self._map_file([(1, 0, length, ".text")])
+        exe_path = os.path.join(tempfile.gettempdir(), "xemu_debug_test_exe2.exe")
+        with open(exe_path, "wb") as f:
+            f.write(pe)
+        try:
+            for length in (1024 - 16, 1024 + 1, 700):
+                path = self._map_file([(1, 0, length, ".text")])
+                self._bound(exe_path, path, pe)
+                try:
+                    self.assertNotEqual(xd.map_matches_pe(path, pe, exe_path=exe_path), [], f"length {length} must not bind")
+                finally:
+                    os.unlink(path)
+            path = self._map_file([])
+            self._bound(exe_path, path, pe)
             try:
-                self.assertNotEqual(xd.map_matches_pe(path, pe), [], f"length {length} must not bind")
+                self.assertNotEqual(xd.map_matches_pe(path, pe, exe_path=exe_path), [], "a map with no section table cannot bind")
             finally:
                 os.unlink(path)
-        path = self._map_file([])
-        try:
-            self.assertNotEqual(xd.map_matches_pe(path, pe), [], "a map with no section table cannot bind")
         finally:
-            os.unlink(path)
+            os.unlink(exe_path); os.unlink(xd.sidecar_path(exe_path))
 
     def test_load_map_symbols_reads_data_sections_too(self):
         import tempfile, os
@@ -426,6 +450,173 @@ class Pools(unittest.TestCase):
             os.unlink(path)
         self.assertEqual(syms["_poolchain"], 0xaf6774)
         self.assertEqual(syms["_R_Init"], 0x12000)
+
+
+class ResumeOnClose(unittest.TestCase):
+    """close() must resume the guest through the monitor and REPORT when it
+    could not - a guest left paused after a read-only command was the
+    silent failure behind two false 'frame counter did not advance' runs."""
+
+    def setUp(self):
+        self.client, self.stub = socket.socketpair()
+        self.addCleanup(self.stub.close)
+        self.conn = object.__new__(xd.GdbRemote)
+        self.conn.sock = self.client
+
+    def _stub_reply(self, reply):
+        def serve():
+            self.stub.recv(4096)          # the qRcmd,<hex 'cont'> packet
+            self.stub.sendall(reply)
+        t = threading.Thread(target=serve); t.start(); return t
+
+    def test_close_sends_monitor_cont_and_returns_true_on_ok(self):
+        t = self._stub_reply(b"+$OK#9a")
+        self.assertTrue(self.conn.close()); t.join()
+
+    def test_close_returns_false_and_warns_when_the_stub_refuses(self):
+        import io, contextlib
+        t = self._stub_reply(b"+$E01#a6")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertFalse(self.conn.close())
+        t.join()
+        self.assertIn("still PAUSED", err.getvalue())
+
+    def test_close_returns_false_and_warns_when_the_stub_says_nothing(self):
+        # Codex review round 2: monitor() used to return "" on a genuine
+        # EOF, identical to a real "OK" with no console output - close()
+        # then called the guest resumed when no reply had arrived at all.
+        import io, contextlib
+        def serve():
+            self.stub.recv(4096)
+            self.stub.close()   # EOF, no reply at all
+        t = threading.Thread(target=serve); t.start()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertFalse(self.conn.close())
+        t.join()
+        self.assertIn("still PAUSED", err.getvalue())
+
+    def test_monitor_raises_on_eof_even_with_no_output_packets(self):
+        def serve():
+            self.stub.recv(4096)
+            self.stub.close()   # peer EOF, not a client-side timeout
+        t = threading.Thread(target=serve); t.start()
+        with self.assertRaises(RuntimeError):
+            self.conn.monitor("cont", timeout=0.3)
+        t.join()
+
+    def test_monitor_returns_empty_string_for_a_real_ok_with_no_output(self):
+        t = self._stub_reply(b"+$OK#9a")
+        self.assertEqual(self.conn.monitor("cont", timeout=0.3), "")
+        t.join()
+
+    def test_context_manager_turns_a_refused_resume_into_an_error(self):
+        import io, contextlib
+        t = self._stub_reply(b"+$E01#a6")
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                with self.conn:
+                    pass
+        t.join()
+
+
+class MapBinding(unittest.TestCase):
+    """map_matches_pe() binds by a SHA-256 sidecar (Codex review round 2:
+    the link timestamp this used to bind on is wall-clock SECONDS - two
+    links in the same second collide, and with equal section extents too
+    - an ordinary equal-size substitution - a stale map would still bind).
+    """
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.dir, ignore_errors=True))
+
+    def _write(self, name, data):
+        import os
+        path = os.path.join(self.dir, name)
+        mode = "wb" if isinstance(data, bytes) else "w"
+        with open(path, mode) as f:
+            f.write(data)
+        return path
+
+    def _pe_and_map(self, text=None, map_text_len=None):
+        text = text if text is not None else bytes(range(256)) * 4
+        pe = _fake_pe(0x10000, [(".text", 0x1000, text, False)])
+        map_body = (" x\n\n Start         Length     Name                   Class\n"
+                   f" 0001:00000000 {map_text_len if map_text_len is not None else len(text):08x}H .text CODE\n")
+        exe_path = self._write("xbe-build.exe", pe)
+        map_path = self._write("xbe-build.map", map_body)
+        return exe_path, map_path, pe
+
+    def _sidecar(self, exe_path, exe_bytes, map_path):
+        h_exe = xd.sha256_hex(exe_bytes)
+        with open(map_path, "rb") as f:
+            h_map = xd.sha256_hex(f.read())
+        with open(xd.sidecar_path(exe_path), "w") as f:
+            f.write(f"sha256_exe={h_exe}\nsha256_map={h_map}\n")
+
+    def test_matching_sidecar_binds(self):
+        exe_path, map_path, pe = self._pe_and_map()
+        self._sidecar(exe_path, pe, map_path)
+        self.assertEqual(xd.map_matches_pe(map_path, pe, exe_path=exe_path), [])
+
+    def test_no_sidecar_is_refused_not_silently_trusted(self):
+        exe_path, map_path, pe = self._pe_and_map()
+        bad = xd.map_matches_pe(map_path, pe, exe_path=exe_path)
+        self.assertEqual([b[0] for b in bad], [0])
+        self.assertIn("no sidecar", bad[0][1])
+
+    def test_a_stale_map_with_identical_section_sizes_is_refused(self):
+        # The exact collision review named: equal-size substitution, sidecar
+        # written for a DIFFERENT map's bytes (different padding/comment,
+        # same .text extent) - the extent check alone would pass this.
+        exe_path, map_path, pe = self._pe_and_map()
+        other_map = self._write("other.map",
+            " y\n\n Start         Length     Name                   Class\n 0001:00000000 00000400H .text CODE\n")
+        self._sidecar(exe_path, pe, other_map)   # sidecar names other.map's hash, not map_path's
+        bad = xd.map_matches_pe(map_path, pe, exe_path=exe_path)
+        self.assertTrue(any(b[0] == 0 for b in bad))
+
+    def test_a_modified_exe_with_the_old_sidecar_is_refused(self):
+        exe_path, map_path, pe = self._pe_and_map()
+        self._sidecar(exe_path, pe, map_path)
+        tampered = pe[:-1] + bytes([pe[-1] ^ 0xFF])
+        bad = xd.map_matches_pe(map_path, tampered, exe_path=exe_path)
+        self.assertTrue(any(b[0] == 0 for b in bad))
+
+    def test_no_exe_path_cannot_bind(self):
+        _exe_path, map_path, pe = self._pe_and_map()
+        self.assertNotEqual(xd.map_matches_pe(map_path, pe, exe_path=None), [])
+
+
+class OffsetProbe(unittest.TestCase):
+    def test_parses_the_probe_tools_one_line(self):
+        self.assertEqual(xd.parse_offsetof("host_parm_t.framecount offset=596 size=4\n"), (596, 4))
+        # MSYS2 bash launched from Windows Python answers CRLF - measured.
+        self.assertEqual(xd.parse_offsetof("host_parm_t.framecount offset=596 size=4\r\n"), (596, 4))
+
+    def test_anything_else_is_an_error_not_an_address(self):
+        for text in ("", "error: something", "offset=596", "host_parm_t.framecount offset=x size=4"):
+            with self.assertRaises(RuntimeError):
+                xd.parse_offsetof(text)
+
+
+class FrameRate(unittest.TestCase):
+    def test_fps_and_ms_from_two_counter_readings(self):
+        fps, ms = xd.frame_rate(1000, 1300, 30.0)
+        self.assertAlmostEqual(fps, 10.0); self.assertAlmostEqual(ms, 100.0)
+
+    def test_counter_wraparound_is_handled(self):
+        fps, _ = xd.frame_rate(0xFFFFFFF0, 0x10, 2.0)
+        self.assertAlmostEqual(fps, 16.0)
+
+    def test_a_counter_that_did_not_move_is_an_error_not_zero_fps(self):
+        with self.assertRaises(RuntimeError):
+            xd.frame_rate(500, 500, 30.0)
+        with self.assertRaises(RuntimeError):
+            xd.frame_rate(500, 600, 0.0)
 
 
 class KernelExportsAndMemstats(unittest.TestCase):

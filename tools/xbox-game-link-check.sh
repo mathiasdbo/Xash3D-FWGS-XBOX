@@ -588,8 +588,15 @@ if [ -n "$XBE_OUT" ]; then
 		exit 1
 	fi
 	# shellcheck disable=SC2086
+	# -map: from THIS link, not a second one: lld writes the same timestamp
+	# into the map's header and the PE's COFF header, which is how
+	# tools/xemu-debug.py binds a map to the executable a guest is running
+	# (Codex review, X5: a map from a separate link of the same inputs has
+	# identical addresses but no identity a tool can check; section
+	# extents are not identity). The map lands next to the XBE below.
+	XBE_MAP="$SCRATCH/game-$TITLE/xbe-build.map"
 	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
-		-stack:"$XBOX_STACK_SIZE" \
+		-stack:"$XBOX_STACK_SIZE" -map:"$XBE_MAP" \
 		-out:"$XBE_EXE" "@$NEW_RESPONSE" > "$SCRATCH/game-$TITLE/xbe-link.txt" 2>&1
 	XBE_LINK_STATUS=$?
 	if [ "$XBE_LINK_STATUS" -ne 0 ] || [ ! -f "$XBE_EXE" ]; then
@@ -624,6 +631,26 @@ if [ -n "$XBE_OUT" ]; then
 	fi
 	# XBEH, the real magic header every valid .xbe starts with - checked,
 	# not assumed from cxbe's own exit code alone.
+	# The XBE's own map, beside it, named for it: what tools/xemu-debug.py's
+	# --map/--exe pair binds against (xbe-build.exe stays the --exe).
+	if [ ! -f "$XBE_MAP" ]; then
+		echo "xbox-game-link-check: the XBE link produced no map at $XBE_MAP." >&2
+		exit 1
+	fi
+	cp "$XBE_MAP" "${XBE_OUT%.xbe}.map" || exit 1
+	# Identity sidecar for tools/xemu-debug.py's pools/fps (Codex review, X5
+	# round 2: the link TIMESTAMP this used to bind on is wall-clock
+	# SECONDS - two links finishing in the same second collide, and with
+	# equal section extents too - an ordinary equal-size substitution - a
+	# stale map would still have bound). SHA-256 of the exact bytes of
+	# xbe-build.exe (the --exe those tools take) and of its own map,
+	# written next to xbe-build.exe as <exe>.identity: content hashes
+	# cannot collide the way a timestamp can, and they bind the map's
+	# actual content, not just a header field.
+	printf 'sha256_exe=%s\nsha256_map=%s\n' \
+		"$(sha256sum "$XBE_EXE" | cut -d' ' -f1)" \
+		"$(sha256sum "$XBE_MAP" | cut -d' ' -f1)" \
+		> "$XBE_EXE.identity" || exit 1
 	MAGIC=$(head -c 4 "$XBE_OUT")
 	if [ "$MAGIC" != "XBEH" ]; then
 		echo "xbox-game-link-check: $XBE_OUT does not start with the XBEH magic" >&2

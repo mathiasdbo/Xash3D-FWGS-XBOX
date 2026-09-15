@@ -5,6 +5,69 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — frame-time measurement: `xemu-debug.py fps`, `tools/xbox-offsetof.sh`, and a 320x240 render target on Xbox (X5, divergence #52)
+
+`fps` reads `host.framecount` twice N seconds apart (wall-clock fps and
+ms/frame) plus the engine's own `host.pureframetime` (the last frame's
+CPU time without `Host_Autosleep`'s sleep), after the same two identity
+checks as `pools`. The field offsets are computed at run time by the new
+`tools/xbox-offsetof.sh <header> <type> <field>`, which compiles a probe
+through `tools/xbox-cc.sh` and reads `offsetof`/`sizeof` out of clang's
+own error text - the Xbox build's exact flags and ABI, no constants in
+the tool (`XASH_LOW_MEMORY` had just moved `host_parm_t`'s fields; review
+rightly refused a copied number with no drift check).
+
+Found doing it: a read-only debugger connection pauses xemu's VM and a
+socket close (or a gdb detach) does not resume it - only a continue
+does. Every `xemu-debug.py` command is now a context-managed connection
+that resumes the guest through the monitor on every exit, exceptions
+included, and reports with a nonzero exit if the stub refused. Two
+frame-rate runs had reported the counter frozen at the same value in two
+separate boots: the driver's first `regs` pausing the guest at the same
+moment each time, not a hang.
+
+Map identity, made real (review, two rounds): section extents are not
+identity, so `tools/xbox-game-link-check.sh --xbe` emits the map from the
+XBE's own link and places it beside the XBE. The first binding scheme
+(the link timestamp lld writes into both the map header and the PE's
+COFF header) was itself rejected in round 2 - it is wall-clock SECONDS,
+so two links in the same second collide, and with equal section extents
+too (an ordinary equal-size substitution) a stale map would still bind.
+Replaced with a SHA-256 sidecar (`xbe-build.exe.identity`, written next
+to the exe with the exact hash of it and of its own map); `pools`/`fps`
+require both hashes to match the files on disk before reading anything -
+verified live, tampering included. The same round found `close()`'s
+resume-on-exit could not distinguish "resumed" from "the stub gave no
+reply at all" (both were an empty string); `monitor()` now raises on
+that case specifically, so the warning and nonzero exit are real.
+
+`vid_scale` cannot give a 320x240 render on `ref_soft` (it refuses any
+scale transform) and the console has no 320x240 video mode, so the Xbox
+video arm honours an integer `vid_scale` itself: `vid_scale 2.0` renders
+320x240 into the top-left of the 640x480 surface, unscaled - the
+`R_SaveVideoMode( 640, 480, 320, 240 )` lever the plan names, which is
+what a frame-time measurement at that resolution has to measure.
+Presenting it full-screen is `vid_xbox.c`'s 2x2 blit, the planned final
+path.
+
+That 320x240 render is now presented full-screen: `SW_UnlockBuffer`'s
+Xbox arm expands it 2x2 (nearest, in place, one expanded row per group
+and `memcpy` for the rest) before the driver's own copy. Costs measured
+at `c1a3`: 43.0 fps render-only, 36.7 with a divide-per-pixel version,
+32.7 with the `memcpy` version kept - slower under xemu, where the
+guest's `div` becomes one native instruction and `memcpy` is emulated
+step by step, and the right choice for a Pentium III, where a `div` per
+output pixel is ~16 ms a frame. Bilinear is the GPU's job
+(`vid_xbox.c`). The engine's own `cl_showfps 2` counter draws on the
+Xbox screen through `ref_soft` and agrees with the tool.
+
+Measured (xemu, `ref_soft`, spawn view, wall fps / `pureframetime`):
+`c0a0` 18.3 fps / 52.5 ms at 640x480, 25.9 / 37.4 at 320x240; `c1a3`
+28.5 / 34.7 and 43.0 / 23.5; `crossfire` 22.2 / 44.7 and 29.1 / 34.3.
+CPU-bound throughout (wall and pure agree), with a fixed full-window
+`SDL_ConvertPixels` per frame that `vid_xbox.c` will delete. X5's exit
+line is met under emulation; the console repeat is pending hardware.
+
 ### Changed — Xbox builds use upstream's low-memory mode; the first map now fits, and it is on screen (X3, divergence #51)
 
 `tools/xbox-cc.sh` compiles every Xbox translation unit with

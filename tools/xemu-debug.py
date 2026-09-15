@@ -148,17 +148,36 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  BSP, edicts, SoundLib, ...). memstats says how
                                  much; this says what. Two identity checks first,
                                  refusing to read anything if either fails: the
-                                 map must be <pe>'s own (every output segment's
-                                 extent in the map's section table equals the PE
-                                 section's VirtualSize, within one 16-byte
-                                 alignment), and the guest must be running <pe>
-                                 (the full verify-image comparison). A stale
-                                 map's addresses once produced a credible
-                                 "0 pools".
+                                 map must be <pe>'s own - a SHA-256 sidecar
+                                 (<pe>.identity, written by tools/
+                                 xbox-game-link-check.sh --xbe next to xbe-build.exe)
+                                 names the exact hash of that exe and of its
+                                 own map; both must match the files on disk,
+                                 plus every output segment's extent matching
+                                 the PE section's VirtualSize - and the guest
+                                 must be running <pe> (the full verify-image
+                                 comparison). A stale map's addresses once
+                                 produced a credible "0 pools".
+  fps --map <file> --exe <pe> [--seconds N]
+                                Wall-clock frame rate: host.framecount read
+                                 twice N seconds apart (default 30), plus the
+                                 engine's own host.pureframetime (the last
+                                 frame's CPU time without Host_Autosleep's
+                                 sleep). Field offsets are computed at run time
+                                 by tools/xbox-offsetof.sh (a probe compiled
+                                 with the Xbox build's exact flags), never
+                                 constants in this file. Same two identity
+                                 checks as pools first; readings outside
+                                 0.1-1000 fps or a pureframetime outside
+                                 (0, 10 s) are refused as wrong addresses.
+  Every command resumes the guest through the monitor on the way out (xemu
+  pauses the VM when a client connects and a socket close or gdb detach does
+  NOT resume it) and reports, with a nonzero exit, if it could not.
 
 Addresses are hex, with or without 0x.
 """
 import argparse
+import os
 import re
 import socket
 import struct
@@ -312,8 +331,18 @@ class GdbRemote:
         return bytes.fromhex(r)
 
     def monitor(self, command, timeout=10):
-        # Reply is a stream of "O<hex>" console-output packets ended by a
-        # bare "OK" or "E<code>"; those two are exact/prefix matches, not hex.
+        """Reply is a stream of "O<hex>" console-output packets ended by a
+        bare "OK" or "E<code>" - those two are exact/prefix matches, not
+        hex. Raises RuntimeError if the stream ends (timeout or the peer
+        closing) before either terminator arrives: Codex review found that
+        an empty string from a genuine "OK" with no output and an empty
+        string from "the connection just ended" were the same return value,
+        so close()'s resume check (a bare `mon cont`, no console output)
+        could not tell "resumed" from "no reply came back" - which is
+        exactly the silent-pause failure this file exists to catch. `E...`
+        is still returned as text (with the code appended), not raised:
+        callers that want to inspect a real, definite stub-reported error
+        can, but they cannot mistake "no reply" for one."""
         r = self.cmd(f"qRcmd,{command.encode().hex()}", timeout=timeout)
         out = ""
         while r is not None and r != "OK" and not r.startswith("E"):
@@ -325,7 +354,10 @@ class GdbRemote:
             else:
                 out += f"<unexpected packet: {r!r}>\n"
             r = self._recv(timeout)
-        if r is not None and r.startswith("E"):
+        if r is None:
+            raise RuntimeError(f"monitor {command!r}: no OK/E reply within {timeout}s "
+                               f"(partial output: {out[:200]!r})")
+        if r.startswith("E"):
             out += f"<monitor error: {r}>\n"
         return out
 
@@ -374,8 +406,48 @@ class GdbRemote:
         except socket.timeout:
             raise RuntimeError(f"no stop-reply within {timeout}s for single-step") from None
 
-    def close(self):
+    def close(self, resume=True):
+        """Resume the guest, then drop the connection. Returns True if the
+        guest was resumed (or resume was not requested), False if the stub
+        refused or did not answer - and says so on stderr either way, because
+        a guest left paused is the silent failure this exists to prevent.
+
+        xemu stops the VM when a gdb client connects and does NOT resume it
+        on a bare socket close, nor on a gdb detach ('D' - tried, measured:
+        EIP identical across two `regs` 3 s apart). Only a continue does.
+        Measured first as: a `regs` followed by 30 s of nothing left
+        host.framecount frozen at the same value in two separate boots,
+        "frame counter did not advance". The monitor's own `cont` resumes
+        the VM and answers synchronously (no outstanding 'c' packet to
+        turn into a stale stop-reply on the next connection)."""
+        resumed = True
+        if resume:
+            try:
+                out = self.monitor("cont", timeout=2.0)
+                resumed = "<monitor error" not in out
+            except Exception as e:
+                out = repr(e)
+                resumed = False
+            if not resumed:
+                sys.stderr.write(f"xemu-debug: WARNING - the guest could not be resumed on close "
+                                 f"(monitor `cont` said {out.strip()!r}); it is still PAUSED. "
+                                 "Run `mon cont`.\n")
         self.sock.close()
+        return resumed
+
+    # Context manager: every command's connection is `with GdbRemote() as g`,
+    # so the guest is resumed on EVERY exit - a raised exception included
+    # (Codex review: a read that raised before g.close() left xemu paused
+    # while the command exited nonzero). A resume failure with no other
+    # exception in flight becomes one, so the process exit code says so.
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        resumed = self.close()
+        if not resumed and exc_type is None:
+            raise RuntimeError("guest left paused: the stub refused to resume it (see warning above)")
+        return False
 
 
 def parse_hex(s):
@@ -912,17 +984,70 @@ def pe_section_sizes(data):
     return [struct.unpack_from("<I", data, pe + 24 + optsz + i * 40 + 8)[0] for i in range(nsec)]
 
 
-def map_matches_pe(map_path, data):
-    """Bind a linker map to a PE without a sidecar: every output segment the
-    map describes must reach exactly the VirtualSize of the PE section it
-    corresponds to. Any code or data change moves .text's or .data's length,
-    so a map from a different link fails here. Returns a list of
-    (segment, map_extent, pe_size) mismatches; empty means bound."""
+def sidecar_path(exe_path):
+    """The identity sidecar tools/xbox-game-link-check.sh --xbe writes next
+    to xbe-build.exe: <exe>.identity, two lines "sha256_exe=<hex>" and
+    "sha256_map=<hex>" over the exact bytes of that exe and its map, from
+    the same link. Content hashes, not the link timestamp: Codex review
+    (X5, round 2) found the timestamp is wall-clock SECONDS, so two links
+    finishing in the same second - concrete under a fast rebuild loop -
+    could share it, and with section extents also equal (an ordinary
+    equal-size substitution) a stale map would still bind."""
+    return exe_path + ".identity"
+
+
+def read_sidecar(path):
+    """{"sha256_exe": hex, "sha256_map": hex} from a sidecar file, or None
+    if it does not exist. Malformed content is an error, not a silent
+    skip - a sidecar that exists but cannot be read is not "no opinion"."""
+    if not os.path.exists(path):
+        return None
+    out = {}
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                out[k] = v
+    for k in ("sha256_exe", "sha256_map"):
+        if k not in out or len(out[k]) != 64:
+            raise RuntimeError(f"{path}: malformed sidecar, missing or bad {k}")
+    return out
+
+
+def sha256_hex(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def map_matches_pe(map_path, data, exe_path=None):
+    """Bind a linker map to a PE. Identity is the sidecar's SHA-256 of the
+    exact PE bytes and the exact map bytes (see sidecar_path) - a content
+    hash cannot collide the way a wall-clock timestamp can, and it binds
+    the map's actual content, not just its header. No sidecar (an exe not
+    produced by tools/xbox-game-link-check.sh --xbe, or --map pointed at
+    something else) is refused, not silently trusted on section extents
+    alone; the extent check stays as a second, structural guard on top.
+    `exe_path` names the file `data` was read from, for locating the
+    sidecar - omit only in tests that construct `data` in memory. Returns
+    a list of mismatches (segment, found, expected); segment 0 carries
+    the sidecar/hash checks. Empty means bound."""
+    bad = []
+    sidecar = read_sidecar(sidecar_path(exe_path)) if exe_path else None
+    if sidecar is None:
+        bad.append((0, "no sidecar", sidecar_path(exe_path) if exe_path else "(--exe path unknown)"))
+    else:
+        h_exe = sha256_hex(data)
+        if h_exe != sidecar["sha256_exe"]:
+            bad.append((0, h_exe[:16] + "...", sidecar["sha256_exe"][:16] + "..."))
+        with open(map_path, "rb") as f:
+            h_map = sha256_hex(f.read())
+        if h_map != sidecar["sha256_map"]:
+            bad.append((0, h_map[:16] + "...", sidecar["sha256_map"][:16] + "..."))
     extents = map_section_extents(map_path)
     sizes = pe_section_sizes(data)
     if not extents:
-        return [(0, 0, 0)]
-    bad = []
+        bad.append((0, 0, 0))
+        return bad
     for seg, extent in sorted(extents.items()):
         pe_size = sizes[seg - 1] if seg - 1 < len(sizes) else -1
         # Measured on this project's own link: .rdata/.data/.tls agree to
@@ -972,33 +1097,14 @@ def cmd_pools(a):
         raise RuntimeError(f"{a.map} has no _poolcount/_poolchain - is it this build's map?")
     with open(a.exe, "rb") as f:
         data = f.read()
-    # Two identities, every time: the first pool dump of this project read
-    # "0 pools" from a stale map's addresses and looked like a result.
-    # (1) the map must be THIS PE's map - every output segment's extent in
-    # the map equals the PE section's VirtualSize (Codex review, round 2:
-    # a current PE plus a stale map passed the guest check below and read
-    # from unrelated addresses); (2) the guest must be running this PE.
-    bad = map_matches_pe(a.map, data)
-    if bad:
-        for seg, ext, size in bad:
-            print(f"  segment {seg:04x}: map extent {ext:#x}, PE section size {size:#x}")
-        print(f"pools: {a.map} is not the map of {a.exe} - its section extents differ. "
-              "Regenerate the map from the same link, or point --map at the right one.")
-        sys.exit(1)
-    g = GdbRemote(a.host, a.port)
-    exports = pe_exports(g.read_mem, KERNEL_BASE)
-    results = verify_image(g.read_mem, data, resolve=exports.get)
-    bad = [(n, s, e, v) for n, s, e, v in results if v not in ("ok", "thunks")]
-    if bad:
-        g.close()
-        for n, s, e, v in bad[:10]:
-            print(f"  {v:<10} {n:<8} {s:#010x}-{e:#010x}")
-        print(f"pools: the guest is not verifiably running {a.exe} ({len(bad)} chunk(s) "
-              "mismatched or unreadable) - no pool reading from this map is trustworthy.")
-        sys.exit(1)
-    rows = read_pools(g.read_mem, pc, ph)
-    g.close()
-    print(f"pools: guest identity confirmed against {a.exe}")
+    # Two identities, every time (check_identity): the first pool dump of
+    # this project read "0 pools" from a stale map's addresses and looked
+    # like a result. The map must be THIS PE's map (a SHA-256 sidecar, then
+    # section extents), and the guest must be running this PE.
+    with GdbRemote(a.host, a.port) as g:
+        check_identity(g, a, data, "pools")
+        rows = read_pools(g.read_mem, pc, ph)
+    print(f"pools: map and guest identity confirmed against {a.exe}")
     total = sum(r for r, _, _ in rows)
     print(f"{len(rows)} pools, {total / 1048576:.2f} MiB real (malloc'd), largest first:")
     for real, payload, name in rows:
@@ -1006,11 +1112,113 @@ def cmd_pools(a):
             print(f"  {real / 1048576:7.2f} MiB real  {payload / 1048576:7.2f} MiB payload  {name}")
 
 
-def cmd_memstats(a):
-    g = GdbRemote(a.host, a.port)
+def frame_rate(frames_before, frames_after, seconds):
+    """(fps, ms per frame) from two readings of a frame counter `seconds`
+    apart. Raises rather than dividing into nonsense: a counter that did not
+    move means the guest is halted, hung, or not running this build."""
+    if seconds <= 0:
+        raise RuntimeError("non-positive interval")
+    frames = (frames_after - frames_before) & 0xFFFFFFFF
+    if frames == 0:
+        raise RuntimeError(f"frame counter did not advance in {seconds:.1f}s - halted, hung, or the wrong address")
+    fps = frames / seconds
+    return fps, 1000.0 / fps
+
+
+def parse_offsetof(text):
+    """`T.f offset=N size=M` (tools/xbox-offsetof.sh's one output line) ->
+    (N, M). Raises on anything else, so a probe that failed cannot become a
+    silently wrong address."""
+    m = re.search(r"^\S+ offset=(\d+) size=(\d+)\s*$", text.strip(), re.M)
+    if not m:
+        raise RuntimeError(f"unexpected offsetof output: {text.strip()[:200]!r}")
+    return int(m.group(1)), int(m.group(2))
+
+
+def struct_offset(header, type_name, field, expect_size):
+    """Field offset for the Xbox build's exact flags and ABI, computed NOW by
+    tools/xbox-offsetof.sh (a probe compiled through tools/xbox-cc.sh), not
+    a constant copied into this file: XASH_LOW_MEMORY moved host_parm_t's
+    fields once already (Codex review: a copied constant has no drift
+    check). The field's size is checked against what the reader will
+    unpack."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    # Not a bare "bash": on this Windows host CreateProcess resolves that to
+    # C:\Windows\System32\bash.exe, the WSL launcher, which answers in UTF-16
+    # ("no installed distributions") - measured, the first run printed
+    # spaced garbage. The project standardises on MSYS2 at C:\msys64
+    # (tools/xbox-env.sh); use its bash when it exists.
+    bash = next((p for p in ("/c/msys64/usr/bin/bash.exe", "C:/msys64/usr/bin/bash.exe") if os.path.exists(p)), "bash")
+    r = subprocess.run([bash, os.path.join(here, "xbox-offsetof.sh"), header, type_name, field],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"xbox-offsetof.sh {type_name}.{field} failed: {(r.stderr or r.stdout).strip()[:300]}")
+    off, size = parse_offsetof(r.stdout)
+    if size != expect_size:
+        raise RuntimeError(f"{type_name}.{field} is {size} bytes in this build, reader expects {expect_size}")
+    return off
+
+
+def check_identity(g, a, data, what):
+    """The two identity checks every measuring command runs first: the map
+    is the PE's own (a SHA-256 sidecar + section extents), and the guest is
+    running that PE (the full read-only image comparison)."""
+    bad = map_matches_pe(a.map, data, exe_path=a.exe)
+    if bad:
+        for seg, found, expected in bad:
+            if seg == 0:
+                print(f"  identity: found {found}, expected {expected}")
+            else:
+                print(f"  segment {seg:04x}: map extent {found:#x}, PE section size {expected:#x}")
+        print(f"{what}: {a.map} is not the map of {a.exe} (use the map the XBE's own link wrote "
+              "beside it - tools/xbox-game-link-check.sh --xbe does, with its .identity sidecar "
+              "next to xbe-build.exe). No reading.")
+        sys.exit(1)
     exports = pe_exports(g.read_mem, KERNEL_BASE)
-    available, usage = kernel_memstats(g.read_mem, exports.get)
-    g.close()
+    results = verify_image(g.read_mem, data, resolve=exports.get)
+    if any(v not in ("ok", "thunks") for _n, _s, _e, v in results):
+        print(f"{what}: the guest is not verifiably running {a.exe} - no reading.")
+        sys.exit(1)
+    return exports
+
+
+def cmd_fps(a):
+    """Wall-clock frame rate from host.framecount, plus the engine's own last
+    pure frame time (host.pureframetime, the frame's CPU time without the
+    sleep Host_Autosleep inserts). Reads are two brief stops of the guest,
+    negligible against the interval, and the guest is resumed after each."""
+    syms = load_map_symbols(a.map)
+    try:
+        host = syms["_host"]
+    except KeyError:
+        raise RuntimeError(f"{a.map} has no _host symbol")
+    with open(a.exe, "rb") as f:
+        data = f.read()
+    off_fc = struct_offset("common.h", "host_parm_t", "framecount", 4)
+    off_pure = struct_offset("common.h", "host_parm_t", "pureframetime", 8)
+    with GdbRemote(a.host, a.port) as g:
+        check_identity(g, a, data, "fps")
+        fc0 = struct.unpack("<I", g.read_mem(host + off_fc, 4))[0]
+    t0 = time.monotonic()
+    time.sleep(a.seconds)
+    with GdbRemote(a.host, a.port) as g:
+        fc1 = struct.unpack("<I", g.read_mem(host + off_fc, 4))[0]
+        pure = struct.unpack("<d", g.read_mem(host + off_pure, 8))[0]
+    elapsed = time.monotonic() - t0
+    fps, ms = frame_rate(fc0, fc1, elapsed)
+    if not (0.1 <= fps <= 1000.0) or not (0.0 < pure < 10.0):
+        raise RuntimeError(f"implausible reading: {fps:.1f} fps, pureframetime {pure!r} s - "
+                           "wrong addresses or offsets, not a measurement")
+    print(f"fps: {fc1 - fc0} frames in {elapsed:.1f}s = {fps:.1f} fps, {ms:.1f} ms/frame (wall); "
+          f"host.pureframetime (last frame, no sleep) = {pure * 1000:.1f} ms "
+          f"[host.framecount @ +{off_fc}, host.pureframetime @ +{off_pure}, from tools/xbox-offsetof.sh]")
+
+
+def cmd_memstats(a):
+    with GdbRemote(a.host, a.port) as g:
+        exports = pe_exports(g.read_mem, KERNEL_BASE)
+        available, usage = kernel_memstats(g.read_mem, exports.get)
     busy = sum(usage.values())
     print(f"available pages: {available:6d}  ({available * 4 / 1024:8.2f} MiB)")
     print(f"busy pages:      {busy:6d}  ({busy * 4 / 1024:8.2f} MiB), by usage:")
@@ -1046,11 +1254,10 @@ def verify_addrs(read, data, addrs, length=16):
 def cmd_verify_image(a):
     with open(a.exe, "rb") as f:
         data = f.read()
-    g = GdbRemote(a.host, a.port)
     if a.addr:
         addrs = [parse_hex(x) for x in a.addr]
-        matched, mismatched, unreadable = verify_addrs(g.read_mem, data, addrs)
-        g.close()
+        with GdbRemote(a.host, a.port) as g:
+            matched, mismatched, unreadable = verify_addrs(g.read_mem, data, addrs)
         for x in matched:
             print(f"  ok         {x:#010x}")
         for x in mismatched:
@@ -1061,15 +1268,14 @@ def cmd_verify_image(a):
               f"{len(mismatched)} mismatch, {len(unreadable)} unreadable. A spot check "
               "is not image identity - run without --addr for that.")
         sys.exit(spot_check_exit_code(matched, mismatched, unreadable))
-    try:
-        exports = pe_exports(g.read_mem, KERNEL_BASE)
-    except (RuntimeError, struct.error) as e:
-        g.close()
-        print(f"verify-image: cannot read the running kernel's export table ({e}) - "
-              "kernel import thunks cannot be resolved, no identity verdict.")
-        sys.exit(2)
-    results = verify_image(g.read_mem, data, chunk=a.chunk, resolve=exports.get)
-    g.close()
+    with GdbRemote(a.host, a.port) as g:
+        try:
+            exports = pe_exports(g.read_mem, KERNEL_BASE)
+        except (RuntimeError, struct.error) as e:
+            print(f"verify-image: cannot read the running kernel's export table ({e}) - "
+                  "kernel import thunks cannot be resolved, no identity verdict.")
+            sys.exit(2)
+        results = verify_image(g.read_mem, data, chunk=a.chunk, resolve=exports.get)
     total = sum(e - s for _n, s, e, _v in results)
     by = {"ok": 0, "thunks": 0, "mismatch": 0, "unreadable": 0}
     for name, s, e, v in results:
@@ -1132,6 +1338,8 @@ def main():
     s = sub.add_parser("memstats"); s.set_defaults(func=cmd_memstats)
     s = sub.add_parser("pools"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
     s.add_argument("--min-bytes", type=lambda x: int(x, 0), default=16384); s.set_defaults(func=cmd_pools)
+    s = sub.add_parser("fps"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
+    s.add_argument("--seconds", type=float, default=30.0); s.set_defaults(func=cmd_fps)
 
     a = p.parse_args()
     try:
