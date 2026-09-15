@@ -5,6 +5,16 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Closed — the WON menu is navigable with a controller (X6)
+
+No code change: `engine/client/input/in_joy.c`'s joystick support and
+`3rdparty/mainui`'s `Gamepad.cpp` were already wired up unconditionally for
+any non-dedicated build, the same code the psvita/nswitch ports already
+use. Verified this session by reading that path end to end, then by a live
+human test with a real host gamepad bound in xemu - the main menu responded
+to it and started a new game. Real-hardware confirmation is still open, per
+this project's own xemu-is-not-validation rule.
+
 ### Added — `tools/x4-triangle`: standalone NV2A bring-up, one textured triangle (X4)
 
 A separate, minimal (~280-line) XBE outside the engine entirely: initialises

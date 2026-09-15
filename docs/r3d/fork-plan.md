@@ -1960,6 +1960,33 @@ is faster" is an opinion.
 
 **Exit:** the menu is navigable with a controller.
 
+**Met under emulation, 2026-09-15.** No code changed to close this - the
+plumbing this section already named was correct and needed no work:
+`engine/client/input/in_joy.c`'s `Joy_Init()` runs unconditionally for any
+non-dedicated build (`input.c`'s `IN_Init`), `joy_enable` defaults on, SDL's
+`GameController` subsystem self-initialises with no Xbox-specific gate
+(`joy_sdl2.c`), and `3rdparty/mainui`'s own `Gamepad.cpp` is the same code
+the psvita/nswitch ports already rely on (`divergences.md`). This session's
+work was entirely verification: confirming the above by reading the code,
+then a live human test - a real host gamepad, already bound in xemu's own
+config (`[input.bindings] port1_driver = 'usb-xbox-gamepad'`) - navigated
+the WON main menu and started a new game with it. **Not yet confirmed on
+real hardware** - per this project's own rule, xemu is not validation, and
+that check is still open, same as X4's.
+
+An unrelated curiosity hit while preparing for this test, left unresolved
+because it turned out not to matter: `.sweep/boot-attempt/
+resonance3d-x74-boot.iso` (X7.4's own headless test build) loads straight
+into `c0a0` gameplay within ~10-15s of boot with no human input, which
+looked at first like a scripted `+map` command-line argument processed via
+`Cbuf_ExecStuffCmds()` (`engine/common/host.c:1357`, `cmd.c:274-325`) -
+disabling `valve.rc`'s `stuffcmds` line on a repacked copy of that disc had
+no effect on it, and nxdk's own `xboxrt` doesn't appear to construct a real
+argv for Xbox in the first place, so that theory is wrong. Whatever
+actually drives it, it didn't get in the way of the human test above (the
+menu was present and controller-responsive regardless), so it's noted here
+rather than chased further - genuinely unknown, not a blocker.
+
 ## X7 — Game code: one XBE per title
 
 **Direction set 2026-09-11.** Half-Life, Opposing Force and Blue Shift each
