@@ -2049,6 +2049,314 @@ strip is BMP-only (`Btns.cpp:27`).
 **Scope - the screens.** Each is a rewrite-in-place or a hide, never a new
 registration unless the stock one is unusable:
 
+0. **Retail menu art - the background and the animated title, for BOTH
+   content profiles (added 2026-09-16, after the X7.5 disc booted to a
+   flat grey menu with text buttons).** The requirement: the menu must
+   render Valve's own art whether the disc carries the 25th-anniversary
+   (HL25) content or the pre-anniversary (older Steam / WON) content,
+   detected from what is on the disc, never assumed. Read, not guessed,
+   before this item was written - `3rdparty/mainui`, the engine, the
+   real Steam install, Ferrum56 and xash-rt:
+
+   **Why the menu is flat grey today - not a renderer gap.** `tools/
+   xbox-cc.sh:329` defines `XASH_LOW_MEMORY=1` (X3); `host.c:1239`
+   exposes it as `host_lowmemorymode`; `BaseMenu.cpp:1167` reads that
+   into `uiStatic.lowmemory`; and `CMenuBackgroundBitmap::LoadBackground`
+   returns before loading anything when it is set (`controls/
+   BackgroundBitmap.cpp:351-352`), leaving `s_state` at `DRAW_COLOR` and
+   `Draw()` painting `colorBase` = `0xFF505050` (`:61`, `:146-150`). The
+   same flag also disables the WON bitmap button strip (`Btns.cpp:37-38`),
+   the blurred PicButton text (`PicButton.cpp:311`), menu sounds
+   (`BaseMenu.cpp:1000-1001`) and one font path (`FontManager.cpp:91`).
+   The X7.5 row's "still-loading pic or a `ref_soft` gap" guess was
+   wrong and is corrected there. The fix is a finer gate, not lifting
+   `XASH_LOW_MEMORY` (X3's other uses of it stay).
+
+   **What the two profiles actually consist of** (real Steam install
+   measured; the older profile from mainui's own loader and Ferrum56's
+   notes):
+   - *HL25*: `liblist.gam` says `animated_title 1`, `hd_background 1`
+     (→ `GFL_ANIMATED_TITLE`/`GFL_HD_BACKGROUND`, `cl_gameui.c:402-405`).
+     Background = `resource/BackgroundLayout.txt`, `resolution 800 600`,
+     12 tiles of 256x256 32-bit TGA (1.85 MiB on disk, 3 MiB raw RGBA);
+     the `HD_` layout is `3840 1600` with 105 tiles (18 MiB) and is
+     what `hd_background 1` makes mainui try FIRST (`BackgroundBitmap.cpp:
+     223-224`) - for a 640x480 CRT that is ~6.9 Mpixel of texture for
+     nothing. Title = `CMenuAnimatedBanner` (`controls/AnimatedBanner.cpp`),
+     eleven `resource/logo*.tga` layers (`logo`, `logo_blip`, `logo_blip2`
+     at 800x86; `logo_big_blurred_{0..3}` and `_blip_{0..3}` at ~466x270),
+     ~4.6 MiB raw RGBA, all-or-nothing (`TryLoad`, `:49-84`), composited
+     with `PIC_DrawTrans` - a TGA state machine, NOT a video, and already
+     NOT gated by `lowmemory`. No `gfx/shell/*.bmp` at all: the button
+     strip and banners are gone from HL25 content, so text buttons are
+     the correct HL25 rendering, not a fallback failure.
+   - *Pre-HL25 (older Steam / WON)*: background = `gfx/shell/splash.bmp`
+     (`ART_BACKGROUND`, `BackgroundBitmap.h:23`, single image), buttons =
+     `gfx/shell/btns_main.bmp` (BMP-only strip, `Btns.cpp:27`; Ferrum56
+     measured its atlas at 4 MiB raw RGBA) plus `head_*.bmp` banners
+     (~3.4 MiB raw across 24), title = `media/logo.avi` through
+     `CMenuMovieBanner` (`controls/MovieBanner.cpp`), enabled only when
+     the WON background is the chosen one (`s_bEnableLogoMovie`,
+     `BackgroundBitmap.cpp:336-340`). Old Steam content may carry BOTH the
+     tiled `resource/background` and the `gfx/shell` art; mainui's
+     existing ladder (`UpdatePreference`, `:307-343`, cvar
+     `ui_prefer_won_background`) already decides which one to DRAW by
+     file presence - but not which one to LOAD: `LoadBackground`
+     (`:345-370`) calls `LoadSteamBackground` and then `LoadWONBackground`
+     unconditionally, both before `UpdatePreference` runs, so a disc that
+     carries both sets has both resident (review, round 1, caught the
+     first draft calling the ladder "the detection, nothing new to
+     write"). The detection logic transfers; the load order does not. On
+     Xbox the two loads become exclusive: probe for each set's files
+     first (`FileExists`, no `PIC_Load`), apply the preference to the
+     probe result, load only the chosen set, and free it before loading
+     the other when `ui_prefer_won_background` flips - a small change on
+     the owned fork, `#if XASH_XBOX`-shaped, with its own ledger row.
+
+   **`logo.avi` is dead on Xbox by construction, three times over, and
+   stays dead.** The engine has exactly one AVI backend, ffmpeg
+   (`common/backends.h:59-61`, `defaults.h:92-98`, keyed solely on
+   `HAVE_FFMPEG`, which `tools/xbox-cc.sh` never defines - so the Xbox
+   build links `avi_ffmpeg.c`'s null stubs, `:811-870`, 14 `AVI_*`
+   symbols in the map); `ref_soft`'s `GL_UpdateTexture`, the call
+   `AVI_Think` pushes frames through, is an empty stub (`ref/soft/
+   r_draw.c:216-221`); and `UI_DrawLogo` refuses any AVI that does not
+   resolve through `FS_GetDiskPath` (`cl_gameui.c:303-310`). Degradation
+   is clean and already verified in code: `AVI_GetVideoInfo` fails →
+   `gameui.drawLogo = false` → `GetLogoLength() <= 0` → the movie banner
+   draws nothing (`MovieBanner.cpp:81`). A pre-HL25 disc therefore gets a
+   title-less WON menu. Baking `logo.avi` into a frame strip offline is
+   XB's kind of work and NOT this phase's - the HL25 title is the one
+   that ships, and it is TGA.
+
+   **What the two sibling projects did, and what transfers.** Ferrum56
+   ports `CMenuAnimatedBanner` line by line (`vgui-rs/src/widget.rs`,
+   `AnimatedLogo`) but bakes every asset offline into `.mpak` (DXT1
+   background, RGBA logo layers, zero runtime decoders), never implements
+   `hd_background`/`animated_title` (asset presence decides), never
+   implements the `logo.avi` fallback, and refuses to pack the WON button
+   atlas for Xbox until a P8 bake exists (`docs/plans/won_menu_ui_plan.md:
+   436-462`: 8.48 MB raw against a ~10-12 MiB GPU heap, 1.7-4.2 s off a
+   DVD). What transfers: the memory arithmetic, the "prefer the small
+   layout" decision, and the alpha-blend (not additive) rule for the logo
+   layers, and - decided 2026-09-16, after the numbers below - the
+   offline bake itself, as this item's second stage (below), not as a
+   copy of Ferrum56's archives. xash-rt inherits stock mainui for both background and
+   logo unchanged, forces text buttons (`GFL_RENDER_PICBUTTON_TEXT`), and
+   then bypasses the static art entirely with a live background MAP
+   (`ui_renderworld 1` + a one-line `chapterbackgrounds.txt`, `c2a5x`)
+   plus readability tints. **Rejected for Xbox**: X7.4 measured the first
+   map at +15 MiB; a menu that costs a map load is the opposite of what
+   this port needs.
+
+   **What a texture actually costs in `ref_soft` - read from the
+   uploader, after review round 1 caught the first draft assuming an
+   8-bit palettized store that does not exist.** `pixel_t` is an
+   `unsigned short` (`ref/soft/r_local.h:84`), `GL_CalcTextureSize` is
+   `width * height * 2` (`r_image.c:82-85`), `GL_UploadTexture` allocates
+   FOUR mip levels for every upload (`:235`, `:244-252` - x1.33 of the
+   base), and any texture with `TF_HAS_ALPHA` gets a second, full-
+   resolution `pixel_t` buffer at mip 0 (`:254-255`). Resident cost is
+   therefore `w*h*2*1.33`, plus `w*h*2` when alpha is kept - the 8-bit
+   quantization at `:337`/`:746` is the palette the 16-bit pixels are
+   built FROM, not the store. Applied: the 12 background tiles are 12 x
+   256x256 = **2.0 MiB** (2.6 MiB if imagelib keeps their alpha - 32-bit
+   TGAs; the content is opaque, so likely not, but measured, not
+   assumed); the eleven title layers are 1.18 Mpixel at mip 0 (three at
+   800x86, eight at ~450x270), all with real alpha, so **~3.0 MiB of
+   mips plus ~2.25 MiB of alpha = ~5.2 MiB**; `logo.tga` alone is ~310
+   KiB; the WON button strip, if it is the 2048x512 atlas Ferrum56
+   measured, is ~2.7 MiB of mips (plus 2 MiB if alpha) AND is halved to
+   1024x256 by `GL_SetTextureDimensions`' 1024 cap (`:94-110`) before
+   any of that - a correctness question for the pre-HL25 profile, not
+   just a size one; the 24 `head_*.bmp` banners at ~460x80 are ~2.3
+   MiB. `PIC_Load` images are `TF_IMAGE`, resident until freed, not per
+   map. Against X7.4's measured 17.4 MiB free after the first map, the
+   animated title as-is is a third of the headroom - which is why the
+   acceptance threshold below is the MEASURED heap delta, with a stated
+   ceiling, and not these estimates.
+
+   **Two stages, decided 2026-09-16: measure the retail files first, then
+   bake them for the console.** Retail art is authored for 800x600 and
+   up; the target is a 640x480 CRT with a 16-bit software rasterizer
+   today and the NV2A after X9. Loading the retail files unchanged (stage
+   A) gives the honest baseline and proves the code path; the bake
+   (stage B) is what makes the art fit, and it lives in `tools/
+   asset-studio` - XB's tool - as an XM-owned output. Read before
+   deciding its shape, because three facts rule out the obvious "reuse
+   Ferrum56's packer as-is":
+   - `tools/asset-studio` already carries `UiPacker` (`src/formats/
+     UiPacker.cpp`, `--pack-ui`/`--pack-menu`): a composited, POT-padded,
+     DXT1, NV2A-swizzled background blob and an RGBA8 dictionary of menu
+     art, refused for `--target xbox` (`main.cpp:340`) until a P8/16-bit
+     encode exists. **Neither archive has a consumer in this engine**:
+     Ferrum56's Rust engine read them; here `mainui` loads through
+     `PIC_Load` → imagelib (`cl_gameui.c:492-510`), and the mpak design
+     itself notes the UI archive is only ever mounted by accident
+     (`mpak-loading-design.md`, "`UiPacker` ... today it is mounted as
+     `maps/menu.bsp`, harmlessly but wrongly"). So the bake's output is
+     not an archive: it is **ordinary files, in formats imagelib already
+     decodes, under the names and layout `mainui` already reads**, laid
+     over the retail tree by the disc packager. No new loader, and the
+     unchanged-content path (stage A) stays valid for any disc built
+     without the overlay.
+   - **DXT is for X9's renderer, not X5's.** imagelib keeps `.dds` data
+     compressed (`img_dds.c:180`, `PF_DXT1`) and only decompresses under
+     `IMAGE_FORCE_RGBA` (`img_utils.c:1364-1366`); `ref_soft`'s uploader
+     merely turns mips off for a compressed pic (`r_image.c:309-315`) and
+     then reads the buffer as RGBA in its pixel loop (`:257-261`) - and
+     refuses to process one (`:736-738`). Under `ref_soft` the bake wins
+     on resolution, mips and alpha only; under `ref/nv2a` it also wins on
+     format (DXT1 for the opaque background, DXT5 or 16-bit for the alpha
+     layers). One bake tool, two format profiles selected by renderer -
+     and XB's own finding applies: `swizzleNV2A` is wrong for DXT
+     ("DXT laid out linear by block row"), so the NV2A profile does NOT
+     swizzle compressed output.
+   - **The title code reads TGA headers by hand** (`UI_GetTargaImageDimensions`,
+     `AnimatedBanner.cpp:30-47`) and positions everything by
+     `ScreenWidth/1024` (`:86-122`), so baked title layers stay TGA and
+     the fork has to know they are already at canvas scale - a small,
+     explicit change, not an accident of resizing.
+
+   What the bake does, per asset, with the arithmetic from the uploader
+   above:
+   - *Background*: composite the 12 tiles, scale the 800x600 canvas to
+     640x480 (x0.8, 4:3 to 4:3, no crop), re-tile at 256x256 (3x2 = 6
+     tiles, the right column and bottom row partial - `mainui` takes each
+     tile's size from its own header, `BackgroundBitmap.cpp:272-273`, so
+     partial tiles are fine) and write a `resource/BackgroundLayout.txt`
+     saying `resolution 640 480` - the parser is generic (`:234-276`).
+     `ref_soft` profile: 24-bit TGA, no alpha channel at all, so no alpha
+     buffer - ~1.0 MiB resident against 2.0 MiB retail. NV2A profile:
+     one 1024x512 DXT1 `.dds` = 256 KiB, one tile, under the 1024 cap.
+     Either way `GFL_HD_BACKGROUND` stays masked (step 2) so the 105-tile
+     layout is never tried.
+   - *Animated title*: keep the layers and the state machine - the
+     blurred strips are a parallax backdrop, pre-compositing them would
+     kill the effect - but scale every layer by the same 0.625 the
+     runtime would apply (`ScreenWidth/1024` at 640), drop mips, and keep
+     alpha: 1.18 Mpixel → ~0.46 Mpixel, ~0.9 MiB of pixels plus ~0.9 MiB
+     of alpha = **~1.8 MiB against 5.2 MiB retail** (~2.1 MiB if the
+     mips cannot be dropped after all), which is what puts the animated
+     title under the ceiling at all. Requires the fork to
+     (a) treat baked layers as canvas-scaled and (b) honour a no-mips
+     request for UI pics - `mipCount` is a hard 4 in `GL_UploadTexture`
+     (`r_image.c:235`) regardless of `TF_NOMIPMAP`, so that one is a
+     `ref_soft` change with its own ledger row, measured before and
+     after. NV2A profile: DXT5 `.dds` layers once the fork's dimension
+     reader accepts DDS.
+   - *Pre-HL25 strip and banners*: bake `btns_main.bmp` to a 1024x256
+     atlas deliberately (so the 1024 cap never halves it blind) with the
+     button rects rescaled - `Btns.cpp` slices by fixed pixel constants,
+     so the fork gains a scale factor read from the baked atlas's size;
+     `head_*.bmp` banners and `splash.bmp` to the 640 canvas, 8-bit or
+     16-bit per profile. Ferrum56's P8 arithmetic (4 MiB → 1 MiB for the
+     atlas) is the reference point; the measured post-traversal number
+     is the acceptance.
+   - *Packaging*: `tools/xbox-xiso.sh` gains `--menu-bake <dir>`, an
+     overlay copied onto the staged gamedir AFTER the retail copy, so the
+     Steam install is never modified and a disc without the overlay
+     still works (stage A). The bake's own hash goes into the disc's
+     `CHANGELOG.txt` provenance, next to the XBE's. `tools/asset-studio`
+     gets the bake as a new mode (`--bake-menu-art --steam <dir> --out
+     <dir> --renderer soft|nv2a`), sharing `UiPacker`'s layout parser
+     and compositor - the archive writers stay for Ferrum56's benefit,
+     unused here.
+
+   Sequencing of the two stages: A first, always - the retail numbers are
+   the baseline the bake is judged against, and the `ref_soft`-profile
+   bake follows as soon as A's numbers say what to shrink (expected: the
+   title). The NV2A profile waits for X9, like every other DXT consumer.
+
+   **The work, in order, each measured with `tools/xemu-debug.py
+   memstats`. Acceptance ceiling: the whole of a profile's menu art -
+   background, title, buttons, banners - may cost at most 3 MiB of
+   measured heap delta (under a fifth of X7.4's post-map free memory,
+   leaving X8's own targets intact); anything over it takes that step's
+   stated fallback, and the number is recorded here either way. How the
+   delta is taken - review round 2 caught the first draft treating a
+   snapshot at the first menu as "the whole profile": the `head_*.bmp`
+   banners are NOT loaded with the menu. Each screen loads its own in
+   its one-time `_Init()` (`CMenuOptions::_Init` → `banner.SetPicture`,
+   `menus/Configuration.cpp:48-50`), `_Init()` is deferred until that
+   screen is first shown (`controls/BaseWindow.cpp:31-36`, `controls/
+   ItemsHolder.cpp:283-294`), and `CImage` has no unloading destructor by
+   design (`Image.h:40-44`, `:58-67`) - so banners accumulate as screens
+   are visited and never come back. An initial-menu reading can pass
+   under 3 MiB and then blow through it during ordinary navigation,
+   which is exactly the cost the ceiling exists to catch. So: the
+   acceptance reading is taken AFTER a deterministic, pad-driven
+   traversal that opens every retained screen of the shipping menu
+   (whatever XM.1 leaves reachable: Options, Video, Controller, Audio,
+   Load, Save, New Game's chapter list, and every dialog that carries a
+   banner) and returns to Main; three numbers are recorded per profile -
+   the first-menu delta, the peak during traversal, and the resident
+   delta back at Main - and the ceiling applies to the resident delta
+   after traversal, the peak recorded beside it. On HL25 content there
+   are no banners to accumulate (no `gfx/shell` art), so the traversal
+   there mostly proves the point; on pre-HL25 content it IS the
+   measurement, and the alternative - freeing a screen's banner on close
+   so the baseline returns - is a fork change to weigh only if the
+   traversal number says the banners are what breaks the ceiling:**
+   1. Replace the `uiStatic.lowmemory` early return in `LoadBackground`
+      with a finer, Xbox-shaped gate on the owned fork (a new `uiStatic`
+      bit set from a cvar the engine registers, e.g. `ui_xbox_menu_art`,
+      so the load is switchable at runtime for measurement) - and the
+      SAME finer gate at `CBtnsManager::LoadBmpButtons` (`Btns.cpp:37`),
+      which the first draft left under `lowmemory` and therefore left the
+      pre-HL25 bitmap buttons impossible (review, round 1). The blurred
+      PicButton text (`PicButton.cpp:311`), menu sounds (`BaseMenu.cpp:
+      1000-1001`) and the font path (`FontManager.cpp:91`) stay under
+      `lowmemory` until each is measured on its own - they are not part
+      of "renders the retail art".
+   2. On Xbox, mask `GFL_HD_BACKGROUND` (at `cl_gameui.c:402-403`, engine
+      side, ledger row) so the 800x600 layout is the one tried: 12 tiles,
+      not 105 - ~2.0 MiB by the arithmetic above, well under the ceiling
+      on its own. Banding from the 16-bit store is accepted for X5's
+      renderer and is X9's to revisit.
+   3. Make the two background loads exclusive as described above (probe,
+      prefer, load one, free on flip), so a mixed-content disc is
+      measured with ONE set resident, never both.
+   4. Confirm the animated title draws as-is (it needs nothing: ungated,
+      all eleven TGAs on the disc, `PIC_Set`/`PIC_DrawTrans` implemented by
+      `ref_soft`) and measure it - `ref_soft`'s translucent-pic path is
+      the thing to look at if it renders as a solid block (Ferrum56 hit
+      exactly that, an unpremultiplied-alpha bug, `CHANGELOG.md:1403-
+      1466`). At ~5.2 MiB it is expected to bust the ceiling on top of
+      the background; the first response is the stage-B bake (~2.1
+      MiB, above), and only if the BAKED animated set still busts the
+      ceiling do the fallbacks apply - the sharp logo plus the two blip
+      layers, no blurred backdrop (~0.9 MiB retail, ~0.4 baked), then
+      `logo.tga` alone (~310 KiB). The numbers decide, recorded here.
+   5. Pre-HL25 profile: with a disc built from older content (the user
+      supplies it - the local Steam install is HL25 only), confirm the
+      ladder picks `splash.bmp` + the bitmap strip, check what the 1024
+      cap does to the strip's atlas (if it halves, the buttons are
+      wrong, not just costly), measure strip + banners against the
+      ceiling, and confirm the missing title degrades exactly as the code
+      reads (no banner, no error). If the strip does not fit or does not
+      survive the cap, `GFL_RENDER_PICBUTTON_TEXT` (what xash-rt forces)
+      is the honest downgrade - a flag, not a rewrite - and the exit
+      below allows it as long as the decision is recorded with its
+      number.
+   6. Both profiles: `ui_prefer_won_background` stays a real cvar so a
+      pre-HL25 disc that carries both sets can be flipped - and it is a
+      candidate for the Video screen (item 2) only if a disc that has
+      both actually exists to test it with.
+
+   **Exit for this item:** the HL25 disc (`../XISOS/2026-09-16_hl-title-
+   disc/` or its successor) boots to the tiled 800x600 background and a
+   title (animated, or the static/middle fallback - whichever the ceiling
+   allowed, recorded with all three `memstats` numbers: first menu, peak
+   during the full-screen traversal, resident back at Main); a pre-HL25
+   disc boots to the WON splash with bitmap buttons, or with text buttons
+   if the strip did not fit, did not survive the 1024 cap, or the
+   post-traversal banner residency broke the ceiling (recorded either
+   way, same three numbers), and no title; on a disc carrying both sets,
+   only the displayed profile's textures are resident (measured, not
+   asserted); the `logo.avi` path is verified to no-op rather than error
+   on both. Hardware per the usual rule.
+
 1. **Main**: flatten as xash-rt did - Resume / New Game / Load / Save /
    Options / Quit. Drop console, previews, minimize/close (`Main.cpp:
    225-243`) and the Update button (`Configuration.cpp:68`).
@@ -2144,17 +2452,24 @@ this. Every future screen change goes `#if XASH_XBOX`-guarded where it
 alters a screen the PC build still shows, same as planned.
 
 **Art and memory.** Reuse every existing `PC_*` button id and `head_*`
-banner (retail ships them as BMP under `gfx/shell/`; the disc already
-carries them, which is why the menu renders today). New art is one file:
+banner where the content provides them - **corrected 2026-09-16: HL25
+content ships NO `gfx/shell/*.bmp` at all** (only the three `kb_*.lst`
+files; no `.pak` either), so on the current disc the menu renders through
+mainui's text-button path, not the bitmap strip - the strip and banners
+exist only on pre-HL25 content, and item 0 above covers both. New art is one file:
 the Duke diagram. At 512x256x32 it is 512 KiB of texture - fine against
 X3's current numbers, and it is XB's bake that decides the final GPU
 format, not this phase. Title-safe layout (90%) for every rewritten screen;
 minimum legible text at 640x480 on a CRT per `ui-architecture.md` §7.
 
-**Sequencing.** XM.1 (Main flattened, Controller with the mapping screen,
-Audio, the hidden PC screens, Video's gamma and read-only display info)
-after X7.5 (a disc per title, so a menu change can be tested on a real
-build without hand-packing) and alongside X8. XM.2 (any mode or
+**Sequencing.** Item 0 (retail menu art, both profiles) first - it is the
+smallest change, it is what a player sees before any button is pressed,
+and its `memstats` numbers set the budget every later screen's art has
+to fit under. Then XM.1 (Main flattened, Controller with the mapping
+screen, Audio, the hidden PC screens, Video's gamma and read-only display
+info); X7.5 (a disc per title, so a menu change can be tested on a real
+build without hand-packing) is done for `hl` as of 2026-09-16, and XM.1
+runs alongside X8. XM.2 (any mode or
 widescreen-presentation control) strictly after X9, because it is X9's
 backend work that gives such a control anything to drive - doing the
 screens first means X9 is then tested through the menu a player will
@@ -4247,10 +4562,13 @@ linker's raw PE output, then the real WON main menu appeared - New Game,
 Training Room, Options, Load Game, Multiplayer, Previews, Quit - the first
 time this fork has booted a title disc built entirely from the documented,
 scriptable pipeline rather than a hand-packed one-off. (The menu's
-background is a flat colour rather than the retail art at the moment the
-screenshot was taken - not chased, most likely a still-loading background
-pic or a `ref_soft` gap; noted here rather than in this row, since it is
-about rendering, not packaging.) `op4`/`bshift` are wired into the same
+background is a flat colour rather than the retail art - **cause found
+2026-09-16, and it was neither of this row's first guesses**: `XASH_LOW_
+MEMORY=1` reaches `uiStatic.lowmemory`, and `CMenuBackgroundBitmap::
+LoadBackground` returns before loading anything under it, `controls/
+BackgroundBitmap.cpp:351-352`; the grey is its `DRAW_COLOR` default.
+Owned by XM's item 0, not by packaging - the tiles are on the disc.)
+`op4`/`bshift` are wired into the same
 title table (`gearbox`/`bshift` gamedirs, `valve` basedir, real Steam
 content confirmed present for both) but untested - no built XBE exists for
 either yet (X7.6, not started); the script warns loudly rather than
@@ -4485,6 +4803,16 @@ Then the format, decided once:
   (`TextureOpt.cpp:110-132`) applies a Morton order to DXT blocks, which is
   wrong for `D3DFMT_DXT1` on this hardware. Verified against a known-good
   surface, not reasoned about.
+- **Menu art bake (added 2026-09-16, owned by XM item 0, built in this
+  tool).** A `--bake-menu-art` mode that scales the retail background
+  tiles and title layers to the 640x480 canvas, re-tiles the background
+  with a rewritten `BackgroundLayout.txt`, and writes ordinary files
+  imagelib already decodes (TGA for `ref_soft`, `.dds` for `ref/nv2a`)
+  as an overlay for `tools/xbox-xiso.sh` - not an archive, since this
+  engine's `mainui` loads through `PIC_Load` and `UiPacker`'s archives
+  have no consumer here. Shares `UiPacker`'s layout parser and
+  compositor; the DXT profile inherits the block-row rule above and does
+  not swizzle. Full design and arithmetic under XM item 0.
 - **Post-T&L cache ordering** of indices. Free offline, invisible to the
   engine.
 
