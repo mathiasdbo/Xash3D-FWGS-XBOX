@@ -5,6 +5,49 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — a disc without `delta.lst` can no longer be packaged into an invisible boot loop
+
+`tools/xbox-xiso.sh` now refuses to pack a gamedir that provides no
+`delta.lst` - loose (any case) or inside a `.pak`, whose directory is
+actually read from the archive's header rather than grepped - unless
+`--delta-lst <file>` supplies one, taken from the user's own install of a
+later release (the Steam `valve/delta.lst`), never from this repository.
+Whichever file wins - supplied, loose, or a pak entry extracted by its
+directory offset - is parsed with a tokenizer and state machine mirroring
+`Delta_InitFields`/`Delta_ParseField` (`net_encode.c:849-885`, `:660-796`):
+everything that is `Sys_Error` in the engine is a refusal here, and the
+cases the engine tolerates by silently dropping data - a malformed field,
+an unknown flag, an empty required section, a field name absent from the
+engine's own table for that struct (read out of `net_encode.c` at run
+time, not copied) - are refused too. Which file wins follows
+`FS_AddGameDirectory`: loose beats every pak, and the pak sorting last
+under `Q_strcmp` is searched first. The supplied file is re-resolved in
+the stage after the copy; passing the flag for a gamedir that already
+ships one is refused rather than silently shadowing it. (Codex review:
+round 1 caught the grep-level check accepting seven section names plus
+one brace; round 2 caught empty sections passing and the pak scan
+checking the first archive the shell glob yielded instead of the one the
+engine loads - all three are negative fixtures now.)
+
+Why: a real box-retail Half-Life 1.0.0.9 install (`hlversion "1009"`,
+`liblist.gam` only, no `gameinfo.txt`) has no `delta.lst` at all - the file
+only exists from 1.1.0.0 on - so `SV_Init` → `Delta_InitFields` hit
+`Sys_Error( "couldn't load file delta.lst" )` (`net_encode.c:854`) before
+`CL_Init`/`VID_Init`, with no renderer to show it, and the host restarted
+into the same error every ~3 s: the screen kept the nxdk boot splash and
+the CPU sat in the kernel's idle wait, indistinguishable at a glance from
+a hung syscall. Found by tracing the engine's own init milestones with
+`tools/xemu-debug.py` breakpoints after four disc variants (full retail,
+no intro videos, zero-padded to 600 MB, an 8 MB menu-only subset) and a
+misread `stat("D:/")` theory had all produced the identical signature -
+recorded in `docs/r3d/lessons.md`. With the gate satisfied the same
+content boots to the real 1998 WON menu ("New game / Hazard course /
+Configuration / Load game / Multiplayer / Previews / Quit" over
+`gfx/shell/splash.bmp` from `pak0.pak`) - the first pre-Steam boot this
+port has done, and the content XM item 0's step 5 was waiting for. Also
+corrects the script's own "untested path" warning: `liblist.gam`-only
+content parses and boots; `delta.lst` was the actual gap.
+
 ### Added — an offline bake for the Xbox menu background (`tools/asset-studio --bake-menu-art`)
 
 New `tools/asset-studio` mode composites a retail gamedir's tiled menu

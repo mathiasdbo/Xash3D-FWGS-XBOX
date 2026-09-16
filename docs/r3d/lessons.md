@@ -29,6 +29,51 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### NEVER diagnose a boot "hang" from the halted CPU alone - find the last event the engine itself emitted
+
+A disc that sat on the nxdk splash showed `EIP` in the kernel's `sti; nop;
+nop; cli; cmp [ebx+0x2c],0; jz` idle wait, with a title-thread stack that
+happened to end in `stat()` → `GetFileAttributesExA` → the kernel. Hours went
+into `stat("D:/")`, disc size (padded to 600 MB), file count (an 8 MB
+subset), intro videos, and a `gameinfo.c` change that "fixed" it - none of
+which was the cause, because an idle CPU looks identical whether a thread
+is blocked in a syscall, sleeping, or gone. A breakpoint sequence on the
+engine's own milestones (`Host_Main` → ... → `SV_Init` → `Sys_Error`) found
+the truth in one pass: `Delta_InitFields: couldn't load file delta.lst`
+(`engine/common/net_encode.c:854`), fired before `VID_Init`, so no renderer
+existed to draw it, and the host restarted into the same error every ~3 s.
+`fork-plan.md` had already recorded that exact signature from an earlier
+phase. **Start from what the program reports or would report - `Sys_Error`,
+`Host_Error`, the log channel, the last milestone reached - before reading
+the CPU's wait loop as the fault.** A saved stack is where a thread was
+last *scheduled*, not what it is waiting for.
+
+### ALWAYS single-step off a software breakpoint before continuing on xemu's gdb stub
+
+`tools/xemu-debug.py`'s `cont()` after a `Z0` hit re-triggers the same
+breakpoint without executing the instruction: a tracer that left its
+breakpoints armed reported `WinMainCRTStartup` (and later `main`) hit
+every ~4 ms from an identical `esp` - a phantom "relaunch loop" that was
+pure round-trip latency - and 40,000 `CloseHandle` hits with zero returns.
+The tracer that removed the breakpoint before continuing, and the `break`
+subcommand (which single-steps after every hit), were the only ones that
+measured anything. **After a stop at a `Z0` address, send `s` (or remove
+that breakpoint) before `c`; an identical register set across "consecutive
+hits" means the guest never moved.**
+
+### ALWAYS run a tool's tests through the shell the tool is documented to run in
+
+`tools/xbox-xiso.sh` is documented for MSYS2 bash. Its `delta.lst` validator
+passed every fixture in an isolation harness run from Git Bash, then
+refused the real Steam `delta.lst` from the live packaging run: under
+MSYS2, an `awk -v` value of 11,686 bytes arrived as 8,184 - measured with
+`length()` inside awk, cut mid-table right after `m_fInZoom` - so every
+field after the cut was "unknown". Same gawk 5.0.0 on both sides; the exec
+path differed. (Earlier the same day, `tools/codex-review.sh` failed under
+MSYS2 because `$HOME` is not the Windows profile there.) **A pass under a
+different shell than the one the tool ships for is not a pass; put the
+documented shell in the test command.**
+
 ### NEVER trust a platform libc function you have not read or tested - a declaration is not an implementation
 
 nxdk's pdclib parses `%f`/`%e`/`%g` and then does nothing

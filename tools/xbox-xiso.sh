@@ -51,6 +51,26 @@
 # how to generate one instead of copying it - see filesystem/gameinfo.c
 # for the real algorithm to port faithfully, not guess.
 #
+# delta.lst is a hard requirement of the engine, not of any one content
+# vintage: SV_Init -> Delta_Init -> Delta_InitFields does
+# `FS_LoadFile( "delta.lst" )` and calls Sys_Error when it is missing
+# (engine/common/net_encode.c:853-854). On Xbox that error fires BEFORE
+# CL_Init/VID_Init/R_Init, so there is no renderer to draw it, and the
+# host then restarts and hits it again about every 3 s - the screen keeps
+# the nxdk boot splash forever and the CPU sits in the kernel's idle
+# wait, which is indistinguishable at a glance from a hung syscall
+# (docs/r3d/lessons.md). Found 2026-09-16 packaging a real box-retail
+# Half-Life 1.0.0.9 install, which ships no delta.lst at all - not loose,
+# not in pak0.pak (3453 entries, scanned) - because the file only exists
+# from Half-Life 1.1.0.0 on; every Steam install carries valve/delta.lst.
+# Four disc variants of that content (full, no intro videos, padded to
+# 600 MB, an 8 MB menu-only subset) all showed the identical splash-and-
+# idle signature, which is exactly why this script now refuses to pack a
+# gamedir that provides no delta.lst (loose, any case, or inside a .pak -
+# the pak directory is scanned, not guessed) unless --delta-lst names a
+# file to supply, taken from the user's own install of a later release
+# (e.g. the Steam valve/delta.lst) - never from this repository.
+#
 # Disc-size and load-time work (.mpak, X8) is deliberately NOT here, per
 # the plan: a raw, uncompressed retail tree is fine for bring-up and this
 # script does not try to be honest about anything it does not do.
@@ -100,7 +120,7 @@ title_row() {
 
 TITLE="${1:-}"
 if [ -z "$TITLE" ]; then
-	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>]" >&2
+	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>] [--delta-lst <file>]" >&2
 	exit 1
 fi
 shift
@@ -115,12 +135,14 @@ STEAM=""
 XBE=""
 OUT=""
 MENU_BAKE=""
+DELTA_LST=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--steam) STEAM="$2"; shift 2 ;;
 		--xbe) XBE="$2"; shift 2 ;;
 		--out) OUT="$2"; shift 2 ;;
 		--menu-bake) MENU_BAKE="$2"; shift 2 ;;
+		--delta-lst) DELTA_LST="$2"; shift 2 ;;
 		*) echo "xbox-xiso: unrecognised argument: $1" >&2; exit 1 ;;
 	esac
 done
@@ -183,7 +205,13 @@ echo "xbox-xiso: identity confirmed - $XBE is $TITLE, $XBE_MODULES, matching $ID
 
 GAMEDIR_SRC="$STEAM/$GAMEDIR"
 [ -f "$GAMEDIR_SRC/liblist.gam" ] || { echo "xbox-xiso: $GAMEDIR_SRC/liblist.gam not found - is --steam the Half-Life install root?" >&2; exit 1; }
-[ -f "$GAMEDIR_SRC/gameinfo.txt" ] || echo "xbox-xiso: WARNING - $GAMEDIR_SRC has no gameinfo.txt; relying on liblist.gam alone (untested path)." >&2
+# liblist.gam-only content (no gameinfo.txt - every pre-Steam, box-retail
+# install) is a tested path as of 2026-09-16: FS_ParseGameInfo derives
+# gameinfo from liblist.gam and boot proceeds through FS_Init,
+# FS_LoadGameInfo, input and server init exactly as with Steam content
+# (traced live with tools/xemu-debug.py breakpoints). What such content
+# actually lacks is delta.lst - see the gate below.
+[ -f "$GAMEDIR_SRC/gameinfo.txt" ] || echo "xbox-xiso: note - $GAMEDIR_SRC has no gameinfo.txt; the engine derives it from liblist.gam." >&2
 
 STAGE="$REPO/.sweep-xiso/$TITLE"
 rm -rf "$STAGE"
@@ -331,6 +359,323 @@ fi
 if [ "$BASEDIR" != "$GAMEDIR" ] && [ ! -f "$STAGE/$BASEDIR/liblist.gam" ]; then
 	echo "xbox-xiso: staged $BASEDIR is missing liblist.gam - copy was incomplete." >&2
 	exit 1
+fi
+
+# The delta.lst gate (see the header): the staged gamedir, or its basedir,
+# must provide delta.lst somewhere the engine's FS_LoadFile will find it -
+# a loose file in any case (the Xbox filesystem layer is case-insensitive)
+# or an entry inside any .pak, which is where pre-Steam content keeps most
+# of its files. The pak directory is read from the file's own header
+# (offset 4: directory offset, offset 8: directory size, then 64-byte
+# entries of a 56-byte NUL-padded name plus offset/size - filesystem/pak.c
+# and the Quake PACK format), NOT guessed from a grep over the raw bytes,
+# which a sound file called `delta.lst.wav` or a stray string could fool.
+PACK_MAGIC="$REPO/.sweep-xiso/.pack-magic.bin"
+printf 'PACK' > "$PACK_MAGIC"
+pak_entries() { # <pak>: "name<TAB>offset<TAB>size" per entry, name lowercased; fails on a non-PACK file
+	local off size
+	cmp -s -n 4 "$PACK_MAGIC" "$1" || return 1
+	off=$(od -An -tu4 -j4 -N4 "$1" 2>/dev/null | tr -d '[:space:]')
+	size=$(od -An -tu4 -j8 -N4 "$1" 2>/dev/null | tr -d '[:space:]')
+	case "$off$size" in *[!0-9]*|"") return 1 ;; esac
+	od -An -v -tx1 -w64 -j "$off" -N "$size" "$1" | awk '{
+		if( NF < 64 ) next
+		s = ""
+		for( i = 1; i <= 56; i++ ) {
+			if( $i == "00" ) break
+			s = s sprintf( "%c", strtonum( "0x" $i ))
+		}
+		printf "%s\t%d\t%d\n", tolower( s ), strtonum( "0x" $60 $59 $58 $57 ), strtonum( "0x" $64 $63 $62 $61 )
+	}'
+}
+# find_delta_lst <dir>: prints "loose<TAB><path>" or "pak<TAB><pak><TAB><offset><TAB><size>"
+# for the delta.lst the ENGINE would load from that directory, or fails.
+# Mirrors FS_AddGameDirectory (filesystem/searchpath.c:215-249): the
+# directory listing is sorted with Q_strcmp - byte order, case-sensitive
+# (filesystem/sys.c:123-137) - every .pak is mounted in that order and each
+# one is PREPENDED to the search list (:161-162), so the pak that sorts
+# LAST is searched first; the directory itself is added after all archives
+# and its loose files win over every pak (:244-246). Codex review round 2:
+# the first version returned the first .pak the shell glob happened to
+# yield, so a good pak0.pak would pass the gate while the engine loaded a
+# broken pak1.pak. Only .pak archives are considered - the other archive
+# types g_archives knows (.pk3, .wad) are not where retail keeps delta.lst.
+find_delta_lst() {
+	local dir="$1" loose name pak hit
+	loose=$(find "$dir" -maxdepth 1 -type f -iname delta.lst 2>/dev/null | head -n1)
+	if [ -n "$loose" ]; then
+		printf 'loose\t%s\n' "$loose"
+		return 0
+	fi
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		pak="$dir/$name"
+		if ! pak_entries "$pak" > "$REPO/.sweep-xiso/.pak-entries.txt"; then
+			echo "xbox-xiso: WARNING - $pak is not a readable PACK archive; the engine would not mount it either. Skipped." >&2
+			continue
+		fi
+		hit=$(awk -F'\t' '$1 == "delta.lst" { printf "%s\t%s", $2, $3; exit }' "$REPO/.sweep-xiso/.pak-entries.txt")
+		if [ -n "$hit" ]; then
+			printf 'pak\t%s\t%s\n' "$pak" "$hit"
+			return 0
+		fi
+	done < <(find "$dir" -maxdepth 1 -type f -iname '*.pak' -printf '%f\n' 2>/dev/null | LC_ALL=C sort -r)
+	return 1
+}
+# materialize_delta_lst <find_delta_lst line> <out>: copies the loose file,
+# or extracts the pak entry by its directory offset/size, into <out>.
+materialize_delta_lst() {
+	local kind a b c out="$2"
+	IFS=$'\t' read -r kind a b c <<<"$1"
+	case "$kind" in
+		loose) cp "$a" "$out" ;;
+		pak)
+			tail -c +$(( b + 1 )) "$a" | head -c "$c" > "$out" || return 1
+			[ "$(wc -c < "$out")" -eq "$c" ]
+			;;
+		*) return 1 ;;
+	esac
+}
+# validate_delta_lst <file> [<label>]: the same grammar Delta_InitFields
+# walks (engine/common/net_encode.c:849-885), token for token, so a file
+# that would Sys_Error there is refused here instead of being packaged
+# into the very boot loop this gate exists to prevent (Codex review round
+# 1: the first version only grepped for section names and a brace, and a
+# file made of the seven names followed by one '{' passed it). The
+# tokenizer is COM_ParseFileSafe's (public/crtlib.c:791-): anything <= ' '
+# is whitespace, `//` runs to end of line, "..." is one token, and each of
+# { } ( ) , ' is a token by itself. What is fatal in the engine is fatal
+# here: a section name outside dt_info[] (:860-865, case-insensitive
+# match), and anything but '{' - end of file included - after the
+# `<struct> <none|gamedll|clientdll> [<function>]` header (:874-879).
+# Deliberately STRICTER than the engine on three things it tolerates by
+# silently dropping data: a DEFINE_DELTA/DEFINE_DELTA_POST whose syntax
+# Delta_ParseField rejects (:660-796, Con_DPrintf and the field is lost),
+# a flag outside the DT_* set (:707-724, ignored), and a stray token or a
+# missing '}' inside a block (:809-828, skipped / parsed to end of file) -
+# a disc built from such a file boots but sends the wrong netcode, which
+# is not a packaging outcome worth reporting as success. Field NAMES are
+# checked against the engine's own per-struct tables (Delta_FindFieldInfo,
+# :505-517, Q_strcmp - exact and case-sensitive; an unknown name drops the
+# field at :678-683), derived at run time from net_encode.c's `*_DEF( x )`
+# entries and its dt_info[] struct->table mapping rather than copied here,
+# so they cannot drift from the engine (Codex review round 2). Round 2
+# also found that seven syntactically valid but EMPTY sections passed:
+# Delta_ParseTable marks a table initialized with numFields = 0
+# (:805-846), so every required section must parse at least one field.
+# The seven sections every retail delta.lst declares are required: the
+# engine asserts on the first packet that needs one it never read (:590).
+DELTA_KNOWN_STRUCTS="event_t movevars_t usercmd_t clientdata_t weapon_data_t entity_state_t entity_state_player_t custom_entity_state_t delta_test_struct_t"
+DELTA_REQUIRED_STRUCTS="clientdata_t entity_state_t entity_state_player_t custom_entity_state_t usercmd_t weapon_data_t event_t"
+delta_field_tables() { # "struct<TAB>field" per line, read out of net_encode.c itself
+	awk '
+	/^static const delta_field_t [a-z_]+\[\] *=/ {
+		match( $0, /delta_field_t [a-z_]+/ )
+		cur = substr( $0, RSTART + 14, RLENGTH - 14 )
+		next
+	}
+	cur != "" && /^};/ { cur = ""; next }
+	cur != "" && match( $0, /_DEF_?\( *[^,)]+/ ) {
+		f = substr( $0, RSTART, RLENGTH )
+		sub( /_DEF_?\( */, "", f )
+		gsub( / /, "", f )
+		tbl[cur] = tbl[cur] f "\n"
+		next
+	}
+	/^\[DT_[A-Z_0-9]+\] *= *\{ *"[a-z_]+", *[a-z_]+/ {
+		match( $0, /"[a-z_]+"/ )
+		s = substr( $0, RSTART + 1, RLENGTH - 2 )
+		rest = substr( $0, RSTART + RLENGTH )
+		match( rest, /[a-z_]+/ )
+		map[s] = substr( rest, RSTART, RLENGTH )
+	}
+	END {
+		for( s in map ) {
+			n = split( tbl[map[s]], arr, "\n" )
+			for( i = 1; i <= n; i++ ) if( arr[i] != "" ) printf "%s\t%s\n", s, arr[i]
+		}
+	}' "$REPO/engine/common/net_encode.c"
+}
+# The tables go to awk through a file, not `-v`: under the MSYS2 bash this
+# script is documented to run in, an `awk -v` value of ~11 KB reached awk
+# truncated, so the last entries of whichever struct landed at the end
+# (weapon_data_t's m_iWeaponState and later) were "unknown" and the real
+# Steam delta.lst was refused - while the same command under Git Bash
+# passed. Found in the live packaging matrix, not in the isolation tests,
+# which had run under the other shell.
+DELTA_FIELDS_FILE="$REPO/.sweep-xiso/.delta-fields.tsv"
+delta_field_tables > "$DELTA_FIELDS_FILE" || { echo "xbox-xiso: could not read the delta field tables out of engine/common/net_encode.c. Refusing to pack." >&2; exit 1; }
+for name in $DELTA_REQUIRED_STRUCTS; do
+	if [ "$(grep -c "^$name	" "$DELTA_FIELDS_FILE")" -lt 3 ]; then
+		echo "xbox-xiso: could not read $name's field table out of engine/common/net_encode.c - the delta.lst check cannot run. Refusing to pack." >&2
+		exit 1
+	fi
+done
+validate_delta_lst() {
+	local f="$1" label="${2:-$1}"
+	if [ ! -s "$f" ]; then
+		echo "xbox-xiso: $label is empty or unreadable." >&2
+		return 1
+	fi
+	awk -v label="$label" -v known="$DELTA_KNOWN_STRUCTS" -v required="$DELTA_REQUIRED_STRUCTS" -v fieldfile="$DELTA_FIELDS_FILE" '
+	function fail( msg ) { printf "xbox-xiso: %s: %s\n", label, msg > "/dev/stderr"; exit 1 }
+	function emit( t ) { if( t != "" ) { n++; tok[n] = t } }
+	function tokat( i ) { return ( i <= n ) ? tok[i] : "<end of file>" }
+	function isnum( t ) { return t ~ /^-?([0-9]+(\.[0-9]*)?|\.[0-9]+)$/ }
+	BEGIN {
+		ntbl = 0
+		while(( getline line < fieldfile ) > 0 ) {
+			sub( /\r$/, "", line )
+			if( line == "" ) continue
+			tbl[line] = 1; split( line, kv, "\t" ); tblcount[kv[1]]++; ntbl++
+		}
+		close( fieldfile )
+		if( ntbl == 0 ) fail( "internal: no field table could be read from " fieldfile )
+		RS = "\001"
+	}
+	{
+		s = $0; L = length( s ); cur = ""; n = 0
+		for( i = 1; i <= L; i++ ) {
+			c = substr( s, i, 1 )
+			if( c == "/" && substr( s, i + 1, 1 ) == "/" ) {
+				emit( cur ); cur = ""
+				while( i <= L && substr( s, i, 1 ) != "\n" ) i++
+				continue
+			}
+			if( c == "\"" ) {
+				emit( cur ); cur = ""; i++
+				while( i <= L && substr( s, i, 1 ) != "\"" ) { cur = cur substr( s, i, 1 ); i++ }
+				emit( cur ); cur = ""
+				continue
+			}
+			if( c <= " " ) { emit( cur ); cur = ""; continue }
+			if( c == "{" || c == "}" || c == "(" || c == ")" || c == "," || c == "\x27" ) { emit( cur ); cur = ""; emit( c ); continue }
+			cur = cur c
+		}
+		emit( cur )
+	}
+	END {
+		split( known, ka, " " ); for( k in ka ) if( ka[k] != "" ) isknown[tolower( ka[k] )] = 1
+		p = 1
+		if( n == 0 ) fail( "contains no tokens at all" )
+		while( p <= n ) {
+			name = tok[p++]
+			if( !( tolower( name ) in isknown )) fail( "section \x27" name "\x27 is not a struct engine/common/net_encode.c\x27s dt_info table knows - Sys_Error at net_encode.c:864" )
+			seen[tolower( name )] = 1
+			enc = tokat( p ); p++
+			if( p > n + 1 ) fail( "section " name " ends before its encode type - Sys_Error (missing \x27{\x27) at net_encode.c:878" )
+			if( tolower( enc ) != "none" ) { p++ }
+			if( tokat( p ) != "{" ) fail( "section " name ": expected \x27{\x27 after its header, found \x27" tokat( p ) "\x27 - Sys_Error at net_encode.c:878" )
+			p++
+			closed = 0
+			while( p <= n ) {
+				t = tok[p++]
+				if( t == "}" ) { closed = 1; break }
+				if( t != "DEFINE_DELTA" && t != "DEFINE_DELTA_POST" ) fail( "section " name ": unexpected token \x27" t "\x27 inside its block - the engine would skip it (net_encode.c:809-828)" )
+				post = ( t == "DEFINE_DELTA_POST" )
+				if( tokat( p ) != "(" ) fail( "section " name ": " t " not followed by \x27(\x27 (found \x27" tokat( p ) "\x27) - the field would be dropped (net_encode.c:665)" )
+				p++
+				fname = tokat( p ); p++
+				if( fname == "<end of file>" || fname ~ /^[(){},]$/ ) fail( "section " name ": " t " has no field name - the field would be dropped (net_encode.c:672)" )
+				if( tblcount[tolower( name )] > 0 && !(( tolower( name ) "\t" fname ) in tbl )) fail( "section " name ": field \x27" fname "\x27 is not in the engine\x27s " name " table - Delta_FindFieldInfo would not find it and the field would be dropped (net_encode.c:678-683)" )
+				if( tokat( p ) != "," ) fail( "section " name ": field " fname ": expected \x27,\x27 after the name, found \x27" tokat( p ) "\x27 - the field would be dropped (net_encode.c:686)" )
+				p++
+				nflags = 0
+				while( p <= n && tok[p] != "," ) {
+					if( tok[p] != "|" ) {
+						if( tok[p] !~ /^DT_(BYTE|SHORT|FLOAT|INTEGER|ANGLE|TIMEWINDOW_8|TIMEWINDOW_BIG|STRING|SIGNED)$/ ) fail( "section " name ": field " fname ": unknown flag \x27" tok[p] "\x27 - the engine would ignore it (net_encode.c:707-724) and encode the field wrongly" )
+						nflags++
+					}
+					p++
+				}
+				if( p > n ) fail( "section " name ": field " fname ": flags never end with \x27,\x27 - the field would be dropped (net_encode.c:727)" )
+				if( nflags == 0 ) fail( "section " name ": field " fname " has no DT_* flag at all" )
+				p++
+				bits = tokat( p ); p++
+				if( bits !~ /^[0-9]+$/ ) fail( "section " name ": field " fname ": bits argument \x27" bits "\x27 is not a number (net_encode.c:734-740)" )
+				if( tokat( p ) != "," ) fail( "section " name ": field " fname ": expected \x27,\x27 after bits, found \x27" tokat( p ) "\x27 - the field would be dropped (net_encode.c:743)" )
+				p++
+				mul = tokat( p ); p++
+				if( !isnum( mul )) fail( "section " name ": field " fname ": multiplier \x27" mul "\x27 is not a number (net_encode.c:750-756)" )
+				if( post ) {
+					if( tokat( p ) != "," ) fail( "section " name ": field " fname ": DEFINE_DELTA_POST expected \x27,\x27 before post_multiply, found \x27" tokat( p ) "\x27 (net_encode.c:761)" )
+					p++
+					pm = tokat( p ); p++
+					if( !isnum( pm )) fail( "section " name ": field " fname ": post_multiply \x27" pm "\x27 is not a number (net_encode.c:768-774)" )
+				}
+				if( tokat( p ) != ")" ) fail( "section " name ": field " fname ": expected \x27)\x27, found \x27" tokat( p ) "\x27 - the field would be dropped (net_encode.c:784)" )
+				p++
+				if( p <= n && tok[p] == "," ) p++
+				fields[tolower( name )]++
+			}
+			if( !closed ) fail( "section " name " is never closed with \x27}\x27 - the engine would parse to end of file and stop (net_encode.c:809)" )
+		}
+		split( required, ra, " " )
+		for( r in ra ) {
+			if( ra[r] == "" ) continue
+			if( !( tolower( ra[r] ) in seen )) fail( "has no \x27" ra[r] "\x27 section - every retail delta.lst declares it, and the engine asserts on the first packet that needs it (net_encode.c:590)" )
+			if( fields[tolower( ra[r] )] == 0 ) fail( "section " ra[r] " declares no field - the engine would mark an empty table initialized (net_encode.c:805-846) and send nothing for it" )
+		}
+		exit 0
+	}' "$f"
+}
+DELTA_CHECK="$REPO/.sweep-xiso/.delta-check.lst"
+DELTA_WHERE=""
+DELTA_FOUND=""
+DELTA_DIRS=( "$STAGE/$GAMEDIR" )
+[ "$BASEDIR" != "$GAMEDIR" ] && DELTA_DIRS+=( "$STAGE/$BASEDIR" )
+for d in "${DELTA_DIRS[@]}"; do
+	if DELTA_FOUND=$(find_delta_lst "$d"); then
+		DELTA_WHERE="${d#"$STAGE/"}"
+		break
+	fi
+done
+if [ -n "$DELTA_WHERE" ]; then
+	if [ -n "$DELTA_LST" ]; then
+		echo "xbox-xiso: $DELTA_WHERE already provides delta.lst - refusing --delta-lst, which would shadow the title's own file." >&2
+		exit 1
+	fi
+	# The title's own file gets the same parse as a supplied one: a retail
+	# tree edited by hand, or a mod's own broken delta.lst, would otherwise
+	# pack into the identical invisible loop.
+	if ! materialize_delta_lst "$DELTA_FOUND" "$DELTA_CHECK"; then
+		echo "xbox-xiso: could not read $DELTA_WHERE's delta.lst (${DELTA_FOUND//$'\t'/ }) - refusing to pack." >&2
+		exit 1
+	fi
+	if ! validate_delta_lst "$DELTA_CHECK" "$DELTA_WHERE's own delta.lst (${DELTA_FOUND//$'\t'/ })"; then
+		echo "xbox-xiso: the title's own delta.lst would not survive Delta_InitFields - refusing to pack a disc that cannot boot." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: delta.lst present in $DELTA_WHERE (${DELTA_FOUND%%$'\t'*}) and parses." >&2
+else
+	if [ -z "$DELTA_LST" ]; then
+		echo "xbox-xiso: $GAMEDIR provides no delta.lst - not loose, not inside any .pak$( [ "$BASEDIR" != "$GAMEDIR" ] && printf ' (nor does %s)' "$BASEDIR" )." >&2
+		echo "  The engine calls Sys_Error without it (engine/common/net_encode.c:854) before any" >&2
+		echo "  renderer exists to show the message: the disc would sit on the nxdk boot splash" >&2
+		echo "  and restart forever. Pre-1.1.0.0 (box-retail) Half-Life never shipped one." >&2
+		echo "  Pass --delta-lst <file> with the delta.lst from a later install of this title" >&2
+		echo "  (e.g. its Steam valve/delta.lst). Refusing to pack." >&2
+		exit 1
+	fi
+	[ -f "$DELTA_LST" ] || { echo "xbox-xiso: --delta-lst path does not exist: $DELTA_LST" >&2; exit 1; }
+	if ! validate_delta_lst "$DELTA_LST"; then
+		echo "xbox-xiso: --delta-lst $DELTA_LST failed validation - refusing to pack." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: $GAMEDIR has no delta.lst; supplying $DELTA_LST..." >&2
+	if ! cp "$DELTA_LST" "$STAGE/$GAMEDIR/delta.lst"; then
+		echo "xbox-xiso: copying $DELTA_LST into the stage failed." >&2
+		exit 1
+	fi
+	if ! cmp -s "$DELTA_LST" "$STAGE/$GAMEDIR/delta.lst"; then
+		echo "xbox-xiso: staged delta.lst differs from $DELTA_LST - copy was incomplete." >&2
+		exit 1
+	fi
+	if ! DELTA_FOUND=$(find_delta_lst "$STAGE/$GAMEDIR") || ! materialize_delta_lst "$DELTA_FOUND" "$DELTA_CHECK" || ! cmp -s "$DELTA_LST" "$DELTA_CHECK"; then
+		echo "xbox-xiso: the staged $GAMEDIR does not resolve delta.lst to the supplied file after the copy - postcondition failed." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: delta.lst supplied and verified in the stage." >&2
 fi
 
 # XM item 0 (fork-plan.md), found chasing why the animated title never

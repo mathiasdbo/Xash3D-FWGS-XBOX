@@ -2488,7 +2488,40 @@ registration unless the stock one is unusable:
       no `btns_main.bmp`, no `splash.bmp`) - a real pre-WON/box-retail
       install (in progress on the user's own machine via an InstallShield
       extraction as this is written) is what closes this step, not a
-      different Steam vintage. With a disc built from that content, confirm the
+      different Steam vintage. **Update, 2026-09-16, later the same day:
+      that install exists (`G:\Games\Half Life`, Sierra/WON 1.0.0.9 -
+      `hlversion "1009"`, `liblist.gam` only, no `gameinfo.txt`, no
+      `resource/` at all; `gfx/shell/btns_main.bmp` and `splash.bmp` live
+      inside `pak0.pak`, 3453 entries) and a disc built from it boots to
+      the real WON menu - "New game / Hazard course / Configuration / Load
+      game / Multiplayer / Previews / Quit" over the grey lambda
+      `splash.bmp`, i.e. `DRAW_WON`, the first pre-Steam boot this port has
+      done.** Two things had to be learned first. (a) That content ships
+      no `delta.lst` (the file only exists from 1.1.0.0 on), so
+      `SV_Init` → `Delta_InitFields` → `Sys_Error` fired before any
+      renderer existed and the host restarted into it every ~3 s - the
+      disc sat on the nxdk splash for as long as anyone watched, and the
+      halted CPU (kernel idle wait, a title-thread stack that happened to
+      end in `stat()`) sent the diagnosis down a `stat("D:/")` path, a
+      disc-size path, a file-count path and an intro-video path, each
+      ruled out live, before a milestone breakpoint trace read the
+      `Sys_Error` off the running engine (`docs/r3d/lessons.md`, both new
+      rules). `tools/xbox-xiso.sh` now refuses such a gamedir unless
+      `--delta-lst` supplies one from a later install (divergence #61) -
+      a packaging gate, not an engine change, since `delta.lst` is Valve
+      content like everything else on the disc. (b) **Open, the next
+      thing this step owes:** the WON bitmap button strip renders as
+      colour garbage - a field of multicoloured blocks down the right
+      half of the menu area and a yellow band along the bottom edge -
+      while the text buttons draw correctly on top of it, and the
+      `Previews` entry (WON-only) is present. That is exactly the "if the
+      strip does not survive, the buttons are wrong, not just costly"
+      case anticipated below, though the failure is corruption, not the
+      1024 cap halving it; it needs the strip's real format (8-bit
+      paletted BMP out of a pak, through `PIC_Load`) read against what
+      `ref_soft` uploads before deciding between a loader fix and
+      `GFL_RENDER_PICBUTTON_TEXT`. Not measured against the ceiling yet.
+      With a disc built from that content, confirm the
       ladder picks `splash.bmp` + the bitmap strip, check what the 1024
       cap does to the strip's atlas (if it halves, the buttons are
       wrong, not just costly), measure strip + banners against the
