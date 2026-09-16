@@ -4530,7 +4530,7 @@ candidate cause gets the cheapest test that would eliminate it, in order,
 and disproofs are recorded here so they are not re-run (`AGENTS.md`,
 "Do not guess"; `lessons.md`'s meta-rules).
 
-### XG.1 — Two yaw errors in `c0a0` (player spawns facing backwards; the guard at the door faces sideways)
+### XG.1 — Two yaw errors in `c0a0` (player spawns facing backwards; the guard at the door faces sideways) — closed on xemu, 2026-09-16; hardware pending
 
 **Observed** (2026-09-15, xemu, the X7.4 boot disc, `ref_soft`, real pad):
 (a) the player starts the tram ride facing the wrong way; (b) the security
@@ -4609,9 +4609,50 @@ XBE and one with #54, captured at the same point of the tram ride
 (`.sweep/xg1-shots/c0a0-old-spawn.png` / `c0a0-printf-spawn.png`, Valve's
 art, not committed): the old build looks backward into the car (seats and
 the rear door ahead), the fixed one looks forward down the track. **XG.1a
-is closed on xemu. What still closes XG.1: the guard (XG.1b) seen facing
-the door on the fixed build - same `"angle"` path, not yet in a frame -
-then hardware.** Two more
+is closed on xemu.**
+
+**XG.1b, 2026-09-16 - closed on xemu by direct observation, entity identity
+confirmed by reading the BSP, not inferred.** Booted the same #54-fixed
+disc through the whole tram ride to the guard's door scene and watched it
+live (your own words: "I visually verified looks ok") - the guard faces
+the door, not sideways. Not closed on a screenshot: the scene was missed
+across sixteen timed captures taken while hunting for it blind
+(`.sweep/xg1-shots/xg1b-check1.png` through `check15.png`, not committed -
+useful only as a record of the ride's own waypoints: the "Lisa
+Mennet"/"Aaron Stackpole"/"Robin Walker" credit panels, the canyon cut
+with a stray white HOM-looking triangle worth a second look some other
+day, and the reactor descent shaft's "EDUCATION:"/"ASSIGNMENT:"/
+"ADMINISTRATIVE SPONSOR:" panels), and a `changelevel` partway through
+that this session did not expect at first (review round 1 flagged the
+resulting contradiction - the account both trusted `runnerguy3`'s `c0a0`
+identity and admitted it might not hold). Checked directly rather than
+argued: the tram ride is not one map but a chain of six, each with its own
+`trigger_changelevel` read straight from every segment's own entity lump -
+`c0a0`→`c0a0a`→`c0a0b`→`c0a0c`→`c0a0d`→`c0a0e`→`c1a0`, `c0a0`'s only
+forward target being `c0a0a` - and the one `changelevel` this session
+actually saw is necessarily that first hop, since a single boot starting
+at `c0a0` cannot reach a later segment without passing through it. Every
+waypoint above, credit panels included, therefore happened inside `c0a0`
+itself, the same map `runnerguy3` was already confirmed to be placed in
+(re-verified here by decoding `c0a0.bsp`'s entity lump directly: version
+30, `runnerguy3` present, three `monster_barney` entities total, absent
+from all five later segments) - the guard scene you watched is the `c0a0`
+scene this row's causal argument is about, not a different map's. A
+same-session attempt to read the guard's angle directly -
+breaking on the server DLL's `UTIL_StringToVector` (`0x39f850` in
+`xbe-build.map`, cdecl `(float *pVector, const char *pString)`) at its
+return address and reading the output vector - returned `(0, 0, 0)` for
+an `"origin"`-shaped input (`"-1784 24 -500"`) that plainly should not
+parse to all zeroes, repeated identically many times in a few
+milliseconds of guest time. Not trusted and not chased: far likelier a
+bug in that probe script (a breakpoint/continue mechanics issue, unproven)
+than a real second parser bug, given the direct observation already
+closed this half and the shared-cause argument (XG.1a and XG.1b's
+`"angle"` reach `UTIL_StringToVector` through the identical, already
+host-verified `xbox_printf.c` conversion - one code path, no per-entity
+branch) - recorded so a future session does not reuse that address/method
+without re-deriving it. **XG.1 is closed on xemu, both halves. Hardware
+remains**, per the usual rule. Two more
 findings from the same session, recorded rather than chased: nxdk's
 `strtod`/`strtof`/`strtold` are `assert(0); return 0.0` stubs
 (`deps/nxdk/lib/xboxrt/libc_extensions/stdlib_ext_.c:89-105`) - not on
@@ -4741,7 +4782,23 @@ as XM's pad-ownership decision. No `#ifdef` that adds 180 to a yaw.
 **Exit:** both XG.1a and XG.1b gone on xemu, each with its cause named by
 `file:line` here (one cause if it is genuinely shared, two if not), the PC
 build unchanged in behaviour, and every hypothesis tried - including the
-ones that failed - recorded in this section. Real-hardware confirmation
+ones that failed - recorded in this section. **"PC unchanged" is met here
+by construction, not by running experiment 1**: the named cause and fix
+are `compat/xbox/xbox_printf.c`, a new file divergence #54 already
+documents as compiled only for the Xbox target (its own merge-risk cell:
+"not `#ifdef`-gated because the file is only ever compiled for this
+target") - no PC translation unit, object, or link input changed, so
+there is nothing for a PC build to regress on. That is a stronger claim
+than a passing PC test would have been for this specific question (did
+*this change* alter PC behaviour), though a weaker one than experiment 1
+would have given for the ORIGINAL question (is this even an Xbox bug at
+all, or would it reproduce on PC too) - that question went unanswered
+(experiment 1, "not done" above; no SDL2 dev package on this machine) and
+stays open only as a "was the diagnosis right" curiosity, not as a merge
+risk: XG.1a's own probe already read the wrong value at the server, before
+any network, renderer or platform-specific code ran, which the PC build
+shares byte-for-byte - so the diagnosis does not depend on experiment 1
+either. Real-hardware confirmation
 per the usual rule.
 
 **Tooling debt found on the way (own item, not XG.1's).**
