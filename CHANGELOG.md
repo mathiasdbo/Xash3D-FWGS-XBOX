@@ -5,6 +5,21 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — gamepad gameplay actions (jump, crouch, use, attack, ...) surviving `config.cfg`'s `unbindall`
+
+Found live during X6's own controller test: the WON menu navigated fine,
+but no gamepad button did anything once a map loaded. Root cause: retail
+Half-Life's own `config.cfg` starts with `unbindall`, wiping the full,
+already-correct default gamepad scheme `Key_Init()` sets up
+(`engine/client/input/in_keys.c`) - `config.cfg` has no idea gamepad
+buttons exist, so it never re-lists them the way it does every keyboard
+key. `Key_Unbindall_f` already had a partial fix for exactly this (it
+re-asserts `K_START_BUTTON` after the wipe so the pause menu stays
+reachable); extended to the rest of the pad (`K_JOY1`..`K_AUX32`) instead
+of adding a second mechanism next to it. Compiles clean; not yet
+re-verified in a live gameplay session (would need a full client relink,
+not just this file's own compile check) - see `docs/r3d/divergences.md`#53.
+
 ### Added — `tools/x4-triangle`: standalone NV2A bring-up, one textured triangle (X4)
 
 A separate, minimal (~280-line) XBE outside the engine entirely: initialises

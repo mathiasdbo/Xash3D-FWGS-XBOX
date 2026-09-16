@@ -373,7 +373,22 @@ static void Key_Unbindall_f( void )
 
 	// set some defaults
 	Key_SetBinding( K_ESCAPE, "cancelselect" );
-	Key_SetBinding( K_START_BUTTON, "cancelselect" );
+
+	// Restore every gamepad default (K_JOY1..K_AUX32, keydefs.h:82-125), not
+	// just START: retail's own config.cfg opens with "unbindall" then
+	// re-lists every keyboard/mouse bind it cares about, but has no idea
+	// gamepad buttons exist, so jump/duck/use/attack/... all went dead the
+	// moment a config.cfg existed - found live in a controller test,
+	// 2026-09-15. Key_Init()'s own comment already calls this out ("'unbindall'
+	// from config.cfg will be reset it"), and the single K_START_BUTTON case
+	// this replaces was upstream's own partial fix for exactly this problem;
+	// extended to the rest of the pad instead of adding a second, parallel
+	// mechanism next to it.
+	for( int i = 0; i < ARRAYSIZE( keynames ); i++ )
+	{
+		if( keynames[i].keynum >= K_JOY1 && keynames[i].keynum <= K_AUX32 )
+			Key_SetBinding( keynames[i].keynum, keynames[i].binding );
+	}
 }
 
 /*
