@@ -1960,6 +1960,36 @@ is faster" is an opinion.
 
 **Exit:** the menu is navigable with a controller.
 
+**Met under emulation, not yet closed, 2026-09-15.** No code change was
+needed - the plumbing this section already named was correct: the exit
+criterion is only met under xemu, not on hardware, and per this project's
+own rule that means X6 stays open, not closed (correction, Codex review -
+an earlier version of this entry said "closed" while saying exactly this in
+the same paragraph). `engine/client/input/in_joy.c`'s `Joy_Init()` runs
+unconditionally for any non-dedicated build (`input.c`'s `IN_Init`),
+`joy_enable` defaults on, SDL's `GameController` subsystem self-initialises
+with no Xbox-specific gate (`joy_sdl2.c`), and `3rdparty/mainui`'s own
+`Gamepad.cpp` is the same code the psvita/nswitch ports already rely on
+(`divergences.md`). This session's work was entirely verification:
+confirming the above by reading the code, then a live human test - a real
+host gamepad, already bound in xemu's own config
+(`[input.bindings] port1_driver = 'usb-xbox-gamepad'`) - navigated the WON
+main menu and started a new game with it. What closes X6: the same test,
+on a real Xbox.
+
+An unrelated curiosity hit while preparing for this test, left unresolved
+because it turned out not to matter: `.sweep/boot-attempt/
+resonance3d-x74-boot.iso` (X7.4's own headless test build) loads straight
+into `c0a0` gameplay within ~10-15s of boot with no human input, which
+looked at first like a scripted `+map` command-line argument processed via
+`Cbuf_ExecStuffCmds()` (`engine/common/host.c:1357`, `cmd.c:274-325`) -
+disabling `valve.rc`'s `stuffcmds` line on a repacked copy of that disc had
+no effect on it, and nxdk's own `xboxrt` doesn't appear to construct a real
+argv for Xbox in the first place, so that theory is wrong. Whatever
+actually drives it, it didn't get in the way of the human test above (the
+menu was present and controller-responsive regardless), so it's noted here
+rather than chased further - genuinely unknown, not a blocker.
+
 ## X7 — Game code: one XBE per title
 
 **Direction set 2026-09-11.** Half-Life, Opposing Force and Blue Shift each
@@ -2924,14 +2954,21 @@ to link against, rather than excluding VGUI-dependent code from the build
 at all. No SDK-side changes to `deps/hlsdk` were needed for this -
 `VGUI_*.h` stayed exactly as upstream ships them.
 
-One engine-side prerequisite the client module has that the stub never
-exercised, from the specialist review: `cl_dll/inputw32.cpp:31-33,148`
-drives the gamepad through `SDL_GameController`, so the engine's Xbox
-`SDL_Init` (`engine/platform/sdl2/sys_sdl2.c:151-152`, currently
-`SDL_INIT_TIMER | SDL_INIT_EVENTS` only) must add
-`SDL_INIT_GAMECONTROLLER` before `IN_Init` runs. X6's "gamepad is free"
-line is only true once that flag is there; without it the controller
-subsystem is simply absent and `IN_Init` finds no device, silently.
+**Corrected, X6 review, 2026-09-15: the prerequisite below was wrong,
+disproved by both the actual code and a live controller test.** An earlier
+specialist review claimed the client module needs
+`engine/platform/sdl2/sys_sdl2.c`'s Xbox `SDL_Init`
+(`SDL_INIT_TIMER | SDL_INIT_EVENTS` only) to add `SDL_INIT_GAMECONTROLLER`
+up front, because `cl_dll/inputw32.cpp:31-33,148` drives the gamepad
+through `SDL_GameController`. It does not need to: `IN_Init` already calls
+`Joy_Init` → `Platform_JoyInit` (`engine/client/input/in_joy.c:619`), which
+calls `SDL_InitSubSystem( SDL_INIT_GAMECONTROLLER )` itself on demand
+(`engine/platform/sdl2/joy_sdl2.c:370-371`) - and `IN_Init` runs before the
+client module loads, so the subsystem is already up by the time
+`inputw32.cpp` touches it. X6's live test (main menu navigated with a real
+gamepad, no `sys_sdl2.c` change made) confirms this end to end. No engine
+change needed here; delete this bullet's original claim rather than carry
+it forward as a live prerequisite.
 
 ### X7.4 — Half-Life first: server, then client, each a boot milestone
 
