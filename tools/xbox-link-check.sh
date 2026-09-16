@@ -752,6 +752,24 @@ for f in $ENGINE_OBJS $THIRDPARTY_OBJS $MAINUI_OBJS $STUB_GAME_OBJS "${LIBS[@]}"
 	echo "\"$(cygpath -m "$f")\"" >> "$RESPONSE"
 done
 
+# Divergence #54: compat/xbox/xbox_printf.c overrides pdclib's buffer-writing
+# printf family (pdclib's prints nothing for %f/%e/%g) by being a defined
+# direct input ahead of libpdclib.lib - lld extracts an archive member only
+# for a symbol still undefined at that point. An ordering mistake fails
+# loudly as a duplicate symbol, which this script already gates to zero;
+# the ONLY silent way back to pdclib's is the object being absent from the
+# link (a widened filter above, a renamed file). Assert presence and order
+# here, so that path fails loudly too. Found in the toolchain review of #54,
+# which proved the ordering behaviour by experiment.
+PRINTF_OBJ_LINE=$(grep -n 'compat_xbox_xbox_printf\.obj' "$RESPONSE" | head -n 1 | cut -d: -f1)
+PDCLIB_LINE=$(grep -n 'libpdclib\.lib' "$RESPONSE" | head -n 1 | cut -d: -f1)
+if [ -z "$PRINTF_OBJ_LINE" ] || [ -z "$PDCLIB_LINE" ] || [ "$PRINTF_OBJ_LINE" -ge "$PDCLIB_LINE" ]; then
+	echo "xbox-link-check: compat_xbox_xbox_printf.obj must be in the response file and precede libpdclib.lib (divergence #54)." >&2
+	echo "  printf object at line ${PRINTF_OBJ_LINE:-<absent>}, libpdclib.lib at line ${PDCLIB_LINE:-<absent>} of $RESPONSE" >&2
+	exit 1
+fi
+echo "xbox-link-check: compat printf override present (line $PRINTF_OBJ_LINE) and ahead of libpdclib.lib (line $PDCLIB_LINE)." >&2
+
 LOG="$SCRATCH/link-check.txt"
 # 1 MiB main-thread stack, overriding nxdk-link's own -stack:65536 default -
 # same value and full reasoning as tools/xbox-game-link-check.sh's

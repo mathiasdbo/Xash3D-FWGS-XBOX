@@ -54,3 +54,5 @@ Two are genuinely missing and are handled in `xbox_posix_io.c`:
 | `dirent.h` | `DIR`, `struct dirent`, `opendir`/`readdir`/`closedir` |
 | `io.h` | the underscore-prefixed CRT names `io.c` reaches for under `XASH_WIN32` |
 | `xbox_posix_io.c` | the implementation |
+| `xbox_crt_ext.c` | C library functions pdclib declares but never implemented (`atof`) |
+| `xbox_printf.c` | the buffer-writing printf family with floating point - pdclib's own parses `%f`/`%e`/`%g` and prints nothing (divergence #54) |

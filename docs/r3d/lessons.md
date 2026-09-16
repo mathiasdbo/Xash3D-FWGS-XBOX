@@ -29,6 +29,43 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### NEVER trust a platform libc function you have not read or tested - a declaration is not an implementation
+
+nxdk's pdclib parses `%f`/`%e`/`%g` and then does nothing
+(`deps/nxdk/lib/pdclib/functions/_PDCLIB/_PDCLIB_print.c:452-458`: the cases
+`break` with no output and without consuming the argument), so every
+`snprintf( "%g" )` on the Xbox produced an empty string and misaligned what
+followed - silently, with no error at compile, link or run time. It took out
+the engine's own `"angle"`→`"angles"` keyvalue conversion (`sv_game.c:5023`)
+and with it the facing of every entity placed with an `"angle"` key
+(fork-plan XG.1), and was found only because a human saw the player spawn
+backwards. The same library had already shipped a declared-but-absent
+`atof` (X1).
+
+**Before relying on a pdclib/xboxrt function that ordinary nxdk samples
+never exercise - floating-point formatting or parsing, `strto*`, locale,
+wide characters - read its implementation or run it on the host against
+the real C library.** The header will happily declare what the library
+never wrote, and nothing downstream will say so. (`strtod`/`strtof`/
+`strtold` are `assert(0); return 0.0` at `xboxrt/libc_extensions/
+stdlib_ext_.c:89-105`, waiting for their turn.)
+
+### ALWAYS confirm which map a live measurement is in before comparing it with map data
+
+XG.1's first probes compared a spawn angle read off the wire, `(0, 0, 0)`,
+with `c0a0.bsp`'s `"angle" "180"` and concluded the value was lost in the
+engine. The disc was not running `c0a0`: its test-only `userconfig.cfg`
+does `map c1a3`, whose player start has no angle, so the reading was right
+and the comparison was wrong. Caught by reading the spawn spot the SDK had
+actually chosen (origin `24 1517 47`, a `c1a3` coordinate). `verify-image`
+guards the binary; nothing guards the scene.
+
+**Read something scene-specific off the guest - an origin, a map name, an
+entity count - and match it to the data you are about to compare
+against, before the comparison.** The `verify-image` rule further down
+(a stale disc image made every breakpoint address lie) has a wrong-map
+twin, and it costs the same round.
+
 ### NEVER conclude an asset is present because the pipeline should have included it
 
 The previous project's baker discovered map assets by regex-scraping the BSP

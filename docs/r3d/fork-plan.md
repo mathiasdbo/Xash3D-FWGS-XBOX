@@ -1985,10 +1985,13 @@ looked at first like a scripted `+map` command-line argument processed via
 `Cbuf_ExecStuffCmds()` (`engine/common/host.c:1357`, `cmd.c:274-325`) -
 disabling `valve.rc`'s `stuffcmds` line on a repacked copy of that disc had
 no effect on it, and nxdk's own `xboxrt` doesn't appear to construct a real
-argv for Xbox in the first place, so that theory is wrong. Whatever
-actually drives it, it didn't get in the way of the human test above (the
-menu was present and controller-responsive regardless), so it's noted here
-rather than chased further - genuinely unknown, not a blocker.
+argv for Xbox in the first place, so that theory is wrong. **Resolved
+during XG.1 (2026-09-15): it is the disc's `valve/userconfig.cfg` - `map
+c1a3` plus `cl_showfps 2`, the X7.4 step-4 boot injection divergence #49
+already describes as test-only and not in the repo** - read straight off
+the disc after a spawn-spot probe returned `c1a3`'s player start instead
+of `c0a0`'s. It didn't get in the way of the human test above, but it did
+mislead one round of XG.1's measurements (see there).
 
 ## XM — Console-shaped menus (proposed, 2026-09-15)
 
@@ -4558,6 +4561,72 @@ player half close the guard half).
   tokenised form `UTIL_StringToVector` hands it), `"270 0"`, `"-1"`,
   `"1e2"`, `".5"`, `"360"`, `"abc"` - all twelve correct. Not the cause.
 
+**Cause found, 2026-09-15 - one cause, both halves, read from source and
+measured at both ends.** Experiment 1 turned out not to be cheap here after
+all: the only PC build in the tree is the dedicated/test configuration, and
+a PC client needs an SDL2 development package this machine does not have -
+noted, not done. So experiment 2 ran first, with `tools/xemu-debug.py`'s
+`GdbRemote` driving breakpoints from the disc's own linker map
+(`.sweep/game-hl/xbe-build.map`; guest identity confirmed with
+`verify-image` before anything was read). **Probe A** - `MSG_WriteVec3Angles`,
+the `svc_setangle` write at `sv_frame.c:545` - fired at spawn with
+`(0, 0, 0)`, in a burst of ~8 writes within 20 ms, then never again in a
+90 s window (so it is not re-sent every frame; a first reading of the hits
+as "every frame" was wrong and is dropped). **Then a correction that
+matters, found by reading the spawn spot the SDK actually selected
+(`EntSelectSpawnPoint`'s returned edict: origin `(24, 1517, 47)`): those
+first probes were not running `c0a0` at all.** The test disc's
+`userconfig.cfg` - the X7.4 boot injection divergence #49 describes,
+test-only, never in the repo - does `map c1a3`, and `c1a3`'s player start
+has no `"angle"` key, so `(0, 0, 0)` there is correct. (That is also the
+answer to X6's "loads straight into gameplay" curiosity: `userconfig.cfg`,
+not a command line.) Re-run with the disc's `userconfig.cfg` set to
+`map c0a0` - the map you reported, whose `info_player_start` says
+`"angle" "180"` (read from `c0a0.bsp`'s entity lump) - and with
+divergence #54 in the build, probe A writes **`(0, 180, 0)`**. The
+pre-fix `c0a0` number was not captured with symbols (the old build's map
+was overwritten by the fixed link); the pre-fix state rests on your
+observation and on the pdclib source, which is unambiguous. Delivery, the
+pad and the renderer are cleared for XG.1a either way: the value is right
+at the server before the network. Working back from `sv_game.c:5013-5029`: the engine
+turns `"angle"` into `"angles"` with `Q_snprintf( "%g %g %g", ... )`, which
+is `Q_vsnprintf` → plain `vsnprintf` on this platform (`public/crtlib.c:
+415-422`) → nxdk's pdclib, whose printf core **parses `%f`/`%e`/`%g` and
+does nothing**: `_PDCLIB_print.c:452-458` is `case 'f': ... case 'G':
+break;` - no output, and the `double` is never consumed, so every later
+argument is misaligned too. The SDK's `UTIL_StringToVector` parses the
+resulting `"  "` as `0 0 0`, `CBasePlayer::Spawn` copies the spot's zero
+angles and sets `fixangle`, and probe A sees `(0, 0, 0)`. XG.1b is the
+same path: the guard by the door is placed with `"angle" "270"`
+(`runnerguy3` - the one `monster_barney` in `c0a0` placed with an
+`"angle"` key; the other two carry none), so it faces yaw 0 - "sideways". Every `"angle"`-placed
+entity on the disc has been facing yaw 0, and every `%f`/`%g` on this
+platform has printed nothing. Fix: divergence #54, `compat/xbox/
+xbox_printf.c`, host-verified against the real C library, and confirmed
+live on `c0a0`: probe A reads `(0, 180, 0)` with it, and the picture agrees
+- two discs built from the same `c0a0`-booting content, one with the old
+XBE and one with #54, captured at the same point of the tram ride
+(`.sweep/xg1-shots/c0a0-old-spawn.png` / `c0a0-printf-spawn.png`, Valve's
+art, not committed): the old build looks backward into the car (seats and
+the rear door ahead), the fixed one looks forward down the track. **XG.1a
+is closed on xemu. What still closes XG.1: the guard (XG.1b) seen facing
+the door on the fixed build - same `"angle"` path, not yet in a frame -
+then hardware.** Two more
+findings from the same session, recorded rather than chased: nxdk's
+`strtod`/`strtof`/`strtold` are `assert(0); return 0.0` stubs
+(`deps/nxdk/lib/xboxrt/libc_extensions/stdlib_ext_.c:89-105`) - not on
+this path (the SDK uses `atof`, the engine `Q_atof`), but linked code does
+call one: `3rdparty/mainui/miniutl/utlbuffer.cpp:1039` calls `strtod`
+(found in review; whether that line is reached at run time is unknown),
+and whether the stub aborts or returns 0 depends on how nxdk was built
+(`NDEBUG` not confirmed either way) - a caller reaching it gets one or the
+other, never a parsed number; and the 3000-call `vsnprintf` scan never
+saw a `%g` after `SV_LoadFromFile`, most likely because per-entity logging
+spends that budget long before the first `"angle"` entity - not re-run
+with a larger budget, so a probe-budget note, not a code finding. The second pad reader (`inputw32.cpp`, below)
+stands as its own finding for XM regardless. Kept below for the record:
+the hypotheses this displaced and the probes as designed.
+
 **Verified facts that constrain the rest** (read, not assumed):
 
 - The engine, not the SDK, turns a map's `"angle"` key into `"angles"`
@@ -4674,6 +4743,22 @@ as XM's pad-ownership decision. No `#ifdef` that adds 180 to a yaw.
 build unchanged in behaviour, and every hypothesis tried - including the
 ones that failed - recorded in this section. Real-hardware confirmation
 per the usual rule.
+
+**Tooling debt found on the way (own item, not XG.1's).**
+`tools/xbox-dedicated-link-check.sh` compiles the generated server and
+client export tables (`generated_lib_server_exports.c`,
+`generated_lib_client_exports.c`, its lines 115-129) but not the two
+`ref` ones that `tools/xbox-link-check.sh:627-670` compiles
+(`generated_lib_ref_null_exports.c`, `generated_lib_ref_soft_exports.c`),
+so since X5 registered both renderers in the static library table the
+dedicated link has reported `_lib_ref_null_exports` and
+`_lib_ref_soft_exports` undefined. It predates #54 and is unrelated to it;
+the dedicated sweep still compiles cleanly and the response file's order
+is still what #54's ledger row states. Fix: either compile the two `ref`
+tables there too, or - since a dedicated server has no renderer - give the
+dedicated build its own `ref`-less library table. Whichever, the script
+should then run green and be re-added to the pre-PR checks, where a red
+result has been quietly ignorable for too long.
 
 ## X10 — First playable
 

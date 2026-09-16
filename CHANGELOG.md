@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — floating-point printf on Xbox: every entity placed with an `"angle"` key faced yaw 0 (player spawning backwards, guard facing sideways in `c0a0`)
+
+nxdk's pdclib parses `%f`/`%e`/`%g` and then prints nothing - and never
+consumes the argument, so everything after a float is misaligned as well
+(`_PDCLIB_print.c:452-458`). The engine's own `"angle"`→`"angles"` keyvalue
+conversion (`sv_game.c:5023`, `Q_snprintf( "%g %g %g" )`) therefore
+produced an empty string that the HL SDK parsed as `0 0 0`. New
+`compat/xbox/xbox_printf.c` provides the buffer-writing printf family
+(`vsnprintf`/`snprintf`/`vsprintf`/`sprintf` and the `_`-prefixed MSVC
+spellings) with real floating-point support, verified on the host against
+the C library on 77 formats. Confirmed live: with the fix in the build, booting into
+`c0a0`, the server writes the spawn `svc_setangle` as `(0, 180, 0)` - the
+map's own `"angle" "180"` - and the old build's view looks backward into
+the tram car where the fixed build's looks forward down the track. The
+guard's facing on screen and the hardware run remain -
+`docs/r3d/fork-plan.md` XG.1, `docs/r3d/divergences.md` #54. The host
+test that validated the formatter is committed as
+`tools/host-tests/printf_host_test.c`.
+
 ### Fixed — gamepad gameplay actions (jump, crouch, use, attack, ...) surviving `config.cfg`'s `unbindall`
 
 Found live during X6's own controller test: the WON menu navigated fine,
