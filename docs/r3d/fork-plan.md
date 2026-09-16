@@ -2298,22 +2298,92 @@ registration unless the stock one is unusable:
    measurement, and the alternative - freeing a screen's banner on close
    so the baseline returns - is a fork change to weigh only if the
    traversal number says the banners are what breaks the ceiling:**
-   1. Replace the `uiStatic.lowmemory` early return in `LoadBackground`
-      with a finer, Xbox-shaped gate on the owned fork (a new `uiStatic`
-      bit set from a cvar the engine registers, e.g. `ui_xbox_menu_art`,
-      so the load is switchable at runtime for measurement) - and the
-      SAME finer gate at `CBtnsManager::LoadBmpButtons` (`Btns.cpp:37`),
-      which the first draft left under `lowmemory` and therefore left the
-      pre-HL25 bitmap buttons impossible (review, round 1). The blurred
-      PicButton text (`PicButton.cpp:311`), menu sounds (`BaseMenu.cpp:
-      1000-1001`) and the font path (`FontManager.cpp:91`) stay under
-      `lowmemory` until each is measured on its own - they are not part
-      of "renders the retail art".
-   2. On Xbox, mask `GFL_HD_BACKGROUND` (at `cl_gameui.c:402-403`, engine
-      side, ledger row) so the 800x600 layout is the one tried: 12 tiles,
-      not 105 - ~2.0 MiB by the arithmetic above, well under the ceiling
-      on its own. Banding from the 16-bit store is accepted for X5's
-      renderer and is X9's to revisit.
+   1. **DONE, 2026-09-16.** Replaced the `uiStatic.lowmemory` early return
+      in `LoadBackground` and in `CBtnsManager::LoadBmpButtons`
+      (`Btns.cpp:37`, which the first draft left under `lowmemory` and
+      therefore left the pre-HL25 bitmap buttons impossible, review round
+      1) with a new engine cvar, `ui_xbox_menu_art` (`host.c`, default 1
+      on Xbox, 0 elsewhere - not read-only, unlike `host_lowmemorymode`,
+      so it can be flipped for measurement). **Found live, not in review:
+      the first implementation cached the cvar into `uiStatic` at
+      `UI_Init` time, the same place `lowmemory` is cached - but
+      `UI_Init` is exactly the point `BaseMenu.cpp`'s own comment on
+      `LoadBackground` names as too early ("can't do this in Init, since
+      these are dependent on cvar values set from user configs"), so a
+      `valve/userconfig.d/*.cfg` override was silently ignored: `s_state`
+      read `DRAW_STEAM` (background loaded) on a disc built specifically
+      to test the opposite.** Fixed by reading the cvar live at each of
+      the two call sites instead of caching it - confirmed by reading
+      `CMenuBackgroundBitmap::s_state`'s own address out of the guest's
+      memory directly (not inferred from a screenshot): `0` (`DRAW_COLOR`)
+      with the override, `2` (`DRAW_STEAM`) without, on the identical
+      binary. The blurred PicButton text (`PicButton.cpp:311`), menu
+      sounds (`BaseMenu.cpp:1000-1001`) and the font path
+      (`FontManager.cpp:91`) stay under `lowmemory` until each is
+      measured on its own - they are not part of "renders the retail
+      art". **Measured, same binary, `memstats` before/after**: `2224`
+      `VirtualMemory` pages with the gate off, `2512` with it on - a
+      **288-page (1.125 MiB) delta** for the background alone, under the
+      lower end of the ~2.0-2.6 MiB estimate above and comfortably under
+      the 3 MiB ceiling. **A second timing bug found, then a regression
+      from the first attempt at fixing it, both Codex review - net
+      result: `LoadBmpButtons()` stays exactly where upstream has it.**
+      Round 1 found `LoadBmpButtons()` was called too early to ever see a
+      `userconfig.d` override, live read or not - from `UI_Precache()`,
+      called once from the FIRST `UI_VidInit()` (`BaseMenu.cpp:1035-1038`),
+      itself called from `CL_Init` (`host.c:1282-1283`) - before
+      `userconfigd` execs (`host.c:1372-1374`; `config.cfg` execs even
+      later than `userconfigd`, so neither reaches this call site). The
+      first fix moved the call (and the `buttons_draw_size` computation
+      reading its result) into the same lazy block `LoadBackground`
+      uses. **Round 2 found that move was itself a real regression**:
+      every `CMenuPicButton` snapshots `uiStatic.buttons_draw_size` into
+      its own `size` at CONSTRUCTION time, and construction happens
+      inside `UI_Precache`'s own `entry->m_pfnPrecache()` loop - before
+      the deferred block ever runs. Deferring the call left every menu
+      button with a zero-sized interaction rectangle (mouse focus/clicks
+      read `ItemsHolder.cpp`'s `m_scSize`, not the drawn bitmap) for its
+      first frame, a cross-platform regression, not an Xbox-only risk.
+      **Reverted**: `LoadBmpButtons()`/`buttons_draw_size` are back at
+      their exact upstream call site in `UI_Precache`, unmoved. The
+      honest cost: `Btns.cpp`'s live read of `ui_xbox_menu_art` still
+      cannot see a `userconfig.d` (or even `config.cfg`) override at that
+      early point, so a same-boot A/B of the button-strip gate is not
+      possible the way the background gate's is - a genuine test needs
+      two separate builds (flip the compiled default, rebuild). **Not
+      attempted this session**: this session's own HL25 disc ships no
+      `gfx/shell/btns_main.bmp` at all, so `LoadBmpButtons()` finds
+      nothing to load either way regardless of timing or gate value -
+      this whole question only matters for the pre-HL25 profile (step 5),
+      which needs its own disc first.
+   2. **DONE, 2026-09-16, but the measurement did not confirm what it
+      changed.** Masked `GFL_HD_BACKGROUND` on Xbox
+      (`cl_gameui.c:402-403`, `#if !XASH_XBOX`, divergence row below) so
+      `hd_background 1` no longer makes `LoadSteamBackground` try
+      `resource/HD_BackgroundLayout.txt` first. **The `memstats` delta
+      before and after this change was identical (2512 pages either
+      way)** - inconclusive on whether the 800x600/12-tile layout was
+      actually what loaded before the mask too (`LoadSteamBackground`
+      only falls back to the small layout when the HD layout FILE itself
+      is missing, not when a tile it references fails to load - a
+      partial HD load stopping after roughly the same number of tiles as
+      the small layout has is a live possibility, not read out). Left
+      open rather than asserted: a live count of `s_SteamBackground`'s
+      entries (or a breakpoint on the per-tile `PIC_Load` call) would
+      settle it, not attempted this session. **A separate, unrelated
+      finding this step's testing produced, worth recording precisely so
+      it is not re-discovered as a "rendering bug" later: the retail
+      800x600 background tiles are genuine RGB(0,0,0), alpha 255, opaque
+      black - verified by reading raw pixel bytes out of
+      `resource/background/800_2_b_loading.tga` on the host, 20 random
+      samples all `(0,0,0,255)`, and cross-checked on `800_1_a_loading.tga`.
+      The menu therefore paints solid black either way, gate on or off,
+      by design of the retail content, not a `ref_soft` texture-upload
+      bug** - HL25's redesigned menu evidently puts all its visual weight
+      on the animated title layered over a plain black backdrop, not on
+      the tiled background image the classic WON menu had. Step 4's
+      measurement is where this port's own "does the menu look right"
+      question actually gets answered.
    3. Make the two background loads exclusive as described above (probe,
       prefer, load one, free on flip), so a mixed-content disc is
       measured with ONE set resident, never both.

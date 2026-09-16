@@ -399,8 +399,29 @@ static void UI_ConvertGameInfo( gameinfo2_t *out, const gameinfo_t *in )
 		SetBits( out->flags, GFL_NOSKILLS );
 	if( in->render_picbutton_text )
 		SetBits( out->flags, GFL_RENDER_PICBUTTON_TEXT );
+	// XM item 0 (fork-plan.md, step 2): masked on Xbox regardless of what
+	// the content declares. hd_background 1 makes CMenuBackgroundBitmap
+	// try resource/HD_BackgroundLayout.txt first (BackgroundBitmap.cpp)
+	// - HL25 content's own copy is a 3840x1600, 105-tile layout, ~6.9
+	// Mpixel for a 640x480 screen, against the small 800x600/12-tile
+	// layout (resource/BackgroundLayout.txt) this item's whole budget was
+	// built around. Codex review round 1, correcting an earlier version
+	// of this comment: masking this flag did NOT change the measured
+	// memstats delta (identical with and without it, both times painting
+	// the same solid-black retail art - see fork-plan.md for why that
+	// black is genuine content, not a bug) - whether the unmasked case
+	// was already falling back to the small layout, or loading a
+	// different-but-same-cost set, was not established, and no claim
+	// about the unmasked load's internal state is made here. The mask
+	// stays in on resolution grounds alone: an untested 105-tile,
+	// 6.9 Mpixel layout is not something to leave live on a 640x480,
+	// 64 MiB console regardless of what this session's numbers showed.
+	// Masking here, not in BackgroundBitmap.cpp itself, keeps the mainui
+	// fork's diff to the two lines XM item 0 already needed there.
+#if !XASH_XBOX
 	if( in->hd_background )
 		SetBits( out->flags, GFL_HD_BACKGROUND );
+#endif
 	if( in->animated_title )
 		SetBits( out->flags, GFL_ANIMATED_TITLE );
 }

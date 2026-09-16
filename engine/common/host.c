@@ -1238,6 +1238,28 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 	Cvar_Getf( "host_ver", FCVAR_READ_ONLY, "detailed info about this build", "%i " XASH_VERSION " %s %s %s", Q_buildnum(), Q_buildos(), Q_buildarch(), g_buildcommit);
 	Cvar_Getf( "host_lowmemorymode", FCVAR_READ_ONLY, "indicates if engine compiled for low RAM consumption (0 - normal, 1 - low engine limits, 2 - low protocol limits)", "%i", XASH_LOW_MEMORY );
 
+	// XM item 0 (fork-plan.md): host_lowmemorymode is one flag doing several
+	// unrelated jobs on Xbox - MAX_MODELS/SINGLEPLAYER_BACKUP sizing,
+	// ref_soft's MAX_TEXTURES, AND (found while chasing the flat-grey menu)
+	// CMenuBackgroundBitmap::LoadBackground and CBtnsManager::LoadBmpButtons
+	// both returning before loading anything. The retail menu art fits the
+	// budget once baked (XM item 0's arithmetic); the rest of
+	// XASH_LOW_MEMORY's effects are untouched. This cvar is the finer gate
+	// mainui reads instead of uiStatic.lowmemory for exactly those two
+	// loads. NOT read-only, unlike host_lowmemorymode: XM item 0's own
+	// measurement work flips it at runtime to A/B the memstats delta with
+	// and without the retail art loaded, on the same build.
+	//
+	// Registration itself is #if XASH_XBOX, not just its default value -
+	// Codex review round 1: an unconditional Cvar_Getf here would reserve
+	// this name and register Xbox-only-meaningful behaviour on every
+	// platform for no reason (host_lowmemorymode being 0 elsewhere makes
+	// the mainui-side gates inert regardless, but the registration itself
+	// has no reason to exist off Xbox).
+#if XASH_XBOX
+	Cvar_Getf( "ui_xbox_menu_art", 0, "load the menu background/button strip even under host_lowmemorymode (XM item 0 gate; toggle for before/after memstats comparison)", "%i", 1 );
+#endif
+
 	Cvar_Get( "host_hl25_extended_structs",
 #if SUPPORT_HL25_EXTENDED_STRUCTS
 		"1",

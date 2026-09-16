@@ -5,6 +5,28 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the flat-grey Xbox main menu: retail background/button-strip art now loads
+
+`XASH_LOW_MEMORY` (X3) blocked the retail menu background (and the
+pre-HL25 button strip) from loading at all, alongside several unrelated
+memory-saving effects. A new, finer, non-read-only cvar
+(`ui_xbox_menu_art`, default on for Xbox) lets the background load run
+independently, read live and confirmed with a `userconfig.d` override -
+measured at a 1.125 MiB cost on the same binary (`memstats`, gate on vs
+off). The button-strip half of the gate could not be made
+config-toggleable within one build without a real regression (every menu
+button snapshots its hit-rectangle size at construction time, before any
+config-reactive load could run) - reverted to upstream's own load timing
+after Codex review caught it; a genuine A/B needs two builds, and this
+session's own disc has no button-strip art to test with regardless.
+`GFL_HD_BACKGROUND` is masked on Xbox so a 25th-anniversary disc's
+`hd_background 1` does not try a 105-tile, 3840x1600 background layout on
+a 640x480 screen. Confirmed live by reading the guest's own memory (not a
+screenshot): the retail 800x600 background tiles are genuinely opaque
+black by design - not a rendering bug - so the animated title (a
+follow-up step) is where this port's actual "does the menu look right"
+question gets answered.
+
 ### Changed — `mainui` (and its nested `miniutl`) moved to owned forks
 
 XM's "Where the code lives" prerequisite: substantive menu-screen changes
