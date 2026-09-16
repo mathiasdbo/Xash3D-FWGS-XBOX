@@ -5,6 +5,30 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — gamepad gameplay actions (jump, crouch, use, attack, ...) surviving `config.cfg`'s `unbindall`
+
+Found live during X6's own controller test: the WON menu navigated fine,
+but no gamepad button did anything once a map loaded. Root cause: retail
+Half-Life's own `config.cfg` starts with `unbindall`, wiping the full,
+already-correct default gamepad scheme `Key_Init()` sets up
+(`engine/client/input/in_keys.c`) - `config.cfg` has no idea gamepad
+buttons exist, so it never re-lists them the way it does every keyboard
+key. Fixed with a new, Xbox-only, one-shot `Key_SeedGamepadDefaults()`
+called from `Host_InitCommon` right after `config.cfg` runs: it fills in
+the compiled defaults for any gamepad key still empty, then sets an
+archived marker cvar (`joy_binds_seeded`) so it never runs again for that
+config - a legacy keyboard-only config gets the defaults once, a config
+that already carries gamepad state (including a bind the player cleared
+on purpose in the Controls menu) is left exactly as saved, and `unbindall`
+/`resetkeys` keep their upstream semantics everywhere. Two Codex rounds
+shaped this: the first version changed `unbindall` itself, which would
+have altered shared behaviour for PC users and mod scripts, and was
+dropped.
+
+Compiles clean; not yet re-verified in a live gameplay session or through
+the real Controls menu (would need a full client relink, not just this
+file's own compile check) - see `docs/r3d/divergences.md`#53.
+
 ### Verified under xemu — the WON menu is navigable with a controller (X6, not yet closed)
 
 No code change: `engine/client/input/in_joy.c`'s joystick support and

@@ -1234,6 +1234,7 @@ void CL_PlayVideo_f( void );
 int Key_IsDown( int keynum );
 void Key_Event( int key, int down );
 void Key_Init( void );
+void Key_SeedGamepadDefaults( void );
 void Key_WriteBindings( file_t *f );
 const char *Key_GetBinding( int keynum );
 void Key_SetBinding( int keynum, const char *binding );
