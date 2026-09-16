@@ -4518,6 +4518,163 @@ all** — nothing before this phase has a consumer for that shape. Treat the
 first hardware run of this phase as a validation of XB's baked format, not
 only of the backend, and be ready for the bug to be in the bake.
 
+## XG — Gameplay-fidelity bugs seen live (open ledger and triage plan)
+
+**Status: open, drafted 2026-09-15.** The place for bugs a human sees while
+playing a real build - as opposed to bring-up blockers, which each X phase
+owns. Rule for every row: no fix is attempted from a hypothesis; each
+candidate cause gets the cheapest test that would eliminate it, in order,
+and disproofs are recorded here so they are not re-run (`AGENTS.md`,
+"Do not guess"; `lessons.md`'s meta-rules).
+
+### XG.1 — Two yaw errors in `c0a0` (player spawns facing backwards; the guard at the door faces sideways)
+
+**Observed** (2026-09-15, xemu, the X7.4 boot disc, `ref_soft`, real pad):
+(a) the player starts the tram ride facing the wrong way; (b) the security
+guard banging on the door - a `scripted_sequence` at the tram's end - stands
+turned to the side instead of facing the door. Both are *yaw* wrong, on
+the same build, in the same map; one shared cause is likelier than two
+unrelated bugs, and the first suspicion was angle math ("is pi wrong?").
+They are still tracked as two: **XG.1a** is the player's *view* yaw
+(`cl.viewangles`, a client-side value fed by `svc_setangle` and then by
+input), **XG.1b** is the guard's *model* yaw (an entity's `angles`,
+delivered by delta and transformed by the renderer) - different code
+paths, so a candidate cause must explain and clear BOTH before it closes
+XG.1; a cause that clears one closes that half only (review, 2026-09-15:
+the first draft's "stop at the first named cause" would have let the
+player half close the guard half).
+
+**Eliminated already, by test, same day:**
+
+- **The Xbox `atof`.** nxdk's pdclib declares `atof`/`strtod` but never
+  implemented them (its own `TODO` at `pdclib/include/stdlib.h:29`); this
+  port's `compat/xbox/xbox_crt_ext.c` supplies a hand-written `atof`, and
+  the HL SDK routes every map angle through `atof` (`dlls/util.cpp:1412`
+  in `UTIL_StringToVector`, `:2018` for scalar fields) - a wrong parser
+  there would make every entity face yaw 0, which is exactly what both
+  symptoms look like. Tested on the host, since it is plain C: compile
+  `compat/xbox/xbox_crt_ext.c` with `-Datof=xbox_atof`, call it on
+  `"180"`, `"270"`, `"-90"`, `"45.5"`, `"  90"`, `"0 270 0"` (the
+  tokenised form `UTIL_StringToVector` hands it), `"270 0"`, `"-1"`,
+  `"1e2"`, `".5"`, `"360"`, `"abc"` - all twelve correct. Not the cause.
+
+**Verified facts that constrain the rest** (read, not assumed):
+
+- The engine, not the SDK, turns a map's `"angle"` key into `"angles"`
+  before the game DLL sees it, using its own `Q_atof`, with the `-1`/`-2`
+  up/down special cases (`engine/server/sv_game.c:5013-5029`) - portable
+  code, shared with PC.
+- The player's facing at spawn is a server → client message: the server
+  writes `svc_setangle` with `v.angles` whenever `v.fixangle == 1`
+  (`engine/server/sv_frame.c:541-554`), and the client copies it straight
+  into `cl.viewangles` (`CL_ParseSetAngle`, `engine/client/parse/
+  cl_parse.c:1237-1240`). Anything that then *adds* to `cl.viewangles`
+  every frame can undo it.
+- A studio model's orientation is `R_StudioSetUpTransform` →
+  `Matrix3x4_CreateFromEntity( angles, origin )` (`ref/soft/r_studio.c:
+  523-541`), with the "stupid quake bug" pitch flip gated on
+  `ENGINE_COMPENSATE_QUAKE_BUG` (`:534-535`) - pitch only; a yaw error is
+  not that flag.
+- nxdk's libm is one x87 instruction per function (`deps/nxdk/lib/pdclib/
+  platform/xbox/functions/math/`: `sin.c`/`cos.c` are `fsin`/`fcos`,
+  `atan2.c` is `fpatan` with `x` in `st(0)` and `y` in `st(1)`, `fmod.c` a
+  single `fprem`), and `M_PI` is the full constant (`platform/xbox/include/
+  math.h:45`). Read against the x87 operand rules, the orders are right,
+  and one `fprem` pass is exact for angle-sized quotients - a lower prior
+  than it first seemed, but not eliminated: no test has run it yet.
+- **The pad is read twice.** X6 confirmed the engine's own path
+  (`in_joy.c` / `joy_sdl2.c`). Separately, the HL SDK's client DLL opens
+  the same `SDL_GameController` itself (`deps/hlsdk/cl_dll/inputw32.cpp:
+  748`), reads its axes (`:790-796`), and `IN_JoyMove` (`:953`) adds stick
+  deflection to `viewangles` every frame (`:1034`, `:1083-1105`) when
+  `in_joystick` is on - and retail's own `controller.cfg`, exec'd from
+  `valve.rc`, sets `joystick "1"` and `joyadvanced "1"` with the DirectInput
+  axis map (`joyadvaxisx 3`, `joyadvaxisy 1`, `joyadvaxisr 2`,
+  `joyadvaxisz 4`). Two readers of one pad means at minimum double look
+  sensitivity; and any rest offset in the SDK's axis read becomes a steady
+  yaw drift, which in a still screenshot taken seconds after spawn looks
+  exactly like "spawned facing the wrong way". This is a real finding on
+  its own, whatever XG.1's cause turns out to be, and belongs to XM's
+  controller work (one path, the engine's, should own the pad).
+
+**Experiments, cheapest and most decisive first. Stop only when the named
+cause explains and clears both XG.1a and XG.1b; otherwise the remaining
+half keeps going down the list.**
+
+1. **PC first.** Run this fork's PC build on the same `valve/` content,
+   `map c0a0`. If both symptoms reproduce on PC, this is not an Xbox bug
+   at all - look at what this fork changed in the engine or on the owned
+   `deps/hlsdk` `resonance3d` branch (divergences #44, #49), and stop
+   reading Xbox code.
+2. **Read the values, don't infer them - as two ordered probes, because
+   a single halt cannot compare server and client state that is not yet
+   in flight.** On a normal new game, `SV_PutClientInServer` only calls
+   the DLL's `pfnClientPutInServer`; its own inline `svc_setangle` is the
+   load-game path only (`engine/server/sv_client.c:1294-1302`,
+   `:1333-1356`, found in review), so the spawn angle reaches the client
+   later, from `fixangle` in the next frame's clientdata
+   (`sv_frame.c:540-554`) - a halt at `SV_PutClientInServer` would read a
+   correct server edict beside a necessarily stale `cl.viewangles` and
+   falsely blame the delivery path. Instead (`tools/xemu-debug.py break`
+   on a `verify-image`-confirmed guest, offsets from
+   `tools/xbox-offsetof.sh`): **probe A, server**, at `sv_frame.c:541`
+   before `:554` clears it - the player edict's `v.angles` and
+   `v.fixangle`, and for XG.1b the guard edict's `v.angles` and
+   `v.ideal_yaw`; **probe B, client, at two points in the same datagram** - the server
+   writes clientdata (carrying `svc_setangle`) before the entity update
+   (`sv_frame.c:688-689`), and the client applies entity state only when
+   the later `svc_packetentities`/`svc_deltapacketentities` is parsed
+   (`cl_parse.c:2658-2666`, found in review round 2), so one halt cannot
+   serve both halves: for XG.1a, on the return of `CL_ParseSetAngle`
+   (`cl_parse.c:1237-1240`), `cl.viewangles` before any input has run
+   that frame; for XG.1b, on the return of `CL_ParsePacketEntities` for
+   that same datagram, the guard's `cl_entity_t` `curstate.angles`/
+   `latched.prevangles`, correlated with the server frame sequence probe
+   A was taken in; **probe C**, the same client reads one `Host_Frame`
+   later, so a per-frame change is drift from input (see 3), not
+   delivery. Compare
+   all of it with the map's own numbers - `info_player_start`'s `"angle"`
+   and the guard/`scripted_sequence` `"angles"` from the BSP entity lump.
+   A right, B wrong → delivery; A already wrong → entity parsing or the
+   SDK; A and B right, C moving → input; everything right and only the
+   picture wrong → the renderer (see 4). Each verdict is per half.
+3. **Turn off one pad reader at a time.** Repack the test disc with a
+   `valve/userconfig.d/xg.cfg` (executed after `config.cfg`,
+   `host.c:1346-1348`): first `joystick 0` (SDK reader off), then
+   `joy_enable 0` (engine reader off). This experiment speaks to XG.1a
+   only: the SDK reader touches the player's `viewangles`
+   (`inputw32.cpp:1067-1089`) and nothing else, so it cannot explain the
+   guard. If the player's facing is right with the SDK reader off, XG.1a
+   is the double read - and the fix is XM's decision about which path
+   owns the pad, recorded in the ledger, not a yaw hack - while XG.1b
+   continues from probe A/B's own verdict.
+4. **Only if 2 says the render is wrong:** a libm probe. Either a
+   `tools/x4-triangle`-style standalone XBE, or a `XASH_ENGINE_TESTS`-style
+   self-test (`engine/common/tests.h` has no math test today), printing
+   `sinf`/`cosf`/`atan2f`/`fmodf` at 0/90/180/270 degrees through
+   `DEG2RAD`/`M_PI_F` and `AngleVectors( (0,180,0) )` (expected forward
+   `(-1,0,0)`) over the log channel. A wrong number here indicts the x87
+   wrappers or the `-march=pentium3 -fno-builtin` float path; a right one
+   eliminates libm for good.
+5. **Cheap side check, any time:** confirm `GetEngineFeatures` is in the
+   generated server export table (`tools/xbox-gen-exports.sh`'s output)
+   and read `host.features` on the guest. A missing export silently drops
+   `ENGINE_COMPENSATE_QUAKE_BUG` and the step-lerp features - pitch and
+   smoothness, not yaw, so it cannot be XG.1's cause, but it is the kind
+   of silent gap this port has hit before (#34) and costs one read.
+
+**Fix policy.** Whatever 1-5 names gets fixed where it lives, in the
+cheapest form on the ledger: an SDK cause on the owned `deps/hlsdk`
+branch (#44's precedent, and then the same fix noted for `hlsdk-opfor`/
+`hlsdk-bshift`), an engine cause with a ledger row, a double-read cause
+as XM's pad-ownership decision. No `#ifdef` that adds 180 to a yaw.
+
+**Exit:** both XG.1a and XG.1b gone on xemu, each with its cause named by
+`file:line` here (one cause if it is genuinely shared, two if not), the PC
+build unchanged in behaviour, and every hypothesis tried - including the
+ones that failed - recorded in this section. Real-hardware confirmation
+per the usual rule.
+
 ## X10 — First playable
 
 Full campaign start to finish on real hardware, with HUD, audio, input and
