@@ -27,20 +27,29 @@
 #
 # gameinfo.txt/liblist.gam need NO generation step here, and this script
 # does not attempt one: the real Steam install already ships both, written
-# by the modern Xash3D FWGS build Valve now distributes Half-Life with
-# (verified directly against a real local install, 2026-09-16 - every
-# title's gamedir already carries a gameinfo.txt whose fields match what
-# filesystem/gameinfo.c's FS_InitGameInfo/FS_ParseGenericGameInfo would
-# derive from that same gamedir's liblist.gam, so "as upstream generates
-# it" in this phase's plan means "ship the file upstream already
-# generated", not "regenerate it here"). Likewise video.cfg: retail's own
-# already sets `r_refdll ""`, which is what selects ref_soft (X5) - the
-# numeric fields (resolution, refresh, fullscreen) are read but overridden
-# by the Xbox video path's own hardcoded 640x480 (divergence #50), so
-# retail's copy needs no Xbox-specific edit. If either fact ever stops
-# holding for a title, this is the file to teach how to generate one
-# instead of copying it - see filesystem/gameinfo.c for the real algorithm
-# to port faithfully, not guess.
+# by the modern Xash3D FWGS build Valve now distributes Half-Life with.
+# **Corrected 2026-09-16, XM item 0**: an earlier version of this comment
+# claimed gameinfo.txt's fields always match what deriving from that same
+# gamedir's liblist.gam would give - checked directly and wrong for two
+# fields. filesystem/gameinfo.c's FS_ParseGameInfo prefers gameinfo.txt
+# whenever it exists and is not older than liblist.gam - true on the real
+# Steam install - and does not re-derive from liblist.gam in that case;
+# the real gameinfo.txt has no animated_title/hd_background line at all,
+# even though liblist.gam sets both to 1, so a disc packaged by copying
+# both files verbatim never sets GFL_ANIMATED_TITLE/GFL_HD_BACKGROUND
+# regardless of liblist.gam's own content - found live, chasing why the
+# animated title never drew (`CMenuAnimatedBanner::TryLoad` never even
+# gets called). This script now copies those two fields from liblist.gam
+# into gameinfo.txt when the latter is missing them (see
+# sync_gameinfo_hl25_flags below) - forwarding what the disc's own
+# liblist.gam already says, not inventing a value. Likewise video.cfg:
+# retail's own already sets `r_refdll ""`, which is what selects ref_soft
+# (X5) - the numeric fields (resolution, refresh, fullscreen) are read
+# but overridden by the Xbox video path's own hardcoded 640x480
+# (divergence #50), so retail's copy needs no Xbox-specific edit. If
+# either fact ever stops holding for a title, this is the file to teach
+# how to generate one instead of copying it - see filesystem/gameinfo.c
+# for the real algorithm to port faithfully, not guess.
 #
 # Disc-size and load-time work (.mpak, X8) is deliberately NOT here, per
 # the plan: a raw, uncompressed retail tree is fine for bring-up and this
@@ -219,6 +228,82 @@ if [ ! -f "$STAGE/$GAMEDIR/liblist.gam" ]; then
 fi
 if [ "$BASEDIR" != "$GAMEDIR" ] && [ ! -f "$STAGE/$BASEDIR/liblist.gam" ]; then
 	echo "xbox-xiso: staged $BASEDIR is missing liblist.gam - copy was incomplete." >&2
+	exit 1
+fi
+
+# XM item 0 (fork-plan.md), found chasing why the animated title never
+# drew on a real disc: this header's own "gameinfo.txt already carries
+# everything liblist.gam does" claim is wrong for exactly two fields.
+# filesystem/gameinfo.c's FS_ParseGameInfo prefers gameinfo.txt over
+# liblist.gam whenever gameinfo.txt exists and is not older than
+# liblist.gam - true on the real Steam install (gameinfo.txt's mtime is
+# the later one) - and never falls back to re-deriving from liblist.gam
+# in that case. The real gameinfo.txt (checked directly, not assumed)
+# has no animated_title or hd_background line at all, even though
+# liblist.gam sets both to 1 - so GFL_ANIMATED_TITLE/GFL_HD_BACKGROUND
+# are never set from a disc packaged by copying both files verbatim, no
+# matter what liblist.gam says. Confirmed live: a breakpoint on
+# CMenuAnimatedBanner::TryLoad never fired, even from a guest reset, on
+# a disc with all eleven logo*.tga files present and readable.
+# Fix, not a guess: copy forward exactly what THIS disc's own liblist.gam
+# already says, for these two fields only, only when gameinfo.txt is
+# missing them - never invented, never applied to a title whose
+# liblist.gam does not set the flag.
+# Codex review round 1: the first version used grep's exit status as a
+# plain boolean (found/not-found), which is wrong - grep exits 1 for "no
+# match" but ALSO anything >1 for a real error (missing file mid-run,
+# I/O failure, a broken regex), and `set -u` alone does not catch either
+# the misread or an unchecked `printf ... >>` append failing on a
+# read-only or full filesystem. Any of those would have left gameinfo.txt
+# silently unchanged while this script still reported a successful pack -
+# recreating the exact missing-title failure this fix exists to close,
+# invisibly. grep_status EXPLICITLY distinguishes "no match" (1, expected,
+# keep going) from anything else (a real error, fail loudly); the append
+# is checked; and the whole function's exit status is checked by its
+# caller, which now also re-reads the flag straight back out of the
+# staged file afterward as the actual postcondition - not "the append
+# command returned 0", but "the file now contains what was asked for".
+grep_status() { # <pattern> <file>: echoes 0=match 1=no-match 2=error, distinct from $?
+	local rc
+	grep -qiE "$1" "$2"; rc=$?
+	if [ "$rc" -gt 1 ]; then
+		echo "xbox-xiso: grep failed reading $2 (exit $rc) - not treating that as 'no match'." >&2
+		return 2
+	fi
+	return "$rc"
+}
+sync_gameinfo_hl25_flags() {
+	local liblist="$1/liblist.gam" gameinfo="$1/gameinfo.txt"
+	[ -f "$liblist" ] && [ -f "$gameinfo" ] || return 0
+	local key already liblist_has
+	for key in animated_title hd_background; do
+		grep_status "^[[:space:]]*${key}[[:space:]]" "$gameinfo"; already=$?
+		case "$already" in
+			0) continue ;;
+			2) return 1 ;;
+		esac
+		grep_status "^[[:space:]]*${key}[[:space:]]+\"?1\"?[[:space:]]*(//.*)?\$" "$liblist"; liblist_has=$?
+		case "$liblist_has" in
+			1) continue ;;
+			2) return 1 ;;
+		esac
+		if ! printf '%s\t\t"1"\n' "$key" >> "$gameinfo"; then
+			echo "xbox-xiso: could not append $key to $gameinfo (append failed)." >&2
+			return 1
+		fi
+		if ! grep -qiE "^[[:space:]]*${key}[[:space:]]" "$gameinfo"; then
+			echo "xbox-xiso: appended $key to $gameinfo but it still does not read back - refusing to pack a disc this fix silently failed on." >&2
+			return 1
+		fi
+		echo "xbox-xiso: $gameinfo had no $key line but $liblist sets it - added $key \"1\"." >&2
+	done
+}
+if ! sync_gameinfo_hl25_flags "$STAGE/$GAMEDIR"; then
+	echo "xbox-xiso: syncing HL25 gameinfo flags for $GAMEDIR failed." >&2
+	exit 1
+fi
+if [ "$BASEDIR" != "$GAMEDIR" ] && ! sync_gameinfo_hl25_flags "$STAGE/$BASEDIR"; then
+	echo "xbox-xiso: syncing HL25 gameinfo flags for $BASEDIR failed." >&2
 	exit 1
 fi
 

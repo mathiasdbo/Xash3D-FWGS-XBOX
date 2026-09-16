@@ -5,6 +5,24 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the animated HL25 main-menu title now draws
+
+`tools/xbox-xiso.sh` now copies `animated_title`/`hd_background` from a
+staged disc's `liblist.gam` into its `gameinfo.txt` when the latter is
+missing them. The real Steam install's `gameinfo.txt` has neither field,
+even though `liblist.gam` sets both to `1` and the engine's own
+`FS_ParseGameInfo` prefers an up-to-date `gameinfo.txt` over re-deriving
+from `liblist.gam` - so a disc packaged by copying both files verbatim
+never set `GFL_ANIMATED_TITLE`, and the animated logo never drew.
+Confirmed fixed live: `CMenuAnimatedBanner::TryLoad` now fires and
+returns true, and the real "HALF-LIFE" title draws over its blurred
+parallax backdrop, animating between captures a few seconds apart.
+Measured cost, same binary: 1324 `VirtualMemory` pages (5.17 MiB) -
+busts the 3 MiB per-profile budget on its own, matching this port's own
+~5.2 MiB estimate closely; an offline bake (not done yet) is the planned
+next step. Also corrects an earlier, wrong claim (X7.5) that a real
+disc's `gameinfo.txt` always carries everything its `liblist.gam` does.
+
 ### Fixed — the flat-grey Xbox main menu: retail background/button-strip art now loads
 
 `XASH_LOW_MEMORY` (X3) blocked the retail menu background (and the

@@ -2387,17 +2387,54 @@ registration unless the stock one is unusable:
    3. Make the two background loads exclusive as described above (probe,
       prefer, load one, free on flip), so a mixed-content disc is
       measured with ONE set resident, never both.
-   4. Confirm the animated title draws as-is (it needs nothing: ungated,
-      all eleven TGAs on the disc, `PIC_Set`/`PIC_DrawTrans` implemented by
-      `ref_soft`) and measure it - `ref_soft`'s translucent-pic path is
-      the thing to look at if it renders as a solid block (Ferrum56 hit
-      exactly that, an unpremultiplied-alpha bug, `CHANGELOG.md:1403-
-      1466`). At ~5.2 MiB it is expected to bust the ceiling on top of
-      the background; the first response is the stage-B bake (~2.1
-      MiB, above), and only if the BAKED animated set still busts the
-      ceiling do the fallbacks apply - the sharp logo plus the two blip
-      layers, no blurred backdrop (~0.9 MiB retail, ~0.4 baked), then
-      `logo.tga` alone (~310 KiB). The numbers decide, recorded here.
+   4. **DONE, 2026-09-16 - and it needed one more fix than "confirm it
+      draws as-is".** First attempt: nothing drew, on a disc with all
+      eleven TGAs present and readable. Diagnosed by breaking on
+      `CMenuAnimatedBanner::TryLoad` (not by guessing from the black
+      screen) - the breakpoint never fired, even from a guest reset, so
+      `Main.cpp:271`'s `if( FBitSet( gMenu.m_gameinfo.flags,
+      GFL_ANIMATED_TITLE ))` was taking the FALSE branch and adding
+      `movieBanner` instead (itself correctly invisible on Xbox, per
+      XG.1... no, per this same item's own earlier finding on `logo.avi`).
+      **Root cause, checked directly against the real Steam install, not
+      assumed: `gameinfo.txt` does not carry `animated_title`/
+      `hd_background` at all, even though `liblist.gam` sets both to 1**
+      - and `filesystem/gameinfo.c`'s `FS_ParseGameInfo` prefers
+      `gameinfo.txt` whenever it exists and is not older than
+      `liblist.gam` (true here: real mtimes checked), never re-deriving
+      from `liblist.gam` in that case. This corrects this session's own
+      earlier claim (X7.5, "gameinfo.txt already carries everything
+      liblist.gam does") - wrong for exactly these two fields, and it is
+      also the real explanation for step 2's "measured inconclusive"
+      result: `GFL_HD_BACKGROUND` was never being set from this disc
+      either way, mask or no mask, so masking it changed nothing to
+      measure. **Fix**: `tools/xbox-xiso.sh` now copies `animated_title`/
+      `hd_background` from a staged gamedir's `liblist.gam` into its
+      `gameinfo.txt` when the latter is missing them - forwarding what
+      the disc's own `liblist.gam` already says, never inventing a value,
+      never touching a title whose `liblist.gam` doesn't set the flag.
+      **Confirmed after the fix**: `TryLoad()` now fires and returns true
+      (read directly from the guest, not inferred), and the screenshot
+      shows the real HL25 title - "HALF-LIFE" over the blurred parallax
+      backdrop, drifting between two captures a few seconds apart. No
+      alpha bug like Ferrum56's (`CHANGELOG.md:1403-1466`) - the blend
+      looked correct on sight, not separately measured pixel-by-pixel.
+      **Measured, same binary (`menuart5.xbe`), same-session**: `2512`
+      `VirtualMemory` pages with only the background loaded (title
+      correctly skipped, pre-fix disc) vs `3836` with the title fully
+      loaded too - a **1324-page (5.17 MiB) delta**, matching the
+      ~5.2 MiB estimate closely. Comfortably busts the 3 MiB ceiling on
+      its own, exactly as predicted - the stage-B bake (~2.1 MiB
+      estimate above) is the next real step, not yet done. **A second,
+      smaller measurement, worth recording on its own**: hiding just ONE
+      of the eleven required TGAs (so `TryLoad()` fails and adds no
+      banner at all) only recovered ~256 pages (1.0 MiB) against the
+      full title's 1324 - most of the other ten files' textures stayed
+      resident despite the failed load adding nothing visible, matching
+      `CImage`'s documented no-unload-on-failure design (`Image.h:40-44`,
+      already named in this item's own arithmetic section) - a real,
+      measured consequence of that design, not just a theoretical risk
+      from reading the header comment.
    5. Pre-HL25 profile: with a disc built from older content (the user
       supplies it - the local Steam install is HL25 only), confirm the
       ladder picks `splash.bmp` + the bitmap strip, check what the 1024
