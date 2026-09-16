@@ -5,6 +5,18 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `tools/xbox-xiso.sh`: one real, packaged XISO per title
+
+Assembles a bootable disc from a real Steam Half-Life install and an
+already-built `default.xbe`: copies the title's gamedir and basedir,
+drops in the XBE, packs with `extract-xiso`. No retail content is copied
+into the repo. `gameinfo.txt`/`video.cfg` need no generation or editing -
+checked directly against a real install, both are already what the
+Xbox target needs, verbatim. `hl` verified end to end: packed, booted in
+xemu with no test-only shortcuts, reached the real WON main menu.
+`op4`/`bshift` are wired into the title table for when their XBEs exist
+(X7.6) but not yet tested.
+
 ### Fixed — dedicated-server link check reported `_lib_ref_null_exports`/`_lib_ref_soft_exports` undefined
 
 `engine/platform/misc/lib_static.c` includes the repo-wide generated

@@ -665,6 +665,34 @@ if [ -n "$XBE_OUT" ]; then
 		exit 1
 	fi
 	echo "xbox-game-link-check: $XBE_OUT is a real, valid XBE ($(wc -c < "$XBE_OUT") bytes)." >&2
+	# Title/completeness sidecar for tools/xbox-xiso.sh (X7.5, Codex review
+	# round 1): nothing about --xbe's own bytes says which title's game
+	# logic it links, or whether it is the real client or the still-stubbed
+	# one - a stale build, a dedicated build, or another title's XBE handed
+	# to xiso packaging under the wrong name would look identical from the
+	# file alone. $XBE_OUT.identity records what THIS script actually
+	# built: the title argument, the module set actually linked
+	# ($MODULE_LABEL - a caller wanting a real bootable disc needs
+	# "server+client+freevgui", not a stub), and the exact bytes' hash so a
+	# later, different link under the same path cannot be mistaken for this
+	# one. Same sidecar shape and reasoning as $XBE_EXE.identity above, one
+	# level up the pipeline (that one binds xbe-build.exe to its own map;
+	# this one binds the packaged --xbe to what was actually linked into it).
+	# Checked, not a bare command substitution inside the printf (Codex
+	# review round 2 on the xiso side of this same sidecar): without
+	# pipefail, a missing or failing sha256sum here would silently write
+	# sha256_xbe= empty, and an equally-broken reader comparing against an
+	# equally-empty value would treat that as a match - defeating the gate
+	# this sidecar exists for. XBE_SHA_OUT is required to look like a real
+	# digest before anything is written.
+	XBE_SHA_OUT="$(sha256sum "$XBE_OUT" 2>/dev/null | cut -d' ' -f1)"
+	if ! [[ "$XBE_SHA_OUT" =~ ^[0-9a-f]{64}$ ]]; then
+		echo "xbox-game-link-check: could not compute a valid sha256 of $XBE_OUT - refusing to write a sidecar tools/xbox-xiso.sh would trust." >&2
+		exit 1
+	fi
+	printf 'title=%s\nmodules=%s\nsha256_xbe=%s\n' \
+		"$TITLE" "$MODULE_LABEL" "$XBE_SHA_OUT" \
+		> "$XBE_OUT.identity" || exit 1
 fi
 
 # Found in Codex review round 1, 2026-09-12: this script was printing

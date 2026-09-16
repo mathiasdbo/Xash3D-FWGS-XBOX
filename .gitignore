@@ -396,5 +396,6 @@ build-test/
 *.stackdump
 .sweep/
 .sweep-dedicated/
+.sweep-xiso/
 .mpak-diff/
 .mpak-run/
