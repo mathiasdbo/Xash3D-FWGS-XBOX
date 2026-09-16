@@ -190,6 +190,7 @@ move to the table above once written.
 | Memory ceiling over `zone.c` | `#ifdef` + new functions | Medium | `zone.c` already has named pools with `file:line` attribution; the cap is what's missing |
 | Polymorphic audio | Refactor of `engine/client/sound/` | **High** | The only one of the big pieces upstream did not abstract. Candidate to send upstream |
 | Xbox trims (demos, HTTP, voice, networking) | `#ifdef` / build flags | Low | Prefer existing `wscript` flags over new `#ifdef`s |
+| `3rdparty/mainui` screens (`fork-plan.md` XM, drafted 2026-09-15) | Owned fork of FWGS `mainui_cpp` on a `resonance3d` branch, the submodule repinned to it (`.gitmodules` `branch = resonance3d`); in-place rewrites of `menus/Main.cpp`, `VideoModes.cpp`, `Gamepad.cpp`/`Controls.cpp`, `Audio.cpp` behind `#if XASH_XBOX`, PC-only screens hidden the same way; one new art file (a captionless pad diagram, TGA under `gfx/shell/`); whatever `tools/xbox-cc.sh` currently auto-patches inside the mainui checkout folds into the branch | Medium - the submodule tracks FWGS `continuous` closely, so upstream `mainui` merges become ours to do; bounded by the guard and by touching only `menus/*.cpp`, never the framework | Precedent: `deps/hlsdk`'s owned `resonance3d` branch (#44) and `sultim-t/xash-rt-menu`'s in-place graphics screen. Framework, registration and pad navigation stay stock (see the narrowed "menu framework" bullet below). Moves to the table above per screen as each is written |
 
 ## Things that are NOT divergences (and must not be touched)
 
@@ -209,9 +210,16 @@ Verified in the tree. Recorded here so nobody "fixes" what already works:
   `engine/wscript:53`.
 - **The platform layer already exists**, with 16 backends, among them
   `psvita`, `nswitch` and `dos`. An `engine/platform/xbox/` is just one more.
-- **The menu does not need rewriting.** `3rdparty/mainui` includes
-  `menus/Gamepad.cpp` and `menus/Gyro.cpp`, and it is what the console ports
-  use. It reproduces the classic WON menu.
+- **The menu *framework* does not need rewriting** - narrowed 2026-09-15;
+  it used to say "the menu". `3rdparty/mainui`'s framework (`ADD_MENU`
+  registration, `CMenuFramework`, the cvar-linked widgets, `Utils.h`'s
+  pad-to-key navigation, `menus/Gamepad.cpp`, `menus/Gyro.cpp`) is what the
+  console ports use, reproduces the classic WON menu, and X6 confirmed it
+  navigates with a pad untouched. What IS planned to change, on an owned
+  fork, is a handful of the *screens* behind it - PC-shaped Video/Controls/
+  Main pages rewritten in place or hidden under `XASH_XBOX` for the console
+  (`fork-plan.md` XM); that is the row in the anticipated table above, not
+  a contradiction of this one. Reuse the framework; do not rewrite it.
 - **The memory pools already exist.** `zone.c` (726 lines):
   `Mem_AllocPool`/`Mem_FreePool`/`Mem_PrintStats`/`Mem_Check`, with
   `__FILE__:__LINE__` attribution and separate pools (`mempool`, `imagepool`,

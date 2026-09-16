@@ -249,6 +249,15 @@ handling including the anamorphic-widescreen FOV bug.
 
 VGUI2 is its own epic and is scheduled after Half-Life runs on hardware.
 
+**The `mainui` half has a concrete plan since 2026-09-15: `fork-plan.md`
+XM — Console-shaped menus.** X6 showed the stock menu already navigates
+with a pad; what is PC-shaped is every screen behind it. XM rewrites the
+Video, Controller (with a Duke-diagram mapping screen and presets) and
+Audio screens in place, flattens Main, and hides the rest under
+`XASH_XBOX` - the same in-place, cvar-linked, macro-guarded approach
+`sultim-t/xash-rt` used for its own graphics menu, on an owned `mainui`
+fork the way this project already owns its HL SDK fork.
+
 ### E8 — Audio
 
 The only major subsystem upstream did not abstract: 6,284 lines in

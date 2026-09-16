@@ -1990,6 +1990,180 @@ actually drives it, it didn't get in the way of the human test above (the
 menu was present and controller-responsive regardless), so it's noted here
 rather than chased further - genuinely unknown, not a blocker.
 
+## XM — Console-shaped menus (proposed, 2026-09-15)
+
+**Status: draft epic, not started.** Raised after X6's live controller test:
+the WON menu navigates with a pad, but every screen behind it is the PC's
+- a resolution table, windowed/borderless toggles, a renderer picker, mouse
+sensitivity, touch and gyro pages, a server browser - and the one screen a
+console player needs most, a controller mapping with presets, does not
+exist. This phase replaces the PC-shaped screens with console-shaped ones
+and hides the rest. It is `epics.md` E7's "mainui" half made concrete for
+this target; the freevgui/VGUI1 half of E7 is separate and later.
+
+**How a sibling fork did it (read, not assumed - `sultim-t/xash-rt`).**
+xash-rt ships its own menu by pointing the `3rdparty/mainui` submodule at a
+fork (`sultim-t/xash-rt-menu`, ~20 commits over stock FWGS `mainui_cpp`).
+It added no new menu files: its "Graphics" screen is `menus/VideoModes.cpp`
+rewritten in place, keeping the stock `ADD_MENU( menu_vidmodes, ... )`
+registration and `gfx/shell/head_vidmodes` banner so no new button strip or
+header art was needed - the resolution table became a `CMenuSpinControl`
+over `vid_mode`, plus `CMenuCheckBox`/`CMenuSpinControl` widgets linked
+straight to its `rt_*` cvars via `LinkCvar`, with `onCvarWrite` lambdas for
+mutual exclusion and `Draw()` greying options the hardware lacks. It
+flattened `Main.cpp` (direct Graphics/Audio/Controls/Load/Save buttons,
+Save/Load/New Game under one "Campaign" button; `Configuration.cpp` left in
+the tree but unreachable) and guarded its layout changes with
+`#if XASH_RAYTRACING`. Nothing controller-specific; `Gamepad.cpp` untouched.
+Three things transfer directly: **rewrite in place behind the existing
+`ADD_MENU`/`PC_*` ids** (no new art pipeline), **link widgets to cvars, not
+to new engine code**, and **guard with a platform macro** - ours is
+`XASH_XBOX`, already defined for every engine TU and not yet used anywhere
+in `mainui`.
+
+**What our vendored `mainui` already gives us (verified in the tree).**
+`ADD_MENU`/`ADD_MENU3` registration (`BaseMenu.h:231-264`; `menus/Video.cpp:
+33-53` is the write-your-own-show-function form); `CMenuFramework::AddButton`
+against the `btns_main.bmp` strip or a custom bitmap (`controls/Framework.h:
+27-74`, auto-stacked at (72, 230+50n)); `CMenuEditable::LinkCvar/WriteCvar/
+ResetCvar/DiscardChanges` with `onCvarGet/Write/Change` hooks
+(`controls/Editable.h:21-89`); `CMenuSlider`, `CMenuSpinControl` (over a
+`CStringArrayModel`), `CMenuCheckBox`, `CMenuSwitch`, `CMenuDropDown`. Pad
+navigation is already in `Utils.h:185-307` (A/B/X/D-pad → Enter/Escape/
+Backspace/arrows - what X6 exercised). `menus/Gamepad.cpp` already has
+`joy_side/forward/pitch/yaw` sliders with invert and `joy_axis_binding` spin
+controls; `Audio.cpp:64-72` already carries `vibration_enable`/
+`vibration_length`; `Controls.cpp`'s key-grab dialog works through
+`KeynumToString`, and the engine's key table names every pad button with a
+default bind (`engine/client/input/in_keys.c:109-127`), so a pad mapping
+screen can reuse `CMenuKbActListModel` rather than invent a binding store.
+The stick deadzone cvars exist (`in_joy.c:56-59`). Art: banners and
+backgrounds load through `PIC_Load` (TGA/BMP/PNG), only the animated button
+strip is BMP-only (`Btns.cpp:27`).
+
+**Scope - the screens.** Each is a rewrite-in-place or a hide, never a new
+registration unless the stock one is unusable:
+
+1. **Main**: flatten as xash-rt did - Resume / New Game / Load / Save /
+   Options / Quit. Drop console, previews, minimize/close (`Main.cpp:
+   225-243`) and the Update button (`Configuration.cpp:68`).
+2. **Video** (`VideoModes.cpp` in place, keeping `PC_VID_MODES` and
+   `head_vidmodes`), in two steps because the backend decides what a
+   control can honestly do. **XM.1**: brightness/gamma sliders, and the
+   display mode and aspect shown as read-only text derived from the
+   dashboard's EEPROM video flags - `ui-architecture.md` §8's standing
+   policy is that Xbox aspect comes from the dashboard, not a player
+   setting, and this phase keeps that policy rather than adding a selector
+   that contradicts it. Nothing else: no resolution table, no windowed/
+   borderless, no `r_refdll`, no 10-second test mode, no `gl_vbo`. **XM.2,
+   after X9**: any mode choice the driver actually honours (today the Xbox
+   backend hardcodes `XVideoSetMode( 640, 480 )` and clamps every later
+   request back to it - divergence #50 - and `ref_soft` refuses any
+   display-transform scale, `r_glblit.c`), and a widescreen-presentation
+   choice only if X9's separate-axis `R_SetDisplayTransform` work (its own
+   listed item) lands first; until then there is no mechanism behind such a
+   control, so it is not offered. The render-resolution lever X5 built
+   (`vid_scale` 2.0 → 320x240 render, presented 2x2) is a candidate XM.2
+   "Performance mode" toggle, exposed only if X9's hardware numbers make it
+   worth a player's choice.
+3. **Controller** (`Gamepad.cpp` extended, plus the mapping screen): preset
+   layouts as a spin control (at minimum "Default" and "Southpaw"/"Legacy").
+   A preset is a complete controller *profile*, not a bind table: the
+   `bind` pairs for the digital buttons PLUS the axis cvars - `joy_axis_
+   binding` for which stick moves and which looks (`in_joy.c:60`; that
+   cvar, not any bind, is what makes Southpaw Southpaw), the `joy_pitch`/
+   `joy_yaw` signs for invert, the `joy_*_deadzone` values - all applied
+   through the existing cvar and bind systems, never a second store (round
+   2 of this draft's review caught a "binds only" definition that would
+   have left the sticks unchanged). Stick sensitivity and deadzone per
+   axis, invert Y, rumble on/off and rumble *duration* (`vibration_enable`
+   and `vibration_length`, moved here from Audio and labelled honestly:
+   `vibration_length` scales duration, `cl_mobile.c:23-35`, and amplitude
+   is randomised in `Platform_Vibrate` when the caller passes none,
+   `joy_sdl2.c:328-355` - there is no strength setting to expose; a real
+   one is a new archived cvar threaded into `Platform_Vibrate2`'s motor
+   amplitudes, engine work with its own ledger row, optional and XM.2),
+   and a **mapping screen with a Duke diagram**: one 32-bit TGA of the pad under
+   `gfx/shell/`, power-of-two (512x256 or 512x512), no captions baked in -
+   each button's current bind is drawn as text at a fixed anchor by code, so
+   presets and rebinding swap strings, not art, and the image is
+   language-neutral. Rebinding reuses `Controls.cpp`'s grab dialog. This
+   screen does NOT retire the one-shot gamepad-bind seeding (divergence
+   #53, PR #65, pending as this is written): a `config.cfg` saved before
+   gamepad binds existed opens with `unbindall` and carries no gamepad
+   lines at all, so the migration has to run before a player ever finds
+   this screen - the screen is where a player changes what was seeded, and
+   whatever it writes is what the seeding then respects on the next boot.
+   Test both paths: an old keyboard-only config (seeded once, then
+   customisable), and a fresh one (presets/rebinds persist as saved).
+4. **Audio**: keep volumes and DSP; drop `snd_mute_losefocus`.
+5. **Hidden under `#if XASH_XBOX`**: `Touch*`, `Gyro`, `InputDevices`,
+   `AdvancedControls`' mouse options, `CustomGame`, `ServerBrowser`/
+   `Multiplayer` (until Xbox netcode exists), `FileDialog`, `Zoo`. Hidden,
+   not deleted: the files stay stock for the merge diff.
+6. **On-screen keyboard**: not in this phase. `osk_enable` and every text
+   field it would serve (player name, server address) are hidden with the
+   screens above; the OSK is E7's own item and only earns its place when a
+   text field is actually reachable.
+
+**Where the code lives - decided by the sibling's example and this
+project's own precedent.** Substantive `mainui` changes cannot live as
+uncommitted patches (the tree already auto-patches `3rdparty/mainui` from
+`patches/` for two build fixes, and a menu rewrite is far past what a patch
+file should carry). Do what `deps/hlsdk` already does (divergence #44's
+precedent) and what xash-rt did: **an owned fork of FWGS `mainui_cpp` with a
+`resonance3d` branch**, the submodule pinned to it, `.gitmodules` gaining
+`branch = resonance3d`, every change `#if XASH_XBOX`-guarded where it alters
+a screen the PC build still shows. Divergence ledger: one entry, form 1
+(our own fork), listing each screen touched - its anticipated row is in
+the ledger now, and the ledger's old "the menu does not need rewriting"
+bullet is narrowed to the framework in the same change. Whatever
+`tools/xbox-cc.sh` currently auto-patches inside the mainui checkout (the
+reason the submodule shows modified in every `git status`) folds into
+that branch on the way.
+
+**Art and memory.** Reuse every existing `PC_*` button id and `head_*`
+banner (retail ships them as BMP under `gfx/shell/`; the disc already
+carries them, which is why the menu renders today). New art is one file:
+the Duke diagram. At 512x256x32 it is 512 KiB of texture - fine against
+X3's current numbers, and it is XB's bake that decides the final GPU
+format, not this phase. Title-safe layout (90%) for every rewritten screen;
+minimum legible text at 640x480 on a CRT per `ui-architecture.md` §7.
+
+**Sequencing.** XM.1 (Main flattened, Controller with the mapping screen,
+Audio, the hidden PC screens, Video's gamma and read-only display info)
+after X7.5 (a disc per title, so a menu change can be tested on a real
+build without hand-packing) and alongside X8. XM.2 (any mode or
+widescreen-presentation control) strictly after X9, because it is X9's
+backend work that gives such a control anything to drive - doing the
+screens first means X9 is then tested through the menu a player will
+actually use.
+
+**Exit, XM.1:** on the disc, with a pad only: the main menu reaches New
+Game, Load, Save, Options and Quit; Options shows exactly Video, Controller
+and Audio; Video's gamma change is visible on the next frame and its
+mode/aspect text matches what the dashboard is set to; Controller shows
+the Duke diagram with live bind labels, applies a preset (Southpaw - and
+in a map the stick roles really swap, not only the button labels), rebinds
+one button, and after a save-quit-boot the change is still there - and the
+same sequence from an old keyboard-only `config.cfg` first shows the
+seeded defaults, then the customisation; no hidden PC screen is reachable
+by any button. **Exit, XM.2:** a mode or presentation change made in Video
+is visible on the next frame, on hardware. Verified on xemu first, closed
+on hardware, same rule as every other phase.
+
+**Risks, named.** (1) Fork maintenance: the `mainui` submodule tracks
+FWGS's `continuous` branch closely; an owned branch means merging upstream
+`mainui` ourselves - bounded, since every change is behind `XASH_XBOX` and
+confined to a handful of `menus/*.cpp`. (2) Display-mode enumeration on
+nxdk: which of 480i/480p/720p/1080i the SDL2 video driver actually honours
+is unmeasured (divergence #50 pinned 640x480; `hal/video.c`'s mode table
+has 720x480 and HD modes) - measure before designing the spin control's
+list. (3) Presets are only as good as the bind system: `+duck` is
+hold-to-crouch in GoldSrc, and a "toggle crouch" preset would need a bind
+alias, not engine code - decide per preset, in the plan, before writing
+the table.
+
 ## X7 — Game code: one XBE per title
 
 **Direction set 2026-09-11.** Half-Life, Opposing Force and Blue Shift each
