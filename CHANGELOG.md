@@ -29,6 +29,19 @@ Compiles clean; not yet re-verified in a live gameplay session or through
 the real Controls menu (would need a full client relink, not just this
 file's own compile check) - see `docs/r3d/divergences.md`#53.
 
+### Verified under xemu — the WON menu is navigable with a controller (X6, not yet closed)
+
+No code change: `engine/client/input/in_joy.c`'s joystick support and
+`3rdparty/mainui`'s `Gamepad.cpp` were already wired up unconditionally for
+any non-dedicated build, the same code the psvita/nswitch ports already
+use. Verified this session by reading that path end to end, then by a live
+human test with a real host gamepad bound in xemu - the main menu responded
+to it and started a new game. **X6 stays open, not closed**: xemu is not
+validation per this project's own rule, and real-hardware confirmation of
+the same test has not happened yet - flagged in Codex review after an
+earlier version of this entry called it "Closed" while saying that in the
+same breath.
+
 ### Added — `tools/x4-triangle`: standalone NV2A bring-up, one textured triangle (X4)
 
 A separate, minimal (~280-line) XBE outside the engine entirely: initialises
