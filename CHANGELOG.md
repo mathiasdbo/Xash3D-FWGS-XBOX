@@ -16,9 +16,20 @@ buttons exist, so it never re-lists them the way it does every keyboard
 key. `Key_Unbindall_f` already had a partial fix for exactly this (it
 re-asserts `K_START_BUTTON` after the wipe so the pause menu stays
 reachable); extended to the rest of the pad (`K_JOY1`..`K_AUX32`) instead
-of adding a second mechanism next to it. Compiles clean; not yet
-re-verified in a live gameplay session (would need a full client relink,
-not just this file's own compile check) - see `docs/r3d/divergences.md`#53.
+of adding a second mechanism next to it.
+
+Also fixes a real regression that fix would otherwise have caused (Codex
+review, same day): the in-game Controls menu can explicitly clear a
+gamepad button's binding, and `Key_WriteBindings` used to just skip
+writing anything for an empty key - correct for keyboard/mouse, but it
+would have let an intentionally-cleared gamepad bind silently come back on
+every restart once `unbindall` started restoring defaults. `Key_WriteBindings`
+now writes an explicit `unbind` line for an empty gamepad key so both
+"never customised" and "explicitly cleared" round-trip correctly.
+
+Compiles clean; not yet re-verified in a live gameplay session or through
+the real Controls menu (would need a full client relink, not just this
+file's own compile check) - see `docs/r3d/divergences.md`#53.
 
 ### Added — `tools/x4-triangle`: standalone NV2A bring-up, one textured triangle (X4)
 

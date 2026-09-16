@@ -470,7 +470,21 @@ void Key_WriteBindings( file_t *f )
 	for( int i = 0; i < ARRAYSIZE( keys ); i++ )
 	{
 		if( COM_StringEmptyOrNULL( keys[i].binding ))
+		{
+			// Gamepad keys need an explicit "unbind" here, unlike every
+			// other key: Key_Unbindall_f's own "unbindall" (just written
+			// above) re-seeds every gamepad key's compiled default the
+			// moment this file is next loaded (divergences.md #53), so an
+			// intentional gamepad unbind - the controls menu really does
+			// let a player clear one, EngFuncs::ClientCmd -> UnbindCommand,
+			// 3rdparty/mainui/menus/Controls.cpp - would otherwise silently
+			// come back on every restart. Keyboard/mouse keys have no such
+			// restore step, so skipping their empty bindings (as before)
+			// is still correct - found in Codex review of that divergence.
+			if( i >= K_JOY1 && i <= K_AUX32 )
+				FS_Printf( f, "unbind \"%s\"\n", Key_KeynumToString( i ));
 			continue;
+		}
 
 		string newCommand;
 		Cmd_Escape( newCommand, keys[i].binding, sizeof( newCommand ));
