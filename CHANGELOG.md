@@ -5,6 +5,20 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — dedicated-server link check reported `_lib_ref_null_exports`/`_lib_ref_soft_exports` undefined
+
+`engine/platform/misc/lib_static.c` includes the repo-wide generated
+library-dispatch table unconditionally, and since X5 registered both
+renderers in it, the dedicated-target link (`tools/xbox-dedicated-link-
+check.sh`) has been undefined on those two symbols - a dedicated server
+never renders, so it never had a reason to compile them, unlike the
+already-real client link. Fixed with the same empty-table stub the script
+already used for the menu table it also never reaches. A second, unrelated
+bug found while re-verifying the fix (stub objects sitting loose in the
+scratch directory made a second run without a re-sweep spuriously fail)
+is fixed alongside it. `tools/xbox-dedicated-sweep.sh` then two consecutive
+link-checks with no re-sweep between them: both clean, both a valid XBE.
+
 ### Fixed — floating-point printf on Xbox: every entity placed with an `"angle"` key faced yaw 0 (player spawning backwards, guard facing sideways in `c0a0`)
 
 nxdk's pdclib parses `%f`/`%e`/`%g` and then prints nothing - and never

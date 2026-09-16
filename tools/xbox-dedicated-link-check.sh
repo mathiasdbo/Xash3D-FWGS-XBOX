@@ -103,10 +103,21 @@ if [ ! -f "$GEN_FS_C" ]; then
 	echo "  is part of that table." >&2
 	exit 1
 fi
-GEN_FS_OBJ="$SCRATCH/gen_$(echo "$GEN_FS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
-if ! tools/xbox-cc.sh "$GEN_FS_C" -o "$GEN_FS_OBJ" 2>"$SCRATCH/stub-lasterr.txt"; then
+# Own subdirectory, not $SCRATCH itself: found while adding the ref stubs
+# below - ENGINE_OBJS above is a plain, non-recursive `ls "$SCRATCH"/*.obj`
+# matched against the sweep manifest's own count, so a stub object sitting
+# loose in $SCRATCH survives to the NEXT run (the sweep only clears
+# $SCRATCH, this script never did) and that next run's own ENGINE_OBJS
+# then over-counts and refuses to link - a false "does not match
+# manifest.txt" on a link-check re-run with no source change at all.
+# tools/xbox-link-check.sh never had this bug because its own stub exports
+# already live in "$SCRATCH/gen/".
+STUB_DIR="$SCRATCH/gen"
+mkdir -p "$STUB_DIR"
+GEN_FS_OBJ="$STUB_DIR/gen_$(echo "$GEN_FS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
+if ! tools/xbox-cc.sh "$GEN_FS_C" -o "$GEN_FS_OBJ" 2>"$STUB_DIR/stub-lasterr.txt"; then
 	echo "xbox-dedicated-link-check: generated_lib_filesystem_stdio_exports.c failed to compile:" >&2
-	cat "$SCRATCH/stub-lasterr.txt" >&2
+	cat "$STUB_DIR/stub-lasterr.txt" >&2
 	exit 2
 fi
 echo "xbox-dedicated-link-check: filesystem_stdio registered in the static library table (real GetFSAPI)." >&2
@@ -117,11 +128,10 @@ for f in stub_game/server/server_stub.c "$GEN_DIR/generated_lib_server_exports.c
 		echo "xbox-dedicated-link-check: $f does not exist." >&2
 		exit 1
 	fi
-	obj="$SCRATCH/gen_$(echo "$f" | tr '/' '_' | sed 's/\.c$/.obj/')"
-	mkdir -p "$SCRATCH"
-	if ! tools/xbox-cc.sh "$f" -o "$obj" 2>"$SCRATCH/stub-lasterr.txt"; then
+	obj="$STUB_DIR/gen_$(echo "$f" | tr '/' '_' | sed 's/\.c$/.obj/')"
+	if ! tools/xbox-cc.sh "$f" -o "$obj" 2>"$STUB_DIR/stub-lasterr.txt"; then
 		echo "xbox-dedicated-link-check: STUB GAME MODULE FILE THAT WAS SUPPOSED TO COMPILE DID NOT: $f" >&2
-		cat "$SCRATCH/stub-lasterr.txt" >&2
+		cat "$STUB_DIR/stub-lasterr.txt" >&2
 		exit 2
 	fi
 	STUB_GAME_OBJS="$STUB_GAME_OBJS $obj"
@@ -133,17 +143,45 @@ echo "xbox-dedicated-link-check: stub game module included (server side; SV_Load
 # dispatch table declares lib_menu_exports[] unconditionally - an empty,
 # real table, same fallback tools/xbox-link-check.sh uses when mainui was
 # not swept.
-MENU_STUB_C="$SCRATCH/gen_menu_exports_empty.c"
-MENU_STUB_OBJ="$SCRATCH/gen_menu_exports_empty.obj"
+MENU_STUB_C="$STUB_DIR/gen_menu_exports_empty.c"
+MENU_STUB_OBJ="$STUB_DIR/gen_menu_exports_empty.obj"
 {
 	echo "typedef struct {const char *name;void *func;} table_t;"
 	echo "table_t lib_menu_exports[] = { {0,0} };"
 } > "$MENU_STUB_C"
-if ! tools/xbox-cc.sh "$MENU_STUB_C" -o "$MENU_STUB_OBJ" 2>"$SCRATCH/stub-lasterr.txt"; then
+if ! tools/xbox-cc.sh "$MENU_STUB_C" -o "$MENU_STUB_OBJ" 2>"$STUB_DIR/stub-lasterr.txt"; then
 	echo "xbox-dedicated-link-check: empty lib_menu_exports failed to compile:" >&2
-	cat "$SCRATCH/stub-lasterr.txt" >&2
+	cat "$STUB_DIR/stub-lasterr.txt" >&2
 	exit 2
 fi
+
+# Same reasoning, two more tables: engine/platform/misc/lib_static.c
+# includes generated_library_tables.h unconditionally, and that header
+# (tools/gen-library-tables.sh, run once for the whole repo, not
+# specialised per link target) declares lib_ref_null_exports[] and
+# lib_ref_soft_exports[] alongside menu/server/client/filesystem_stdio -
+# no #ifdef distinguishes a dedicated build's copy from
+# tools/xbox-link-check.sh's. A dedicated server never reaches R_Init
+# (engine/client/vid_common.c, and everything under engine/client/, is
+# `#if !XASH_DEDICATED` and is not even in this target's object set), so
+# nothing ever looks these two tables up - unlike the menu case, there is
+# not even a compiled GetRefAPI to point at. Found while checking #54's
+# link order: since X5 registered ref_null/ref_soft in the generated
+# table, this script never compiled either one and the dedicated link has
+# been reporting them undefined - a pre-existing gap, unrelated to #54.
+REF_STUB_C="$STUB_DIR/gen_ref_exports_empty.c"
+REF_STUB_OBJ="$STUB_DIR/gen_ref_exports_empty.obj"
+{
+	echo "typedef struct {const char *name;void *func;} table_t;"
+	echo "table_t lib_ref_null_exports[] = { {0,0} };"
+	echo "table_t lib_ref_soft_exports[] = { {0,0} };"
+} > "$REF_STUB_C"
+if ! tools/xbox-cc.sh "$REF_STUB_C" -o "$REF_STUB_OBJ" 2>"$STUB_DIR/stub-lasterr.txt"; then
+	echo "xbox-dedicated-link-check: empty lib_ref_null_exports/lib_ref_soft_exports failed to compile:" >&2
+	cat "$STUB_DIR/stub-lasterr.txt" >&2
+	exit 2
+fi
+echo "xbox-dedicated-link-check: ref_null/ref_soft given empty stub tables (never reached - R_Init is #if !XASH_DEDICATED)." >&2
 
 NXDK_DIR="deps/nxdk"
 LIBS=(
@@ -165,7 +203,7 @@ LIBS=(
 RESPONSE="$SCRATCH/link-response.txt"
 : > "$RESPONSE"
 # shellcheck disable=SC2086
-for f in $ENGINE_OBJS $STUB_GAME_OBJS "$MENU_STUB_OBJ" "${LIBS[@]}"; do
+for f in $ENGINE_OBJS $STUB_GAME_OBJS "$MENU_STUB_OBJ" "$REF_STUB_OBJ" "${LIBS[@]}"; do
 	echo "\"$(cygpath -m "$f")\"" >> "$RESPONSE"
 done
 
