@@ -1343,6 +1343,15 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 			Cbuf_Execute();
 		}
 
+#if XASH_XBOX && !XASH_DEDICATED
+		// A config.cfg written by PC Half-Life re-lists keyboard/mouse binds
+		// only and its "unbindall" wipes every gamepad default - on a console
+		// with no keyboard, that is every gameplay action. Seeded here, once
+		// per config, after config.cfg and before userconfig.d can override
+		// it. docs/r3d/divergences.md #53.
+		Key_SeedGamepadDefaults();
+#endif
+
 		// exec all files from userconfig.d
 		Cbuf_AddText( "userconfigd\n" );
 		Cbuf_Execute();

@@ -159,6 +159,7 @@ static const keyname_t keynames[] =
 };
 
 static CVAR_DEFINE_AUTO( key_rotate, "0", FCVAR_ARCHIVE|FCVAR_FILTERABLE, "rotate arrow keys (0-3)" );
+static CVAR_DEFINE_AUTO( joy_binds_seeded, "0", FCVAR_ARCHIVE|FCVAR_FILTERABLE, "gamepad default binds were seeded into this config once (Key_SeedGamepadDefaults)" );
 
 /*
 ===================
@@ -373,22 +374,7 @@ static void Key_Unbindall_f( void )
 
 	// set some defaults
 	Key_SetBinding( K_ESCAPE, "cancelselect" );
-
-	// Restore every gamepad default (K_JOY1..K_AUX32, keydefs.h:82-125), not
-	// just START: retail's own config.cfg opens with "unbindall" then
-	// re-lists every keyboard/mouse bind it cares about, but has no idea
-	// gamepad buttons exist, so jump/duck/use/attack/... all went dead the
-	// moment a config.cfg existed - found live in a controller test,
-	// 2026-09-15. Key_Init()'s own comment already calls this out ("'unbindall'
-	// from config.cfg will be reset it"), and the single K_START_BUTTON case
-	// this replaces was upstream's own partial fix for exactly this problem;
-	// extended to the rest of the pad instead of adding a second, parallel
-	// mechanism next to it.
-	for( int i = 0; i < ARRAYSIZE( keynames ); i++ )
-	{
-		if( keynames[i].keynum >= K_JOY1 && keynames[i].keynum <= K_AUX32 )
-			Key_SetBinding( keynames[i].keynum, keynames[i].binding );
-	}
+	Key_SetBinding( K_START_BUTTON, "cancelselect" );
 }
 
 /*
@@ -470,21 +456,7 @@ void Key_WriteBindings( file_t *f )
 	for( int i = 0; i < ARRAYSIZE( keys ); i++ )
 	{
 		if( COM_StringEmptyOrNULL( keys[i].binding ))
-		{
-			// Gamepad keys need an explicit "unbind" here, unlike every
-			// other key: Key_Unbindall_f's own "unbindall" (just written
-			// above) re-seeds every gamepad key's compiled default the
-			// moment this file is next loaded (divergences.md #53), so an
-			// intentional gamepad unbind - the controls menu really does
-			// let a player clear one, EngFuncs::ClientCmd -> UnbindCommand,
-			// 3rdparty/mainui/menus/Controls.cpp - would otherwise silently
-			// come back on every restart. Keyboard/mouse keys have no such
-			// restore step, so skipping their empty bindings (as before)
-			// is still correct - found in Codex review of that divergence.
-			if( i >= K_JOY1 && i <= K_AUX32 )
-				FS_Printf( f, "unbind \"%s\"\n", Key_KeynumToString( i ));
 			continue;
-		}
 
 		string newCommand;
 		Cmd_Escape( newCommand, keys[i].binding, sizeof( newCommand ));
@@ -593,7 +565,44 @@ void Key_Init( void )
 		Key_SetBinding( keynames[i].keynum, keynames[i].binding );
 
 	Cvar_RegisterVariable( &key_rotate );
+	Cvar_RegisterVariable( &joy_binds_seeded );
 
+}
+
+/*
+===================
+Key_SeedGamepadDefaults
+
+Fills in the compiled gamepad defaults (keynames[], K_JOY1..K_AUX32) for
+any gamepad key still unbound after config.cfg ran - once per config,
+tracked by the archived cvar joy_binds_seeded, so a gamepad unbind the
+player later saves on purpose is never re-seeded over.
+
+Why: retail Half-Life's config.cfg opens with "unbindall" and re-lists only
+keyboard/mouse binds - it has no idea gamepad buttons exist - so the
+gamepad defaults Key_Init() sets never survive it (Key_Init's own comment
+says as much). Deliberately NOT done inside "unbindall" itself: that
+command is documented as clearing everything and mod scripts rely on it,
+and "resetkeys" is the existing restore-all path. docs/r3d/divergences.md #53.
+===================
+*/
+void Key_SeedGamepadDefaults( void )
+{
+	if( joy_binds_seeded.value != 0.0f )
+		return;
+
+	for( int i = 0; i < ARRAYSIZE( keynames ); i++ )
+	{
+		const int k = keynames[i].keynum;
+
+		if( k < K_JOY1 || k > K_AUX32 )
+			continue;
+
+		if( COM_StringEmptyOrNULL( keys[k].binding ) && !COM_StringEmptyOrNULL( keynames[i].binding ))
+			Key_SetBinding( k, keynames[i].binding );
+	}
+
+	Cvar_DirectSetValue( &joy_binds_seeded, 1.0f );
 }
 
 /*

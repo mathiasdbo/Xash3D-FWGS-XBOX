@@ -13,19 +13,17 @@ Half-Life's own `config.cfg` starts with `unbindall`, wiping the full,
 already-correct default gamepad scheme `Key_Init()` sets up
 (`engine/client/input/in_keys.c`) - `config.cfg` has no idea gamepad
 buttons exist, so it never re-lists them the way it does every keyboard
-key. `Key_Unbindall_f` already had a partial fix for exactly this (it
-re-asserts `K_START_BUTTON` after the wipe so the pause menu stays
-reachable); extended to the rest of the pad (`K_JOY1`..`K_AUX32`) instead
-of adding a second mechanism next to it.
-
-Also fixes a real regression that fix would otherwise have caused (Codex
-review, same day): the in-game Controls menu can explicitly clear a
-gamepad button's binding, and `Key_WriteBindings` used to just skip
-writing anything for an empty key - correct for keyboard/mouse, but it
-would have let an intentionally-cleared gamepad bind silently come back on
-every restart once `unbindall` started restoring defaults. `Key_WriteBindings`
-now writes an explicit `unbind` line for an empty gamepad key so both
-"never customised" and "explicitly cleared" round-trip correctly.
+key. Fixed with a new, Xbox-only, one-shot `Key_SeedGamepadDefaults()`
+called from `Host_InitCommon` right after `config.cfg` runs: it fills in
+the compiled defaults for any gamepad key still empty, then sets an
+archived marker cvar (`joy_binds_seeded`) so it never runs again for that
+config - a legacy keyboard-only config gets the defaults once, a config
+that already carries gamepad state (including a bind the player cleared
+on purpose in the Controls menu) is left exactly as saved, and `unbindall`
+/`resetkeys` keep their upstream semantics everywhere. Two Codex rounds
+shaped this: the first version changed `unbindall` itself, which would
+have altered shared behaviour for PC users and mod scripts, and was
+dropped.
 
 Compiles clean; not yet re-verified in a live gameplay session or through
 the real Controls menu (would need a full client relink, not just this
