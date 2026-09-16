@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <utility>
 #include <tuple>
+#include <cmath>
 
 namespace formats {
 
@@ -303,6 +304,103 @@ bool parseBackgroundLayout(const std::string& path, int& outResW, int& outResH, 
     return haveResolution && !outTiles.empty();
 }
 
+// XM item 0 stage B (fork-plan.md): writes an uncompressed 32-bit truecolor
+// TGA (image type 2) that the real engine's Image_LoadTGA reads correctly
+// via the background-tile load path (PIC_Load(..., PIC_NOFLIP_TGA) ->
+// IL_DONTFLIP_TGA, img_tga.c) - that path takes the file's on-disk row
+// order literally and ignores the descriptor byte's own flip bit entirely
+// (`if (!Image_CheckFlag(IL_DONTFLIP_TGA) && attributes & 0x20)` - false
+// whenever IL_DONTFLIP_TGA is set, so the attribute is read but never
+// acted on). Every real retail background tile has that bit UNSET (0x08,
+// checked directly against 800_1_a_loading.tga's own header) yet displays
+// correctly through this exact load path - meaning retail's own on-disk
+// row order, taken literally with no flip applied, is already what the
+// engine expects: row 0 of the file is the top of the image. This writer
+// matches that: `rgba`'s row 0 (as this tool's own readTga already
+// normalizes it - top-down, canonical) is written first, verbatim, and
+// the descriptor byte is set to the same 0x08 retail's own files use, so
+// a baked tile is byte-for-byte interchangeable with a retail one from
+// this loader's point of view. NOT verified against a generic (flip-
+// respecting) TGA viewer - the only consumer that matters for this bake
+// is the Xbox engine's own NOFLIP path, confirmed by booting a real disc
+// with baked tiles and reading the result off the screen, not assumed
+// from the format spec.
+bool writeTga(const std::string& path, const std::vector<uint8_t>& rgba, int w, int h) {
+    if (w <= 0 || h <= 0 || rgba.size() != static_cast<size_t>(w) * h * 4) return false;
+
+    std::ofstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+
+    uint8_t header[18] = {0};
+    header[2] = 2; // uncompressed truecolor
+    header[12] = static_cast<uint8_t>(w & 0xFF);
+    header[13] = static_cast<uint8_t>((w >> 8) & 0xFF);
+    header[14] = static_cast<uint8_t>(h & 0xFF);
+    header[15] = static_cast<uint8_t>((h >> 8) & 0xFF);
+    header[16] = 32; // bits per pixel
+    header[17] = 0x08; // 8 alpha bits, origin/interleave bits 0 - matches retail's own tiles
+    f.write(reinterpret_cast<const char*>(header), sizeof(header));
+
+    std::vector<uint8_t> row(static_cast<size_t>(w) * 4);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* src = &rgba[static_cast<size_t>(y) * w * 4];
+        for (int x = 0; x < w; ++x) {
+            // TGA truecolor is stored BGRA, mirroring readTga's own R/B swap.
+            row[x * 4 + 0] = src[x * 4 + 2];
+            row[x * 4 + 1] = src[x * 4 + 1];
+            row[x * 4 + 2] = src[x * 4 + 0];
+            row[x * 4 + 3] = src[x * 4 + 3];
+        }
+        f.write(reinterpret_cast<const char*>(row.data()), row.size());
+        if (!f) return false;
+    }
+    return true;
+}
+
+// Bilinear resize, RGBA, straightforward and not performance-critical (this
+// runs once per bake on a desktop host, not per frame). Alpha is resampled
+// the same as color - correct for premultiplied-adjacent sampling only if
+// the source is already premultiplied, which retail's opaque background
+// tiles are moot on (alpha is uniformly 255, checked directly) and the
+// animated title's own layers are not (real, non-uniform alpha) - a
+// straight unpremultiplied bilinear resize of RGBA can bleed color from
+// fully-transparent neighboring texels into a partially-transparent edge.
+// Not a concern for the background bake (opaque source); flagged here for
+// whoever extends this to the title bake next, not silently inherited.
+std::vector<uint8_t> resizeBilinear(const std::vector<uint8_t>& src, int srcW, int srcH, int dstW, int dstH) {
+    std::vector<uint8_t> dst(static_cast<size_t>(dstW) * dstH * 4);
+    if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return dst;
+
+    const double xRatio = static_cast<double>(srcW) / dstW;
+    const double yRatio = static_cast<double>(srcH) / dstH;
+
+    for (int dy = 0; dy < dstH; ++dy) {
+        double sy = (dy + 0.5) * yRatio - 0.5;
+        int y0 = static_cast<int>(std::floor(sy));
+        double fy = sy - y0;
+        int y0c = std::min(std::max(y0, 0), srcH - 1);
+        int y1c = std::min(std::max(y0 + 1, 0), srcH - 1);
+
+        for (int dx = 0; dx < dstW; ++dx) {
+            double sx = (dx + 0.5) * xRatio - 0.5;
+            int x0 = static_cast<int>(std::floor(sx));
+            double fx = sx - x0;
+            int x0c = std::min(std::max(x0, 0), srcW - 1);
+            int x1c = std::min(std::max(x0 + 1, 0), srcW - 1);
+
+            for (int c = 0; c < 4; ++c) {
+                double top = src[(static_cast<size_t>(y0c) * srcW + x0c) * 4 + c] * (1.0 - fx)
+                           + src[(static_cast<size_t>(y0c) * srcW + x1c) * 4 + c] * fx;
+                double bot = src[(static_cast<size_t>(y1c) * srcW + x0c) * 4 + c] * (1.0 - fx)
+                           + src[(static_cast<size_t>(y1c) * srcW + x1c) * 4 + c] * fx;
+                double v = top * (1.0 - fy) + bot * fy;
+                dst[(static_cast<size_t>(dy) * dstW + dx) * 4 + c] = static_cast<uint8_t>(std::min(255.0, std::max(0.0, v + 0.5)));
+            }
+        }
+    }
+    return dst;
+}
+
 } // namespace
 
 bool UiPacker::packMenuBackground(const std::string& inputDir, const std::string& outputPath, bool isXbox) {
@@ -526,6 +624,107 @@ std::string trimManifestLine(std::string line) {
 }
 
 } // namespace
+
+// XM item 0 stage B (fork-plan.md): the ref_soft-profile background bake.
+// Retail art is authored for 800x600 (or a 3840x1600 HD set neither this
+// port's renderer nor its 640x480 screen has any use for); this composites
+// whichever layout the caller's own gameDir carries into one canvas exactly
+// the way real mainui's LoadSteamBackground would (same tile-parsing rule:
+// size comes from each tile's own header, never the layout file), resizes
+// the RESULT to 640x480 - not a per-tile resize, which would distort the
+// composite - and re-tiles it into ordinary files under the names and
+// layout `CMenuBackgroundBitmap::LoadSteamBackground` already reads: a
+// rewritten `resource/BackgroundLayout.txt` plus `resource/background/
+// bake_<row>_<col>.tga` tiles. No archive, no new loader - this is
+// deliberately not UiPacker's own MPAKv6 format (see the plan's own "three
+// facts" for why: this engine's mainui loads through PIC_Load/imagelib,
+// not through any consumer this tool's archives have).
+//
+// Always writes plain TGA (ref_soft profile only, for now) - the NV2A/DXT
+// profile the plan also describes is not implemented by this function;
+// XB owns that work once X9 exists to consume it.
+bool UiPacker::bakeBackgroundArt(const std::string& gameDir, const std::string& outDir,
+                                  int canvasW, int canvasH, int tileSize) {
+    int resW = 0, resH = 0;
+    std::vector<BackgroundTile> tiles;
+    std::string layoutPath = gameDir + "/resource/BackgroundLayout.txt";
+    if (!parseBackgroundLayout(layoutPath, resW, resH, tiles)) {
+        std::cerr << "bakeBackgroundArt: no usable " << layoutPath << "\n";
+        return false;
+    }
+    std::cout << "bakeBackgroundArt: compositing " << layoutPath << " (" << resW << "x" << resH
+               << ", " << tiles.size() << " tiles)\n";
+
+    std::vector<uint8_t> canvas(static_cast<size_t>(resW) * resH * 4, 0);
+    for (const auto& tile : tiles) {
+        std::string fullPath = gameDir + "/" + tile.relPath;
+        std::vector<uint8_t> tileRgba;
+        int tw = 0, th = 0;
+        if (!readTga(fullPath, tileRgba, tw, th)) {
+            std::cerr << "bakeBackgroundArt: missing or unreadable tile " << fullPath << "\n";
+            return false;
+        }
+        if (tile.x < 0 || tile.y < 0 || tile.x + tw > resW || tile.y + th > resH) {
+            std::cerr << "bakeBackgroundArt: tile " << fullPath << " does not fit the declared "
+                       << resW << "x" << resH << " canvas at (" << tile.x << "," << tile.y << ")\n";
+            return false;
+        }
+        blit(canvas, resW, tile.x, tile.y, tileRgba, tw, th);
+    }
+
+    std::cout << "bakeBackgroundArt: resizing " << resW << "x" << resH << " -> "
+               << canvasW << "x" << canvasH << "\n";
+    std::vector<uint8_t> resized = resizeBilinear(canvas, resW, resH, canvasW, canvasH);
+
+    std::string outResourceDir = outDir + "/resource";
+    std::string outBgDir = outResourceDir + "/background";
+#if defined(_WIN32)
+    system(("mkdir \"" + outBgDir + "\" 2>nul").c_str());
+#else
+    system(("mkdir -p \"" + outBgDir + "\"").c_str());
+#endif
+
+    std::ofstream layoutOut(outResourceDir + "/BackgroundLayout.txt");
+    if (!layoutOut.is_open()) {
+        std::cerr << "bakeBackgroundArt: could not create " << outResourceDir << "/BackgroundLayout.txt\n";
+        return false;
+    }
+    layoutOut << "resolution\t" << canvasW << "\t" << canvasH << "\n\n";
+
+    int tileCount = 0;
+    for (int ty = 0; ty < canvasH; ty += tileSize) {
+        int th = std::min(tileSize, canvasH - ty);
+        for (int tx = 0; tx < canvasW; tx += tileSize) {
+            int tw = std::min(tileSize, canvasW - tx);
+
+            std::vector<uint8_t> tileBuf(static_cast<size_t>(tw) * th * 4);
+            for (int y = 0; y < th; ++y) {
+                std::memcpy(&tileBuf[static_cast<size_t>(y) * tw * 4],
+                            &resized[(static_cast<size_t>(ty + y) * canvasW + tx) * 4],
+                            static_cast<size_t>(tw) * 4);
+            }
+
+            char name[64];
+            std::snprintf(name, sizeof(name), "bake_%d_%d.tga", ty / tileSize, tx / tileSize);
+            std::string tilePath = outBgDir + "/" + name;
+            if (!writeTga(tilePath, tileBuf, tw, th)) {
+                std::cerr << "bakeBackgroundArt: could not write " << tilePath << "\n";
+                return false;
+            }
+            layoutOut << "resource/background/" << name << "\tfit\t" << tx << "\t" << ty << "\n";
+            ++tileCount;
+        }
+    }
+    layoutOut.flush();
+    if (!layoutOut.good()) {
+        std::cerr << "bakeBackgroundArt: write failed to " << outResourceDir << "/BackgroundLayout.txt\n";
+        return false;
+    }
+
+    std::cout << "bakeBackgroundArt: wrote " << tileCount << " tile(s) to " << outBgDir
+               << " and " << outResourceDir << "/BackgroundLayout.txt\n";
+    return true;
+}
 
 bool UiPacker::packMenuAssets(const std::string& xashExtrasDir, const std::string& bannerManifestPath,
                                const std::string& outputPath, const std::string& debugDumpDir,

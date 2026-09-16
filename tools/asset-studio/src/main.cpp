@@ -249,6 +249,7 @@ int main(int argc, char *argv[]) {
     std::string verifyPath;
     bool packUi = false;
     bool buildGlobal = false;
+    bool bakeMenuArt = false;
     formats::PakManager pak;
 
     // --pack-menu specific options. Separate from --game-dir/--sprites since
@@ -319,7 +320,29 @@ int main(int argc, char *argv[]) {
             debugDumpDir = argv[++i];
         } else if (arg == "--resource-dir" && i + 1 < argc) {
             resourceDir = argv[++i];
+        } else if (arg == "--bake-menu-art") {
+            bakeMenuArt = true;
         }
+    }
+
+    if (bakeMenuArt) {
+        // XM item 0 stage B (fork-plan.md): --game-dir is a gamedir root
+        // (e.g. a Steam install's "valve") - not the whole Steam install,
+        // matching what resource/BackgroundLayout.txt is already relative
+        // to. --output is a directory (an overlay tree for
+        // tools/xbox-xiso.sh --menu-bake), not a file, unlike every other
+        // mode this tool has - checked here rather than left to
+        // bakeBackgroundArt to discover as a confusing mkdir failure.
+        if (gameDir == ".") {
+            std::cerr << "--bake-menu-art requires --game-dir <path to a gamedir, e.g. .../valve>\n";
+            return 1;
+        }
+        if (outputPath == "../test_map.mpak") {
+            std::cerr << "--bake-menu-art requires --output <directory> (an overlay tree, not a file)\n";
+            return 1;
+        }
+        bool ok = formats::UiPacker::bakeBackgroundArt(gameDir, outputPath);
+        return ok ? 0 : 1;
     }
 
     if (packMenu) {

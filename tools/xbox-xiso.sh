@@ -100,7 +100,7 @@ title_row() {
 
 TITLE="${1:-}"
 if [ -z "$TITLE" ]; then
-	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>]" >&2
+	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>]" >&2
 	exit 1
 fi
 shift
@@ -114,11 +114,13 @@ fi
 STEAM=""
 XBE=""
 OUT=""
+MENU_BAKE=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--steam) STEAM="$2"; shift 2 ;;
 		--xbe) XBE="$2"; shift 2 ;;
 		--out) OUT="$2"; shift 2 ;;
+		--menu-bake) MENU_BAKE="$2"; shift 2 ;;
 		*) echo "xbox-xiso: unrecognised argument: $1" >&2; exit 1 ;;
 	esac
 done
@@ -211,6 +213,106 @@ fi
 if ! cp "$XBE" "$STAGE/default.xbe"; then
 	echo "xbox-xiso: copying $XBE to $STAGE/default.xbe failed." >&2
 	exit 1
+fi
+
+# XM item 0 stage B (fork-plan.md): --menu-bake overlays a directory tree
+# (tools/asset-studio --bake-menu-art's own output shape - e.g.
+# resource/BackgroundLayout.txt + resource/background/*.tga) onto the
+# staged GAMEDIR, AFTER the retail copy above, so a disc built without
+# this flag is completely unaffected (the retail Steam install is never
+# modified - the overlay only ever touches this run's own scratch stage).
+# `cp -r <bakeDir>/. <stage>/` (the trailing `/.` copies CONTENTS into an
+# existing directory rather than nesting bakeDir itself one level deep).
+#
+# validate_menu_bake checks a directory actually IS a complete bake, not
+# just that it exists (Codex review round 1: an empty or unrelated
+# --menu-bake directory would otherwise copy nothing relevant, print the
+# same "overlaying" message, and still report a successful pack - a
+# baked-disc claim with nothing baked, indistinguishable from a real one
+# in a later memstats reading). Checked BEFORE the copy (catch a bad
+# --menu-bake argument immediately) and AGAIN AFTER it against the staged
+# copy (catch a copy that silently dropped or truncated files, the same
+# "verify the postcondition, not the command's own exit code" rule the
+# sha256 checks above already use).
+#
+# EVERY referenced tile, not just the first (Codex review round 2: mainui
+# aborts loading the WHOLE background as soon as any one referenced tile
+# is missing or unreadable, BackgroundBitmap.cpp:249-258 - a bake missing
+# a later tile, or one truncated mid-copy, would otherwise pass this
+# check and package a disc whose baked background never loads at all).
+# tga_dims reads width/height straight out of the file's own 18-byte
+# header (bytes 12-13, 14-15, little-endian - the exact shape
+# tools/asset-studio's writeTga() always produces: uncompressed 32bpp,
+# no ID field); comparing the file's actual byte count against
+# 18 + w*h*4 catches a truncated/corrupt tile without needing a full TGA
+# parser or a source-vs-staged hash compare - proportionate to what
+# writeTga can actually get wrong (a short write), not to every way a
+# TGA file in general could be malformed.
+tga_dims() { # <path>: echoes "<w> <h>" or fails
+	local w h
+	w=$(od -An -tu2 -j12 -N2 "$1" 2>/dev/null | tr -d '[:space:]')
+	h=$(od -An -tu2 -j14 -N2 "$1" 2>/dev/null | tr -d '[:space:]')
+	case "$w$h" in *[!0-9]*|"") return 1 ;; esac
+	printf '%s %s\n' "$w" "$h"
+}
+validate_menu_bake() {
+	local dir="$1" layout="$1/resource/BackgroundLayout.txt" resLine tileCount=0
+	local tilePath tileFile dims w h expectedSize actualSize
+	if [ ! -f "$layout" ]; then
+		echo "xbox-xiso: $dir has no resource/BackgroundLayout.txt - not a tools/asset-studio --bake-menu-art output." >&2
+		return 1
+	fi
+	resLine=$(grep -m1 -E '^[[:space:]]*resolution[[:space:]]+[0-9]+[[:space:]]+[0-9]+' "$layout")
+	if [ -z "$resLine" ]; then
+		echo "xbox-xiso: $layout has no valid 'resolution <w> <h>' line." >&2
+		return 1
+	fi
+	while IFS= read -r tilePath; do
+		[ -n "$tilePath" ] || continue
+		tileFile="$dir/$tilePath"
+		if [ ! -f "$tileFile" ]; then
+			echo "xbox-xiso: $layout references $tilePath, which does not exist under $dir." >&2
+			return 1
+		fi
+		if ! dims=$(tga_dims "$tileFile"); then
+			echo "xbox-xiso: $tileFile: could not read a TGA header (too short or unreadable)." >&2
+			return 1
+		fi
+		read -r w h <<<"$dims"
+		if [ "$w" -eq 0 ] || [ "$h" -eq 0 ]; then
+			echo "xbox-xiso: $tileFile: TGA header declares 0x0 dimensions." >&2
+			return 1
+		fi
+		expectedSize=$((18 + w * h * 4))
+		actualSize=$(wc -c < "$tileFile")
+		if [ "$actualSize" -ne "$expectedSize" ]; then
+			echo "xbox-xiso: $tileFile: $actualSize bytes, expected $expectedSize for an uncompressed 32-bit ${w}x${h} TGA - truncated or corrupt." >&2
+			return 1
+		fi
+		tileCount=$((tileCount + 1))
+	done < <(awk '$1 != "resolution" && NF >= 4 { print $1 }' "$layout")
+	if [ "$tileCount" -eq 0 ]; then
+		echo "xbox-xiso: $layout declares no tile line - refusing an empty bake." >&2
+		return 1
+	fi
+	return 0
+}
+if [ -n "$MENU_BAKE" ]; then
+	[ -d "$MENU_BAKE" ] || { echo "xbox-xiso: --menu-bake path does not exist or is not a directory: $MENU_BAKE" >&2; exit 1; }
+	if ! validate_menu_bake "$MENU_BAKE"; then
+		echo "xbox-xiso: --menu-bake $MENU_BAKE failed validation - refusing to pack." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: overlaying menu bake $MENU_BAKE onto $GAMEDIR..." >&2
+	if ! cp -r "$MENU_BAKE/." "$STAGE/$GAMEDIR/"; then
+		echo "xbox-xiso: overlaying $MENU_BAKE onto $STAGE/$GAMEDIR failed." >&2
+		exit 1
+	fi
+	if ! validate_menu_bake "$STAGE/$GAMEDIR"; then
+		echo "xbox-xiso: staged $GAMEDIR failed the same bake validation after the overlay copy - copy was incomplete." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: menu bake overlay verified in the stage." >&2
 fi
 
 # Verify the stage is actually complete before handing it to extract-xiso -

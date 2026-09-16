@@ -63,6 +63,21 @@ public:
     static bool packMenuAssets(const std::string& xashExtrasDir, const std::string& bannerManifestPath,
                                 const std::string& outputPath, const std::string& debugDumpDir,
                                 const std::string& resourceDir = "");
+
+    // XM item 0 stage B (fork-plan.md): bakes a retail gamedir's menu
+    // background - whichever of BackgroundLayout.txt/HD_BackgroundLayout.txt
+    // it carries - to a canvasW x canvasH canvas re-tiled at tileSize x
+    // tileSize, writing ordinary TGA files and a rewritten
+    // resource/BackgroundLayout.txt under outDir (NOT an archive - this
+    // engine's mainui loads through PIC_Load, not any consumer UiPacker's
+    // other archives have). gameDir is a gamedir root (e.g. a Steam
+    // install's "valve", not its parent) - the same directory
+    // resource/BackgroundLayout.txt already lives under. ref_soft (TGA)
+    // profile only; the NV2A/DXT profile is X9's to add once it exists to
+    // consume it. Returns false on any missing/malformed input or write
+    // failure - never a partial bake.
+    static bool bakeBackgroundArt(const std::string& gameDir, const std::string& outDir,
+                                   int canvasW = 640, int canvasH = 480, int tileSize = 256);
 };
 
 }

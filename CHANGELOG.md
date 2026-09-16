@@ -5,6 +5,22 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — an offline bake for the Xbox menu background (`tools/asset-studio --bake-menu-art`)
+
+New `tools/asset-studio` mode composites a retail gamedir's tiled menu
+background, resizes it to 640x480, and re-tiles it into ordinary TGA
+files under the same names `mainui` already reads - not an archive, since
+this engine's menu loads through `PIC_Load`, not any consumer
+`UiPacker`'s existing formats have. `tools/xbox-xiso.sh --menu-bake <dir>`
+overlays the result onto a staged disc after the retail copy, so a disc
+built without the flag is unaffected. Measured, same binary, same
+content: 0.25 MiB saved (2512 vs 2448 `VirtualMemory` pages) - real, but
+under this phase's own ~1.0-1.2 MiB estimate, not yet explained. Visual
+result confirmed correct (real retail art, not the black tiles this was
+originally tested against - the local Steam install changed content
+mid-session, see `docs/r3d/fork-plan.md`'s XM item 0 step 5), with pixel-
+level continuity checked across the retile seam.
+
 ### Fixed — the animated HL25 main-menu title now draws
 
 `tools/xbox-xiso.sh` now copies `animated_title`/`hd_background` from a

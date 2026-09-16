@@ -2220,16 +2220,45 @@ registration unless the stock one is unusable:
 
    What the bake does, per asset, with the arithmetic from the uploader
    above:
-   - *Background*: composite the 12 tiles, scale the 800x600 canvas to
-     640x480 (x0.8, 4:3 to 4:3, no crop), re-tile at 256x256 (3x2 = 6
-     tiles, the right column and bottom row partial - `mainui` takes each
-     tile's size from its own header, `BackgroundBitmap.cpp:272-273`, so
-     partial tiles are fine) and write a `resource/BackgroundLayout.txt`
-     saying `resolution 640 480` - the parser is generic (`:234-276`).
-     `ref_soft` profile: 24-bit TGA, no alpha channel at all, so no alpha
-     buffer - ~1.0 MiB resident against 2.0 MiB retail. NV2A profile:
-     one 1024x512 DXT1 `.dds` = 256 KiB, one tile, under the 1024 cap.
-     Either way `GFL_HD_BACKGROUND` stays masked (step 2) so the 105-tile
+   - *Background*: **`ref_soft` profile DONE, 2026-09-16 - a new
+     `tools/asset-studio` mode, `--bake-menu-art --game-dir <gamedir>
+     --output <dir>`, and a new `tools/xbox-xiso.sh --menu-bake <dir>`
+     overlay flag.** `UiPacker::bakeBackgroundArt` composites whichever
+     layout the gamedir carries (reusing `parseBackgroundLayout`/
+     `readTga`/`blit`, the exact functions `packMenuBackground` already
+     used, so the composite is provably built the same way), bilinear-
+     resizes the composite to 640x480, and re-tiles it at 256x256 (3x2 =
+     6 tiles, the right column and bottom row genuinely partial - 128 and
+     224 px, confirmed by reading the written files' own headers, not
+     assumed), writing a new `resource/BackgroundLayout.txt` (`resolution
+     640 480`) plus plain uncompressed TGA tiles - ordinary files under
+     the names `mainui` already reads, not an archive, per this section's
+     own "three facts". A new `writeTga` matches retail's own on-disk
+     convention exactly (row 0 first, `0x08` descriptor - verified
+     correct by booting a real disc with baked tiles and reading the
+     screen, not assumed from the TGA spec) so a baked tile is
+     interchangeable with a retail one from the engine's own load path.
+     **Measured, same binary, `memstats`, same disc content on both
+     sides**: `2512` `VirtualMemory` pages retail (unbaked) vs `2448`
+     baked - a **64-page (0.25 MiB) saving**, real but well under the
+     ~1.0-1.2 MiB this section originally estimated from the uploader's
+     own formula - the gap between the two is not explained (worth
+     instrumenting `Mem_Calloc` directly before trusting the formula for
+     anything else, not attempted this session). **Visual**: content
+     changed mid-session (the Steam install this was tested against was
+     switched from a 25th-anniversary build - which has genuinely solid
+     black 800x600 tiles, confirmed earlier by reading raw pixel bytes -
+     to an older, pre-25th-anniversary Steam release with real
+     photographic art, Gordon Freeman and the lambda logo) - the baked
+     result is recognisably the same image, correctly oriented, with
+     smooth colour continuity verified pixel-by-pixel across the tile
+     seam at y=255/y=256 (not just eyeballed); a visual difference from
+     the unbaked screenshot exists and was not root-caused before this
+     was written up - worth a second look before calling this fully
+     closed, not blocking given the memory number is what step 3's
+     ceiling actually needs. NV2A profile (one 1024x512 DXT1 `.dds`) is
+     not implemented - X9's to add once it exists to consume it. Either
+     profile keeps `GFL_HD_BACKGROUND` masked (step 2) so the 105-tile
      layout is never tried.
    - *Animated title*: keep the layers and the state machine - the
      blurred strips are a parallax backdrop, pre-compositing them would
@@ -2435,8 +2464,31 @@ registration unless the stock one is unusable:
       already named in this item's own arithmetic section) - a real,
       measured consequence of that design, not just a theoretical risk
       from reading the header comment.
-   5. Pre-HL25 profile: with a disc built from older content (the user
-      supplies it - the local Steam install is HL25 only), confirm the
+   5. Pre-HL25 profile: with a disc built from older content. **Correction,
+      2026-09-16: "the local Steam install is HL25 only" no longer
+      holds** - Half-Life's own Steam distribution is not a fixed target;
+      partway through this same session the local install changed from a
+      25th-anniversary build (genuinely solid black `resource/background/
+      *.tga`, all eleven `resource/logo*.tga` layers present,
+      `liblist.gam` setting `animated_title`/`hd_background`) to an
+      older, pre-anniversary release (real photographic art in the same
+      12 tiles - confirmed live, not assumed, by the screenshot changing
+      from black to Gordon Freeman's face - `resource/logo*.tga` gone
+      except an unrelated `logo_game.tga`, `liblist.gam` no longer
+      setting either flag) - apparently a Steam beta-branch switch on the
+      user's own account, not a bug in anything this project owns. Two
+      things follow: divergence #59's gameinfo sync (copies a flag from
+      `liblist.gam` only when it is actually set there) degrades to a
+      correct no-op on this older content, exactly as its own "closes
+      if..." row describes - checked live, not just reasoned about, since
+      the sync ran against this exact content and correctly added
+      nothing. And this older Steam release, while genuinely different
+      art, is STILL not the classic WON content this step actually needs
+      to test (`gfx/shell` there still carries only the `kb_*.lst` files,
+      no `btns_main.bmp`, no `splash.bmp`) - a real pre-WON/box-retail
+      install (in progress on the user's own machine via an InstallShield
+      extraction as this is written) is what closes this step, not a
+      different Steam vintage. With a disc built from that content, confirm the
       ladder picks `splash.bmp` + the bitmap strip, check what the 1024
       cap does to the strip's atlas (if it halves, the buttons are
       wrong, not just costly), measure strip + banners against the
@@ -4910,16 +4962,24 @@ Then the format, decided once:
   (`TextureOpt.cpp:110-132`) applies a Morton order to DXT blocks, which is
   wrong for `D3DFMT_DXT1` on this hardware. Verified against a known-good
   surface, not reasoned about.
-- **Menu art bake (added 2026-09-16, owned by XM item 0, built in this
-  tool).** A `--bake-menu-art` mode that scales the retail background
-  tiles and title layers to the 640x480 canvas, re-tiles the background
-  with a rewritten `BackgroundLayout.txt`, and writes ordinary files
-  imagelib already decodes (TGA for `ref_soft`, `.dds` for `ref/nv2a`)
-  as an overlay for `tools/xbox-xiso.sh` - not an archive, since this
-  engine's `mainui` loads through `PIC_Load` and `UiPacker`'s archives
-  have no consumer here. Shares `UiPacker`'s layout parser and
-  compositor; the DXT profile inherits the block-row rule above and does
-  not swizzle. Full design and arithmetic under XM item 0.
+- **Menu art bake (owned by XM item 0, built in this tool). Background
+  DONE, 2026-09-16; title and the NV2A profile are NOT built - corrected
+  here after review caught this bullet claiming both, still in the
+  original planning tense, after the background half actually shipped.**
+  A `--bake-menu-art` mode scales the retail background to a 640x480
+  canvas, re-tiles it with a rewritten `BackgroundLayout.txt`, and writes
+  ordinary TGA files `mainui` already decodes as an overlay for `tools/
+  xbox-xiso.sh --menu-bake` - not an archive, since this engine's
+  `mainui` loads through `PIC_Load` and `UiPacker`'s other archives have
+  no consumer here. Shares `UiPacker`'s layout parser and compositor.
+  Measured: a real 0.25 MiB saving, same binary, same content. Not yet
+  built: the animated title's own scale-and-drop-mips bake (busts the 3
+  MiB ceiling on its own without it - the actual reason this item
+  exists), and the NV2A/DXT profile for either asset (X9's to add once it
+  exists to consume it; when it lands, the DXT profile inherits the
+  block-row rule above and does not swizzle). Full design and arithmetic
+  under XM item 0 itself, which is the current source of truth for
+  status, not this cross-reference.
 - **Post-T&L cache ordering** of indices. Free offline, invisible to the
   engine.
 
