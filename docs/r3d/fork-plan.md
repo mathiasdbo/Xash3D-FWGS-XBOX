@@ -1995,7 +1995,9 @@ mislead one round of XG.1's measurements (see there).
 
 ## XM — Console-shaped menus (proposed, 2026-09-15)
 
-**Status: draft epic, not started.** Raised after X6's live controller test:
+**Status: in progress, 2026-09-16 - the "Where the code lives" prerequisite
+is done (an owned `mainui_cpp` fork exists, verified against the current
+tree); no screen has been rewritten yet.** Raised after X6's live controller test:
 the WON menu navigates with a pad, but every screen behind it is the PC's
 - a resolution table, windowed/borderless toggles, a renderer picker, mouse
 sensitivity, touch and gyro pages, a server browser - and the one screen a
@@ -2110,20 +2112,36 @@ registration unless the stock one is unusable:
    text field is actually reachable.
 
 **Where the code lives - decided by the sibling's example and this
-project's own precedent.** Substantive `mainui` changes cannot live as
-uncommitted patches (the tree already auto-patches `3rdparty/mainui` from
-`patches/` for two build fixes, and a menu rewrite is far past what a patch
-file should carry). Do what `deps/hlsdk` already does (divergence #44's
-precedent) and what xash-rt did: **an owned fork of FWGS `mainui_cpp` with a
-`resonance3d` branch**, the submodule pinned to it, `.gitmodules` gaining
-`branch = resonance3d`, every change `#if XASH_XBOX`-guarded where it alters
-a screen the PC build still shows. Divergence ledger: one entry, form 1
-(our own fork), listing each screen touched - its anticipated row is in
-the ledger now, and the ledger's old "the menu does not need rewriting"
-bullet is narrowed to the framework in the same change. Whatever
-`tools/xbox-cc.sh` currently auto-patches inside the mainui checkout (the
-reason the submodule shows modified in every `git status`) folds into
-that branch on the way.
+project's own precedent. DONE, 2026-09-16.** Substantive `mainui` changes
+cannot live as uncommitted patches, and a menu rewrite is far past what a
+patch file should carry. Did what `deps/hlsdk` already does (divergence
+#44's precedent) and what xash-rt did: forked FWGS `mainui_cpp` to
+`mathiasdbo/mainui_cpp`, a `resonance3d` branch created from the exact
+commit already vendored (`8843994`, no source content changed), `.gitmodules`
+re-pointed at it with `branch = resonance3d`. One thing the plan had not
+anticipated: `miniutl` (divergence #20's `winlite.h` fix) is nested a
+level deeper, inside `mainui_cpp` itself (`FWGS/miniutl`, not this repo's
+own `.gitmodules`) - the patch this project auto-applied at sweep time
+could not fold into the outer fork alone, so it needed its own fork too
+(`mathiasdbo/MiniUTL`, `resonance3d` branch, the fix now a real commit),
+pinned by the mainui fork's own `.gitmodules`. `tools/xbox-mainui-sweep.sh`'s
+patch-auto-apply preflight is replaced with a `git submodule sync
+--recursive` + `update --init --recursive` the sweep now runs itself,
+unconditionally, every time - found in Codex review round 1: an already-
+initialised checkout caches the OLD FWGS urls in its own `.git/config`,
+and `git submodule update`, even `--init --recursive`, does not re-read
+`.gitmodules` for a submodule already registered, so it would otherwise
+try to fetch this fork's commits from upstream and fail. `sync` is local-
+only and a no-op when already correct, so running it unconditionally
+self-heals either case with no manual step for a caller to remember.
+Verified against the exact
+same commits so nothing else moved: the mainui sweep still reports 82 ok /
+0 failing, and the baseline engine+menu link still reports 0 duplicate / 0
+undefined. Divergence ledger: #57 (this move) and #20 (updated to point
+here instead of at the retired patch file); the ledger's "the menu does
+not need rewriting" bullet was already narrowed to the framework ahead of
+this. Every future screen change goes `#if XASH_XBOX`-guarded where it
+alters a screen the PC build still shows, same as planned.
 
 **Art and memory.** Reuse every existing `PC_*` button id and `head_*`
 banner (retail ships them as BMP under `gfx/shell/`; the disc already

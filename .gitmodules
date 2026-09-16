@@ -1,6 +1,7 @@
 [submodule "mainui"]
 	path = 3rdparty/mainui
-	url = https://github.com/FWGS/mainui_cpp
+	url = git@github.com:mathiasdbo/mainui_cpp.git
+	branch = resonance3d
 [submodule "ref_gl/nanogl"]
 	path = 3rdparty/nanogl
 	url = https://github.com/FWGS/nanogl

@@ -79,30 +79,67 @@ if [ ! -d "$MSYS2_BIN" ]; then
 fi
 export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
 
-# The miniutl patch preflight lives here, not in tools/xbox-cxx.sh - found
-# in review, 2026-09-09: that script is meant to stay a generic one-
-# translation-unit C++ compiler (it also has to serve the HL SDK's
-# client/server later), and a mainui-only nested-submodule requirement
-# does not belong forced onto every caller. This is the only script that
-# actually needs it, so it owns the full preflight: existence check plus
-# idempotent auto-apply, same mechanism/reasoning as the library_suffix/
-# opusfile preflights tools/xbox-cc.sh and tools/xbox-cxx.sh already carry
-# for their own patches.
+# The NXDK winlite.h fix used to be a patch auto-applied here at sweep
+# time (this preflight owned it rather than tools/xbox-cxx.sh - found in
+# review, 2026-09-09 - because that script stays a generic one-
+# translation-unit C++ compiler with no mainui-only requirement forced
+# onto every caller). XM (fork-plan.md, "Where the code lives") replaced
+# that with an owned fork of mainui_cpp - and, one level down, of its own
+# miniutl nested submodule - each with a resonance3d branch carrying the
+# fix as a real commit (mathiasdbo/MiniUTL, "winlite.h: skip winsock2.h/
+# dbghelp.h on NXDK"), the same pattern deps/hlsdk already used.
+#
+# `git submodule sync` first, always - found in Codex review: a checkout
+# that already had 3rdparty/mainui/miniutl initialised BEFORE the fork
+# move has the OLD FWGS urls cached in its own .git/config, and
+# `git submodule update`, even with `--init --recursive`, does not
+# re-read `.gitmodules` for a submodule already registered - it fetches
+# from whatever url is cached, which after this move is upstream's, not
+# the fork's, and the fork-only commits this pin points at simply do not
+# exist there. `sync` is local-only (rewrites the cached url from
+# .gitmodules, no network) and a no-op on an already-correct checkout, so
+# running it unconditionally before every update is free and self-heals
+# either case - a caller does not need to know this move happened at all.
+#
+# Non-recursive, THEN recursive, in that order - found in round 2 of the
+# same review: a stale checkout's 3rdparty/mainui is still sitting on the
+# OLD commit until its own update runs, and that old commit's OWN
+# .gitmodules still points miniutl at upstream FWGS, not the fork - a
+# recursive sync run before mainui itself is updated recurses into that
+# stale content and just re-affirms the wrong nested url, then the
+# recursive update fetches miniutl's fork-only commit from FWGS and
+# fails. mainui has to reach its NEW commit (and thus its NEW, fork-
+# pointing .gitmodules) before a recursive sync/update of what is nested
+# inside it means anything.
+if ! git -C "$REPO" submodule sync -- 3rdparty/mainui > /dev/null; then
+	echo "xbox-mainui-sweep: git submodule sync -- 3rdparty/mainui failed." >&2
+	exit 1
+fi
+if ! git -C "$REPO" submodule update --init -- 3rdparty/mainui > /dev/null; then
+	echo "xbox-mainui-sweep: git submodule update --init -- 3rdparty/mainui failed." >&2
+	echo "  (network access to mathiasdbo/mainui_cpp is required)" >&2
+	exit 1
+fi
+if ! git -C "$REPO" submodule sync --recursive -- 3rdparty/mainui > /dev/null; then
+	echo "xbox-mainui-sweep: git submodule sync --recursive -- 3rdparty/mainui failed." >&2
+	exit 1
+fi
+if ! git -C "$REPO" submodule update --init --recursive -- 3rdparty/mainui > /dev/null; then
+	echo "xbox-mainui-sweep: git submodule update --init --recursive -- 3rdparty/mainui failed." >&2
+	echo "  (network access to mathiasdbo/mainui_cpp and mathiasdbo/MiniUTL is required)" >&2
+	exit 1
+fi
 WINLITE_H="$REPO/3rdparty/mainui/miniutl/winlite.h"
 if [ ! -f "$WINLITE_H" ]; then
-	echo "xbox-mainui-sweep: 3rdparty/mainui/miniutl/winlite.h does not exist." >&2
-	echo "  Run:" >&2
-	echo "  git submodule update --init 3rdparty/mainui" >&2
-	echo "  git -C 3rdparty/mainui submodule update --init miniutl" >&2
+	echo "xbox-mainui-sweep: 3rdparty/mainui/miniutl/winlite.h does not exist even" >&2
+	echo "  after a sync+update - check 3rdparty/mainui/.gitmodules's miniutl entry." >&2
 	exit 1
 elif ! grep -q "NXDK: neither header exists" "$WINLITE_H"; then
-	if ! git -c core.autocrlf=false -C "$REPO/3rdparty/mainui/miniutl" apply \
-		"$REPO/patches/miniutl-xbox-winlite.patch" 2>&1; then
-		echo "xbox-mainui-sweep: could not apply patches/miniutl-xbox-winlite.patch" >&2
-		echo "  to 3rdparty/mainui/miniutl/winlite.h - check it still applies" >&2
-		echo "  cleanly against the submodule's pinned commit." >&2
-		exit 1
-	fi
+	echo "xbox-mainui-sweep: $WINLITE_H does not carry the NXDK fix even after a" >&2
+	echo "  sync+update - 3rdparty/mainui/miniutl is not on mathiasdbo/MiniUTL's" >&2
+	echo "  resonance3d branch. Check 3rdparty/mainui/.gitmodules and the pinned" >&2
+	echo "  commit by hand." >&2
+	exit 1
 fi
 
 SCRATCH="${SCRATCH:-$REPO/.sweep}"

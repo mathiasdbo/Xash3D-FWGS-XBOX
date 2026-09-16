@@ -5,6 +5,22 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — `mainui` (and its nested `miniutl`) moved to owned forks
+
+XM's "Where the code lives" prerequisite: substantive menu-screen changes
+cannot live as uncommitted patches. Forked `FWGS/mainui_cpp` to
+`mathiasdbo/mainui_cpp` and `FWGS/miniutl` to `mathiasdbo/MiniUTL`, each on
+a `resonance3d` branch created from the exact commit already vendored -
+no source content changed by the move itself. The NXDK `winlite.h` fix
+that used to be a patch file auto-applied at sweep time is now a real
+commit on the `MiniUTL` fork; the patch file is gone. The sweep script now
+runs `git submodule sync`/`update` itself, unconditionally, before every
+sweep, so an already-initialised checkout's cached submodule urls (which
+a plain `git submodule update` would not otherwise repoint) self-heal
+with no manual step. Re-verified against the exact same
+commits: the mainui sweep still compiles 82/82, the baseline engine+menu
+link is still 0 duplicate/0 undefined.
+
 ### Added — `tools/xbox-xiso.sh`: one real, packaged XISO per title
 
 Assembles a bootable disc from a real Steam Half-Life install and an
