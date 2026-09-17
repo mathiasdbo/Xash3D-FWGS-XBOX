@@ -5,6 +5,41 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — the menu ships with a real font instead of console glyphs
+
+The Xbox menu now draws every row as text in a real typeface instead of the retail button artwork. The face is Fira Sans Condensed, chosen over the design's original pick after building all three candidates as real discs and comparing them on screen. Without
+it the font system fell back to the engine's console glyphs without
+saying so — a character set with no accented Latin at all, so most
+European languages simply could not be drawn, and English looked
+identical either way. Confirmed on a real boot by reading the guest's
+own texture table rather than trusting the screen, since that is the
+only way to tell the two paths apart. Menu row labels still come from
+the retail button art until that changes separately.
+
+Measured on a real boot, the text menu costs the console almost exactly
+what the retail button art it replaces cost — a wash to within a few tens
+of kilobytes — so this buys reach rather than memory. The two halves ship
+together by necessity: keeping both would have doubled the menu's texture
+budget.
+
+A disc missing its font, or missing the string tables the text now needs,
+is a packaging failure rather than a silent downgrade — without the latter
+every label would render as its own internal lookup name.
+
+The design originally called for Barlow Semi Condensed. It was dropped
+because it cannot draw a single Cyrillic character and is missing nine
+Central European letters, which would have quietly limited how far the
+menu could ever be translated — the whole reason for the change. The
+condensed Fira keeps the narrower look the design wanted, covers every
+character the menu can render, and costs exactly the same memory.
+
+The second face the menu can use is deliberately left off: it is Wine's
+Tahoma under the LGPL, not an open font licence, and its own notice
+refers to a licence text this tree does not carry — so shipping it would
+put incorrect provenance on every disc. It only backs the small help
+text, which keeps the console glyphs it already had. Giving that text a
+properly licensed typeface is tracked separately.
+
 ### Added — the Audio screen is trimmed to what a fixed console needs
 
 `Audio.cpp` keeps its three volume sliders (Sound, Music, HEV suit) and

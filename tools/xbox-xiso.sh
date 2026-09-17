@@ -120,7 +120,7 @@ title_row() {
 
 TITLE="${1:-}"
 if [ -z "$TITLE" ]; then
-	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>] [--delta-lst <file>]" >&2
+	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>] [--delta-lst <file>] [--resource-dir <dir>]" >&2
 	exit 1
 fi
 shift
@@ -136,6 +136,7 @@ XBE=""
 OUT=""
 MENU_BAKE=""
 DELTA_LST=""
+RESOURCE_DIR=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--steam) STEAM="$2"; shift 2 ;;
@@ -143,6 +144,7 @@ while [ $# -gt 0 ]; do
 		--out) OUT="$2"; shift 2 ;;
 		--menu-bake) MENU_BAKE="$2"; shift 2 ;;
 		--delta-lst) DELTA_LST="$2"; shift 2 ;;
+		--resource-dir) RESOURCE_DIR="$2"; shift 2 ;;
 		*) echo "xbox-xiso: unrecognised argument: $1" >&2; exit 1 ;;
 	esac
 done
@@ -341,6 +343,120 @@ if [ -n "$MENU_BAKE" ]; then
 		exit 1
 	fi
 	echo "xbox-xiso: menu bake overlay verified in the stage." >&2
+fi
+
+# The menu font (XM.1 item 13 step 1). Unlike delta.lst above, this DOES
+# come from this repository, and the difference is provenance, not
+# convenience: delta.lst is retail content only the user's own install may
+# supply, while this is an SIL OFL 1.1 face we are entitled to ship. Its
+# licence travels with it because the OFL requires that.
+#
+# It lives in assets/fonts/, NOT in 3rdparty/extras/xash-extras/, for a
+# structural reason: that path is an upstream submodule (FWGS/xash-extras)
+# and nothing this fork owns may be added to it. assets/ is this fork's
+# own home for content it ships. The face is Fira Sans **Condensed** -
+# see FindFontDataFile in FontManager.cpp for why that and not the design
+# canvas's Barlow Semi Condensed (Barlow cannot draw Cyrillic at all).
+#
+# Staged unconditionally, because the alternative failure is silent:
+# CStbFont::Create asks the filesystem for the mapped path
+# ("Trebuchet MS"), and when the file is absent CFontBuilder::Create falls
+# back to CBitmapFont without a word (FontManager.cpp:506-514) - engine
+# conchars, ASCII 33-126 plus Cyrillic and no accented Latin at all
+# (BitmapFont.cpp:87-93). Every menu string then draws in a font that
+# cannot spell "Trainingsgelände", and English looks identical either way,
+# which is exactly how this went unnoticed until item 13 went looking. A
+# disc that cannot render its own menu is not a disc worth packing, so a
+# missing source font is fatal here.
+#
+# tahoma.ttf is deliberately NOT staged, though the tree carries it and
+# FindFontDataFile maps "Tahoma" (the console face, FontManager.cpp:102)
+# to it. Codex review caught the reason: it is Wine's Tahoma under LGPL
+# 2.1-or-later, not OFL, and its own notice points at a COPYING.LIB this
+# tree does not have - so shipping it would put materially wrong
+# provenance and an incomplete licence on every disc. Leaving it off costs
+# one face, which falls back to conchars: the 11 px help/console text,
+# already the face item 13 step 2 accepted as the one that does not get
+# its ideal typeface, and consistent with divergence #63 putting the
+# engine console on WON conchars anyway. It also returns the 512 KiB that
+# face measured. Shipping a real console face again means an OFL (or
+# similarly unencumbered) one, not this file.
+FONTS_SRC="$REPO/assets/fonts"
+if [ ! -d "$FONTS_SRC" ]; then
+	echo "xbox-xiso: menu fonts are missing from $FONTS_SRC - the menu would" >&2
+	echo "  silently fall back to console glyphs with no accented Latin." >&2
+	exit 1
+fi
+mkdir -p "$STAGE/$GAMEDIR/gfx/fonts"
+for f in FiraSansCondensed-Regular.ttf FiraSansCondensed-OFL.txt; do
+	if [ ! -f "$FONTS_SRC/$f" ]; then
+		echo "xbox-xiso: menu font file $FONTS_SRC/$f is missing." >&2
+		exit 1
+	fi
+	if ! cp "$FONTS_SRC/$f" "$STAGE/$GAMEDIR/gfx/fonts/$f"; then
+		echo "xbox-xiso: copying $f into the stage failed." >&2
+		exit 1
+	fi
+done
+# Verify after copying rather than trusting cp, the same way every other
+# stage gate in this script does - and compare sizes, since a truncated
+# TTF loads as far as stbtt_InitFont and then fails the same silent way.
+for f in FiraSansCondensed-Regular.ttf; do
+	src_sz=$(wc -c < "$FONTS_SRC/$f")
+	dst_sz=$(wc -c < "$STAGE/$GAMEDIR/gfx/fonts/$f" 2>/dev/null || echo 0)
+	if [ "$src_sz" != "$dst_sz" ]; then
+		echo "xbox-xiso: staged gfx/fonts/$f is $dst_sz bytes, source is $src_sz - copy was incomplete." >&2
+		exit 1
+	fi
+done
+echo "xbox-xiso: menu font staged into $GAMEDIR/gfx/fonts and verified." >&2
+
+# The localization dictionaries (XM.1 item 13 step 4), and the gate that
+# makes them non-optional. Once the Xbox build draws menu rows as text
+# rather than button-strip bitmaps, every row's label is whatever the
+# string layer returns - and L() returns its own key on a miss
+# (MenuStrings.cpp:75-89), with GameUI_* having no compiled-in fallback.
+# A classic WON install ships no resource/ directory at all, so without
+# these files Main would read "GameUI_NewGame", "GameUI_TrainingRoom",
+# "GameUI_LoadGame", "GameUI_Options" on screen. StringsList_* keys do
+# resolve from a compiled-in table (MenuStrings.cpp:35, :485-492), which
+# is exactly why the status lines under those labels looked correct all
+# along and hid this.
+#
+# Same provenance rule as delta.lst: these are content, taken from the
+# user's own install via --resource-dir, never from this repository.
+RESOURCE_FILES="gameui_english.txt valve_english.txt"
+have_dicts=1
+for d in $RESOURCE_FILES; do
+	[ -f "$STAGE/$GAMEDIR/resource/$d" ] || have_dicts=0
+done
+if [ "$have_dicts" -eq 0 ] && [ -n "$RESOURCE_DIR" ]; then
+	[ -d "$RESOURCE_DIR" ] || { echo "xbox-xiso: --resource-dir does not exist: $RESOURCE_DIR" >&2; exit 1; }
+	mkdir -p "$STAGE/$GAMEDIR/resource"
+	for d in $RESOURCE_FILES; do
+		if [ ! -f "$RESOURCE_DIR/$d" ]; then
+			echo "xbox-xiso: --resource-dir $RESOURCE_DIR has no $d." >&2
+			exit 1
+		fi
+		if ! cp "$RESOURCE_DIR/$d" "$STAGE/$GAMEDIR/resource/$d"; then
+			echo "xbox-xiso: copying $d into the stage failed." >&2
+			exit 1
+		fi
+		if ! cmp -s "$RESOURCE_DIR/$d" "$STAGE/$GAMEDIR/resource/$d"; then
+			echo "xbox-xiso: staged resource/$d differs from source - copy was incomplete." >&2
+			exit 1
+		fi
+	done
+	have_dicts=1
+	echo "xbox-xiso: localization dictionaries supplied from $RESOURCE_DIR and verified." >&2
+fi
+if [ "$have_dicts" -eq 0 ]; then
+	echo "xbox-xiso: $GAMEDIR provides no resource/gameui_english.txt." >&2
+	echo "  The Xbox menu draws its rows as text, so without it every label" >&2
+	echo "  renders as its own lookup key (\"GameUI_NewGame\" and friends)." >&2
+	echo "  Supply them with --resource-dir <dir> from an install that has" >&2
+	echo "  them (a Steam/HL25 valve/resource), the same way --delta-lst works." >&2
+	exit 1
 fi
 
 # Verify the stage is actually complete before handing it to extract-xiso -

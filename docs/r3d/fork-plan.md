@@ -3433,7 +3433,9 @@ toggle has no setting behind it (item 8).
    row's label is whatever the string layer returns, so the font (1) and
    both dictionaries (3, 4) have to be on the disc before it, or the menu
    ships in console glyphs reading `GameUI_NewGame`.
-   1. **A real font on the disc, proved to be the one drawing.** Xbox
+   1. **A real font on the disc, proved to be the one drawing. DONE,
+      2026-09-17** (the staging and the proof; the measurement it produced
+      is below and it changed this item's budget). Xbox
       already compiles a real rasterizer, not conchars:
       `tools/xbox-mainui-sweep.sh:164` passes
       `-DMAINUI_USE_CUSTOM_FONT_RENDER -DMAINUI_USE_STB`, so
@@ -3452,10 +3454,36 @@ toggle has no setting behind it (item 8).
       strings we pass**. Work: stage the fonts, then **prove which
       backend is live** by reading it out of the guest the way item 0
       read `s_state` and `r_images[]` - eyeballing cannot tell, the
-      fallback is silent and English looks the same either way. Decide
-      *which* font in writing: the canvas asks for Barlow Semi Condensed
-      and IBM Plex Mono, and FiraSans is merely what the mapper happens
-      to name. **The tempting cheap option does not work** - dropping
+      fallback is silent and English looks the same either way.
+
+      **The face is decided and shipped: Fira Sans Condensed** (2026-09-17,
+      after building all three candidates as real discs and reading the
+      output at 640x480 rather than arguing from a mockup). The canvas
+      asked for Barlow Semi Condensed, and **Barlow lost on coverage, not
+      on looks**: parsing each TTF's own `cmap` gives Barlow **0/96
+      Cyrillic and 119/128 Latin Extended-A**, against **382/382 across
+      every uploaded range** for both Fira faces - so the canvas's own
+      choice would have quietly capped how far this menu can ever be
+      translated, the one thing item 13 exists to enable. Worth naming the
+      irony: Barlow's narrowness is exactly what long German and Russian
+      strings want, and it cannot draw Russian at all. Condensed Fira
+      keeps that narrower column, covers everything, sits on the same OFL
+      licence and superfamily already staged, and measured **identical
+      atlas buckets** to the upright face - the swap is free. **A
+      prediction this item made and got wrong, recorded because it nearly
+      decided the question**: condensed faces were argued to break down at
+      12-25 px under an unhinted rasterizer. Compared at 3x on real
+      output, they do not - all three read cleanly at the row size, and
+      that legibility argument should carry no weight here. The font lives
+      in **`assets/fonts/`, not `3rdparty/extras/xash-extras/`**, because
+      that path is an upstream submodule and nothing this fork owns may be
+      added to it; `assets/` is this fork's own home for shipped content.
+      IBM Plex Mono is still not taken: a second family for 10-11 px help
+      text is a whole atlas, and step 2 already conceded that face.
+
+      The reasoning that got here, kept because it constrains any future
+      swap: the canvas asks for Barlow Semi Condensed and IBM Plex Mono,
+      and FiraSans is merely what the mapper happens to name. **The tempting cheap option does not work** - dropping
       Barlow in under the filename `FindFontDataFile` already expects
       cannot render the design, because the canvas uses three Barlow
       weights (700 headings, 600 rows, 500 setting labels) and two mono
@@ -3494,7 +3522,75 @@ toggle has no setting behind it (item 8).
       staged caches corroborate every bucket exactly (each file is
       `atlas_bytes + 8130`, with deltas of 2^18/2^19/2^20).
 
-      **That 1.5 MiB is new cost, not existing cost - do not read it as a
+      **MEASURED 2026-09-17, and the prediction above was wrong - the
+      real figure is 2.75 MiB, not 1.5.** Staged the fonts and read the
+      live texture table (`r_images[]` at `0x00f1d4bc`, stride 312,
+      `name` at offset 0 and `width`/`height` at +260/+262). The *face
+      set* was predicted exactly right - talls 11, 12, 16, 16@1000 and
+      25 - and `GetTextureName` puts the backend in the name, so
+      `#Trebuchet MS_16_500_stb_font.bmp` and its siblings are proof the
+      TTF path is live and not the silent fallback. But **every face
+      except tall 12 came out one bucket larger than predicted**:
+      256x512 for default, bold and console, 512x512 for big, only small
+      at 256x256. The
+      bucket-doubling rule was right; predicting which bucket a given
+      tall lands in from the staged PC-resolution caches was not. Two
+      lessons, and the second is the reusable one: **`r_images[]` gives
+      exact texture bytes for anything resident, so no atlas cost in this
+      item ever needs predicting again** - and a prediction that survives
+      review is still a prediction.
+
+      **And a second correction, Codex review round 2 - the first pass
+      counted the wrong bytes entirely.** Dimensions are not residency:
+      `ref_soft` does not keep textures as RGBA at all. It converts to
+      16-bit `pixel_t`, allocates **four mip levels**
+      (`r_image.c:302-353`, `GL_CalcTextureSize` = `w*h*2`,
+      `:82-85`), and allocates a **separate full-resolution alpha plane**
+      when `TF_HAS_ALPHA` is set. So `w*h*4` is neither the colour
+      allocation nor the total. `image_t` carries the real figure -
+      `size` at +280 accumulates the colour mips, `alpha_pixels` at +300
+      says whether the extra plane exists - and read that way, on the
+      shipping four-face disc:
+
+      | texture | colour mips | alpha plane | resident |
+      |---|---|---|---|
+      | `Trebuchet MS_25_500` (512x512) | 696,320 | 524,288 | **1,220,608** |
+      | `Trebuchet MS_16_500` (256x512) | 348,160 | 262,144 | **610,304** |
+      | `Trebuchet MS_16_1000` (256x512) | 348,160 | 262,144 | **610,304** |
+      | `Trebuchet MS_12_500` (256x256) | 174,080 | 131,072 | **305,152** |
+      | **fonts total** | | | **2,746,368 B = 2.619 MiB** |
+      | `#btns_atlas_0` (1024x1024) | 2,785,280 | none | **2,785,280 B = 2.656 MiB** |
+
+      Two things fall out that the RGBA arithmetic hid completely.
+      **The strip is 2.656 MiB resident, not 4.0** - it carries no alpha
+      plane at all, which is what item 0's "~2.7 MiB of mips" reading
+      (`:2168-2171`) was right about all along. And **the fonts' alpha
+      planes are 1.15 MiB, 43% of their total** - the single largest
+      lever in this item, bigger than weights, sizes and the glow put
+      together.
+
+      **Only Fira Sans ships; `tahoma.ttf` does not, and that is a
+      licensing decision with a visible cost - Codex review round 1.**
+      The tree carries both and `FindFontDataFile` maps the console face
+      ("Tahoma", `FontManager.cpp:102`) to the second, but Fira Sans is
+      SIL OFL 1.1 while **Wine's Tahoma is LGPL 2.1-or-later**, and its
+      own notice points at a `COPYING.LIB` this tree does not have - so
+      shipping it would put wrong provenance and an incomplete licence on
+      every disc. Staged it anyway during the first measurement, which is
+      how the cost is known rather than guessed: **with Tahoma the help
+      and status lines render in a real antialiased face; without it they
+      fall back to conchars**, screenshotted both ways. That is not a
+      regression (they were conchars before this item too, and the face
+      is short enough that `CBitmapFont` loads no texture at all, so it
+      costs nothing) - it is an improvement declined on licence. **The
+      follow-up is to give the console face an unencumbered TTF**, either
+      by shipping an OFL mono/sans for it or by teaching
+      `FindFontDataFile` that "Tahoma" resolves to the face already on
+      the disc; it measured **512 KiB** as its own tall-11 atlas, which
+      on these numbers is a fair price for legible help text on a TV.
+      What must not happen is shipping the LGPL file to get it.
+
+      **That 2.75 MiB is new cost, not existing cost - do not read it as a
       baseline.** It follows from this item's own first paragraph and an
       earlier draft got it backwards: because the TTFs are not staged
       today, every face falls back to `CBitmapFont`, whose
@@ -3518,36 +3614,41 @@ toggle has no setting behind it (item 8).
       disappoints, since all 446 glyphs are paid for per face whether a
       screen draws them or not.
 
-      **Net, with step 2's decisions taken**: **+1.5 MiB** for the five
-      real faces the staged TTFs bring, **+0 beyond them for the type**
-      (every design size snaps onto one of those five rather than asking
-      for a sixth), **+768 KiB** for the focus glow, **−2.7 MiB** as the
-      button strip stops loading, and a small credit back for the embedded
-      fallback bitmap that stops being needed. **≈ −0.4 MiB: close to
-      break-even, with the saving small enough that it is not the reason
-      to do this.** The reason is that the menu becomes translatable; the
-      memory answer is only that a 64 MiB console **can afford real text
-      at roughly the price of the bitmaps it replaces**. An earlier draft
-      of this paragraph claimed ≈ −1.9 MiB by treating the five atlases as
-      already resident - they are not, see above - and the corrected
-      margin is thin enough that **the `memstats` measurement stops being
-      a formality**: take it the way item 0 took the background's
-      288-page delta, before treating the one-weight and glow decisions as
-      affordable, and record both the texture and heap domains since these
-      are different allocators.
-      Flagged in passing and worth its own row whatever happens here: the
-      classic disc stage already carries **74 MiB of stale `.fontcache/`**
-      riding along on a 390 MB ISO. Measured, not estimated
-      (`find .sweep/boot-attempt/disc/valve/.fontcache -type f -printf
-      '%s\n'`): **48 files, 77,722,720 bytes total, min 264 KiB, mean
-      1.54 MiB, max 4.0 MiB** - PC-resolution atlases, since
-      `FontManager.cpp:78-104` sizes every face by `uiStatic.scaleY`.
-      `BaseFontBackend.cpp:585`/`:775` read and write that directory, so
-      it is both a packaging bug today and the mechanism that could ship
-      exact pre-rendered atlases instead of rasterizing at boot. Note this
-      is **on-disc** size and says nothing directly about the resident
-      cost the 3 MiB ceiling governs - the two are separate numbers and
-      the measurement above must report both.
+      **Net, on measured resident bytes, in the shipped configuration**:
+      fonts **2.619 MiB** in, strip **2.656 MiB** out - **≈ −0.04 MiB. It
+      is a wash**, and confirmed by reading `r_images[]` on a disc that
+      has both changes: four font atlases, **no `btns_atlas` entry at
+      all**. **Codex review caught this being claimed prematurely** and
+      the correction matters more than the number: an earlier cut of this
+      work staged the font while leaving the strip loading, which is not
+      a wash but **5.275 MiB against a 3 MiB ceiling** - both allocations
+      resident at once. Text and bitmaps are alternatives here, not
+      layers, so steps 1 and 5 cannot be separate releases however
+      convenient the slicing looks. Real text
+      costs this console almost exactly what the retail bitmap strip cost
+      it, to within 39 KiB, which is a better answer than either of the
+      two this item predicted on its way here (−1.9 MiB, then −1.75) and
+      the only one actually measured. **So the memory argument neither
+      supports nor blocks this work, and should stop being offered as a
+      reason for it**: the reason is that the menu becomes translatable.
+
+      Three consequences for what is still unbuilt. **The glow is no
+      longer a small ask.** Its two faces are blur variants at tall 16,
+      and on these numbers a face at that size is 610,304 B with a
+      further doubling for the heavy one - order **+1.8 MiB**, not the
+      +768 KiB predicted, which would blow item 0's 3 MiB ceiling on its
+      own. It stays decided in principle and **ships only if measured
+      under that ceiling**, and it is the first thing to drop. **The
+      alpha planes are the real lever**: 1.15 MiB of the fonts' 2.62 is a
+      full-resolution 16-bit plane allocated only when `TF_HAS_ALPHA` is
+      set (`r_image.c:322-323`), and a glyph atlas whose colour is
+      already a coverage value may not need a second plane to say the
+      same thing - worth one experiment before any charset trimming,
+      because it is nearly half the cost and costs no glyphs. **And the
+      charset lever is now second, not first**: Cyrillic plus cp1251 is
+      160 of 446 glyphs for languages this fork has no strings in, still
+      worth taking, but smaller than the alpha question.
+
    2. **Style it to the canvas.** The canvas is 1280x960, i.e. 640x480 at
       2x, so every number here is the canvas's own halved - real values
       this plan did not have before. **Heading**: Barlow 700, 32 px,
@@ -3653,7 +3754,12 @@ toggle has no setting behind it (item 8).
       `szStatusText` independently of all three button branches, so they
       already localize once they have keys.
    4. **Stage the dictionaries onto the classic profile - this one gates
-      step 5, and skipping it ships a visibly broken menu.**
+      step 5, and skipping it ships a visibly broken menu. DONE,
+      2026-09-17**: `tools/xbox-xiso.sh --resource-dir <dir>` supplies
+      them under delta.lst's own provenance rule (the user's install,
+      never this repository), and the pack **fails** when a profile has
+      neither them nor the flag - tested by running it without, which
+      refused and produced no ISO.
       Checked, not assumed: the retail WON install has no `resource/`
       directory at all, its `pak0.pak` contains neither `gameui_english`
       nor `strings.lst`, and the built classic stage
@@ -3693,7 +3799,9 @@ toggle has no setting behind it (item 8).
       works before trusting it: include a fixture with one deliberately
       missing non-`GameUI_*` key and require the check to fail on it -
       otherwise the build goes green for the same reason English did.
-   5. **Turn the strip off.** `uiStatic.renderPicbuttonText` is set from
+   5. **Turn the strip off. DONE, 2026-09-17**, together with steps 1, 3
+      and 4 - they are one release, for the budget reason above.
+      `uiStatic.renderPicbuttonText` is set from
       the gameinfo flag at `BaseMenu.cpp:1212`; setting it under `#if
       XASH_XBOX` both routes every `CMenuPicButton` to its text branch
       and makes `Btns.cpp:42`'s existing early return skip loading the
