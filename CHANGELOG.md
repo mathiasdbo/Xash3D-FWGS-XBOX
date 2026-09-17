@@ -5,6 +5,35 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — a mixed-content menu disc no longer keeps both backgrounds resident
+
+`CMenuBackgroundBitmap::LoadBackground()` (`3rdparty/mainui/controls/BackgroundBitmap.cpp`)
+loaded the Steam-style and WON-style background unconditionally whenever a
+disc's content carried both, and only ever decided which one to *draw* -
+the one not shown stayed loaded, and resident, for the rest of the
+session. It now frees whichever side loses right after deciding, and
+moves residency over (loading the new side, freeing the old one) if a
+player flips `ui_prefer_won_background` at runtime instead of just
+switching which one draws. Verified live on a synthetic disc built to
+carry both content sets (no real one does): the correct side is picked,
+the loser's handle reads freed, and the winner's data is intact -
+confirmed at the memory level, not just from what's on screen, since the
+current Steam content's own background art renders solid black on both
+the fixed and the pre-fix binary alike (a separate, pre-existing issue,
+not this change's doing). No regression on a normal, single-profile disc
+of either vintage.
+
+Two rounds of review corrections went into this before it was measured
+as actually freeing memory: `UI_Precache()` independently preloads the
+WON splash under a different cache key than this file's own loader used,
+so the two ended up as two separate resident copies of the same image -
+freeing one left the other in place. Loading and freeing under the same
+key `UI_Precache()` already uses fixed it; the same synthetic disc's
+resident memory measurably dropped once it did (3501 to 3350 pages).
+Also fixed: a malformed background layout line could leave a texture
+loaded but never tracked, unreachable to the cleanup that runs on a
+failed background switch.
+
 ### Fixed — the console font now draws its own real glyphs instead of neighbour-glyph slices
 
 `con_oldfont` now defaults to `"1"` under `#if XASH_XBOX` (`engine/client/console.c`).

@@ -2413,9 +2413,116 @@ registration unless the stock one is unusable:
       the tiled background image the classic WON menu had. Step 4's
       measurement is where this port's own "does the menu look right"
       question actually gets answered.
-   3. Make the two background loads exclusive as described above (probe,
-      prefer, load one, free on flip), so a mixed-content disc is
-      measured with ONE set resident, never both.
+   3. **DONE, 2026-09-17.** Make the two background loads exclusive as
+      described above (probe, prefer, load one, free on flip), so a
+      mixed-content disc is measured with ONE set resident, never both.
+      Confirmed the two loads were NOT exclusive before this: `LoadBackground()`
+      (`3rdparty/mainui/controls/BackgroundBitmap.cpp`) called
+      `LoadSteamBackground()` AND `LoadWONBackground()` unconditionally
+      whenever each existed, then `UpdatePreference()` only ever decided
+      which one to DRAW - the loser stayed loaded (and resident) for the
+      rest of the session, on any platform. **Fixed**: load both once
+      (re-parsing just to decide existence risks disagreeing with the real
+      loaders' own validation, so probing by actually loading is the
+      honest option), decide via the existing `UpdatePreference()`, then
+      free whichever side lost via two new helpers, `FreeWONBackground()`/
+      `FreeSteamBackground()` - `EngFuncs::PIC_Free(name)` frees by name
+      (`menu_int.h:65` → `GL_FreeImage` → `GL_FindTexture`/`GL_FreeTexture`,
+      a real free, already used this way elsewhere in mainui - `ColorPicker.cpp`,
+      `LoadGame.cpp`), so each Steam tile's load-time filename now lives in
+      `bimage_t` alongside its handle (`Image_LoadBMP`'s own `PIC_Load` name
+      strings were never retained before). The runtime flip path (`Draw()`'s
+      `ui_prefer_won_background` `FCVAR_CHANGED` handler) previously only
+      called `UpdatePreference()`, safe when both were always resident;
+      now it (re)loads whichever side just became preferred if it isn't
+      loaded, then frees the side losing the flip. Not `#if XASH_XBOX`-
+      guarded: a mixed-content disc wastes the same memory holding two
+      resident backgrounds on any platform, and freeing the one never
+      drawn changes nothing a player can see - Form 1, entirely within
+      this project's own `mainui_cpp` fork (divergence #57).
+      **Verified live**, since no real disc anywhere carries both content
+      sets: baked a synthetic one with `tools/asset-studio --bake-menu-art`'s
+      existing output overlaid (`tools/xbox-xiso.sh --menu-bake`) onto the
+      real classic WON install, so the disc genuinely has both
+      `gfx/shell/splash.bmp` and a `resource/BackgroundLayout.txt` +
+      tiles. Read live off the guest (`.map` RVA+Base addresses for the
+      class's static members, direct memory reads, the pattern used
+      throughout this item): `s_state=DRAW_STEAM` (the correct pick -
+      `ui_prefer_won_background` defaults `"0"`, Steam preferred when
+      both exist), `s_WONBackground.hImage=0` (freed, correctly), and
+      `s_SteamBackground` fully intact - 6 valid entries, handles and
+      tile coordinates/sizes matching the bake exactly. The exclusivity
+      mechanism itself is confirmed correct at the data level.
+      **Codex review round 1 found two real failure modes** in the
+      runtime flip path (a player toggling `ui_prefer_won_background`
+      after `LoadBackground()` already freed the loser), both fixed:
+      `s_bGameHasSteamBackground`/`s_bGameHasWONBackground` only turned
+      true on a gamedir-specific load, never the base-directory fallback
+      - harmless before this row, since both sides always stayed loaded
+      and `UpdatePreference()`'s own secondary check (what's actually
+      resident) caught a base-only background regardless; with the loser
+      now freed, that secondary signal disappears for the un-shown side,
+      so a base-only background read as permanently unavailable on a
+      flip. Both branches now set the flag. Separately, the flip handler
+      froze the old background unconditionally after attempting to load
+      the new one, even when that load failed (`PIC_Load` returns 0
+      under memory pressure or a missing file) - discarding a working
+      background for one silently not there; it now only frees the
+      losing side once the replacement actually loaded, restoring the
+      previous state otherwise. `LoadSteamBackground()` also left a
+      partial tile list behind when a later tile in the layout failed to
+      parse, which a subsequent `Count() > 0` check could mistake for a
+      complete background - it now rolls back exactly what the failed
+      attempt appended. Re-verified live after the fix: same disc, same
+      `s_state=DRAW_STEAM`/`s_WONBackground.hImage=0` result as before.
+      **Codex review round 2 found the reason `s_WONBackground.hImage=0`
+      wasn't actually proof of freed memory**: `UI_Precache()`
+      (`BaseMenu.cpp`) unconditionally preloads the same splash art under
+      the key `"gfx/shell/splash"` (no extension) as part of its general
+      icon precache, completely independent of this file's own
+      `ART_BACKGROUND` (`"gfx/shell/splash.bmp"`) - and `GL_LoadTexture`
+      caches by the EXACT string a caller passes (`r_image.c:587`),
+      before imagelib's own extension resolution ever runs, so the two
+      different keys created two SEPARATE resident copies of the
+      identical decoded image. Freeing `s_WONBackground`'s copy left
+      `UI_Precache()`'s untouched regardless - the live handle check
+      wasn't wrong about ITS handle, but it wasn't proof of actual
+      residency either. Fixed by loading and freeing under the SAME key
+      `UI_Precache()` already uses (new `ART_BACKGROUND_PIC` constant) -
+      `FileExists()` still needs `ART_BACKGROUND`'s real extension (a
+      literal filesystem check, no probing of its own), but `PIC_Load`/
+      `PIC_Free`/the stored `img.name` all move to the extensionless key,
+      so both call sites share one cache entry and freeing it frees the
+      one real resident copy. Re-verified live: `s_WONBackground.name`
+      now reads `"gfx/shell/splash"`; `VirtualMemory` on the same
+      synthetic disc dropped from 3501 to 3350 pages (~0.59 MiB) versus
+      the pre-this-fix reading - real freed memory, not just a
+      zeroed local handle. **Second finding, same round**:
+      `LoadSteamBackground()` called `PIC_Load` for a tile BEFORE parsing
+      its remaining fields (a "scaled" attribute, two coordinates); any
+      of those three later parses failing left that texture loaded but
+      never appended to `s_SteamBackground`, unreachable to the
+      round-1 rollback (which only walks entries already in the vector).
+      Restructured so `PIC_Load` is the last fallible step, immediately
+      before `AddToTail` - a malformed layout line can no longer strand
+      a texture. This was Codex review's SECOND round on this fix; per
+      the standing two-round cap, both findings were fixed rather than
+      re-submitted for a third pass.
+      **Found and set aside, not fixed here**: the on-screen result was a
+      solid black background under otherwise-correct WON-style menu text
+      - traced one level further (dumping the loaded tiles' own pixel
+      data) to the CURRENT Steam install's actual `resource/background/
+      800_*.tga` source files themselves reading back mostly zero-alpha
+      at the sampled points, i.e. this is what the real content composites
+      to today, not a bug this fix introduced - confirmed by packaging
+      the exact same synthetic mixed disc against the PRE-fix binary
+      (`oldfont-fix.xbe`) and getting byte-identical solid-black output.
+      Whether that is expected (the 25th-anniversary build's tiles really
+      are solid black per divergence #60's own earlier finding) or a
+      real bake/alpha-compositing bug is unresolved and out of scope for
+      this row - a background-art issue, not a residency issue. No
+      regression on either single-profile disc (classic, Steam), each
+      re-booted with the fixed binary and screenshotted unchanged.
    4. **DONE, 2026-09-16 - and it needed one more fix than "confirm it
       draws as-is".** First attempt: nothing drew, on a disc with all
       eleven TGAs present and readable. Diagnosed by breaking on
