@@ -2521,6 +2521,131 @@ registration unless the stock one is unusable:
       paletted BMP out of a pak, through `PIC_Load`) read against what
       `ref_soft` uploads before deciding between a loader fix and
       `GFL_RENDER_PICBUTTON_TEXT`. Not measured against the ceiling yet.
+
+      **Update, same day, later still: read against what `ref_soft`
+      uploads, per the line above - the loader is provably innocent, on
+      both fonts and pictures.** The description text next to each item
+      is ALSO corrupted (noticed live, watching the boot), and that text
+      draws through the completely unrelated console-font path
+      (`gfx.wad`'s `CONCHARS` lump, `img_wad.c`'s `Image_LoadFNT`, its own
+      "oldstyle font" branch for content whose file size predates the
+      HL 1.1.0.0 `qfont_t` layout - exactly this content's vintage,
+      confirmed live: computed size 26450 vs the lump's real 34580) - a
+      second image, decoded by a second loader, corrupted the same way.
+      Both were checked the only way that settles it: reproduce the
+      engine's own byte-exact parsing on the host and look at the result.
+      `tools/asset-studio`-style host ports of `Image_LoadBMP`'s atlas
+      math (`Btns.cpp:35-195`) and of `Image_LoadFNT`'s oldstyle path
+      against the real `btns_main.bmp` (extracted from `pak0.pak`) and the
+      real `CONCHARS` lump (extracted from `gfx.wad`, WAD3's own header -
+      `filepos`/`size` read from the lump directory, not guessed) both
+      render perfectly legible output - all 62 WON button labels on the
+      atlas, the full ASCII console font on CONCHARS. Both loaders are
+      correct. Live memory then confirmed where it actually breaks:
+      `tools/xemu-debug.py` breakpoints on `R_DrawStretchPicImplementation`
+      (`ref/soft/r_draw.c:38`) caught a real glyph draw
+      (`s1=48,t1=80,s2=64,t2=96`, a 16x16 cell) and a real button draw
+      (`s1=0,t1=0,s2=156,t2=26`, button 0's normal state) mid-frame;
+      reading `pic->pixels[0]`/`pic->alpha_pixels` at those exact
+      coordinates - decoded back to RGB through the exact inverse of
+      `GL_UploadTexture`'s major/minor bit-packing (`r_image.c:259-271`,
+      verified term-by-term against `MOVE_BIT`/`GET_BIT`, `r_local.h:
+      77-79`) - found the uploaded buffer reads **zero everywhere**: a
+      cell known from the host repro to be blank AND a cell known to hold
+      real ink (index 0, RGB `(46,40,22)`, expected pixel_t `0x241C`)
+      both come back `0x0000`, foreground indistinguishable from
+      background. A wrong bit-packing formula would produce plausible-but-
+      wrong nonzero values, not a clean, uniform zero matching
+      `Mem_Calloc`'s own initial state (`r_image.c:252` - the buffer
+      `GL_UploadTexture` allocates for `tex->pixels[j]`) - the per-pixel
+      conversion loop (`:257-280`) is not actually writing real source
+      data into it, for either asset, even though both textures register
+      the correct dimensions and both allocations land at valid,
+      consistently-reproducible addresses across a fresh `system_reset`.
+      **Found and fixed, same day: `pic->buffer` itself, checked live at
+      `GL_UploadTexture`'s own entry (breakpoint on `r_image.c:214`,
+      before any of its own code runs) - not empty, but the WRONG SIZE.**
+      `pic->size` read `32768` (`width*height`, one byte per pixel) where
+      every consumer below - `GL_ResampleTexture`, the per-pixel mip
+      loop - assumes `width*height*4` (RGBA). Root cause:
+      `GL_ProcessImage` (this same file) computes
+      `img_flags |= IMAGE_FORCE_RGBA` for an indexed `pic->type` but never
+      applies it - `img_flags` is a dead local, set and never read again,
+      upstream's own gap (checked: not something this fork introduced).
+      `Con_LoadFixedWidthFont("gfx/conchars", ..., TF_KEEP_SOURCE)` (the
+      console font's own load, `engine/client/console.c:592`) is the
+      specific trigger: `TF_KEEP_SOURCE` becomes `IL_KEEP_8BIT`
+      (`ref/soft/r_image.c`'s own `GL_LoadTexture`), which makes
+      `Image_AddIndexedImageToPack` store raw palette-index bytes instead
+      of expanding them - legitimate, upstream behaviour, meant to keep
+      `pic->original` around for later re-tinting - but nothing after it
+      in `ref_soft` ever performs that expansion, so `GL_UploadTexture`
+      read index bytes 4-at-a-time as if they were already RGBA: real
+      data for the first `width*height/4` "pixels" (reinterpreted index
+      bytes, which is what the semi-plausible-looking early rows were),
+      zero (`Mem_Calloc`'s own initial state, never written) past that
+      up to the true end of the small allocation, then genuinely unmapped
+      memory - measured precisely: `pic->size=32768`, real data through
+      row 31 of a 256-wide image (`32768/4/256=32`), zero rows 32-91,
+      unreadable beyond. **Fixed** in `GL_UploadTexture`: expand an
+      indexed `pic->buffer` to RGBA before the mip loop touches it, using
+      `pic->palette` - always `(R,G,B,A)` byte order regardless of
+      source format, since `Image_GetPaletteBMP`/`Image_GetPaletteLMP`
+      both funnel through `Image_SetPalette`'s `HostFourCC` into the same
+      `d_currentpal` (`img_utils.c:284-346`) - unlike `Image_LoadBMP`'s
+      own indexed case, which reads the BMP file's raw on-disk `(B,G,R,A)`
+      palette directly and was never affected (it expands to RGBA itself,
+      inline, before `GL_UploadTexture` ever sees it - which is exactly
+      why the button atlas, BMP-sourced, did not show this exact defect
+      even though its own row-200 sample from earlier looked close-but-
+      not-exact against the host repro; worth a second look, not
+      re-opened here). **Verified live, same disc, same binary**: the
+      screen's colour-noise grid and the yellow/black bottom band are
+      gone; real console-font glyphs render at each menu row's hint-text
+      position and on the bottom status line instead - legible, not
+      noise, but NOT the intended text: `"PQ RST"`, `"YZ WX"`, `"HIJI"`,
+      `"ghabc"` are consecutive-alphabet slices. **That is a second,
+      separate, pre-existing bug, analysed the same day (not fixed in
+      the same change):** the console font is being loaded through the
+      FIXED-width path. `Con_LoadConsoleFont` (`engine/client/console.c:
+      554-595`) only takes the legacy variable-width path
+      (`Con_LoadVariableWidthFont("gfx/conchars.fnt")`) when
+      `con_oldfont` is set, and nothing sets it on Xbox - default `"0"`,
+      the only setter is the `-oldfont` command-line parameter
+      (`Con_VidInit`, `:2241-2242`), and an Xbox boot has no command
+      line. With it off, it tries FWGS's own modern font resources
+      (`font%i_<charset>.fnt` behind a `fonts.wad` CRC gate, then
+      `fonts/font%i`) - those ship in xash-extras, are in no retail
+      install and not on any disc this project packs, so both fail - and
+      falls to `Con_LoadFixedWidthFont("gfx/conchars", ...,
+      TF_KEEP_SOURCE)` (`:592`), which never reads a glyph table: it
+      assumes a 16x16 grid of `font_width/16` cells (`cl_font.c:105-115`)
+      and gives character `c` the cell at `(c%16, c/16)`. The WON
+      `CONCHARS` lump is a variable-width qfont: its `charinfo` table
+      is valid (dumped from the lump: `' '` 4px, `'!'` 3px, `'I'` 3px,
+      `'M'`/`'W'` 9px, glyph rows 12px apart - `'J'` starts at pixel row
+      12, `rowheight=12`), glyphs packed edge to edge, so a 16px cell
+      holds whatever two or three neighbours sit there - `'S'` (83:
+      column 3, row 5) draws the slice containing `"RST"`, which is
+      exactly what the screen shows. Why Steam content never showed it:
+      its `CONCHARS` is the 1.1.0.0+ layout, where `Image_LoadFNT`
+      computes `image.width = font.width * QCHAR_WIDTH` - a real 16px
+      grid, so the fixed fallback happens to coincide; the oldstyle
+      branch (width hardcoded to 256, height from the header) has no
+      such grid to coincide with. The variable-width loader would be
+      right for both vintages: the WAD layer exposes a `QFONT` lump as
+      `gfx/conchars.fnt` (`filesystem/wad.c:83`), and
+      `Con_LoadVariableWidthFont` reads exactly the header and table
+      dumped above (`cl_font.c:120-160`); the fixed fallback stays as
+      the safety net behind it. Candidate fix, smallest first: default
+      `con_oldfont` to `"1"` under `#if XASH_XBOX` - on a disc without
+      extras the modern branch can never succeed, so going straight to
+      the legacy path is the honest default, and the existing fallback
+      chain handles a `gfx.wad` with no `CONCHARS`; verify on BOTH the
+      classic and the Steam disc (description text and the bottom
+      version line on each).
+      `r_numImages` was read live along the way and ruled out as a factor
+      (38 of `MAX_TEXTURES` 1024, nowhere near the `XASH_LOW_MEMORY` cap).
       With a disc built from that content, confirm the
       ladder picks `splash.bmp` + the bitmap strip, check what the 1024
       cap does to the strip's atlas (if it halves, the buttons are

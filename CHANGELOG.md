@@ -5,6 +5,40 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the WON console font (and any other TF_KEEP_SOURCE texture) no longer renders as noise
+
+`GL_UploadTexture` (`ref/soft/r_image.c`), under `#if XASH_XBOX`, now
+expands an indexed `pic->buffer` to RGBA before its mip loop and
+`GL_ResampleTexture` touch it, strided correctly per type (3 bytes/entry
+for `PF_INDEXED_24`'s 768-byte palette, alpha forced 255; 4 bytes/entry
+for `PF_INDEXED_32`'s 1024-byte one, real alpha). `GL_ProcessImage`
+already computes `IMAGE_FORCE_RGBA` for an indexed `pic->type` but never
+applies it - a dead local, upstream's own gap, present on every platform
+this software renderer runs on - so `Con_LoadFixedWidthFont`'s
+`TF_KEEP_SOURCE` (the console font's own load, kept 8-bit deliberately for
+later re-tinting) left `pic->buffer` as raw one-byte-per-pixel indices
+while every consumer downstream assumed four-byte RGBA: real (if
+meaningless) data for the first quarter of the image, zero for the rest
+up to the small allocation's actual end, then unmapped memory beyond it.
+
+Found live, tracing the WON menu's console-font corruption for real
+box-retail content: both the button-strip atlas and the console font's
+own WAD lump were independently proven correct at the decode stage first
+(host-side reproductions of each loader's exact byte layout against the
+retail files render perfectly legible), which is what pointed at
+`GL_UploadTexture` rather than either loader. Verified live: the on-screen
+colour-noise grid and yellow/black band are gone, replaced by real
+console-font glyphs - legible, though not yet the intended text: those
+are consecutive-alphabet slices from a second, separate bug (the console
+font loads through the fixed-width 16x16-grid fallback because nothing on
+Xbox sets `con_oldfont`, while the oldstyle `CONCHARS` lump is a
+variable-width qfont), analysed and recorded in `docs/r3d/fork-plan.md`,
+not fixed here. Guarded to Xbox rather than sent upstream (no path to
+submit a FWGS patch this session); Codex review round 1 also caught the
+first draft always striding the palette at 4 bytes/entry, wrong and
+out-of-bounds for `PF_INDEXED_24` (reachable live via the alias-skin
+remap path, `engine/client/cl_remap.c`).
+
 ### Fixed — a disc without `delta.lst` can no longer be packaged into an invisible boot loop
 
 `tools/xbox-xiso.sh` now refuses to pack a gamedir that provides no

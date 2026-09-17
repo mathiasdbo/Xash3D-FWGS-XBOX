@@ -231,6 +231,73 @@ static qboolean GL_UploadTexture( image_t *tex, rgbdata_t *pic )
 		return true;
 
 	byte *buf = pic->buffer;
+	byte *indexed_rgba = NULL;
+
+#if XASH_XBOX
+	// XM item 0 (fork-plan.md), found live tracing the WON console font
+	// corruption: GL_ProcessImage (this file) computes IMAGE_FORCE_RGBA
+	// for an indexed pic->type but never applies it - img_flags there is
+	// a dead local, upstream's own gap, present on every platform this
+	// software renderer runs on. Guarded to Xbox anyway (Codex review
+	// round 1: an unguarded behaviour change is Form 5 in
+	// docs/r3d/divergences.md, "forbidden unless it is a genuine upstream
+	// bug, in which case the patch goes upstream first" - not attempted
+	// this session, so the cheap, honest option is this guard instead,
+	// matching every other ref_soft/XASH_XBOX site in this file).
+	//
+	// Every consumer below (GL_ResampleTexture, the per-pixel mip loop)
+	// assumes 4 bytes/pixel RGBA; pic->buffer is only width*height bytes
+	// for an indexed image (Image_AddIndexedImageToPack under
+	// IL_KEEP_8BIT, set by TF_KEEP_SOURCE - engine/client/console.c's own
+	// font load, to keep pic->original for later re-tinting), so reading
+	// it at 4x that stride ran off the end of the allocation: measured
+	// live, pic->size == width*height (32768 for a real 256x128 conchars
+	// texture), not width*height*4 - confirmed against the real WAD
+	// lump's CONCHARS entry, which decodes correctly on its own (a host
+	// reproduction of Image_LoadFNT's own byte layout renders it
+	// perfectly legible; the bug is only ever reached from here).
+	//
+	// Expand here using pic->palette. Round 1 also caught the first
+	// version of this fix always striding the palette by 4 bytes/entry:
+	// PF_INDEXED_24's palette is 768 bytes, 3 bytes/entry, no alpha
+	// (com_image.h:37, FS_CopyImage preserves exactly that, img_main.c:
+	// 609-623 - reachable live via engine/client/cl_remap.c's alias
+	// skin remap, which submits a PF_INDEXED_24 image with
+	// TF_KEEP_SOURCE too); PF_INDEXED_32's is 1024 bytes, 4 bytes/entry
+	// including alpha (com_image.h:38). Byte order within an entry is
+	// (R,G,B,[A]) either way regardless of source format -
+	// Image_GetPaletteBMP and Image_GetPaletteLMP both funnel through
+	// Image_SetPalette's HostFourCC into the same d_currentpal
+	// (img_utils.c:284-316, :341-346), and Image_ConvertPalTo24bit
+	// (:318-334) only ever drops the alpha byte, never reorders the
+	// rest - unlike Image_LoadBMP's OWN indexed case, which reads the
+	// BMP file's raw on-disk (B,G,R,A) palette bytes directly and is
+	// unaffected by any of this (it expands to RGBA itself, inline,
+	// before this function ever sees the image).
+	if( pic->type == PF_INDEXED_24 || pic->type == PF_INDEXED_32 )
+	{
+		size_t pixel_count = (size_t)pic->width * pic->height;
+		size_t pal_stride = ( pic->type == PF_INDEXED_24 ) ? 3 : 4;
+
+		if( pic->palette )
+		{
+			indexed_rgba = Mem_Malloc( r_temppool, pixel_count * 4 );
+
+			for( size_t i = 0; i < pixel_count; i++ )
+			{
+				byte idx = buf[i];
+				const byte *entry = pic->palette + idx * pal_stride;
+
+				indexed_rgba[i * 4 + 0] = entry[0];
+				indexed_rgba[i * 4 + 1] = entry[1];
+				indexed_rgba[i * 4 + 2] = entry[2];
+				indexed_rgba[i * 4 + 3] = ( pal_stride == 4 ) ? entry[3] : 255;
+			}
+
+			buf = indexed_rgba;
+		}
+	}
+#endif // XASH_XBOX
 
 	int mipCount = 4;
 
@@ -285,6 +352,9 @@ static qboolean GL_UploadTexture( image_t *tex, rgbdata_t *pic )
 		tex->size += texsize;
 		tex->numMips++;
 	}
+
+	if( indexed_rgba )
+		Mem_Free( indexed_rgba );
 
 	return true;
 }
