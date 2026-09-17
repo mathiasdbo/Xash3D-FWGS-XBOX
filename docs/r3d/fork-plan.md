@@ -3195,6 +3195,56 @@ toggle has no setting behind it (item 8).
    reversed: DSP has no player-facing meaning on a fixed console),
    `snd_mute_losefocus` (`:71`), and both vibration rows (`:67`, `:72`),
    which move to Controller.
+
+   **DONE in part, 2026-09-17.** The three sliders and the hides, exactly
+   as above, under `#if XASH_XBOX`/`#else` with the stock screen kept
+   verbatim. Vibration hidden now (not deferred like Options' Joystick
+   row) is the plan's own explicit call, not a new judgment - a real but
+   narrow gap next to Joystick's, since `vibration_enable` still
+   defaults on (`cl_mobile.c`) and just cannot be turned off until
+   Controller ships, where losing gamepad-axis configuration entirely
+   would have been worse. **The read-only Speaker output row is NOT
+   built this pass**: nxdk exposes it only as a raw EEPROM value
+   (`ExQueryNonVolatileSetting( XC_AUDIO, ... )`, `xboxkrnl.h:4229`),
+   with no documented bit layout anywhere in this vendored copy or its
+   samples (checked directly, not assumed) - unlike Display's video
+   output row, whose fields (`XVideoGetEncoderSettings`,
+   `VIDEO_WIDESCREEN`/`VIDEO_LETTERBOX`) are named and clear
+   (`video.h:41-42`, confirmed for divergence #64's own PR round 2).
+   Decoding `XC_AUDIO` without that documentation would be exactly the
+   "never guess a constant" this project's own rules forbid - a real
+   follow-up once the bit layout is found or reverse-engineered on
+   hardware, not attempted here. Verified: classic disc links clean (0
+   duplicate, 0 undefined) and boots to an unchanged Main, screenshotted;
+   `menu_audio`'s static pointer reads as a real non-null heap address
+   post-boot. NOT verified, same limit as items 4/8: `_Init()` only runs
+   from `Show()`, so the Options → Audio navigation and on-screen
+   rendering need a pad live. This screen's own `AddItem` order was
+   written already matching visual order (heading, three sliders, Done
+   last) from the two lessons items 4/8 already paid for - not
+   re-discovered here, applied. **Codex review round 1 found a different
+   overlap than item 8's**: `CMenuSlider` draws its own label above its
+   `SetCoord` y (`Slider.cpp:205-206`'s `textHeight = y - charHeight*1.5`,
+   ~39px for this medium font), so the first slider at y=260 put its
+   label at ~221, inside the heading's own 200-232 span - a layout defect
+   `AddButton`'s formula (item 8's bug) had nothing to do with. Fixed by
+   reusing stock `Audio.cpp`'s own first-slider y=280 (already proven
+   safe there, nothing sits above it) instead of inventing a new offset;
+   the remaining sliders and Done shift down the same 20px. Re-verified:
+   clean link, no regression on the boot screenshot, `menu_audio` still
+   constructs non-null. **Codex review round 2 asked for the pad-live
+   check itself, not just static/boot verification, before this ships**
+   - correct as a gap, but not a new one: it is the exact same "needs a
+   pad live" limit already named above and already accepted, at the
+   same depth, for items 4 and 8's merged PR (#85) - this project's own
+   standing workflow (`AGENTS.md`) is explicit that "xemu is not
+   validation, hardware closes phases", so no amount of emulator
+   scripting in this session substitutes for it, and blocking every
+   Xbox screen on hardware access this session does not have would stop
+   XM.1 entirely rather than move it forward one screen at a time. Not
+   fixed here, and not silently accepted either: named as the same
+   already-tracked hardware-verification debt every screen in this item
+   carries, closed together once a controller reaches this build.
 7. **Display** (`VideoOptions.cpp` in place; `Video.cpp` and
    `VideoModes.cpp` hidden entirely - the earlier draft's "VideoModes.cpp
    in place" is superseded): Brightness and Gamma (`:292-293`), Screen

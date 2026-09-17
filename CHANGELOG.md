@@ -5,6 +5,24 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — the Audio screen is trimmed to what a fixed console needs
+
+`Audio.cpp` keeps its three volume sliders (Sound, Music, HEV suit) and
+drops DSP effects, mute-on-focus-loss, and both vibration controls -
+DSP has no player-facing meaning on a fixed console, and vibration
+moves to the Controller screen once it exists (it still works, at its
+default of on, just cannot be toggled off until then). The design's
+read-only "Speaker output" row is not built yet: nxdk only exposes it
+as an undocumented raw EEPROM value, and guessing its layout is exactly
+the kind of thing this project's own rules forbid. Every other platform
+keeps the screen exactly as it was.
+
+Review caught a different overlap than the Game screen's: the slider
+control draws its own label above the coordinate it is placed at, so
+the first slider sat close enough to the heading above it that the two
+overlapped. Moved down to the same y stock `Audio.cpp` already uses for
+its own first slider, where nothing sits above it to collide with.
+
 ### Fixed — the Options → Game row showed the wrong button art
 
 It reused `PC_ADV_OPT`, the picture id `PlayerSetup.cpp` already uses
