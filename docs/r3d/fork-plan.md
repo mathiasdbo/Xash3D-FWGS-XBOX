@@ -3096,13 +3096,27 @@ toggle has no setting behind it (item 8).
    functional loss) and Update (same guard around `:68` - needs
    `UI_OpenUpdatePage`'s internet access, which XN has not built), and
    added the new Game row, pointing at `UI_GameOptions_Menu`
-   (`PC_ADV_OPT` - reused, not new: it is already how `PlayerSetup.cpp`
-   reaches the same menu on PC, and at ordinal 84 of `PC_BUTTONCOUNT`
-   it is well past the WON strip's real 62 buttons, `Btns.cpp`'s own
-   math, confirmed this row, so it always falls to the text-rendering
-   path this item already relies on). Controls and Video stay exactly
-   as stock for now, pointing at their PC screens - not a final state,
-   the next honest step once 5 or 7 lands.
+   (originally `PC_ADV_OPT`, reused from how `PlayerSetup.cpp` reaches
+   the same menu on PC - **corrected after merge, three times**: counted
+   from `PC_NEW_GAME = 0`, its real ordinal is 60, inside the WON strip's
+   populated 0-61 range, not past it, so it drew that strip's actual
+   "Adv. Options" bitmap instead of falling to text. Switching to
+   `PC_ADV_OPT2` (ordinal 68, unused anywhere in this codebase) only
+   moved the same bug to an id that is unpopulated in *today's* strip,
+   not one that is guaranteed unpopulated - `Btns.cpp`'s `pic_count` is
+   measured from the loaded bitmap's own height, not a fixed constant,
+   so any future or modded strip reaching that far reopens it. Dropping
+   `EDefaultBtns` entirely for a plain `CMenuPicButton` member fixed the
+   picture but broke shutdown: the member never went into `m_apBtns`, so
+   `~CMenuFramework()` dereferenced a null slot there destroying every
+   other button the screen owns - a crash on `UI_Shutdown`, not something
+   a boot-and-screenshot check could ever catch. The actual fix
+   heap-allocates the button and stores it in `m_apBtns` with
+   `m_iBtnsNum` incremented in the same statement, exactly matching
+   `AddButton()`'s own ownership contract - only the `SetPicture()` call
+   is left out). Controls and Video stay exactly as stock for now,
+   pointing at their PC screens - not a final state, the next honest
+   step once 5 or 7 lands.
 5. **Controller** (replaces `Gamepad.cpp` in place; `Controls.cpp` becomes
    its Customize sub-screen) - three screens. **Scheme**: Standard /
    Southpaw / Legacy / Custom as one horizontal row with a description

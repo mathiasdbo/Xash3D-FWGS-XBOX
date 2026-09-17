@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the Options → Game row showed the wrong button art
+
+It reused `PC_ADV_OPT`, the picture id `PlayerSetup.cpp` already uses
+for its own "Adv. Options" button, on the assumption that its ordinal
+sat past the classic WON button strip's populated range and would
+always render as plain text. Counted correctly, that ordinal is inside
+the populated range, so the row drew the strip's real "Adv. Options"
+bitmap instead of the "Game" label. A first fix swapped in an id that
+happens to be unpopulated in today's strip - review then pointed out
+that "unpopulated today" isn't "unpopulated ever", since how many ids
+get a picture depends on the loaded bitmap's own size, not a fixed
+count. Dropping the picture id fixed that, but the way it was dropped
+skipped a bookkeeping step the menu framework needs to clean itself up
+without crashing - fixed by keeping that bookkeeping intact and only
+leaving the picture assignment out. The row now uses no picture id at
+all: a button built without ever assigning it one, so it always
+renders as text no matter how the art changes, and shuts down the same
+way every other button on the screen does.
+
 ### Added — a Game options screen, and Options gains a row to reach it
 
 `GameOptions.cpp` (previously a PC-only network/performance tuning
