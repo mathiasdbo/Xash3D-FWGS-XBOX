@@ -3084,6 +3084,25 @@ toggle has no setting behind it (item 8).
    Done with descriptions. Controls → Controller (`:58`), Video → Display
    (`:62`), Game is a new row; Touch (`:64`), Joystick (`:66`) and Update
    (`:68`) hidden.
+
+   **DONE in part, 2026-09-17 - only the dependency-free half.** Renaming
+   Controls → Controller and Video → Display, and hiding Joystick,
+   before items 5 and 7 exist would label a button with a screen that
+   is not there, or remove the only way to reach gamepad-axis settings
+   with nothing built to replace it - a real regression, not a
+   simplification with a due date. So this pass did only what has no
+   such dependency: hid Touch (`#if !XASH_XBOX` around `:64` - a
+   touchscreen settings screen on hardware with no touchscreen, zero
+   functional loss) and Update (same guard around `:68` - needs
+   `UI_OpenUpdatePage`'s internet access, which XN has not built), and
+   added the new Game row, pointing at `UI_GameOptions_Menu`
+   (`PC_ADV_OPT` - reused, not new: it is already how `PlayerSetup.cpp`
+   reaches the same menu on PC, and at ordinal 84 of `PC_BUTTONCOUNT`
+   it is well past the WON strip's real 62 buttons, `Btns.cpp`'s own
+   math, confirmed this row, so it always falls to the text-rendering
+   path this item already relies on). Controls and Video stay exactly
+   as stock for now, pointing at their PC screens - not a final state,
+   the next honest step once 5 or 7 lands.
 5. **Controller** (replaces `Gamepad.cpp` in place; `Controls.cpp` becomes
    its Customize sub-screen) - three screens. **Scheme**: Standard /
    Southpaw / Legacy / Custom as one horizontal row with a description
@@ -3197,6 +3216,75 @@ toggle has no setting behind it (item 8).
    "Autosave" toggle is dropped - GoldSrc autosaves where a map's
    `trigger_autosave` says, unconditionally, and no engine or client cvar
    turns that off, so the row would be wired to nothing.
+
+   **DONE, 2026-09-17.** `GameOptions.cpp` reshaped exactly as above under
+   `#if XASH_XBOX`/`#else`, the stock network/performance screen kept
+   verbatim for every other platform. A text heading (`CMenuAction`,
+   `QMF_INACTIVE|QMF_DROPSHADOW`, `QM_BIGFONT` - the same primitive
+   `GameOptions.cpp` already used for its own stock "Select network
+   mode:" label, no new class needed) in place of `ART_BANNER`, per the
+   design's own decision that sub-screen headings are text on Xbox - the
+   first screen actually built against that decision, so it is the
+   reference for the ones after it. The three checkboxes follow
+   `Audio.cpp`'s own already-stock idiom exactly (verified by reading
+   it, not assumed): `LinkCvar` stages a value and reads it into the
+   control immediately (`CMenuEditable::LinkCvar` calls `UpdateCvar(true)`
+   on link, `Editable.cpp:30-36`), a single Done button overrides
+   `SaveAndPopMenu()` to `WriteCvar()` each one then chain to the base,
+   and B/Escape - inherited, no override needed - hides without writing
+   (`CMenuBaseWindow::KeyDown`'s Escape branch calls `Hide()` directly,
+   `BaseWindow.cpp:98-102`, never the save path), an implicit discard
+   with no separate Cancel button, matching the design's single "Done"
+   row. **Verified live only in part - the honest limit of what this
+   session's tools can reach**: the classic and HL25 discs link clean (0
+   duplicate, 0 undefined) and boot to an unchanged Main (screenshotted,
+   no regression), and `menu_options`/`menu_gameoptions` (both static
+   pointers, `ADD_MENU3`'s own `cmd = new type()` in `_Precache`,
+   `BaseMenu.h:246-256`) read as real, non-null heap addresses after
+   boot - both objects construct without crashing. What is NOT verified:
+   `_Init()` itself, which is what actually calls `LinkCvar`/builds the
+   screen's rows, only runs from `Show()`
+   (`BaseWindow.cpp:31-34`), never from construction - so the Options →
+   Game navigation, and everything the new screen actually draws, needs
+   a pad reaching it live, the same limitation already named for every
+   in-game and Controller-scheme state in this item. Considered and
+   rejected as disproportionate for a three-checkbox screen: forcing
+   `Show()` early by writing a fabricated return address and redirecting
+   `EIP` to `UI_GameOptions_Menu` through the GDB stub - technically
+   reachable with this session's own tools, but `tools/xemu-debug.py`
+   has no register or memory WRITE support today (`read_regs`/`read_mem`
+   only), and building that now, for this, risked corrupting a running
+   guest to save one screenshot. **That gap is exactly why Codex review
+   still found a real bug**: `AddButton()`'s own auto-position
+   (`(72, 230 + 50 * n)`, `Framework.cpp:106-123`, `UI_BUTTONS_HEIGHT=42`)
+   put the Done button at y=230-272, overlapping both the heading
+   (200-232) and Auto-aim (260-292) - a live rendering and hit-target
+   defect no compile or link check could catch. Fixed the same way
+   `AdvancedControls.cpp`'s own Done button already avoids this: a
+   manual `CMenuPicButton` member, explicitly positioned at `(72, 440)`,
+   below all three checkboxes, not `AddButton`'s auto-placed one.
+   Re-verified: no overlap in the corrected coordinates (checked by the
+   same arithmetic the finding used), clean link, no regression on the
+   boot screenshot, the screen's own menu object still constructs.
+   **Codex review round 2 found the same class of bug divergence #66
+   already found in `Main.cpp`, on a new screen**: `AddItem()`'s
+   registration order is pad focus order (`ItemsHolder.cpp`'s cursor is
+   a plain sequential index into `m_pItems[]`, `Up`/`Down`
+   incrementing/decrementing it - read directly to confirm, no
+   geometric awareness at all), independent of screen position - `done`
+   was registered right after the heading while sitting visually last,
+   so Down from the top would reach it before Auto-aim. **Worth writing
+   down once, for every screen after this one**: `AdvancedControls.cpp`
+   has this EXACT same mismatch in stock, unmodified upstream code (its
+   own `done` registers second, positions last, `:200-201`) and it is
+   not a bug there - PC navigation is mouse-first, and a click goes
+   straight to screen position, bypassing the index entirely. Xbox has
+   no mouse, so sequential Up/Down is the ONLY way to move focus, and
+   registration order has to match visual order on every screen built
+   for it - a correctness requirement this port adds that stock upstream
+   never had to meet. Fixed: `done` now registers last. Re-verified:
+   clean link, no regression on the boot screenshot, the screen's own
+   menu object still constructs.
 9. **Hidden under `#if XASH_XBOX`**, in two groups the expanded design
    now separates. **Permanently** (nothing later un-hides these):
    `Touch*`, `Gyro`, `InputDevices`, `AdvancedControls` (its two

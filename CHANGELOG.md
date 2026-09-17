@@ -5,6 +5,32 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — a Game options screen, and Options gains a row to reach it
+
+`GameOptions.cpp` (previously a PC-only network/performance tuning
+screen - FPS cap, download permission, `cmdrate`/`updaterate`/`rate`)
+is reshaped under `#if XASH_XBOX` into three gameplay toggles: Auto-aim,
+Crosshair, and Fast weapon switch - the last a real client cvar
+(`hud_fastswitch`) no menu screen linked before this. `Configuration.cpp`
+hides Touch and Update (no touchscreen exists; no internet to check for
+updates) and adds a new Game row to reach the reshaped screen. Every
+other platform keeps both screens exactly as they were.
+
+Controls and Video stay unrenamed for now - "Controller" and "Display"
+belong to whichever change actually rebuilds those screens, and
+labelling a button for a screen that does not exist yet would be worse
+than leaving it as it is.
+
+Review caught the Done button overlapping the new heading and the
+Auto-aim row - a real defect the auto-layout helper produced silently,
+now positioned explicitly below all three toggles instead - and then
+caught the same class of bug PR #83 already fixed once for Main:
+registration order is pad focus order, independent of where a control
+actually sits on screen, and Done was registered ahead of the three
+toggles it sits below. Stock upstream has this exact mismatch too, and
+gets away with it because PC navigation is mouse-first; a console has
+no mouse, so this now matters on every screen built for one.
+
 ### Added — the Xbox Main menu is flattened to a console-shaped shape
 
 Under `#if XASH_XBOX`, `Main.cpp` now shows Resume Game (in-game only) /
