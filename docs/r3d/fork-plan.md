@@ -2842,9 +2842,13 @@ registration unless the stock one is unusable:
       wasted, and misleadingly pessimistic, number. The full, correct
       whole-profile ceiling measurement is therefore sequenced to run
       AFTER XM.1 trims the reachable screen graph down to what will
-      actually ship (Main: Resume/New Game/Load/Save/Options/Quit;
-      Options: Video/Controller/Audio only), against a genuine, minimal
-      screen list, using the decomposition both review rounds converged
+      actually ship (the 2026-09-17 design, XM.1 below: Main with Resume
+      / New Game / Training Room / Load / Save / Options; Options with
+      Controller / Audio / Display / Game - and text headings in place of
+      every `head_*.bmp`, so the banner-accumulation half of this
+      measurement is zero by construction on that graph), against a
+      genuine, minimal screen list, using the decomposition both review
+      rounds converged
       on: background+button-strip cost from the `ui_xbox_menu_art` A/B
       (two builds, since the button gate can't see a same-boot config
       override - step 1's own prior finding), PLUS the surviving
@@ -2875,67 +2879,202 @@ registration unless the stock one is unusable:
    asserted); the `logo.avi` path is verified to no-op rather than error
    on both. Hardware per the usual rule.
 
-1. **Main**: flatten as xash-rt did - Resume / New Game / Load / Save /
-   Options / Quit. Drop console, previews, minimize/close (`Main.cpp:
-   225-243`) and the Update button (`Configuration.cpp:68`).
-2. **Video** (`VideoModes.cpp` in place, keeping `PC_VID_MODES` and
-   `head_vidmodes`), in two steps because the backend decides what a
-   control can honestly do. **XM.1**: brightness/gamma sliders, and the
-   display mode and aspect shown as read-only text derived from the
-   dashboard's EEPROM video flags - `ui-architecture.md` §8's standing
-   policy is that Xbox aspect comes from the dashboard, not a player
-   setting, and this phase keeps that policy rather than adding a selector
-   that contradicts it. Nothing else: no resolution table, no windowed/
-   borderless, no `r_refdll`, no 10-second test mode, no `gl_vbo`. **XM.2,
-   after X9**: any mode choice the driver actually honours (today the Xbox
-   backend hardcodes `XVideoSetMode( 640, 480 )` and clamps every later
-   request back to it - divergence #50 - and `ref_soft` refuses any
-   display-transform scale, `r_glblit.c`), and a widescreen-presentation
-   choice only if X9's separate-axis `R_SetDisplayTransform` work (its own
-   listed item) lands first; until then there is no mechanism behind such a
-   control, so it is not offered. The render-resolution lever X5 built
-   (`vid_scale` 2.0 → 320x240 render, presented 2x2) is a candidate XM.2
-   "Performance mode" toggle, exposed only if X9's hardware numbers make it
-   worth a player's choice.
-3. **Controller** (`Gamepad.cpp` extended, plus the mapping screen): preset
-   layouts as a spin control (at minimum "Default" and "Southpaw"/"Legacy").
-   A preset is a complete controller *profile*, not a bind table: the
-   `bind` pairs for the digital buttons PLUS the axis cvars - `joy_axis_
-   binding` for which stick moves and which looks (`in_joy.c:60`; that
-   cvar, not any bind, is what makes Southpaw Southpaw), the `joy_pitch`/
-   `joy_yaw` signs for invert, the `joy_*_deadzone` values - all applied
-   through the existing cvar and bind systems, never a second store (round
-   2 of this draft's review caught a "binds only" definition that would
-   have left the sticks unchanged). Stick sensitivity and deadzone per
-   axis, invert Y, rumble on/off and rumble *duration* (`vibration_enable`
-   and `vibration_length`, moved here from Audio and labelled honestly:
-   `vibration_length` scales duration, `cl_mobile.c:23-35`, and amplitude
-   is randomised in `Platform_Vibrate` when the caller passes none,
-   `joy_sdl2.c:328-355` - there is no strength setting to expose; a real
-   one is a new archived cvar threaded into `Platform_Vibrate2`'s motor
-   amplitudes, engine work with its own ledger row, optional and XM.2),
-   and a **mapping screen with a Duke diagram**: one 32-bit TGA of the pad under
-   `gfx/shell/`, power-of-two (512x256 or 512x512), no captions baked in -
-   each button's current bind is drawn as text at a fixed anchor by code, so
-   presets and rebinding swap strings, not art, and the image is
-   language-neutral. Rebinding reuses `Controls.cpp`'s grab dialog. This
-   screen does NOT retire the one-shot gamepad-bind seeding (divergence
-   #53, PR #65, pending as this is written): a `config.cfg` saved before
-   gamepad binds existed opens with `unbindall` and carries no gamepad
-   lines at all, so the migration has to run before a player ever finds
-   this screen - the screen is where a player changes what was seeded, and
-   whatever it writes is what the seeding then respects on the next boot.
-   Test both paths: an old keyboard-only config (seeded once, then
-   customisable), and a fresh one (presets/rebinds persist as saved).
-4. **Audio**: keep volumes and DSP; drop `snd_mute_losefocus`.
-5. **Hidden under `#if XASH_XBOX`**: `Touch*`, `Gyro`, `InputDevices`,
-   `AdvancedControls`' mouse options, `CustomGame`, `ServerBrowser`/
-   `Multiplayer` (until Xbox netcode exists), `FileDialog`, `Zoo`. Hidden,
+**The design, 2026-09-17 - the target for every item below is the
+"Half-Life Xbox Menu" canvas
+(https://claude.ai/code/artifact/51a8c032-54b1-4e1d-bf22-2ca867eb8584):
+ten screens drawn at 640x480 and shown at 2x, one artboard per screen,
+each with a note naming the `menus/*.cpp` it maps to.** What it keeps is
+the WON menu's identity - the left-aligned column of orange labels with a
+console-font description beside each one (the exact text #78/#79 made
+legible), the black ground, the version string bottom-right, selection
+as the brighter-orange WON highlight rather than a box - and what it adds
+is the console layer: a bottom legend of Xbox button glyphs with the
+verbs each screen answers to (A Select / B Back everywhere; X and Y only
+where a screen uses them; the D-pad glyph where a row adjusts a value),
+pad-only navigation, and every screen inside the title-safe area (labels
+start 72 px in and 48 px down at 1x, the legend sits at y=438, all within
+`ui-architecture.md` §7's 90%). Three decisions the earlier draft left
+open, made by the design: (a) **sub-screen headings are text** - an
+uppercase orange heading over a gradient rule replaces every `head_*.bmp`
+banner, so on the shipping screen graph the per-screen banner residency
+that item 0 step 5's ceiling deferral is about does not exist at all; the
+bitmap art left is item 0's own (background, title, button strip, per
+profile) plus the Duke diagram and the save previews. (b) **No Quit,
+Previews, Multiplayer or Console on Main** - a console title has no
+desktop to return to and no server list yet. (c) **Row labels come from
+the strip where the strip has them** (`PC_*` ids through
+`PicButton.cpp:259`'s existing path; text when `renderPicbuttonText` /
+`GFL_RENDER_PICBUTTON_TEXT` is set or the strip has no such label -
+Controller, Display and Game are words the 1998 strip never had, so they
+render as text on every profile); the canvas's typefaces are stand-ins
+for the strip and the console font, no new font ships. Nothing new in
+input either: `Utils.h:190-222` already answers A as Enter, B as Escape
+and X as Backspace for every menu - the legend shows what the pad
+already does. Two corrections to the canvas's own notes, found by
+reading the files they name: `sv_aim` and `crosshair` live in
+`AdvancedControls.cpp:86-91`, not `GameOptions.cpp`, and its "Autosave"
+toggle has no setting behind it (item 8).
+
+1. **Main** (`Main.cpp`): Resume Game (in-game only), New Game, Training
+   Room (`PC_HAZARD_COURSE`, `:203` - kept, it is the WON menu), Load
+   Game, Save Game (in-game only), Options, each with its description.
+   Hidden under `XASH_XBOX`: Console (`:179`), Disconnect (`:193`),
+   Multiplayer (`:209`), Custom Game (`:221`), Previews (`:226`), Quit
+   (`:231`). Load and Save go straight to `UI_LoadGame_Menu` /
+   `UI_SaveGame_Menu` (`LoadGame.cpp:497-502`), retiring `SaveLoad.cpp`'s
+   three-button hub (`:60-62`) and splitting `Main.cpp:378-384`'s single
+   `saveRestore` button into the two rows. Backdrop per item 0's two
+   profiles: on HL25 content the BackgroundLayout tiles (solid black,
+   measured) under `CMenuAnimatedBanner` exactly as the canvas animates
+   it (`AnimatedBanner.cpp`: `logo.tga`, the two blips, the four
+   `logo_big_blurred_%i` layers drifting 3.7x as far, `:195`); on
+   pre-HL25 content the WON `splash.bmp` under the same rows and no title
+   (step 5: it degrades clean). Version string as today, `xbox-i386` in
+   place of `win32-i386`.
+2. **New Game** (`NewGame.cpp`): unchanged - Easy / Medium / Difficult /
+   Cancel with descriptions, under a text heading.
+3. **Load Game / Save Game** (`LoadGame.cpp`, one screen in its two modes
+   as today): Load (or Save) / Delete / Done on the left with "Saved games
+   are kept on the Xbox hard disk"; on the right the existing `CMenuTable
+   savesList` (`:164`) as Saved game / Chapter / Date, `CMenuSavePreview`
+   (`:68`, `save/<name>.bmp`) with the name, chapter and difficulty line
+   beside it; Delete through the existing `CMenuYesNoMessageBox` ("Delete
+   this saved game?", `:362`), answered A/B; legend A Load (Save) /
+   X Delete / B Back. `head_load`/`head_save` (`:29-30`) become the
+   heading.
+4. **Options** (`Configuration.cpp`): Controller / Audio / Display / Game /
+   Done with descriptions. Controls → Controller (`:58`), Video → Display
+   (`:62`), Game is a new row; Touch (`:64`), Joystick (`:66`) and Update
+   (`:68`) hidden.
+5. **Controller** (replaces `Gamepad.cpp` in place; `Controls.cpp` becomes
+   its Customize sub-screen) - three screens. **Scheme**: Standard /
+   Southpaw / Legacy / Custom as one horizontal row with a description
+   line under it, the scheme's mapping list (Left trigger, Left stick,
+   Stick click, D-pad, Back) beside the Duke diagram with the scheme's
+   labels drawn by code, and Settings… / Customize… / Done. A scheme is a
+   complete controller *profile*, not a bind table: the `bind` pairs over
+   `in_keys.c:107-129`'s pad names through `KEY_SetBinding` PLUS
+   `joy_axis_binding` (`in_joy.c:60`; that cvar, not any bind, is what
+   makes Southpaw Southpaw), applied through the existing cvar and bind
+   systems, never a second store. Standard's table is the canvas's
+   Customize table: Fire = right trigger, Secondary fire = left trigger,
+   Jump = A, Crouch = left stick click, Use = B, Reload = X, Next weapon =
+   Y, Previous weapon = White, Flashlight = Black, Walk = right stick
+   click, Weapon slots = D-pad, Quick save = Back, Pause menu = Start -
+   deliberately NOT `in_keys.c`'s stock defaults, which put `+attack` on
+   `R1_BUTTON` (a shoulder the Duke does not have) and `+attack2` on the
+   trigger. **Start is `cancelselect` in every scheme and is not
+   rebindable** (Codex review of this plan, round 1): it is the stock
+   binding (`in_keys.c:115`), the HL client's `cancelselect` closes an
+   open weapon menu or else issues `escape` (`deps/hlsdk/cl_dll/
+   ammo.cpp:286`, `:762`), and in a map every pad press runs its binding
+   and nothing else (`in_keys.c:862-865`) - so it is the ONLY pad route
+   from gameplay back to Main, and the canvas's "Pause menu = Start"
+   means exactly that route, never the `pause` command (which keeps no
+   pad button: the menu is the pause). Quick save on Back replaces
+   Back's stock `pause` (`:113`). Legacy = those stock defaults verbatim, so a player who
+   already has them keeps them by name; Southpaw = Standard with the
+   sticks swapped in `joy_axis_binding`; Custom = whatever Customize left,
+   selected automatically once a rebind departs from every preset. Before
+   the table is typed in: read which `K_*` names nxdk's SDL2 joystick
+   backend actually emits for the Duke's triggers, White and Black off
+   what divergence #53's seeding (PR #65) already writes. The seeding note
+   stands verbatim: a `config.cfg` saved before gamepad binds existed
+   opens with `unbindall` and carries no gamepad lines at all, so the
+   migration has to run before a player ever finds this screen - the
+   screen is where a player changes what was seeded, and whatever it
+   writes is what the seeding respects next boot; test both paths (an old
+   keyboard-only config, seeded once then customised, and a fresh one).
+   **Settings**: Look sensitivity 1-10 (one slider driving `joy_pitch` and
+   `joy_yaw` together, `in_joy.c:48-49`), Invert look (`joy_pitch`'s
+   sign), Vibration on/off (`vibration_enable`, `cl_mobile.c:24`, moved
+   here from `Audio.cpp:72`). Dropped from the earlier draft: per-axis
+   deadzone rows (`joy_*_deadzone` keep their defaults, `in_joy.c:56-59`)
+   and rumble duration (`vibration_length` stays hidden at 1.0); the
+   honesty note stands - there is no strength setting to expose,
+   amplitude is randomised in `Platform_Vibrate` when the caller passes
+   none (`joy_sdl2.c:328-355`), and a real one is engine work with its
+   own ledger row, XM.2 at the earliest. **Customize**: `Controls.cpp`
+   rewritten in place - `CMenuKeysModel`/`CMenuKbActListModel` (`:36-39`)
+   filtered to pad keys, the existing grab dialog ("Press a key or
+   button", `:239`), A reassign / X clear / Y defaults / B back;
+   `AdvancedControls.cpp`'s mouse rows hidden. Start's row is shown
+   (Pause menu) but locked - not reassignable, not clearable, for the
+   reason above. **Y is NOT `ResetKeysList`** (Codex review of this plan,
+   round 2): that function runs `unbindall` (`:124`) and then binds only
+   what `gfx/shell/kb_def.lst` lists (`:112-149`) - a keyboard-only file
+   with no gamepad entries (divergence #53) - and the one-shot seeder
+   `Key_SeedGamepadDefaults` (`in_keys.c:589-606`) fills EMPTY binds
+   only while `joy_binds_seeded` is still 0, so a pad wiped after
+   seeding stays wiped across reboots. Y instead applies the selected
+   scheme's complete profile (Standard when the scheme is Custom): an
+   Xbox-only routine that issues every pad `bind` of the scheme's
+   table, sets `joy_axis_binding`, and re-pins Start - never `unbindall`,
+   never an empty binding left behind for the seeder to ignore. X clear
+   does leave that action empty, by the player's choice; Y is the way
+   back. The
+   diagram: one 32-bit TGA under `gfx/shell/`, 512x256, no captions baked
+   in - the canvas's inline Duke drawing is the reference for the pose -
+   with labels as text at fixed anchors, so schemes swap strings, not
+   art, and the image is language-neutral.
+6. **Audio** (`Audio.cpp`): Sound / Music / HEV suit volume (`volume` /
+   `MP3Volume` / `suitvolume`, `:64-66`) as D-pad-adjusted rows; Speaker
+   output a read-only row from the Dashboard. Hidden: `room_off` /
+   `dsp_coeff_table` (`:69-70` - the earlier draft's "keep DSP" is
+   reversed: DSP has no player-facing meaning on a fixed console),
+   `snd_mute_losefocus` (`:71`), and both vibration rows (`:67`, `:72`),
+   which move to Controller.
+7. **Display** (`VideoOptions.cpp` in place; `Video.cpp` and
+   `VideoModes.cpp` hidden entirely - the earlier draft's "VideoModes.cpp
+   in place" is superseded): Brightness and Gamma (`:292-293`), Screen
+   size (`viewsize`, `:289`), HUD size (`hud_scale`, `:300`, a spin the
+   canvas defaults to Large, "for a TV at couch distance"), Texture
+   filtering (`sw_texfilt` under `ref_soft`, `:354`; `gl_texture_nearest`
+   after X9, `:374`); Video output a read-only row, derived live and
+   never a literal (Codex review of this plan, round 2 - the canvas's
+   "640x480 · 4:3 · 60 Hz, set in Dashboard" is the NTSC 4:3 case, not
+   the string): resolution and refresh from `XVideoGetMode()`
+   (`deps/nxdk/lib/hal/video.c:315` - PAL consoles run 640x480 at 50 Hz,
+   `REFRESH_50HZ`/`REFRESH_60HZ`, `video.h:48-49`), aspect from
+   `XVideoGetEncoderSettings()` (`video.c:208`) and its
+   `VIDEO_WIDESCREEN`/`VIDEO_LETTERBOX` bits (`video.h:41-42`); §8's
+   standing policy that aspect comes from the Dashboard, not a player
+   setting, unchanged. Hidden: `r_detailtextures`, `r_ripple`, `gl_vbo`,
+   `gl_overbright` (`:295-298`); no resolution table, no windowed/
+   borderless, no `r_refdll`, no 10-second test mode. **XM.2, after X9**,
+   exactly as before: any mode choice the driver actually honours (today
+   the Xbox backend hardcodes `XVideoSetMode( 640, 480 )` and clamps every
+   later request back to it - divergence #50 - and `ref_soft` refuses any
+   display-transform scale, `r_glblit.c`), a widescreen-presentation
+   choice only once X9's separate-axis `R_SetDisplayTransform` work lands,
+   and X5's `vid_scale` lever (2.0 → 320x240 render, presented 2x2) as a
+   candidate "Performance mode" toggle only if X9's hardware numbers make
+   it worth a player's choice.
+8. **Game** (new screen; `GameOptions.cpp` reshaped): Auto-aim (`sv_aim`)
+   and Crosshair (`crosshair`) moved in from `AdvancedControls.cpp:86-91`;
+   Fast weapon switch (`hud_fastswitch`, a client cvar no mainui screen
+   links today - a new row). Hidden: `fps_max`, `cl_allowdownload`,
+   `cl_cmdrate` / `cl_updaterate` / `rate` (`:113-140`) and the
+   `developer`-gated rows (`:192-197`). One correction to the canvas: its
+   "Autosave" toggle is dropped - GoldSrc autosaves where a map's
+   `trigger_autosave` says, unconditionally, and no engine or client cvar
+   turns that off, so the row would be wired to nothing.
+9. **Hidden under `#if XASH_XBOX`** (extends the earlier list): `Touch*`,
+   `Gyro`, `InputDevices`, `AdvancedControls` (its two surviving rows
+   moved to Game), `CustomGame`, `ServerBrowser` / `Multiplayer` /
+   `PlayerSetup` / `CreateGame` (until Xbox netcode exists), `FileDialog`,
+   `Zoo`, `Video.cpp` / `VideoModes.cpp`, `SaveLoad.cpp`'s hub. Hidden,
    not deleted: the files stay stock for the merge diff.
-6. **On-screen keyboard**: not in this phase. `osk_enable` and every text
-   field it would serve (player name, server address) are hidden with the
-   screens above; the OSK is E7's own item and only earns its place when a
-   text field is actually reachable.
+10. **On-screen keyboard**: not in this phase. `osk_enable` and every text
+   field it would serve are hidden with the screens above; the OSK is E7's
+   own item and only earns its place when a text field is actually
+   reachable.
+11. **The legend**: one shared control every screen draws from its own
+   list of (glyph, verb) pairs - A/B/X/Y as filled discs in the Duke's
+   colours, the D-pad as an outline - at the same y on every screen. It
+   describes, it does not dispatch: dispatch is `Utils.h`'s existing
+   mapping plus each control's own left/right handling on the rows the
+   D-pad adjusts.
 
 **Where the code lives - decided by the sibling's example and this
 project's own precedent. DONE, 2026-09-16.** Substantive `mainui` changes
@@ -2969,23 +3108,30 @@ not need rewriting" bullet was already narrowed to the framework ahead of
 this. Every future screen change goes `#if XASH_XBOX`-guarded where it
 alters a screen the PC build still shows, same as planned.
 
-**Art and memory.** Reuse every existing `PC_*` button id and `head_*`
-banner where the content provides them - **corrected 2026-09-16: HL25
-content ships NO `gfx/shell/*.bmp` at all** (only the three `kb_*.lst`
-files; no `.pak` either), so on the current disc the menu renders through
-mainui's text-button path, not the bitmap strip - the strip and banners
-exist only on pre-HL25 content, and item 0 above covers both. New art is one file:
-the Duke diagram. At 512x256x32 it is 512 KiB of texture - fine against
-X3's current numbers, and it is XB's bake that decides the final GPU
-format, not this phase. Title-safe layout (90%) for every rewritten screen;
-minimum legible text at 640x480 on a CRT per `ui-architecture.md` §7.
+**Art and memory.** Reuse every existing `PC_*` button id where the
+content provides the strip - **corrected 2026-09-16: HL25 content ships
+NO `gfx/shell/*.bmp` at all** (only the three `kb_*.lst` files; no `.pak`
+either), so on that profile every label renders through mainui's
+text-button path; the strip exists only on pre-HL25 content, and item 0
+above covers both. The `head_*` banners are NOT reused: the design
+replaces every one with a text heading, which is also what makes item 0
+step 5's deferred ceiling measurement tractable - on the shipping screen
+graph there is no banner to accumulate, so the post-traversal number is
+item 0's own art plus the Duke diagram and the save previews. New art is
+one file: the Duke diagram. At 512x256x32 it is 512 KiB of texture - fine
+against X3's current numbers, and it is XB's bake that decides the final
+GPU format, not this phase. Title-safe layout (90%) for every rewritten
+screen; minimum legible text at 640x480 on a CRT per `ui-architecture.md`
+§7 - the canvas's 2x rendering is the check: anything unreadable at 2x on
+a monitor is unreadable at 1x on a CRT.
 
 **Sequencing.** Item 0 (retail menu art, both profiles) first - it is the
 smallest change, it is what a player sees before any button is pressed,
 and its `memstats` numbers set the budget every later screen's art has
-to fit under. Then XM.1 (Main flattened, Controller with the mapping
-screen, Audio, the hidden PC screens, Video's gamma and read-only display
-info); X7.5 (a disc per title, so a menu change can be tested on a real
+to fit under. Then XM.1 (the ten screens of the 2026-09-17 design: Main,
+New Game, Load/Save, Options, Controller with its Settings and Customize
+sub-screens, Audio, Display, Game, the hidden PC screens); X7.5 (a disc
+per title, so a menu change can be tested on a real
 build without hand-packing) is done for `hl` as of 2026-09-16, and XM.1
 runs alongside X8. XM.2 (any mode or
 widescreen-presentation control) strictly after X9, because it is X9's
@@ -2993,18 +3139,29 @@ backend work that gives such a control anything to drive - doing the
 screens first means X9 is then tested through the menu a player will
 actually use.
 
-**Exit, XM.1:** on the disc, with a pad only: the main menu reaches New
-Game, Load, Save, Options and Quit; Options shows exactly Video, Controller
-and Audio; Video's gamma change is visible on the next frame and its
-mode/aspect text matches what the dashboard is set to; Controller shows
-the Duke diagram with live bind labels, applies a preset (Southpaw - and
-in a map the stick roles really swap, not only the button labels), rebinds
-one button, and after a save-quit-boot the change is still there - and the
-same sequence from an old keyboard-only `config.cfg` first shows the
-seeded defaults, then the customisation; no hidden PC screen is reachable
-by any button. **Exit, XM.2:** a mode or presentation change made in Video
-is visible on the next frame, on hardware. Verified on xemu first, closed
-on hardware, same rule as every other phase.
+**Exit, XM.1:** on the disc, with a pad only, against the canvas screen
+by screen: Main reaches New Game, Training Room, Load Game and Options,
+and shows Resume Game and Save Game only once a map is loaded; Options
+shows exactly Controller, Audio, Display and Game; Display's brightness
+and gamma changes are visible on the next frame and its output row
+matches what the Dashboard is set to under NTSC 4:3, widescreen and
+PAL50 settings alike (xemu's EEPROM flips each); from a running map, Start alone
+opens Main with Resume Game under every scheme, Custom included;
+Controller shows the Duke with the selected scheme's labels, applies
+Southpaw (and in a map the stick roles
+really swap, not only the labels), Settings' sensitivity, invert and
+vibration take effect in a map, Customize rebinds one action, X clears
+one, Y restores the selected scheme completely (every gameplay action
+bound again, checked in a map, never an empty bind left) - and after a
+save-quit-boot every change, the Y restore included, is still there; the same sequence from an old keyboard-only `config.cfg`
+first shows the seeded defaults, then the customisation; Game's three
+toggles change their cvars; every screen's legend matches what the pad
+actually does on it; no `head_*.bmp` is resident on any shipping screen
+(read out of `r_images[]`, the way step 5 read the atlas) and no hidden
+PC screen is reachable by any button. **Exit, XM.2:** a mode or
+presentation change made in Display is visible on the next frame, on
+hardware. Verified on xemu first, closed on hardware, same rule as every
+other phase.
 
 **Risks, named.** (1) Fork maintenance: the `mainui` submodule tracks
 FWGS's `continuous` branch closely; an owned branch means merging upstream
@@ -3016,7 +3173,11 @@ has 720x480 and HD modes) - measure before designing the spin control's
 list. (3) Presets are only as good as the bind system: `+duck` is
 hold-to-crouch in GoldSrc, and a "toggle crouch" preset would need a bind
 alias, not engine code - decide per preset, in the plan, before writing
-the table.
+the table. (4) The Standard scheme's table assumes the Duke's triggers,
+White and Black arrive as specific `K_*` names from nxdk's SDL2 backend -
+unverified in this document; read them off divergence #53's seeding
+before the table exists, or Standard silently binds Fire to a button the
+pad never sends.
 
 ## X7 — Game code: one XBE per title
 
