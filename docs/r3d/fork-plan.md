@@ -2882,8 +2882,68 @@ registration unless the stock one is unusable:
 **The design, 2026-09-17 - the target for every item below is the
 "Half-Life Xbox Menu" canvas
 (https://claude.ai/code/artifact/51a8c032-54b1-4e1d-bf22-2ca867eb8584):
-ten screens drawn at 640x480 and shown at 2x, one artboard per screen,
-each with a note naming the `menus/*.cpp` it maps to.** What it keeps is
+screens drawn at 640x480 and shown at 2x, one artboard per screen,
+each with a note naming the `menus/*.cpp` it maps to.**
+
+**Expanded the same day, from ten artboards to twenty-one - read before
+the items below, because it moves a whole half of the menu out of XM.1.**
+The canvas gained three groups: **multiplayer** (Multiplayer hub, System
+Link browser, Host Game, Direct Connect, Split Screen, Player Profile,
+Internet Games, Master Servers), **pause menus** (single-player Paused,
+multiplayer Game Menu), and a **shared on-screen keyboard**. Its own two
+new titles say what it is aiming at: "Multiplayer - System Link over
+lwIP, master servers configurable, no Xbox Live" and "Pause menus -
+START in game". The single-player screens that were already drawn are
+unchanged except Main, which gains a Multiplayer row.
+
+That split is now the plan's own: **XM.1 stays the single-player
+console shape** (Main through Game, plus the single-player pause
+screen - nothing in it needs a socket), and everything multiplayer
+becomes **XM.3**, sequenced behind a new networking phase, **XN**,
+because the Xbox build has no networking at all today: `tools/xbox-cc.sh:290`
+compiles the engine with `-DXASH_NO_NETWORK=1`, which `net_ws_private.h:17`
+resolves to `platform/stub/net_stub.h`. Every multiplayer artboard on
+the canvas rests on a stack that is stubbed out in the binary that boots
+today - the design is a target for XM.3, not a description of what the
+menu can be wired to now. X0's own analysis (lines 208-230) already
+scoped the lwIP port layer as conditional, "only if the console build
+ever wants real networking"; this design answers that conditional yes,
+so XN below turns it into a real phase with its own exit.
+
+**Four corrections to the new notes, from reading the files they name**
+(the same pass that caught `sv_aim`/`GameOptions.cpp` in the first
+design): (a) there is no `menus/LanGame.cpp` - the LAN browser is
+`menus/ServerBrowser.cpp`, the same class serving both screens through
+`m_bLanOnly` (`:384`, `:940-943`) and registered twice (`menu_langame`,
+`menu_internetgames`, `:457-458`); it already issues `localservers` and
+`internetservers <filter>` (`:943`, `:982`), so System Link and Internet
+Games are a reskin over existing plumbing, not new protocol code. (b) The
+master list is not a new `masters.vdf`: `engine/common/masterlist.c` is
+already a multi-master implementation (`NET_AddMaster` `:486`,
+`NET_AddMasterStatic` `:527`, the `addmaster`/`addmasterstatic` commands)
+and it already reads its list from **`xashcomm.lst`** (`:648`) - so the
+Master Servers screen extends that file and inherits the engine's own
+dedupe and per-master accounting, rather than inventing a format beside
+it. It does NOT follow that the screen is a menu-only change, which this
+note first claimed and Codex review corrected: that format has no
+disabled state, the shipped default master is added unconditionally
+before the file is even read (`:768-776`), and the runtime commands are
+add and clear-all only - so enable, remove, test and Restore Defaults
+are engine surface XN has to add first (XN step 4, XM.3 item 4). (c) The engine already HAS an on-screen keyboard -
+`engine/client/input/in_osk.c`, 4 lines x 13 keys, left trigger
+backspace, right trigger space, behind `osk_enable` (default `"0"`,
+`:20`), already exposed by `Gamepad.cpp:86` - and it is a different
+keyboard from the canvas's: 10 wide, SHIFT/SPACE/BACKSPACE/ACCEPT, an
+A/X/Y/START/B legend, and a caller-supplied title, initial value and
+character set. Which one ships is a real decision XM.3 has to make and
+record, not a detail (below). (d) **Split Screen has no engine behind it
+at all**: grepping the whole engine for split-screen, a second local
+client or a second viewport finds nothing - GoldSrc and Xash are
+single-local-client engines, and a second client is not a menu change
+but an engine one (a second `cl` state, a second view, input from a
+second port, and a listen server hosting both). The canvas's own note
+says to grey the row out until it is measured; this plan goes further
+and keeps it out of XM.3's exit entirely (see XN's risks). What it keeps is
 the WON menu's identity - the left-aligned column of orange labels with a
 console-font description beside each one (the exact text #78/#79 made
 legible), the black ground, the version string bottom-right, selection
@@ -2920,7 +2980,14 @@ toggle has no setting behind it (item 8).
    Game, Save Game (in-game only), Options, each with its description.
    Hidden under `XASH_XBOX`: Console (`:179`), Disconnect (`:193`),
    Multiplayer (`:209`), Custom Game (`:221`), Previews (`:226`), Quit
-   (`:231`). Load and Save go straight to `UI_LoadGame_Menu` /
+   (`:231`). **The expanded design puts a Multiplayer row back on Main**
+   ("System Link, split screen, player profile"), between Save Game and
+   Options, and hides only Console, Disconnect, Custom Game, Previews and
+   Quit - but it also says that row is visible "only when the NIC has a
+   link", and there is no link-state query in the engine to ask (nor a
+   network stack under it, see the design note above). So the row lands
+   in **XM.3**, with XN's link check behind it; XM.1 keeps Multiplayer
+   hidden, which is what shipped. Load and Save go straight to `UI_LoadGame_Menu` /
    `UI_SaveGame_Menu` (`LoadGame.cpp:497-502`), retiring `SaveLoad.cpp`'s
    three-button hub (`:60-62`) and splitting `Main.cpp:378-384`'s single
    `saveRestore` button into the two rows. Backdrop per item 0's two
@@ -3130,22 +3197,55 @@ toggle has no setting behind it (item 8).
    "Autosave" toggle is dropped - GoldSrc autosaves where a map's
    `trigger_autosave` says, unconditionally, and no engine or client cvar
    turns that off, so the row would be wired to nothing.
-9. **Hidden under `#if XASH_XBOX`** (extends the earlier list): `Touch*`,
-   `Gyro`, `InputDevices`, `AdvancedControls` (its two surviving rows
-   moved to Game), `CustomGame`, `ServerBrowser` / `Multiplayer` /
-   `PlayerSetup` / `CreateGame` (until Xbox netcode exists), `FileDialog`,
-   `Zoo`, `Video.cpp` / `VideoModes.cpp`, `SaveLoad.cpp`'s hub. Hidden,
-   not deleted: the files stay stock for the merge diff.
-10. **On-screen keyboard**: not in this phase. `osk_enable` and every text
-   field it would serve are hidden with the screens above; the OSK is E7's
-   own item and only earns its place when a text field is actually
-   reachable.
-11. **The legend**: one shared control every screen draws from its own
+9. **Hidden under `#if XASH_XBOX`**, in two groups the expanded design
+   now separates. **Permanently** (nothing later un-hides these):
+   `Touch*`, `Gyro`, `InputDevices`, `AdvancedControls` (its two
+   surviving rows moved to Game), `CustomGame`, `FileDialog`, `Zoo`,
+   `Video.cpp` / `VideoModes.cpp`, `SaveLoad.cpp`'s hub. **Until XN
+   lands**, then rebuilt by XM.3 rather than un-hidden as they stand:
+   `ServerBrowser` (both registrations), `Multiplayer`, `PlayerSetup`,
+   `CreateGame`. Hidden, not deleted, either way: the files stay stock
+   for the merge diff.
+10. **Single-player pause** (new screen, XM.1): the canvas's "Paused" -
+   chapter and difficulty under the heading, the game scene dimmed
+   behind it with the HUD still faintly visible, and Resume Game / Save
+   Game / Load Game / Options / Quit to Main Menu ("Unsaved progress
+   will be lost.", through the existing `CMenuYesNoMessageBox`). Legend
+   A Select / B Resume / START Resume. **It supersedes Main's in-game
+   variant**: START in a map opens this, not Main, and Main's own
+   `connected`-gated Resume Game and Save Game rows (which shipped in
+   XM.1's first slice, PR #83, and are what START opens until this lands)
+   come back out when it does - the design keeps those rows drawn on the
+   Main artboard as the in-game state it had before this screen existed,
+   but it is one in-game menu, not two. It needs no socket, so it belongs
+   here rather than XM.3 - but it does need two things this phase has
+   not checked: that the engine really pauses (the note says `sv pause`;
+   `pausable` is already forced to 1 for singleplayer in `Main.cpp:178`)
+   and that the menu can draw over a dimmed live scene rather than the
+   menu background, which is `CMenuBackgroundBitmap::DrawInGameBackground`'s
+   job today (a flat black fill, `BackgroundBitmap.cpp:66-69`) and would
+   become a dim instead. Measure both before writing the screen.
+11. **On-screen keyboard**: **moves to XM.3** - the design gives it three
+   callers (master address, player name, server name) and all three are
+   multiplayer screens, so it earns its place exactly when they do, and
+   not before. The decision it carries: the engine already has an OSK
+   (`in_osk.c`, above), a different shape from the canvas's, driven by
+   the engine's own text-field path rather than by a menu screen. Reusing
+   it costs no new code and gets every engine text field at once, but
+   ships a keyboard that does not match the design or the legend;
+   building the canvas's costs a new `mainui` screen and leaves two
+   keyboards in the tree. XM.3 picks one, in writing, before either is
+   built - noting that E7's own design already called for "on-screen
+   keyboard as a `mainui` window" (`epics.md`), which is the canvas's
+   answer, not `in_osk.c`'s.
+12. **The legend**: one shared control every screen draws from its own
    list of (glyph, verb) pairs - A/B/X/Y as filled discs in the Duke's
-   colours, the D-pad as an outline - at the same y on every screen. It
-   describes, it does not dispatch: dispatch is `Utils.h`'s existing
-   mapping plus each control's own left/right handling on the rows the
-   D-pad adjusts.
+   colours, the D-pad as an outline, START as its own glyph on the pause
+   screens - at the same y on every screen. It describes, it does not
+   dispatch: dispatch is `Utils.h`'s existing mapping plus each control's
+   own left/right handling on the rows the D-pad adjusts. Shared with
+   XM.3, which adds no new glyph vocabulary - every multiplayer screen's
+   legend is drawn from the same five.
 
 **Where the code lives - decided by the sibling's example and this
 project's own precedent. DONE, 2026-09-16.** Substantive `mainui` changes
@@ -3199,16 +3299,24 @@ a monitor is unreadable at 1x on a CRT.
 **Sequencing.** Item 0 (retail menu art, both profiles) first - it is the
 smallest change, it is what a player sees before any button is pressed,
 and its `memstats` numbers set the budget every later screen's art has
-to fit under. Then XM.1 (the ten screens of the 2026-09-17 design: Main,
-New Game, Load/Save, Options, Controller with its Settings and Customize
-sub-screens, Audio, Display, Game, the hidden PC screens); X7.5 (a disc
+to fit under. Then XM.1 (the single-player screens of the 2026-09-17
+design: Main, New Game, Load/Save, Options, Controller with its Settings
+and Customize sub-screens, Audio, Display, Game, the single-player pause
+screen, the hidden PC screens); X7.5 (a disc
 per title, so a menu change can be tested on a real
 build without hand-packing) is done for `hl` as of 2026-09-16, and XM.1
 runs alongside X8. XM.2 (any mode or
 widescreen-presentation control) strictly after X9, because it is X9's
 backend work that gives such a control anything to drive - doing the
 screens first means X9 is then tested through the menu a player will
-actually use.
+actually use. **XM.3 (the multiplayer screens) strictly after XN**, for
+the same reason and more sharply: every one of its screens is a view
+onto a socket, and there is no socket in the build today - a menu
+written against the stub would be eight screens nothing can answer.
+XN itself is optional to the project's spine (a single-player port
+reaches X10 without it); it is sequenced whenever multiplayer stops
+being optional to the person deciding, and nothing in X7-X11 waits on
+it.
 
 **Exit, XM.1:** on the disc, with a pad only, against the canvas screen
 by screen: Main reaches New Game, Training Room, Load Game and Options,
@@ -3216,8 +3324,11 @@ and shows Resume Game and Save Game only once a map is loaded; Options
 shows exactly Controller, Audio, Display and Game; Display's brightness
 and gamma changes are visible on the next frame and its output row
 matches what the Dashboard is set to under NTSC 4:3, widescreen and
-PAL50 settings alike (xemu's EEPROM flips each); from a running map, Start alone
-opens Main with Resume Game under every scheme, Custom included;
+PAL50 settings alike (xemu's EEPROM flips each); from a running map,
+START alone opens the in-game menu under every scheme, Custom included -
+which is the single-player pause screen once item 10 lands, and until
+then is Main with its Resume Game and Save Game rows, the form that
+shipped in XM.1's first slice (PR #83);
 Controller shows the Duke with the selected scheme's labels, applies
 Southpaw (and in a map the stick roles
 really swap, not only the labels), Settings' sensitivity, invert and
@@ -3229,10 +3340,106 @@ first shows the seeded defaults, then the customisation; Game's three
 toggles change their cvars; every screen's legend matches what the pad
 actually does on it; no `head_*.bmp` is resident on any shipping screen
 (read out of `r_images[]`, the way step 5 read the atlas) and no hidden
-PC screen is reachable by any button. **Exit, XM.2:** a mode or
+PC screen is reachable by any button - and the single-player pause
+screen, once item 10 lands, is what START opens in a map: it pauses the
+game, dims the scene with the HUD still readable, its Save Game / Load
+Game / Options rows reach the same screens Main's do, B or START resumes,
+and Quit to Main Menu confirms before leaving (leaving the map, so Main
+is then its out-of-game self, with no Resume or Save row).
+**Exit, XM.2:** a mode or
 presentation change made in Display is visible on the next frame, on
 hardware. Verified on xemu first, closed on hardware, same rule as every
 other phase.
+
+### XM.3 — the multiplayer screens (proposed 2026-09-17, blocked on XN)
+
+Eight artboards, each a view onto something XN has to provide first.
+The engine files they map to, corrected against the tree rather than
+taken from the canvas's notes:
+
+1. **Multiplayer hub** (`menus/Multiplayer.cpp`, rebuilt): System Link /
+   Internet Games / Direct Connect / Split Screen / Player Profile /
+   Done, with a network status line (IP, DHCP state) from the lwIP
+   `netif` at top right. Spectate and Advanced stay hidden. This is also
+   the row XM.1 left hidden on Main, and its "only when the NIC has a
+   link" condition needs a link-state query XN adds - not a menu change.
+2. **System Link** (`menus/ServerBrowser.cpp` in its `m_bLanOnly` mode,
+   `:384`, `:940-943` - NOT a `LanGame.cpp`): the existing
+   `CMenuGameListModel` and `localservers` broadcast, re-laid-out as
+   Server / Map / Players / Ping with the selected server's rules under
+   it, refreshed on a timer. Legend A Join / Y Host / X Refresh / B Back.
+3. **Internet Games** (the same class in its other mode, `:982`'s
+   `internetservers <filter>`): the same table fed from the master list
+   instead of broadcast, a "only maps on this disc" filter applied
+   client-side on the A2S_INFO reply (Y toggles it), and a
+   Master Servers… row. The canvas's own performance note - query each
+   master, dedupe by `ip:port`, then A2S_INFO the results 12 at a time,
+   because the fan-out and not the master query is what costs on 64 MB -
+   is a real constraint for XN to honour in the engine, not something
+   the menu can enforce.
+4. **Master Servers** (new screen, no upstream equivalent - and, corrected
+   by Codex review round 1, **not a menu-only change either**). The first
+   draft here said the screen need only write `xashcomm.lst` because
+   `masterlist.c` is already multi-master. It is multi-master (`:486`,
+   `:527`) and it does read that file (`:648`), but it cannot express
+   what this screen shows: the persisted format is four keys -
+   `master`/`master6`/`mastergs`/`masterstatic` (`:671-688`, written back
+   at `:723-746`) - and every entry in it is enabled by definition, so
+   there is **no disabled state to write**; `NET_InitMasters` adds the
+   shipped `http://xash.su/server-list` static master unconditionally and
+   BEFORE it loads the file (`:768-776`), so a "disabled" default would
+   still be queried; and the only runtime commands are `addmaster`,
+   `addmasterstatic`, `clearmasters` and `listmasters` (`:760-763`) -
+   add and clear-everything, no per-entry remove, no enable, no re-test,
+   and writing the file does not rebuild the in-memory list. So the
+   engine side of this screen moves into **XN step 4**: enumerate, add,
+   remove, enable/disable, test and reload as real engine surface, a
+   persisted format that can carry a disabled shipped default, and the
+   in-memory list rebuilt atomically when it changes. The screen is then
+   what the design draws - per-row enable, A edit, Y add, X remove, Test,
+   Restore Defaults - over that. The canvas's own warning is worth
+   keeping in the screen: a named master needs DNS, and an Xbox with no
+   name server from DHCP needs a numeric address.
+5. **Direct Connect** (new): address on a D-pad numeric keypad (digits,
+   dot, colon, backspace), port 27015 assumed, the last three addresses
+   kept on the hard disk, `connect <addr>`.
+6. **Host Game** (`menus/CreateGame.cpp`, trimmed): server name, map,
+   mode (deathmatch/teamplay), max players 2-8, `mp_fraglimit`,
+   `mp_timelimit`, `mp_friendlyfire`, `mp_weaponstay`; Start runs the
+   listen server through `map`. Password and dedicated hidden.
+7. **Player Profile** (`menus/PlayerSetup.cpp`, trimmed): name (through
+   whichever keyboard XM.1 item 11's decision picked), model with the
+   existing `CMenuPlayerModelView` preview, top/bottom colour swatches,
+   spray. Persisted in `config.cfg` like every other cvar.
+8. **Multiplayer pause** ("Game Menu"): explicitly NOT paused - the
+   design says so on the screen, in a warning line, because a listen
+   server cannot pause for one player - Resume / Player Profile /
+   Options / Disconnect (confirmed), with a mini scoreboard from the
+   client's own player info beside it and a pointer to the full one on
+   BACK.
+
+**Not in XM.3: Split Screen.** The canvas draws it (two player slots,
+port 2 joining on START, a shared map/mode/limits block) and its note
+already hedges - "grey out the row until it's measured". The engine
+reason is harder than performance: there is no second local client
+anywhere in Xash or GoldSrc, so this is a second `cl` state, a second
+view, a second input port and a listen server serving both, on a 733 MHz
+CPU already the constraint everywhere else in this plan. It stays drawn
+and greyed, with no exit criterion, until somebody measures a second
+viewport at all - not something XM.3 promises to deliver.
+
+**Exit, XM.3:** on the disc, with a pad only, two Xboxes (or one Xbox
+and one PC) on the same network: Main shows Multiplayer only with a link
+up; System Link finds a game hosted from the other machine within one
+refresh and joins it; Host Game starts a listen server the other machine
+finds; Direct Connect joins by typed address; Internet Games lists
+servers from at least one enabled master, its disc-map filter hides what
+it should, and Master Servers' edits survive a reboot in `xashcomm.lst`;
+Player Profile's name and colours show up on the other machine; the
+multiplayer Game Menu opens on START without pausing, and Disconnect
+confirms and returns to the Multiplayer hub. Verified on xemu first
+where its networking allows, closed on hardware - the same rule as
+every other phase, and on this phase hardware is the only honest test.
 
 **Risks, named.** (1) Fork maintenance: the `mainui` submodule tracks
 FWGS's `continuous` branch closely; an owned branch means merging upstream
@@ -3249,6 +3456,124 @@ White and Black arrive as specific `K_*` names from nxdk's SDL2 backend -
 unverified in this document; read them off divergence #53's seeding
 before the table exists, or Standard silently binds Fire to a button the
 pad never sends.
+
+## XN — Networking over lwIP (proposed 2026-09-17, optional to the spine)
+
+**Why this exists now:** the menu design of 2026-09-17 asks for eight
+multiplayer screens (XM.3), and every one of them is a view onto a socket
+this build does not have. X0 parked networking with a two-item list -
+"complete upstream's stub" first, "only if the console build ever wants
+real networking, write the lwIP port layer" second. The design is that
+"only if", answered yes. X0's first item is long done (divergence #29
+completed `net_stub.h` so `net_ws.c`, `xrcon.c` and both `common/http/*.c`
+compile clean against it); this phase is the second.
+
+**What is actually missing, measured rather than assumed.** Less than the
+`XASH_NO_NETWORK` flag suggests:
+
+- **`net_chan.c` is not a blocker.** It shows FAIL in the broad sweep on
+  `#include <bzlib.h>`, but that include is upstream's own
+  `#if !XASH_DEDICATED` (`:21-23`) and `tools/xbox-link-check.sh` already
+  builds the vendored `3rdparty/bzip2` (seven sources, `BZ_NO_STDIO` on
+  `bzlib.c`, `:354-371`) and compiles the file with its include path -
+  `.sweep/engine_common_net_chan.obj` is real and in every link this
+  project ships. The sweep FAIL is a flag gap between the broad sweep and
+  the real link, one of the known 29, not missing functionality.
+- **lwIP is already up, and already used.** nxdk builds `libnxdk_net.lib`
+  with `LWIP_SOCKET`/`LWIP_UDP` on, its headers are already on the engine
+  include path (`tools/xbox-cc.sh:251-253`), and this project already
+  sends real UDP over it from inside the engine - the boot log channel,
+  `engine/platform/xbox/net_xbox_log.c`, divergence #13.
+- **What is stubbed is `net_ws.c`'s sockets, and only those.**
+  `-DXASH_NO_NETWORK=1` (`tools/xbox-cc.sh:290`) makes
+  `net_ws_private.h:17` select `platform/stub/net_stub.h`, whose socket
+  calls are all the same always-fails macro.
+
+**The work, in order:**
+
+1. **Write an Xbox/lwIP platform header and select it explicitly**, which
+   is more than dropping a flag (Codex review of this plan, round 1,
+   caught the first draft saying otherwise): Xbox is a sub-platform OF
+   `XASH_WIN32` (the `build.h` patch nests it inside `defined _WIN32`),
+   and `net_ws_private.h:17-25` tests `XASH_NO_NETWORK`, then
+   `XASH_WIN32`, then others - so simply dropping `XASH_NO_NETWORK`
+   selects `platform/win32/net.h`, whose first act is
+   `#include <ws2tcpip.h>` (`:18`). That is WinSock, which nxdk does not
+   have; `net_ws.c` would then want `WSAStartup`/`WSACleanup`
+   (`:2009`, `:2072`), `WSAGetLastError` in four places and
+   `net_ws_private.h:35`'s own `NET_ErrorString`. So: a new
+   `engine/platform/xbox/net_xbox.h` selected by an `#elif XASH_XBOX`
+   branch placed BEFORE the `XASH_WIN32` one, providing what that header
+   provides - socket types, error reporting (lwIP sets `errno`, there is
+   no `WSAGetLastError`), startup/shutdown (lwIP needs its own init, not
+   `WSAStartup`), and the close/ioctl spellings - over
+   `<lwip/sockets.h>`. X0's own remaining question is then the real one
+   inside this: whether `net_ws.c`'s field-by-field use of
+   `sockaddr_in6`/`sockaddr_storage`/`in6_addr` compiles against lwIP's
+   versions or needs a translation shim. Expect IPv6 to be the sore
+   point: lwIP's v6 is a build option and nxdk's `lwipopts.h` decides it -
+   read that first, and if v6 is off, the honest shape is a v4-only Xbox
+   path, not a fake v6 one. Audit the other users of the same header in
+   the same pass, not after: `xrcon.c` and both `common/http/*.c`, which
+   divergence #29 got compiling against the stub and which will follow
+   this branch instead.
+2. **One netif lifecycle, shared.** The log channel brings lwIP up on its
+   own today, and divergence #33 already records its DHCP being
+   unreliable enough to lose a whole boot's logs. Two independent
+   bring-ups is one too many: give the engine a single init that both the
+   log channel and `net_ws.c` use, with DHCP state observable rather than
+   assumed.
+3. **A link/address query** the menu can ask - for XM.3's Multiplayer row
+   ("visible only when the NIC has a link") and the hub's status line
+   (IP, DHCP state). This is engine surface that does not exist in any
+   form today, on any platform, so it is ours to define narrowly: link
+   up, address, DHCP state, nothing more.
+4. **Server discovery within the memory budget, and a master list the
+   menu can actually edit.** `localservers` (broadcast) and
+   `internetservers` (masters) already exist in the engine and are what
+   XM.3's two browsers call. What needs measuring on this hardware is the
+   fan-out the design's own note names: dedupe by `ip:port` across
+   masters, then A2S_INFO the result set in bounded batches (the canvas
+   says 12 at a time) - on 64 MB the reply storm, not the master query,
+   is the cost. The master LIST, corrected by Codex review round 1, is
+   engine work and not just a file the menu writes: `masterlist.c` is
+   multi-master (`:486`, `:527`) and reads `xashcomm.lst` (`:648`), but
+   its persisted keys carry no disabled state (`:671-688`, `:723-746`),
+   `NET_InitMasters` adds the shipped `xash.su` static master
+   unconditionally before loading that file (`:768-776`), and the only
+   commands are add / add-static / clear-all / list (`:760-763`) - no
+   per-entry remove, no enable, no reload. XN owns: enumerate, add,
+   remove, enable/disable, test and reload as engine surface; a format
+   that can represent a disabled shipped default (so Restore Defaults
+   means something and a disabled default is genuinely not queried); and
+   an in-memory list rebuilt atomically when any of that changes.
+   Persistence tested across a reboot, not just across a menu close.
+5. **Then, and only then, XM.3.**
+
+**Exit, XN:** on hardware, two machines on one network: the engine
+resolves a link and an address and says so; `localservers` finds a game
+hosted by the other machine and `connect` joins it; a listen server
+started here is joinable from the other machine; `internetservers`
+against at least one master returns a server list without exhausting
+memory (measured with `memstats`, against X3's ceiling, during the
+fan-out - not after it); and the master list survives a reboot with a
+shipped default disabled and genuinely not queried, and re-enabled by
+Restore Defaults. No menu is required to pass this: the console and the
+commands - including the new per-entry ones step 4 adds - are enough,
+and keeping the exit that way is what stops XN and XM.3 from being one
+untestable lump.
+
+**Risks, named.** (1) IPv6: upstream's `net_ws.c` is v6-aware throughout
+and lwIP's v6 is optional - a v4-only Xbox path is a divergence with a
+real surface, not a one-liner. (2) DHCP on real hardware has already
+bitten this project once (divergence #33); a menu that reports "no link"
+because DHCP silently failed is worse than no menu. (3) Scope: this is
+the first phase in this plan that adds a whole subsystem rather than
+porting one, and it is optional to the single-player spine - X10 (first
+playable) does not wait on it, and neither does anything in X7-X11.
+(4) Split screen (XM.3's own excluded item) is NOT solved by this phase
+and is not networking: it is a second local client, an engine change of
+a different kind, and no part of XN brings it closer.
 
 ## X7 — Game code: one XBE per title
 

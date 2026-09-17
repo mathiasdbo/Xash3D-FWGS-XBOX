@@ -256,7 +256,16 @@ Video, Controller (with a Duke-diagram mapping screen and presets) and
 Audio screens in place, flattens Main, and hides the rest under
 `XASH_XBOX` - the same in-place, cvar-linked, macro-guarded approach
 `sultim-t/xash-rt` used for its own graphics menu, on an owned `mainui`
-fork the way this project already owns its HL SDK fork.
+fork the way this project already owns its HL SDK fork. **Updated
+2026-09-17**: the menu design grew a multiplayer half (System Link,
+Internet Games over configurable masters, Host Game, Direct Connect,
+Player Profile) plus pause menus and a shared on-screen keyboard - the
+keyboard being exactly this epic's own "OSK as a `mainui` window". The
+single-player half stays XM.1; the multiplayer half is XM.3, and it is
+blocked on a new phase, `fork-plan.md` XN, because the Xbox build
+compiles with `XASH_NO_NETWORK` and has no sockets at all today. XN is
+optional to the single-player spine - nothing in E1-E5 or X7-X11 waits
+on it.
 
 ### E8 — Audio
 
