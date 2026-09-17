@@ -2930,7 +2930,78 @@ toggle has no setting behind it (item 8).
    `logo_big_blurred_%i` layers drifting 3.7x as far, `:195`); on
    pre-HL25 content the WON `splash.bmp` under the same rows and no title
    (step 5: it degrades clean). Version string as today, `xbox-i386` in
-   place of `win32-i386`.
+   place of `win32-i386` - **not done in this row**: the string comes
+   from the engine's own build-platform code, not `mainui`, and this
+   row's scope stayed inside `Main.cpp`; a small follow-up.
+
+   **DONE, 2026-09-17.** Implemented and verified live on both discs.
+   **A real infrastructure bug found first, blocking**: every `#if
+   XASH_XBOX` written into this file compiled clean but took the WRONG
+   branch - the flattened Xbox layout never appeared, the retail
+   Multiplayer/Previews/Quit column stayed, on a build that otherwise
+   linked and booted fine. Root cause, found by preprocessing the file
+   directly rather than guessing: `tools/xbox-mainui-sweep.sh`'s include
+   path (`-I3rdparty/mainui/sdk_includes/...`) never reaches
+   `3rdparty/library_suffix/include/build.h`, the engine header
+   `patches/library_suffix-xbox-subplatform.patch` teaches to `#define
+   XASH_XBOX 1` under `defined _WIN32 && defined NXDK` - `mainui` builds
+   against its OWN, entirely separate `sdk_includes/public/build.h`
+   copy of the same platform-detection matrix, which had no Xbox
+   sub-platform branch at all, so the macro was silently undefined
+   (0 in `#if`) for every file in this fork's own menu module. This is
+   exactly why the earlier `ui_xbox_menu_art`/`uiStatic.lowmemory` gates
+   in `BackgroundBitmap.cpp`/`Btns.cpp` were built as RUNTIME checks
+   instead of `#if XASH_XBOX` - a choice made correctly, for a reason
+   this row is the first to write down. **Fixed**: added the identical
+   `#if defined NXDK` branch to `sdk_includes/public/build.h`'s own
+   `_WIN32` case, same condition, same reasoning, as the engine's patch.
+   Confirmed by preprocessing `Main.cpp` directly (`tools/xbox-cxx.sh
+   ... -E`) before touching the link at all - the Xbox-only code
+   survived - and checked the fix does not silently change behaviour
+   elsewhere: `Main.cpp` was, before this row, the ONLY file in the
+   whole `mainui` tree that referenced `XASH_XBOX` (grepped), so nothing
+   else could have been depending on it staying undefined. **A second,
+   real bug found live, not by review**: Save Game's row is hidden
+   outside a game, but its position in the stacking loop reserved a
+   vertical slot regardless of visibility - Load Game sat one row too
+   high, leaving a visible gap above Configuration on the actual boot
+   screenshot. Fixed to skip the slot entirely when hidden, the same
+   way `resumeGame`/`hazardCourse` already do; re-verified live, rows
+   pack tight. **Verified live on both profiles**: classic WON disc
+   shows New Game / Hazard Course / Load Game / Configuration, tight,
+   no gap, Multiplayer/Previews/Quit gone; HL25 disc (text-button path,
+   no strip at all) shows New Game / Training Room / Load Game /
+   Options with the same set removed - confirming the flattening
+   applies identically whether the profile draws bitmap buttons or
+   text. The in-game state (Resume Game and Save Game appearing,
+   Load Game's slot shifting up to make room) is reasoned through
+   from the code and not live-tested - reaching it needs a controller
+   in a running map, the same limitation this item's other rows already
+   name. **Codex review found a real bug the screenshots couldn't
+   catch**: `AddItem()`'s registration order IS keyboard/pad focus
+   order (`ItemsHolder.cpp`), independent of on-screen position -
+   `loadGame` was registered before `configuration` unconditionally,
+   but the retail (non-Xbox) layout still draws `configuration` ABOVE
+   `loadGame`, so pressing Down at Configuration on the PC build would
+   have jumped backward on screen to Load Game, then forward past it to
+   Multiplayer - exactly the kind of thing that never shows up in a
+   screenshot. Fixed by making the registration order `#if XASH_XBOX`
+   too, matching each platform's own visual stacking; `saveGame` stays
+   registered (permanently invisible) on non-Xbox either way, since an
+   invisible item is skipped by navigation regardless of its slot.
+   Re-verified live: no visual change on the Xbox layout, exactly as
+   expected for a registration-order-only fix. **Codex review round 2**
+   caught something visible in every single screenshot taken this
+   session, unnoticed until it named it: the two small white squares in
+   the top-right corner of every WON menu boot screenshot are the
+   retail desktop `minimizeBtn`/`quitButton` icons - `QMF_MOUSEONLY`
+   only means "not reachable by keyboard/pad focus", not "invisible";
+   they are ordinary visible-by-default items, drawn every frame
+   regardless of input method. A console has no window to minimize or
+   close, so their setup, `AddItem()` registration and positioning all
+   moved under `#if !XASH_XBOX` - not just left unfocusable in the
+   corner. Re-verified live: the corner is empty on the boot screenshot,
+   no other change.
 2. **New Game** (`NewGame.cpp`): unchanged - Easy / Medium / Difficult /
    Cancel with descriptions, under a text heading.
 3. **Load Game / Save Game** (`LoadGame.cpp`, one screen in its two modes

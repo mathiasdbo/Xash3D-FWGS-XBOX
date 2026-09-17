@@ -5,6 +5,34 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — the Xbox Main menu is flattened to a console-shaped shape
+
+Under `#if XASH_XBOX`, `Main.cpp` now shows Resume Game (in-game only) /
+New Game / Training Room / Load Game / Save Game (in-game only) / Options,
+and hides Console, Disconnect, Multiplayer, Custom Game, Previews and
+Quit - a console title has no desktop to quit to and no server list yet.
+The old combined "Save\Load Game" button is split into its own Load Game
+and Save Game rows. Verified live on both content profiles (the bitmap-
+button WON disc and the text-button HL25 disc) with no regression on
+either.
+
+Fixing this also fixed something bigger: every `#if XASH_XBOX` written
+into this menu module was silently taking the wrong branch, because the
+module builds against its own copy of the engine's platform-detection
+header and that copy never learned about the Xbox sub-platform at all -
+the macro read as undefined (0), not an error, for every file in the
+module, for as long as it has existed. `sdk_includes/public/build.h`
+now carries the same Xbox branch the engine's own header already has.
+
+Review also caught that the new rows' registration order didn't match
+retail's own on-screen order, which would have made Up/Down jump
+around the unchanged PC menu instead of following it row by row - the
+registration order now follows the platform too. And it caught two
+small white squares visible in the corner of every WON menu screenshot
+taken this whole session: retail's desktop minimize/close icons, which
+a mouse-only flag doesn't actually hide from a screen with no mouse -
+neither exists on Xbox now.
+
 ### Fixed — a mixed-content menu disc no longer keeps both backgrounds resident
 
 `CMenuBackgroundBitmap::LoadBackground()` (`3rdparty/mainui/controls/BackgroundBitmap.cpp`)
