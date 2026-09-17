@@ -2384,7 +2384,15 @@ registration unless the stock one is unusable:
       `gfx/shell/btns_main.bmp` at all, so `LoadBmpButtons()` finds
       nothing to load either way regardless of timing or gate value -
       this whole question only matters for the pre-HL25 profile (step 5),
-      which needs its own disc first.
+      which needs its own disc first. **Superseded in part, 2026-09-17,
+      by XM.1 item 13**: that item stops the strip drawing on Xbox
+      entirely (every row becomes text, so the menu can be translated),
+      and `Btns.cpp:42`'s early return then skips the load on both
+      profiles regardless of `ui_xbox_menu_art`. So the two-build A/B
+      this step deferred is no longer worth building - the strip's cost
+      becomes zero, not smaller, and what needs measuring in its place is
+      the glyph atlas item 13 ships. The background half of this gate is
+      untouched and still matters exactly as written.
    2. **DONE, 2026-09-16, but the measurement did not confirm what it
       changed.** Masked `GFL_HD_BACKGROUND` on Xbox
       (`cl_gameui.c:402-403`, `#if !XASH_XBOX`, divergence row below) so
@@ -2961,13 +2969,28 @@ that item 0 step 5's ceiling deferral is about does not exist at all; the
 bitmap art left is item 0's own (background, title, button strip, per
 profile) plus the Duke diagram and the save previews. (b) **No Quit,
 Previews, Multiplayer or Console on Main** - a console title has no
-desktop to return to and no server list yet. (c) **Row labels come from
-the strip where the strip has them** (`PC_*` ids through
-`PicButton.cpp:259`'s existing path; text when `renderPicbuttonText` /
-`GFL_RENDER_PICBUTTON_TEXT` is set or the strip has no such label -
-Controller, Display and Game are words the 1998 strip never had, so they
-render as text on every profile); the canvas's typefaces are stand-ins
-for the strip and the console font, no new font ships. Nothing new in
+desktop to return to and no server list yet. (c) **Every row is drawn as
+text, and the WON button strip does not draw on Xbox at all** - reversing
+this plan's own earlier call (that row labels come from the strip where
+the strip has them, `PC_*` ids through `PicButton.cpp:259`, text only
+where the 1998 strip had no such word). The design asked for this and the
+plan had not noticed: the canvas's NewGame artboard names `PC_EASY` /
+`PC_MEDIUM` / `PC_DIFFICULT` / `PC_CANCEL` and then says **"text-button
+rendering"** - the design naming the exact picture ids and choosing text
+over them. That note is the evidence, not the fact that an HTML mockup
+draws text, which proves nothing by itself. The reason to reverse is not
+fidelity but reach: **the strip's labels are English baked into a bitmap,
+so no menu built on them can ever be translated**, and the canvas's own
+typefaces (Barlow Semi Condensed for UI text, IBM Plex Mono for the help
+lines) stop being stand-ins for the strip and become a real font that
+ships. Item 13 owns the change and every consequence: the strip stops
+being resident at all (`Btns.cpp:42` already refuses to load it when
+`renderPicbuttonText` is set), a memory *win* against item 0's 3 MiB
+ceiling rather than a cost - though a glyph atlas arrives in its place
+and has to be measured the same way - and the `PC_*` picture-id question
+retires entirely, an argument that only ever existed while a strip drew
+(divergence #67 spent three review rounds on which id the Game row should
+borrow). Nothing new in
 input either: `Utils.h:190-222` already answers A as Enter, B as Escape
 and X as Backspace for every menu - the legend shows what the pad
 already does. Two corrections to the canvas's own notes, found by
@@ -3398,6 +3421,297 @@ toggle has no setting behind it (item 8).
    own left/right handling on the rows the D-pad adjusts. Shared with
    XM.3, which adds no new glyph vocabulary - every multiplayer screen's
    legend is drawn from the same five.
+13. **Text rendering and localization** (new, 2026-09-17 - the work
+   decision (c) above reverses into). It **retrofits items 1, 4, 6 and 8,
+   which already shipped**, so it is not a screen but a change under all
+   of them. Its point is one sentence: *a menu whose words are pixels in
+   a 1998 bitmap cannot be translated*, and three separate things make
+   that true here, each of them invisible in English - which is exactly
+   how all three survived this long. The steps are ordered because each gates the
+   next, and the last one is deliberately last: **step 5 is the only
+   irreversible-looking one** - the moment the strip stops drawing, every
+   row's label is whatever the string layer returns, so the font (1) and
+   both dictionaries (3, 4) have to be on the disc before it, or the menu
+   ships in console glyphs reading `GameUI_NewGame`.
+   1. **A real font on the disc, proved to be the one drawing.** Xbox
+      already compiles a real rasterizer, not conchars:
+      `tools/xbox-mainui-sweep.sh:164` passes
+      `-DMAINUI_USE_CUSTOM_FONT_RENDER -DMAINUI_USE_STB`, so
+      `FontManager.cpp:490-498` selects `CStbFont` (stb_truetype).
+      **But it needs the file**: `FindFontDataFile`
+      (`FontManager.cpp:537-548`) maps "Trebuchet MS" →
+      `gfx/fonts/FiraSans-Regular.ttf` and "Tahoma" →
+      `gfx/fonts/tahoma.ttf`, and on failure `CFontBuilder::Create`
+      falls back to `CBitmapFont` **silently**
+      (`FontManager.cpp:506-514`), which is engine conchars
+      (`BitmapFont.cpp:147-153`) with a charset of ASCII 33-126 plus
+      Cyrillic and nothing else (`:87-93`). Both TTFs exist in-repo
+      (`3rdparty/extras/xash-extras/gfx/fonts/`) and `tools/xbox-xiso.sh`
+      stages neither, so **today every Xbox menu string is drawn by the
+      fallback, and Spanish, French and German are unrenderable whatever
+      strings we pass**. Work: stage the fonts, then **prove which
+      backend is live** by reading it out of the guest the way item 0
+      read `s_state` and `r_images[]` - eyeballing cannot tell, the
+      fallback is silent and English looks the same either way. Decide
+      *which* font in writing: the canvas asks for Barlow Semi Condensed
+      and IBM Plex Mono, and FiraSans is merely what the mapper happens
+      to name. **The tempting cheap option does not work** - dropping
+      Barlow in under the filename `FindFontDataFile` already expects
+      cannot render the design, because the canvas uses three Barlow
+      weights (700 headings, 600 rows, 500 setting labels) and two mono
+      weights, while `FindFontDataFile` **ignores its `weight` argument
+      entirely** (`FontManager.cpp:535-545`) and `CStbFont` stores the
+      requested weight without synthesizing it
+      (`StbFont.cpp:49-56`, `:103-112`), so every request would rasterize
+      the one regular face. The choice was either to ship a separate TTF
+      per weight and teach `FindFontDataFile` to select on weight, or to
+      relax the design. **Decided on the measured numbers below: one real
+      weight per family, recorded as a deliberate departure from the
+      canvas.** An extra weight is a whole extra 446-glyph atlas for a
+      difference of 100 units of stroke thickness, and the budget it
+      would eat buys the focus glow instead - which is the same amber the
+      eye actually reads as "this row is selected". Licensing blocks
+      nothing either way (Fira, Barlow and IBM Plex are all OFL).
+
+      **What a face actually costs, computed from the code rather than
+      guessed - this is what decided both open questions in this item.**
+      A face is one RGBA8888 texture (`BaseFontBackend.cpp:193`, uploaded
+      whole at `:211`), starting 256x256 (`:78`, `:98`) and **doubling**
+      height-first to fit (`:153-167`); there is no paging despite the
+      comment, every glyph shares the one image (`:215-220`). Its glyphs
+      are rasterized **eagerly at creation, never lazily on draw**
+      (`UploadGlyphsForRanges`, `:111-207`), and the ranges
+      (`FontManager.cpp:444-451` plus `table_cp1251[64]`,
+      `utflib.cpp:222`) come to **446 glyphs for every face, always** -
+      94 ASCII + 64 Latin-1 + 128 Latin Extended-A + 96 Cyrillic + 64
+      cp1251. Crucially, **face identity is `(name, tall, weight, blur,
+      flags)`** (`BaseFontBackend.h:84`), so *every distinct type size is
+      already its own 446-glyph atlas* - size is the expensive axis, not
+      weight. On Xbox `scaleY` is 480/768 = **0.625** (`BaseMenu.cpp:1074`),
+      so the five faces at `FontManager.cpp:78-104` are really tall 11
+      (console), 12 (small), 16 (default), 16 (bold) and 25 (big) - four
+      at 256x256 and one at 256x512, **1,572,864 B ≈ 1.5 MiB**. The 48
+      staged caches corroborate every bucket exactly (each file is
+      `atlas_bytes + 8130`, with deltas of 2^18/2^19/2^20).
+
+      **That 1.5 MiB is new cost, not existing cost - do not read it as a
+      baseline.** It follows from this item's own first paragraph and an
+      earlier draft got it backwards: because the TTFs are not staged
+      today, every face falls back to `CBitmapFont`, whose
+      `UploadGlyphsForRanges` is **empty** (`BitmapFont.cpp:95-98`) - no
+      atlas is generated at all. What is resident instead is a single
+      shared embedded bitmap, `#XASH_SYSTEMFONT_001.bmp` loaded from
+      `menufont.h`'s compiled-in array (`BitmapFont.cpp:47-56`), shared by
+      every face above the console height because `PIC_Load` keys on the
+      name, with shorter faces drawing through the console instead. So
+      **staging the fonts introduces those five atlases rather than
+      reusing them**, and step 2's "+0" below means "+0 *beyond the five
+      faces the engine already asks for*" - it avoids a sixth, seventh and
+      eighth face, not the first five.
+      The 1024 texture cap that halved the button atlas is **not binding
+      here** - the largest face is 256x512, four doublings clear. Net
+      against item 0's 3 MiB ceiling: **the strip's ~2.7 MiB leaves, and
+      what replaces it is bounded by how many distinct sizes this item
+      chooses to ask for** - which is why step 2 snaps to the existing
+      handles instead of taking the canvas's sizes literally. A trimmed
+      charset stays available as the lever if the measured number
+      disappoints, since all 446 glyphs are paid for per face whether a
+      screen draws them or not.
+
+      **Net, with step 2's decisions taken**: **+1.5 MiB** for the five
+      real faces the staged TTFs bring, **+0 beyond them for the type**
+      (every design size snaps onto one of those five rather than asking
+      for a sixth), **+768 KiB** for the focus glow, **−2.7 MiB** as the
+      button strip stops loading, and a small credit back for the embedded
+      fallback bitmap that stops being needed. **≈ −0.4 MiB: close to
+      break-even, with the saving small enough that it is not the reason
+      to do this.** The reason is that the menu becomes translatable; the
+      memory answer is only that a 64 MiB console **can afford real text
+      at roughly the price of the bitmaps it replaces**. An earlier draft
+      of this paragraph claimed ≈ −1.9 MiB by treating the five atlases as
+      already resident - they are not, see above - and the corrected
+      margin is thin enough that **the `memstats` measurement stops being
+      a formality**: take it the way item 0 took the background's
+      288-page delta, before treating the one-weight and glow decisions as
+      affordable, and record both the texture and heap domains since these
+      are different allocators.
+      Flagged in passing and worth its own row whatever happens here: the
+      classic disc stage already carries **74 MiB of stale `.fontcache/`**
+      riding along on a 390 MB ISO. Measured, not estimated
+      (`find .sweep/boot-attempt/disc/valve/.fontcache -type f -printf
+      '%s\n'`): **48 files, 77,722,720 bytes total, min 264 KiB, mean
+      1.54 MiB, max 4.0 MiB** - PC-resolution atlases, since
+      `FontManager.cpp:78-104` sizes every face by `uiStatic.scaleY`.
+      `BaseFontBackend.cpp:585`/`:775` read and write that directory, so
+      it is both a packaging bug today and the mechanism that could ship
+      exact pre-rendered atlases instead of rasterizing at boot. Note this
+      is **on-disc** size and says nothing directly about the resident
+      cost the 3 MiB ceiling governs - the two are separate numbers and
+      the measurement above must report both.
+   2. **Style it to the canvas.** The canvas is 1280x960, i.e. 640x480 at
+      2x, so every number here is the canvas's own halved - real values
+      this plan did not have before. **Heading**: Barlow 700, 32 px,
+      uppercase, letter-spacing 0.75, `#ffb020`, over a 310x1.5 rule
+      fading `#c8861c` → transparent. Our three shipped headings use
+      `QM_BIGFONT`, which is `hBigFont` at 40 px (`FontManager.cpp:84`,
+      `BaseItem.cpp:100-118`) coloured `uiColorHelp` grey - wrong on both
+      counts against the design. **Row label**: Barlow 600, **20 px on
+      top-level screens, 17 on sub-screens, 18 on Controller** - the
+      canvas disagrees with itself across artboards. **Help/status**: IBM
+      Plex Mono 400, 10 px, `#8ea8bd`. **Setting label** 14 px `#e6dccb`,
+      **value** 13-14 px `#f1e8d8` or `#ffb020`, **legend** 12 px
+      `#cfc6b6` with 10 px glyph letters on the pad colours (A `#6dbe45`,
+      B `#d9322d`, X `#2f79c8`, Y `#f0a91c`).
+
+      **Decided: snap every one of those onto the five faces that already
+      exist, rather than ask for the canvas's sizes literally.** Step 1's
+      arithmetic is the reason - each distinct `tall` is another eager
+      446-glyph RGBA atlas, so taken at face value the canvas needs about
+      eight faces (heading 32, rows at both 20 and 17, label 14, value 13,
+      legend 12, mono 10 and 19), and **the 32 px heading alone lands in
+      the 512x512 bucket at 1 MiB, double today's big font** - roughly
+      2.5-3 MiB of fonts before a single extra weight, which would eat the
+      whole ceiling on its own. The mapping, in real Xbox pixels: heading →
+      `hBigFont` (**25**, against the design's 32 - the one visible
+      concession, and the only place the departure shows), rows → default
+      (**16**, which is within a pixel of the canvas's own sub-screen 17
+      and settles the 20/17/18 disagreement by construction), setting
+      label / value / legend → small (**12**, exact on the legend), help →
+      console (**11**). That is **zero new faces and zero added bytes**.
+      Two departures to record with it: the heading is 7 px shy of the
+      canvas, and the help line loses its monospace face (the console font
+      is Tahoma, `FontManager.cpp:102`, and a real mono family would be a
+      whole second family of atlases for a texture the eye barely reads at
+      11 px). If the heading's size turns out to matter on a TV more than
+      it does in the artboard, adding that one face back is a **+1 MiB**
+      decision to take on its own evidence, not a default. **The palette is a real
+      divergence in every role, not a nudge**: stock is
+      `uiPromptTextColor` `#F0B418` base, `uiPromptFocusColor` **pure
+      yellow `#FFFF00`** focus and `uiColorHelp` neutral grey `#A0A0A0`
+      (`BaseMenu.cpp:61-71`, defaulted onto every item at
+      `BaseItem.cpp:65-66`), while the design wants dim amber `#c8861c` →
+      bright amber `#ffb020` and a cool blue-grey `#8ea8bd` for help -
+      note the *shape* of the gap, that stock's base is roughly the
+      design's focus and stock's focus is a yellow the canvas never uses.
+      **Most of it can be content rather than code**: `UI_ApplyCustomColors`
+      parses `HELP_COLOR` / `PROMPT_TEXT_COLOR` / `PROMPT_FOCUS_COLOR` and
+      the rest from `gfx/shell/colors.lst` (`BaseMenu.cpp:940-975`), and
+      our disc is Xbox-only content, so the base and focus ambers can ship
+      there at zero `mainui` divergence - the cheapest form this fork has.
+      **But not all of it, and the exception is one we created**: the three
+      headings already shipped set `colorBase = uiColorHelp`
+      (`Audio.cpp:155-158`, `GameOptions.cpp:145-148`), and `colors.lst`
+      has a single `HELP_COLOR` feeding that one global, so pointing it at
+      the design's blue-grey `#8ea8bd` for the help lines would drag the
+      headings blue-grey with it - the canvas wants them amber `#ffb020`.
+      So the heading needs a colour of its own, set in code under `#if
+      XASH_XBOX` (or a distinct parsed role added), which is a real if
+      small divergence to record - and **the acceptance check has to read
+      heading and help colour independently**, since a single sampled
+      colour cannot tell the two apart. Check also whether the classic WON
+      `pak0.pak` already ships a `colors.lst` that would win or lose
+      against ours, and whether the parse runs early enough to matter. **The focus glow is the one
+      thing the design asks for that Xbox currently cannot draw**: the
+      canvas's focus is colour *plus* `text-shadow: 0 0 16px
+      rgba(255,176,32,0.55)`, which is precisely what
+      `PicButton.cpp:311-353`'s two-layer `hHeavyBlur` + `hLightBlur`
+      path does - and those two handles are created only outside
+      `lowmemory` (`FontManager.cpp:91-100`), which `tools/xbox-cc.sh:329`'s
+      `-DXASH_LOW_MEMORY=1` makes permanently true on Xbox
+      (`host.c:1239` → `BaseMenu.cpp:1191`). Xbox therefore lands on
+      `:354-379`: one flat `UI_DrawString`, drop-shadowed, no bloom.
+      **Decided: lift the two blur faces out of the `lowmemory` gate on
+      Xbox and draw the glow.** It is the cheapest thing in this item and
+      the most visible - **+768 KiB total**, against the ~2.7 MiB the strip
+      gives back. The blur radii scale with everything else (`2*scale` → 1,
+      `8*scale` → 5, `FontManager.cpp:94`, `:98`) and blur widens the glyph
+      cell, since `GetHeight()` adds `GetEfxOffset() = blur + outline`
+      (`BaseFontBackend.h:75`, `:82`) - so the light face is **free** in
+      bucket terms (blur 1 at tall 16 stays 256x256, ≈262 KiB) and the
+      heavy face costs **exactly one doubling** (≈524 KiB). Both confirmed
+      against the staged cache, which holds the matching
+      `Trebuchet MS_22_1000`, `_g21.00` and `_g81.75` atlases at precisely
+      those bucket sizes. Note this is the one place the `lowmemory` gate
+      is lifted rather than respected, so it is a real divergence to
+      record - and the reason it is affordable is exactly the reason the
+      gate existed: the strip it was protecting against is gone.
+   3. **Make our own strings reachable by a translator.** `L()`
+      (`Utils.h:148,150`, `MenuStrings.cpp:75-89`) is a dictionary lookup
+      that **returns its argument unchanged on a miss** (`:88`) - so a
+      missing key is invisible in English and permanent in every other
+      language. Today the `GameUI_*` keys resolve (checked against
+      `gameui_english.txt`), while **`"Done"`, `"Game"`, `"Crosshair"`,
+      `"Fast weapon switch"`, `"Controls"`, `"Touch"`, `"Update"` and
+      every status line this fork wrote are misses** - roughly twenty
+      strings that look localized and are not. `Localize_InitLanguage`
+      already loads `resource/mainui_<lang>.txt`
+      (`MenuStrings.cpp:456-474`) and **nothing ships one** (only
+      uncommitted skeletons in `3rdparty/mainui/translations/`). So: give
+      every string this fork wrote a real key, ship `mainui_english.txt`
+      (UTF-16LE with BOM, `:334-379`), stage it on both profiles. Status
+      lines need no change of mechanism - `PicButton.cpp:243-255` draws
+      `szStatusText` independently of all three button branches, so they
+      already localize once they have keys.
+   4. **Stage the dictionaries onto the classic profile - this one gates
+      step 5, and skipping it ships a visibly broken menu.**
+      Checked, not assumed: the retail WON install has no `resource/`
+      directory at all, its `pak0.pak` contains neither `gameui_english`
+      nor `strings.lst`, and the built classic stage
+      (`.sweep-xiso/hl/valve/`) therefore carries **no localization
+      dictionary of any kind**. The `GameUI_*` keys have **no compiled-in
+      fallback**, so `L( "GameUI_NewGame" )` returns its own key as the
+      string - and the moment step 2 stops the strip drawing, that key
+      *is* the visible label. Main alone would read "GameUI_NewGame",
+      "GameUI_TrainingRoom", "GameUI_LoadGame", "GameUI_Options"
+      (`Main.cpp:222-250`), with Audio and Game the same. **This is
+      invisible today and stays invisible right up until the change
+      lands**, for a reason worth writing down: the `StringsList_*` keys
+      *do* resolve, from a compiled-in English table seeded into the
+      dictionary at init (`MenuStrings.cpp:35`, `:485-492`; `:546` lets a
+      real `strings.lst` override it), which is exactly why the classic
+      disc's status lines read correct English in every screenshot taken
+      so far while its row labels were bitmaps. Two different mechanisms,
+      one of which has no fallback. So: stage `gameui_<lang>.txt` and
+      `valve_<lang>.txt` alongside `mainui_<lang>.txt` on **both**
+      profiles and for **every** language shipped - `tools/xbox-xiso.sh`
+      supplies the classic profile only `delta.lst` today (`:660-678`) and
+      needs the same treatment for these. And make it a packaging
+      postcondition rather than a hope, the way `xbox-xiso.sh` already
+      refuses a disc with no `delta.lst` (divergence #77's own precedent).
+      **Specify that check carefully, because the obvious version of it
+      passes while broken**: matching on a `GameUI_*` / `StringsList_*`
+      prefix would not catch step 3's own new keys at all - those are
+      whatever namespace this fork picks (say `R3D_Done`), and a missing
+      one renders its own literal exactly like the others while a
+      prefix-matching validator reports success. So **pick and write down
+      the key namespace** for this fork's strings, then make the check
+      namespace-independent by testing the actual failure mode: **every
+      visible key on every shipping screen - not a representative sample -
+      resolved through the shipped dictionary, failing if any lookup
+      returns its input unchanged** (`MenuStrings.cpp:88`, which is the
+      one observable signature a miss has). And prove the validator itself
+      works before trusting it: include a fixture with one deliberately
+      missing non-`GameUI_*` key and require the check to fail on it -
+      otherwise the build goes green for the same reason English did.
+   5. **Turn the strip off.** `uiStatic.renderPicbuttonText` is set from
+      the gameinfo flag at `BaseMenu.cpp:1212`; setting it under `#if
+      XASH_XBOX` both routes every `CMenuPicButton` to its text branch
+      and makes `Btns.cpp:42`'s existing early return skip loading the
+      atlas - one line for both halves. Items 1/4/6/8's `PC_*` ids go
+      inert, and divergence #67's `PC_ADV_OPT` → `PC_ADV_OPT2` →
+      no-picture sequence becomes a correct fix for a case that no longer
+      arises; keep it, but the ledger should record that a general rule
+      replaced it. Note this is only visible on the classic WON profile:
+      the HL25 disc ships no `btns_main.bmp` at all, so it already draws
+      text buttons today and is the closest thing to a preview of the
+      result that exists.
+   6. **Prove it is localizable, not merely text.** The only test that
+      means anything: ship a real second language file on the disc, flip
+      `ui_language` (`engine/common/filesystem_engine.c:43`), and
+      screenshot a screen whose words include accented glyphs. English
+      proves nothing here - a baked bitmap label, a missing dictionary key
+      and a font that cannot draw the glyph all look identical and correct
+      in English, which is how this plan carried all three at once.
 
 **Where the code lives - decided by the sibling's example and this
 project's own precedent. DONE, 2026-09-16.** Substantive `mainui` changes
@@ -3492,7 +3806,15 @@ first shows the seeded defaults, then the customisation; Game's three
 toggles change their cvars; every screen's legend matches what the pad
 actually does on it; no `head_*.bmp` is resident on any shipping screen
 (read out of `r_images[]`, the way step 5 read the atlas) and no hidden
-PC screen is reachable by any button - and the single-player pause
+PC screen is reachable by any button; **every row on every screen is
+text in the shipped font and the button strip is not resident at all**
+(both read out of `r_images[]`, and the live font backend read out of
+the guest rather than inferred from the screen, since the conchars
+fallback is silent), the type and palette match item 13's chosen values
+against the canvas, and **a second language file on the disc with
+`ui_language` flipped actually changes the words on screen, accented
+glyphs included** - the single test that distinguishes a localizable
+menu from an English one that merely draws text - and the single-player pause
 screen, once item 10 lands, is what START opens in a map: it pauses the
 game, dims the scene with the HUD still readable, its Save Game / Load
 Game / Options rows reach the same screens Main's do, B or START resumes,

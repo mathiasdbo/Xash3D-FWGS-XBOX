@@ -265,7 +265,17 @@ single-player half stays XM.1; the multiplayer half is XM.3, and it is
 blocked on a new phase, `fork-plan.md` XN, because the Xbox build
 compiles with `XASH_NO_NETWORK` and has no sockets at all today. XN is
 optional to the single-player spine - nothing in E1-E5 or X7-X11 waits
-on it.
+on it. **Updated again 2026-09-17**: XM.1 gained item 13, which drops the
+retail WON button strip on Xbox and draws every menu row as text in a
+shipped font. That is a real capability this epic had not named -
+**localization**. The strip's labels are English baked into a bitmap, so
+the menu could never have been translated while it drew them; and two
+further links in that chain are also broken today, both invisible in
+English (roughly twenty of this fork's own strings are dictionary misses
+that render their own literal, and the font actually drawing on the disc
+is the conchars fallback, which has no accented Latin at all). Item 13
+owns all three, and the plan's own text-style mapping against the design
+canvas goes with it.
 
 ### E8 — Audio
 
