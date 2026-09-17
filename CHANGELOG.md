@@ -5,6 +5,22 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — the menu can be translated, and one language proves it
+
+Menu strings are keyed by their own English text, which is the
+convention the menu code already expected, so translating the menu needs
+a language file and no code changes at all. A German translation ships
+as the working example, and a disc can now be packed in a chosen
+language.
+
+Verified by doing it rather than assuming: a German disc boots with
+German menu rows whose umlauts render correctly. The help lines beneath
+them do not — they are drawn with the engine's console glyphs, which
+have no accented characters, so they silently lose them. Giving that
+text a proper typeface is therefore a prerequisite for shipping any
+language rather than a cosmetic nicety, and no disc selects a
+non-English language until it lands.
+
 ### Added — the menu ships with a real font instead of console glyphs
 
 The Xbox menu now draws every row as text in a real typeface instead of the retail button artwork. The face is Fira Sans Condensed, chosen over the design's original pick after building all three candidates as real discs and comparing them on screen. Without
@@ -13,8 +29,7 @@ saying so — a character set with no accented Latin at all, so most
 European languages simply could not be drawn, and English looked
 identical either way. Confirmed on a real boot by reading the guest's
 own texture table rather than trusting the screen, since that is the
-only way to tell the two paths apart. Menu row labels still come from
-the retail button art until that changes separately.
+only way to tell the two paths apart.
 
 Measured on a real boot, the text menu costs the console almost exactly
 what the retail button art it replaces cost — a wash to within a few tens

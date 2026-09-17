@@ -120,7 +120,7 @@ title_row() {
 
 TITLE="${1:-}"
 if [ -z "$TITLE" ]; then
-	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>] [--delta-lst <file>] [--resource-dir <dir>]" >&2
+	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>] [--delta-lst <file>] [--resource-dir <dir>] [--ui-language <lang>]" >&2
 	exit 1
 fi
 shift
@@ -137,6 +137,7 @@ OUT=""
 MENU_BAKE=""
 DELTA_LST=""
 RESOURCE_DIR=""
+UI_LANGUAGE=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--steam) STEAM="$2"; shift 2 ;;
@@ -145,6 +146,7 @@ while [ $# -gt 0 ]; do
 		--menu-bake) MENU_BAKE="$2"; shift 2 ;;
 		--delta-lst) DELTA_LST="$2"; shift 2 ;;
 		--resource-dir) RESOURCE_DIR="$2"; shift 2 ;;
+		--ui-language) UI_LANGUAGE="$2"; shift 2 ;;
 		*) echo "xbox-xiso: unrecognised argument: $1" >&2; exit 1 ;;
 	esac
 done
@@ -449,6 +451,90 @@ if [ "$have_dicts" -eq 0 ] && [ -n "$RESOURCE_DIR" ]; then
 	done
 	have_dicts=1
 	echo "xbox-xiso: localization dictionaries supplied from $RESOURCE_DIR and verified." >&2
+fi
+
+# This fork's own translations (XM.1 item 13 step 3), staged from assets/
+# alongside the retail dictionaries above. Keys in these files are the
+# ORIGINAL ENGLISH STRINGS, not invented identifiers - that is mainui's
+# own documented convention (translations/mainui_skeleton_*.txt: "Tokens
+# on left are original strings, on right is translation"), and it is why
+# no menu source file needed changing to become translatable: L() already
+# looks the literal up and returns it unchanged when there is no entry,
+# so English is the built-in fallback.
+#
+# mainui_<lang>.txt loads AFTER gameui_<lang>.txt and BEFORE the gamedir's
+# own file (MenuStrings.cpp Localize_InitLanguage), so these may override
+# GameUI_*/StringsList_* labels but cannot override valve_<lang>.txt.
+shopt -s nullglob
+r3d_translations=( "$REPO"/assets/resource/mainui_*.txt )
+shopt -u nullglob
+if [ ${#r3d_translations[@]} -gt 0 ]; then
+	mkdir -p "$STAGE/$GAMEDIR/resource"
+	for t in "${r3d_translations[@]}"; do
+		bn="$(basename "$t")"
+		if ! cp "$t" "$STAGE/$GAMEDIR/resource/$bn"; then
+			echo "xbox-xiso: copying $bn into the stage failed." >&2
+			exit 1
+		fi
+		if ! cmp -s "$t" "$STAGE/$GAMEDIR/resource/$bn"; then
+			echo "xbox-xiso: staged resource/$bn differs from source - copy was incomplete." >&2
+			exit 1
+		fi
+	done
+	echo "xbox-xiso: staged ${#r3d_translations[@]} Resonance3D translation file(s)." >&2
+fi
+
+# --ui-language writes the gamedir's vfs.cfg, which is where the engine
+# actually picks the language up: FS_LoadVFSConfig execs <gamedir>/vfs.cfg
+# during filesystem init (filesystem_engine.c:115-116), long before
+# CL_Init reaches the menu - unlike userconfig.d or config.cfg, which both
+# exec too late for Localize_Init to see (the same ordering trap item 0
+# hit with ui_xbox_menu_art).
+if [ -n "$UI_LANGUAGE" ]; then
+	case "$UI_LANGUAGE" in
+		*[!a-z]*) echo "xbox-xiso: --ui-language must be a lowercase language name: $UI_LANGUAGE" >&2; exit 1 ;;
+	esac
+	if [ ! -f "$STAGE/$GAMEDIR/resource/mainui_$UI_LANGUAGE.txt" ] 	   && [ ! -f "$STAGE/$GAMEDIR/resource/gameui_$UI_LANGUAGE.txt" ]; then
+		echo "xbox-xiso: --ui-language $UI_LANGUAGE but the stage has no" >&2
+		echo "  resource/mainui_$UI_LANGUAGE.txt or resource/gameui_$UI_LANGUAGE.txt -" >&2
+		echo "  the menu would fall back to English and the disc would lie about it." >&2
+		exit 1
+	fi
+	# Rewrite vfs.cfg by REPLACING our two directives and preserving every
+	# other line. Found in Codex review: truncating the file would silently
+	# drop fs_mount_hd/fs_mount_lv/fs_mount_addon/fs_mount_l10n, which decide
+	# which content directories the engine mounts (filesystem_engine.c:91-129)
+	# - so picking a menu language could quietly remove HD or low-violence
+	# content from the disc. The classic WON install ships no vfs.cfg at all,
+	# which is exactly why the first version of this looked fine.
+	vfs="$STAGE/$GAMEDIR/vfs.cfg"
+	kept=0
+	if [ -f "$vfs" ]; then
+		kept=$(grep -c -v -iE '^[[:space:]]*(ui_language|fs_mount_l10n)([[:space:]]|$)' "$vfs" || true)
+		grep -v -iE '^[[:space:]]*(ui_language|fs_mount_l10n)([[:space:]]|$)' "$vfs" > "$vfs.tmp" || true
+	else
+		: > "$vfs.tmp"
+	fi
+	# fs_mount_l10n mirrors what the engine's own -language path does
+	# (filesystem_engine.c:119-123): selecting a language there also turns on
+	# localization mounting, so a disc built for a language behaves the same
+	# way as an engine launched for one.
+	printf 'ui_language "%s"
+' "$UI_LANGUAGE" >> "$vfs.tmp"
+	printf 'fs_mount_l10n "1"
+' >> "$vfs.tmp"
+	mv "$vfs.tmp" "$vfs"
+	if ! grep -q "ui_language \"$UI_LANGUAGE\"" "$vfs"; then
+		echo "xbox-xiso: writing $GAMEDIR/vfs.cfg failed." >&2
+		exit 1
+	fi
+	now_kept=$(grep -c -v -iE '^[[:space:]]*(ui_language|fs_mount_l10n)([[:space:]]|$)' "$vfs" || true)
+	if [ "$now_kept" != "$kept" ]; then
+		echo "xbox-xiso: $GAMEDIR/vfs.cfg lost directives while setting the language" >&2
+		echo "  ($kept before, $now_kept after) - refusing to pack." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: $GAMEDIR/vfs.cfg sets ui_language to $UI_LANGUAGE ($kept other directive(s) preserved)." >&2
 fi
 if [ "$have_dicts" -eq 0 ]; then
 	echo "xbox-xiso: $GAMEDIR provides no resource/gameui_english.txt." >&2

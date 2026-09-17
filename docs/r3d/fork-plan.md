@@ -3736,7 +3736,25 @@ toggle has no setting behind it (item 8).
       is lifted rather than respected, so it is a real divergence to
       record - and the reason it is affordable is exactly the reason the
       gate existed: the strip it was protecting against is gone.
-   3. **Make our own strings reachable by a translator.** `L()`
+   3. **Make our own strings reachable by a translator. DONE, 2026-09-17
+      - and the premise below was wrong, which is the useful part.** This
+      step expected to invent keys for ~20 strings and ship a
+      `mainui_english.txt` defining them. Neither is needed: **`mainui`'s
+      own convention is that the key IS the original English string** -
+      `3rdparty/mainui/translations/mainui_skeleton_*.txt` says it
+      outright, "Tokens on left are original strings, on right is
+      translation", and every entry is an English sentence. So `L( "Done" )`
+      is already a correct, translatable call: the literal is the lookup
+      key, and `L()` returning its argument on a miss is not a bug to
+      route around but **English as the built-in fallback**. No menu
+      source file needed changing, and no `mainui_english.txt` needs to
+      exist. What was actually missing was simply a translation file, so
+      this step reduces to shipping one - `assets/resource/mainui_<lang>.txt`,
+      staged by `tools/xbox-xiso.sh`. Measured against the real build
+      rather than estimated: preprocessing the four reshaped screens for
+      Xbox gives **35 strings compiled in, 15 resolved by the shipped
+      dictionaries, 5 by the compiled-in `StringsList_` table and 15
+      literals**, not the "roughly twenty misses" this plan claimed. `L()`
       (`Utils.h:148,150`, `MenuStrings.cpp:75-89`) is a dictionary lookup
       that **returns its argument unchanged on a miss** (`:88`) - so a
       missing key is invisible in English and permanent in every other
@@ -3813,7 +3831,29 @@ toggle has no setting behind it (item 8).
       the HL25 disc ships no `btns_main.bmp` at all, so it already draws
       text buttons today and is the closest thing to a preview of the
       result that exists.
-   6. **Prove it is localizable, not merely text.** The only test that
+   6. **Prove it is localizable, not merely text. DONE, 2026-09-17 - and
+      it found a real defect no amount of English testing could have.**
+      Shipped `assets/resource/mainui_german.txt` (31 tokens, UTF-16LE
+      like the retail dictionaries), packed a disc with
+      `--ui-language german`, booted it, and photographed the result.
+      **The menu rows are correctly German and their umlauts render
+      exactly right** - "Trainingsgelände" with a real ä, drawn through
+      the `mainui` font. That is the whole chain working: `vfs.cfg` →
+      `ui_language` → `Localize_InitLanguage` → dictionary override →
+      Fira Sans Condensed glyph.
+      **The help lines beneath them are mangled**: "früher" renders as
+      "frher" with the ü silently dropped, and "ändern" as "?dern". They
+      do not go through the `mainui` font at all - `PicButton.cpp:243-255`
+      and `Framework.cpp:67-79` draw `szStatusText` with
+      `EngFuncs::DrawConsoleString`, i.e. the **engine's** console glyphs,
+      which have no accented Latin. **This promotes the console-face
+      follow-up from cosmetic to required**: the note under step 1 costed
+      an unencumbered TTF for that face at 512 KiB and called it a fair
+      price for legibility - it is not a matter of legibility, it is the
+      difference between a menu that can be translated and one that can
+      only translate half of itself. Until it lands, no non-English
+      language is shippable end to end, which is why the German file is
+      staged but **no disc selects it by default**. The only test that
       means anything: ship a real second language file on the disc, flip
       `ui_language` (`engine/common/filesystem_engine.c:43`), and
       screenshot a screen whose words include accented glyphs. English
