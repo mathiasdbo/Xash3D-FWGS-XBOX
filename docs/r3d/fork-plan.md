@@ -2637,13 +2637,24 @@ registration unless the stock one is unusable:
       `gfx/conchars.fnt` (`filesystem/wad.c:83`), and
       `Con_LoadVariableWidthFont` reads exactly the header and table
       dumped above (`cl_font.c:120-160`); the fixed fallback stays as
-      the safety net behind it. Candidate fix, smallest first: default
-      `con_oldfont` to `"1"` under `#if XASH_XBOX` - on a disc without
-      extras the modern branch can never succeed, so going straight to
-      the legacy path is the honest default, and the existing fallback
-      chain handles a `gfx.wad` with no `CONCHARS`; verify on BOTH the
-      classic and the Steam disc (description text and the bottom
-      version line on each).
+      the safety net behind it. **Fixed** the same way this was predicted:
+      `con_oldfont` now defaults to `"1"` under `#if XASH_XBOX` in
+      `engine/client/console.c` (divergence #63) - a disc without
+      xash-extras can never succeed on the modern branch anyway, so
+      going straight to the legacy, variable-width path is the honest
+      default, and the existing fallback chain still handles a `gfx.wad`
+      with no `CONCHARS` at all. **Verified live on both discs**: the
+      classic WON disc now shows the real menu description text
+      ("Start a new game.", "Learn how to play Half-Life", ...) and the
+      correct bottom version line instead of alphabet-slice gibberish;
+      a Steam-content disc, rebuilt with the same fixed binary, is
+      unchanged - same correct text as before, no regression (its
+      `CONCHARS` was already on the lucky 16px-grid layout). One
+      unrelated, pre-existing issue surfaced during verification and is
+      NOT part of this fix: the classic disc's "Quit" menu item shows
+      the unresolved localisation key `GameUI_QuitConfirmationText`
+      instead of its string - a missing/unresolved titles.txt entry, not
+      a font or glyph-cell problem; not investigated further here.
       `r_numImages` was read live along the way and ruled out as a factor
       (38 of `MAX_TEXTURES` 1024, nowhere near the `XASH_LOW_MEMORY` cap).
       With a disc built from that content, confirm the

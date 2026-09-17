@@ -5,6 +5,28 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the console font now draws its own real glyphs instead of neighbour-glyph slices
+
+`con_oldfont` now defaults to `"1"` under `#if XASH_XBOX` (`engine/client/console.c`).
+No Xbox disc ships xash-extras' `fonts.wad`/`fonts/font%i` resources, so
+`Con_LoadConsoleFont`'s "modern" branch always failed and fell through to
+`Con_LoadFixedWidthFont`'s hardcoded 16x16-pixel glyph grid - which doesn't
+match the real, variable-width `charinfo` table in either vintage's
+`CONCHARS` lump (confirmed by dumping the WON lump's own qfont header and
+table: glyphs from 3px to 9px wide, packed edge to edge, 12px row height,
+no 16px grid to slice along). The result was legible but wrong text -
+consecutive-alphabet fragments like `"PQ RST"` where a run of 16px cells
+each straddled two or three real glyphs. Steam content's own `CONCHARS`
+happens to use a real 16px grid (the modern qfont layout computes
+`width = font.width * 16`), so this never showed there; the classic WON
+lump has no such grid, hence "only" the classic disc showing gibberish.
+`con_oldfont "1"` routes through `Con_LoadVariableWidthFont`
+(`gfx/conchars.fnt`, resolved through the WAD filesystem's existing
+`fnt` -> `TYP_QFONT` mapping) instead, which reads each glyph's real
+metrics. Verified live on both the classic WON disc (description text and
+the bottom version line now read correctly) and a Steam-content disc (no
+regression - same correct text, real 16px-grid font unaffected).
+
 ### Fixed — the WON console font (and any other TF_KEEP_SOURCE texture) no longer renders as noise
 
 `GL_UploadTexture` (`ref/soft/r_image.c`), under `#if XASH_XBOX`, now

@@ -32,7 +32,21 @@ static CVAR_DEFINE_AUTO( con_fontscale, "1.0", FCVAR_ARCHIVE, "scale font textur
 static CVAR_DEFINE_AUTO( con_fontnum, "-1", FCVAR_ARCHIVE, "console font number (0, 1 or 2), -1 for autoselect" );
 static CVAR_DEFINE_AUTO( con_color, "240 180 24", FCVAR_ARCHIVE, "set a custom console color" );
 static CVAR_DEFINE_AUTO( scr_drawversion, "1", FCVAR_ARCHIVE, "draw version in menu or screenshots, doesn't affect console" );
+#if XASH_XBOX
+// XM item 0 (fork-plan.md): no Xbox disc ships xash-extras' fonts.wad/fonts/font%i
+// resources, so the "modern" branch in Con_LoadConsoleFont always falls through to
+// Con_LoadFixedWidthFont's hardcoded 16x16 glyph grid. The old-style CONCHARS a
+// classic WON gfx.wad carries has no such grid (Image_LoadFNT hardcodes its width
+// to 256, img_wad.c:140-150) and is variable-width, so the fixed loader slices
+// letters across cell boundaries; a modern (Steam) gfx.wad computes width as
+// font.width * QCHAR_WIDTH, a real 16px grid the fixed loader happens to match.
+// gfx/conchars.fnt resolves the same lump through the WAD filesystem (filesystem/
+// wad.c's "fnt" -> TYP_QFONT mapping), and Con_LoadVariableWidthFont reads its
+// real per-glyph metrics correctly either way.
+static CVAR_DEFINE_AUTO( con_oldfont, "1", 0, "use legacy font from gfx.wad, might be missing or broken" );
+#else
 static CVAR_DEFINE_AUTO( con_oldfont, "0", 0, "use legacy font from gfx.wad, might be missing or broken" );
+#endif
 static CVAR_DEFINE_AUTO( con_showcompletion, "1", FCVAR_ARCHIVE, "perform simplified autocompletion while typing" );
 
 static int g_codepage = 0;
