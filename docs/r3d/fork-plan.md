@@ -2764,16 +2764,99 @@ registration unless the stock one is unusable:
       a font or glyph-cell problem; not investigated further here.
       `r_numImages` was read live along the way and ruled out as a factor
       (38 of `MAX_TEXTURES` 1024, nowhere near the `XASH_LOW_MEMORY` cap).
-      With a disc built from that content, confirm the
-      ladder picks `splash.bmp` + the bitmap strip, check what the 1024
-      cap does to the strip's atlas (if it halves, the buttons are
-      wrong, not just costly), measure strip + banners against the
-      ceiling, and confirm the missing title degrades exactly as the code
-      reads (no banner, no error). If the strip does not fit or does not
-      survive the cap, `GFL_RENDER_PICBUTTON_TEXT` (what xash-rt forces)
-      is the honest downgrade - a flag, not a rewrite - and the exit
-      below allows it as long as the decision is recorded with its
-      number.
+      **The 1024-cap question, closed 2026-09-17**: the ladder picks
+      `splash.bmp` + the bitmap strip correctly (confirmed by every
+      screenshot in this step, buttons and description text both
+      correct). The real retail `btns_main.bmp` is `156x4836`, 8bpp
+      (read from its own BMP header, not assumed) - `Btns.cpp`'s own
+      atlas-sizing loop (`:53-116`, this fork's own code, not upstream's)
+      computes `pic_count = min(4836/26/3, 62) = 62` exactly (`4836/78`
+      is a clean `62.0`, not a truncated fit), `cell_w=156+2=158`,
+      `cell_h=(26+2)*3=84`, and searches `{256,512,1024}²` for the
+      smallest POT page holding `cols*rows >= 62`: every combination
+      under `1024x1024` falls short (`512x1024` fits only 36, `1024x512`
+      only 36), and `1024x1024` fits `6*12=72`, so a single
+      `#btns_atlas_0.bmp` page is chosen - by construction, never
+      handed to `GL_SetTextureDimensions`' strict `>1024` halving check
+      at a size that check could touch. **Verified live, not just by the
+      arithmetic**: scanned `r_images[]` (`ref/soft/r_image.c:20`,
+      `sizeof(image_t)=312` computed from the linker map's own
+      `_r_images`/`_r_numImages` address delta divided by `MAX_TEXTURES`,
+      not guessed) for the `#btns_atlas_0.bmp` entry and read its real
+      `srcWidth`/`srcHeight`/`width`/`height` directly: `1024x1024` on
+      all four, exactly as computed - the strip survives the cap
+      untouched, buttons are correct, not a `GFL_RENDER_PICBUTTON_TEXT`
+      downgrade case. The missing title on WON content degrades exactly
+      as the code reads: no banner, no error, confirmed by every one of
+      this step's own screenshots showing a clean menu with no
+      placeholder art and no console error spam.
+      **Acceptance-ceiling measurement: not done this session, and after
+      a second Codex review round this is now a deliberate deferral, not
+      an oversight.** A raw `VirtualMemory` reading at the WON main menu
+      was taken with the current merged binary (PRs #78-#80): `3277`
+      pages (12.80 MiB), recorded as diagnostic context only - not a
+      ceiling measurement, for the reasons below.
+
+      Two drafts of a measurement procedure were written this session
+      and both were caught by Codex review as unsound before either was
+      run, which is worth recording so the next attempt doesn't repeat
+      either mistake. First draft: a before/after-traversal comparison
+      on ONE build, which cannot see the background+button cost at all
+      (`UI_Precache()`, `BaseMenu.cpp:867-913`, loads both before the
+      first menu frame ever draws - there is no "before" moment left to
+      diff against on one build), and whose traversal covered only the
+      four top-level screens, missing that `Configuration` alone opens
+      five further screens (Controls, Audio, Video, Touch, Gamepad),
+      each with its own distinct banner loaded on first visit
+      (confirmed: `#define ART_BANNER` is a separate file per screen,
+      not shared - `head_controls`, `head_audio`, `head_vidmodes`,
+      `head_touch`, `head_gamepad`), plus Controls' own child Advanced
+      Controls (`head_advanced`). Second draft: a two-build `ui_xbox_
+      menu_art` on/off comparison, meant to fix the first problem by
+      isolating background+button cost as a delta - which it does
+      correctly (a live flip already measured the background's own
+      piece, 288 pages, item 1) - but Codex's second round caught that
+      per-screen banners are NOT gated by this cvar at all
+      (`Configuration.cpp:50`'s `banner.SetPicture` and every sibling
+      screen's own `_Init` are unconditional), so identical banner costs
+      appear in BOTH builds and cancel out of the delta entirely - the
+      "whole profile" claim was wrong specifically for the part
+      (banners) that this step's own earlier finding says is the
+      likeliest thing to blow the ceiling during ordinary navigation.
+
+      **Why this isn't worth a third draft right now, and what actually
+      needs to happen first**: the full stock FWGS screen graph reachable
+      today (`Configuration`'s children, `Multiplayer`'s own children -
+      Internet/LAN game each with their own `ART_BANNER_INET`/
+      `ART_BANNER_LAN`, `ServerBrowser.cpp:1403-1413`, Player Setup,
+      Controls again - `Touch`'s three children, each with a banner)
+      is NOT what ships on Xbox: XM.1 (this item's own stated successor,
+      "Sequencing" above) explicitly flattens Main and hides `Touch*`,
+      `Gyro`, `ServerBrowser`/`Multiplayer` entirely under
+      `#if XASH_XBOX` until Xbox netcode exists - Codex's own suggested
+      alternative fix was exactly this: narrow the ceiling to the
+      post-XM.1 shipping screen graph rather than the full stock one.
+      Measuring the current, pre-XM.1 tree in full would spend real
+      effort precisely costing screens (Multiplayer, ServerBrowser,
+      Touch, Gyro) that will not exist in the shipped build at all - a
+      wasted, and misleadingly pessimistic, number. The full, correct
+      whole-profile ceiling measurement is therefore sequenced to run
+      AFTER XM.1 trims the reachable screen graph down to what will
+      actually ship (Main: Resume/New Game/Load/Save/Options/Quit;
+      Options: Video/Controller/Audio only), against a genuine, minimal
+      screen list, using the decomposition both review rounds converged
+      on: background+button-strip cost from the `ui_xbox_menu_art` A/B
+      (two builds, since the button gate can't see a same-boot config
+      override - step 1's own prior finding), PLUS the surviving
+      screens' banner-accumulation cost from a single build's first-
+      menu-vs-post-traversal resident delta (valid for banners
+      specifically, since they are the only thing that changes state
+      between those two readings within one build). Both halves need a
+      human at a controller either way: `xemu`'s emulated Xbox
+      controller port is fed by the host's real gamepad/keyboard-to-pad
+      mapping inside its own GUI, not by anything `tools/xemu-debug.py`'s
+      GDB-stub connection can inject (QEMU monitor `sendkey` reaches an
+      emulated PS/2 keyboard the guest has none of).
    6. Both profiles: `ui_prefer_won_background` stays a real cvar so a
       pre-HL25 disc that carries both sets can be flipped - and it is a
       candidate for the Video screen (item 2) only if a disc that has
