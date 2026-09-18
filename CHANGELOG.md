@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — pressing Start during a game now opens a real pause menu
+
+Starting a map and pressing Start used to reopen the full main menu,
+just with a couple of extra rows. It now opens a dedicated pause screen
+instead: the game visibly freezes and dims behind it rather than
+disappearing, the current chapter title and difficulty are shown, and
+Resume, Save, Load, Options and Quit are all one press away. Start
+closes the menu the same way Resume does; quitting still asks for
+confirmation first.
+
+Pausing and unpausing no longer fight with Back, which pauses the game
+on its own outside this menu: opening or closing the pause screen only
+changes the pause state when this screen is the one that caused it, so
+a game already paused by Back stays paused after visiting this menu and
+back out again. This screen only opens in singleplayer - Start in a
+multiplayer game still opens the regular in-game menu, unaffected.
+Saving or loading from Pause correctly resumes gameplay afterward
+instead of leaving it paused.
+
 ### Added — a Display screen, showing real hardware video state
 
 Options gains a Display screen on Xbox: brightness and gamma (unchanged

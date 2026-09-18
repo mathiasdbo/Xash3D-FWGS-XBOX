@@ -597,6 +597,13 @@ void SV_ActivateServer( int runPhysics )
 	svgame.globals->time = sv.time;
 	svgame.dllFuncs.pfnServerActivate( svgame.edicts, svgame.numEntities, svs.maxclients );
 
+#if XASH_XBOX
+	// XM.1 item 10: worldspawn is fully spawned by this point (entity
+	// spawning already happened earlier in SV_SpawnServer), so the level
+	// title is resolvable now - the Pause screen's own read.
+	SV_UpdateLevelTitleCvar();
+#endif
+
 	SV_SetStringArrayMode( true );
 
 	// parse user-specified resources

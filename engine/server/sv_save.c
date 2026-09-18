@@ -226,6 +226,20 @@ static TYPEDESCRIPTION gTempEntvars[] =
 	DEFINE_ENTITY_GLOBAL_FIELD( globalname, FIELD_STRING ),
 };
 
+#if XASH_XBOX
+// XM.1 item 10: the Pause screen's difficulty annotation was meant to
+// carry a chapter title too - dropped in the plan as "no such concept
+// exists" until Codex review found this table and pointed at it, which
+// is why the cvar lives here rather than in vid_common.c alongside
+// vid_refresh/vid_aspect: it depends on gTitleComments[], a few lines
+// below, which is file-static and stays that way rather than getting
+// exported. Same read-only-cvar shape as that precedent regardless -
+// zero new ABI surface, Xbox-only definition and registration (Codex
+// review round 2 on the Display PR: an Xbox-only value has no business
+// reserving a cvar name on every platform).
+CVAR_DEFINE( sv_leveltitle, "sv_leveltitle", "", FCVAR_READ_ONLY, "current level's resolved title, Xbox only" );
+#endif
+
 static const struct
 {
 	const char *mapname;
@@ -305,6 +319,69 @@ static const struct
 
 /*
 =============
+SV_ResolveLevelTitle
+
+Pulled out of SaveBuildComment's own "else" branch below (Codex review
+of Pause.cpp, round 1: a claim that classic Half-Life has no chapter-
+title concept at all was checked against deps/hlsdk/cl_dll/ only and
+missed this - the real, retail mapname-to-title-token table, already
+used to build save-file comments). Read-only, no side effects, and
+deliberately excludes SaveBuildComment's OWN first branch
+(pfnSaveGameComment - a gamedll callback that BUILDS a full comment
+string, not something to invoke just to peek at a title): mapname
+prefix match against gTitleComments[] first (the complete, canonical
+table for retail HL/OpFor/BShift, populated regardless of whether a
+given map happens to set its own worldspawn "chaptertitle" - most
+mid-chapter maps don't), falling back to worldspawn's own message
+field, then the raw mapname. The returned string may be a "#TOKEN"-
+style localization key (matching L()'s own '#'-stripping convention,
+LoadGame.cpp:286's own already-existing use of exactly this) or plain
+text - both are safe to hand to L() unchanged.
+=============
+*/
+static const char *SV_ResolveLevelTitle( void )
+{
+	size_t i;
+	const char *mapname = SV_GetString( svgame.globals->mapname );
+
+	for( i = 0; i < ARRAYSIZE( gTitleComments ); i++ )
+	{
+		// compare if strings are equal at beginning
+		size_t len = strlen( gTitleComments[i].mapname );
+		if( !Q_strnicmp( mapname, gTitleComments[i].mapname, len ))
+			return gTitleComments[i].titlename;
+	}
+
+	if( svgame.edicts->v.message != 0 )
+	{
+		// trying to extract message from the world
+		return SV_GetString( svgame.edicts->v.message );
+	}
+
+	// or use mapname
+	return SV_GetString( svgame.globals->mapname );
+}
+
+#if XASH_XBOX
+/*
+=============
+SV_UpdateLevelTitleCvar
+
+Called from SV_ActivateServer (sv_init.c), right after
+pfnServerActivate - worldspawn's own Spawn() already ran by then (entity
+spawning happens earlier in SV_SpawnServer), so svgame.globals->mapname
+and svgame.edicts->v.message are both valid. Xbox only: this cvar has
+exactly one reader, Pause.cpp's own difficulty/title annotation.
+=============
+*/
+void SV_UpdateLevelTitleCvar( void )
+{
+	Cvar_FullSet( "sv_leveltitle", SV_ResolveLevelTitle(), sv_leveltitle.flags );
+}
+#endif // XASH_XBOX
+
+/*
+=============
 SaveBuildComment
 
 build commentary for each savegame
@@ -326,33 +403,7 @@ static void SaveBuildComment( char *text, int maxlength )
 	}
 	else
 	{
-		size_t i;
-		const char *mapname = SV_GetString( svgame.globals->mapname );
-
-		for( i = 0; i < ARRAYSIZE( gTitleComments ); i++ )
-		{
-			// compare if strings are equal at beginning
-			size_t len = strlen( gTitleComments[i].mapname );
-			if( !Q_strnicmp( mapname, gTitleComments[i].mapname, len ))
-			{
-				pName = gTitleComments[i].titlename;
-				break;
-			}
-		}
-
-		if( !pName )
-		{
-			if( svgame.edicts->v.message != 0 )
-			{
-				// trying to extract message from the world
-				pName = SV_GetString( svgame.edicts->v.message );
-			}
-			else
-			{
-				// or use mapname
-				pName = SV_GetString( svgame.globals->mapname );
-			}
-		}
+		pName = SV_ResolveLevelTitle();
 	}
 
 	Q_snprintf( text, maxlength, "%-64.64s %02d:%02d", pName, (int)(sv.time / 60.0 ), (int)fmod( sv.time, 60.0 ));

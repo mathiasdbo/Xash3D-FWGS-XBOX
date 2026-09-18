@@ -3500,6 +3500,157 @@ toggle has no setting behind it (item 8).
    menu background, which is `CMenuBackgroundBitmap::DrawInGameBackground`'s
    job today (a flat black fill, `BackgroundBitmap.cpp:66-69`) and would
    become a dim instead. Measure both before writing the screen.
+
+   **DONE, 2026-09-18 - and both prerequisites checked out the opposite
+   of how this note framed them: real, complete machinery already there,
+   not something needing new engine work.** `pause`/`SV_Pause_f`
+   (`engine/server/sv_client.c:1435-1446,1630-1655`) toggles `sv.paused`
+   and broadcasts `svc_setpause` to every client, the listen server's own
+   local one included; `sv_pausable` already defaults to `"1"`
+   (`sv_main.c:137`), so `Main.cpp:178`'s own set is belt-and-suspenders,
+   not compensation for a 0 default. On the client, `cl.paused` freezes
+   simulation through `CL_EmitEntities`'s own early-out
+   (`cl_frame.c:1289`) while `V_RenderView` keeps drawing the scene every
+   frame regardless of it - exactly the frozen-but-visible effect this
+   screen needs, reachable with the same `EngFuncs::ClientCmd` mechanism
+   `Audio.cpp`'s own `vibrate` already uses. **This note's own premise
+   for the second prerequisite was simply wrong**: `DrawInGameBackground`
+   already fills at `uiColorBlack` (`BaseMenu.cpp:75`), which is
+   `0x80000000` - 50% alpha, not the opaque black this note assumed - so
+   no code change was needed there at all. The real gate is
+   `ui_renderworld` (default `"0"`, `cl_main.c:86`), the single flag
+   `V_RenderView` checks (`cl_view.c:395`) to skip the 3D draw entirely
+   while a menu is up - already flipped by `AnimatedBanner.cpp`/
+   `MovieBanner.cpp` for their own reasons, not new engine territory.
+   Both facts were checked by reading the real render/pause path
+   directly, not by a boot test - a pause screen's correctness has no
+   `memstats`-style number to measure, so this is one of the few things
+   in this plan verified by source reading alone, end to end, and named
+   as such rather than dressed up as something it isn't.
+
+   A new file, `Pause.cpp`, not a reshape - there is no stock in-game
+   pause menu in `mainui` to diverge from (GoldSrc opens `Main` itself
+   in-game). Repoints the ONE place that decides what opens when the
+   menu system activates with nothing already showing
+   (`BaseMenu.cpp:641-647`) to open Pause instead of Main whenever
+   `CL_IsActive()` is true - confirmed by grep to be the only call site
+   that matters: the other three `UI_Main_Menu()` sites are connection-
+   flow returns that cannot fire mid-game, or `UI_ShowMessageBox`'s rare
+   system-error fallback, left alone rather than touched speculatively.
+   Resume Game / Save Game / Load Game / Options / Quit to Main Menu
+   (through the existing `CMenuYesNoMessageBox`, the same idiom
+   `Main.cpp`'s own `DisconnectDialogCb` already uses) all present;
+   `Hide()` is overridden as the single place every exit path goes
+   through (Resume's own button, B/Escape's inherited default, and
+   Quit's confirmed callback alike) so the pause toggle and
+   `ui_renderworld` reset happen exactly once per close regardless of
+   which path was taken, rather than duplicating that logic per button.
+
+   **Chapter title is real, not dropped - corrected in Codex review
+   (round 1)**: an earlier version of this note claimed classic
+   Half-Life's SDK has no chapter-title concept at all, checked only
+   against `deps/hlsdk/cl_dll/` (the client DLL, which never sees it).
+   Two real mechanisms exist. Worldspawn's own `chaptertitle` key
+   (`deps/hlsdk/dlls/world.cpp:663-674`) fires a one-time `env_message`
+   0.3s after map start, not something to read back later - but
+   `engine/server/sv_save.c`'s own `gTitleComments[]`, a complete
+   mapname-prefix-to-title-token table for every retail HL/OpFor/BShift
+   map already used to build save-file comments (and already resolved
+   through `L()` by `LoadGame.cpp:286`), does not depend on a given map
+   re-setting `chaptertitle` - most mid-chapter maps do not. Pulling a
+   `SV_ResolveLevelTitle()` out of that file's own `SaveBuildComment`
+   (a pure refactor, save comments unchanged) and populating a new
+   Xbox-only read-only `sv_leveltitle` cvar from it once a map activates
+   (`SV_UpdateLevelTitleCvar`, called from `SV_ActivateServer` in
+   `sv_init.c`) closes the gap with the same zero-new-ABI-surface shape
+   as the Display screen's own `vid_refresh`/`vid_aspect`. Difficulty IS
+   shown, and is real: the same `skill` cvar `NewGame.cpp`'s own
+   Easy/Medium/Hard rows already write, read fresh in `_VidInit()`
+   (which reruns every visit, unlike `_Init()`'s one-time `AddItem`
+   calls - confirmed directly from `WasInit()`'s own guard,
+   `ItemsHolder.cpp:283-295`, not assumed from this screen's own
+   behaviour looking right). One real string-lookup mistake caught
+   before it shipped: the heading first tried `L( "StringsList_235" )`
+   on the assumption that a Paused string sat near
+   `HazardCourseDialogCb`'s own `StringsList_234` - checked against
+   `MenuStrings.cpp`'s real compiled table and found empty
+   (`EMPTY_STRINGS_5`, index 235 included). Fixed with item 13's own
+   established idiom instead: `L( "Paused" )`, the literal itself as the
+   key, translatable via `mainui_<lang>.txt`, English if nobody has.
+
+   **Codex review (round 1) found two further real defects, both fixed
+   before this PR opened.** First (high severity): the first version
+   toggled `pause` unconditionally on every show and hide, but
+   `SV_Pause_f` is a state inversion, not a settable flag, and Xbox's
+   BACK button is independently bound to raw `"pause"`
+   (`engine/client/input/in_keys.c`) outside this menu entirely - so a
+   player already paused by BACK before opening this screen would be
+   silently unpaused by it, and vice versa on close. Fixed with a new
+   Xbox-only read-only `cl_ispaused` cvar mirroring `cl.paused`, synced
+   once per frame in `Host_ClientFrame` right after `CL_ReadPackets`
+   (`cl_main.c`) via `Cvar_FullSet` (`Cvar_SetValue` was tried first and
+   silently no-ops on a read-only cvar - it routes through
+   `Cvar_CanSet`, which refuses `FCVAR_READ_ONLY` outright). `_VidInit()`
+   now only issues `pause` - and records that it did, in a new
+   `m_bDidPause` member - when `cl_ispaused` reads 0; `Hide()` only
+   reverses it when `m_bDidPause` is true. Second (medium severity):
+   once a menu is active, raw input goes straight to the UI and never
+   reaches gameplay bindings, and the inherited escape predicate
+   (`UI::Key::IsEscape`, `Utils.h`) only recognizes Escape/B - Xbox's
+   START is bound to `"cancelselect"` (`in_keys.c`), not pause, so it
+   did nothing here. Fixed with a `KeyDown` override recognizing
+   `K_START_BUTTON` and routing it through the same `Hide()` every
+   other close path already uses.
+
+   **Codex review (round 2) found two more real defects, both fixed
+   before this PR opened.** First (high severity): the activation branch
+   tested only `CL_IsActive()`, which says nothing about player count -
+   pressing START in a multiplayer session would open this screen too,
+   pause the whole match (`sv_pausable` defaults to `"1"`), and offer
+   Save/Load that make no sense there. Fixed by gating with the same
+   `host_serverstate`/`maxplayers == 1` test `Main.cpp`'s own
+   `QuitDialogCb` already uses to mean "really singleplayer" - a
+   multiplayer session now still opens Main on START, exactly as before
+   this item existed. Second (high severity): `CMenuLoadGame`'s own
+   `SaveGame()`/`LoadGame()` (`LoadGame.cpp`) both finish by calling
+   `UI_CloseMenu()`, which clears the entire window stack without
+   calling `Hide()` on anything still in it - harmless for every other
+   caller, since no other screen's own `Hide()` does real work, but this
+   screen's unpause and `ui_renderworld` reset live there, so saving or
+   loading from Pause left the game paused with the world still hidden
+   afterward. Rather than hiding Pause before opening Save/Load (which
+   would have broken the normal cancel-and-return-to-Pause navigation,
+   since Save/Load stay layered on top of Pause on the stack exactly
+   like Options does), the cleanup moved into a public
+   `ClosedExternally()` method polled once per frame from the same hook
+   that opens this screen (`UI_Pause_CheckClosed`) for the specific
+   visible-to-not-visible edge that means it left the stack some way
+   other than its own `Hide()` - idempotent, so it changes nothing on
+   every normal close path where `Hide()` already ran.
+
+   Verified: `mainui` sweep clean (83/83, both rounds - the new file's
+   own object growing from a false-start 544 bytes - `#if XASH_XBOX`
+   checked before any `#include`, seeing the macro `build.h` only
+   defines transitively through `Framework.h` as undefined, compiling
+   the whole file to nothing and only failing at the link as an
+   undefined `UI_Pause_Menu` symbol, not at compile time - to a real
+   ~24 KB once the guard moved after the includes, matching every other
+   file's own structure); the full engine sweep still 203/29, unchanged
+   by the touched shared files (`cl_main.c`, `sv_init.c`, `sv_save.c`,
+   `sv_main.c`, `server.h`); classic disc links clean (0 duplicate, 0
+   undefined) and boots to an unchanged Main, screenshotted, both before
+   and after the round 2 fixes. NOT verified: `_Init()`/`_VidInit()`
+   themselves, and - more than any screen before it - the actual in-game
+   behaviour this whole item is about: pressing START in a live
+   singleplayer map but not a multiplayer one, the dim, the
+   chapter/difficulty text, the pause round-trip on every exit path
+   including the one Codex's own round-1 finding named (opening and
+   closing this screen while already paused by BACK), and Save/Load's
+   own cleanup firing correctly when reached from here. None of that is
+   reachable without a pad in a running map, a stronger version of the
+   same limit every screen since item 4 has carried, named here because
+   this is the first item where the untested behaviour is the entire
+   point of the work rather than a screen's cosmetic layout.
 11. **On-screen keyboard**: **moves to XM.3** - the design gives it three
    callers (master address, player name, server name) and all three are
    multiplayer screens, so it earns its place exactly when they do, and
@@ -4131,9 +4282,12 @@ and gamma changes are visible on the next frame and its output row
 matches what the Dashboard is set to under NTSC 4:3, widescreen and
 PAL50 settings alike (xemu's EEPROM flips each); from a running map,
 START alone opens the in-game menu under every scheme, Custom included -
-which is the single-player pause screen once item 10 lands, and until
-then is Main with its Resume Game and Save Game rows, the form that
-shipped in XM.1's first slice (PR #83);
+the single-player pause screen, landed in item 10 (2026-09-18) but not
+yet pad-verified doing any of this live: that it actually opens on
+START, dims the scene, freezes it, shows the real chapter title and
+difficulty, unpauses on every exit path exactly once (Codex round 1's
+own START-closes-the-menu fix included), and leaves a game already
+paused by BACK still paused after visiting it;
 Controller shows the Duke with the selected scheme's labels, applies
 Southpaw (and in a map the stick roles
 really swap, not only the labels), Settings' sensitivity, invert and

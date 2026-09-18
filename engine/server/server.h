@@ -476,6 +476,10 @@ qboolean SV_ProcessUserAgent( netadr_t from, const char *useragent );
 //
 qboolean SV_InitGame( qboolean silent );
 void SV_ActivateServer( int runPhysics );
+#if XASH_XBOX
+void SV_UpdateLevelTitleCvar( void ); // sv_save.c - XM.1 item 10
+extern convar_t sv_leveltitle; // sv_save.c - registered from SV_Init, sv_main.c
+#endif
 qboolean SV_SpawnServer( const char *server, const char *startspot, qboolean background );
 void SV_DeactivateServer( void );
 void SV_FreeTestPacket( void );

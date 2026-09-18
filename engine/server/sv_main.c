@@ -902,6 +902,9 @@ void SV_Init( void )
 	Cvar_RegisterVariable( &sv_connect_timeout_ban );
 	Cvar_RegisterVariable( &sv_connect_timeout_ban_time );
 	Cvar_RegisterVariable( &sv_pausable );
+#if XASH_XBOX
+	Cvar_RegisterVariable( &sv_leveltitle );
+#endif
 	Cvar_RegisterVariable( &sv_validate_changelevel );
 	Cvar_RegisterVariable( &sv_clienttrace );
 	Cvar_RegisterVariable( &sv_bounce );

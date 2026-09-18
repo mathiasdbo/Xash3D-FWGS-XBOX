@@ -84,6 +84,19 @@ CVAR_DEFINE_AUTO( cl_trace_events, "0", FCVAR_CHEAT, "enable events tracing (goo
 static CVAR_DEFINE_AUTO( cl_nat, "0", 0, "show servers running under NAT" );
 CVAR_DEFINE_AUTO( hud_utf8, "0", FCVAR_ARCHIVE, "Use utf-8 encoding for hud text" );
 CVAR_DEFINE_AUTO( ui_renderworld, "0", FCVAR_ARCHIVE, "render world when UI is visible" );
+#if XASH_XBOX
+// XM.1 item 10: the Pause screen's own pause/unpause has to be
+// idempotent, not a blind toggle - Codex review found BACK is
+// independently bound to raw "pause" (in_keys.c), so a player could
+// already be paused (or not) by the time Pause.cpp opens or closes,
+// and SV_Pause_f is state inversion, not a settable flag. Mirrors
+// cl.paused, synced once per frame in Host_ClientFrame right after
+// CL_ReadPackets - not a new ui_enginefuncs_t export (Display's own
+// round-1 lesson): a read-only cvar Pause.cpp already knows how to read
+// via EngFuncs::GetCvarFloat, zero new ABI surface, Xbox-only since
+// this cvar has exactly one reader.
+CVAR_DEFINE_AUTO( cl_ispaused, "0", FCVAR_READ_ONLY, "mirrors cl.paused, Xbox only" );
+#endif
 static CVAR_DEFINE_AUTO( cl_maxframetime, "0", 0, "set deadline timer for client rendering to catch freezes" );
 CVAR_DEFINE_AUTO( cl_fixmodelinterpolationartifacts, "1", 0, "try to fix up models interpolation on a moving platforms (monsters on trains for example)" );
 
@@ -3731,6 +3744,9 @@ static void CL_InitLocal( void )
 	Cvar_RegisterVariable( &cl_showevents );
 	Cvar_Get( "lastdemo", "", FCVAR_ARCHIVE, "last played demo" );
 	Cvar_RegisterVariable( &ui_renderworld );
+#if XASH_XBOX
+	Cvar_RegisterVariable( &cl_ispaused );
+#endif
 	Cvar_RegisterVariable( &cl_maxframetime );
 	Cvar_RegisterVariable( &cl_fixmodelinterpolationartifacts );
 
@@ -3896,6 +3912,18 @@ void Host_ClientFrame( void )
 
 	// read updates from server
 	CL_ReadPackets ();
+
+#if XASH_XBOX
+	// XM.1 item 10: cl.paused is current for this frame now that packets
+	// are read (svc_setpause is what sets it) - mirror it before any menu
+	// code this frame might act on it. Cvar_SetValue goes through
+	// Cvar_CanSet, which refuses FCVAR_READ_ONLY outright (prints
+	// "is read-only" and leaves the value untouched) - Cvar_FullSet is
+	// the same escape hatch sv_leveltitle already uses (SV_UpdateLevelTitleCvar,
+	// sv_save.c) to write a read-only cvar from engine code.
+	if( cl_ispaused.value != (float)cl.paused )
+		Cvar_FullSet( "cl_ispaused", cl.paused ? "1" : "0", cl_ispaused.flags );
+#endif
 
 	// do prediction again in case we got
 	// a new portion updates from server
