@@ -2049,9 +2049,11 @@ strip is BMP-only (`Btns.cpp:27`).
 **Scope - the screens.** Each is a rewrite-in-place or a hide, never a new
 registration unless the stock one is unusable:
 
-0. **Retail menu art - the background and the animated title, for BOTH
-   content profiles (added 2026-09-16, after the X7.5 disc booted to a
-   flat grey menu with text buttons).** The requirement: the menu must
+0. **Menu art - the background and the animated title, for BOTH content
+   profiles (added 2026-09-16, after the X7.5 disc booted to a flat grey
+   menu with text buttons; extended 2026-09-18 with step 7, the art this
+   fork authors rather than inherits, and the provenance rule that goes
+   with it).** The requirement: the menu must
    render Valve's own art whether the disc carries the 25th-anniversary
    (HL25) content or the pre-anniversary (older Steam / WON) content,
    detected from what is on the disc, never assumed. Read, not guessed,
@@ -2274,6 +2276,63 @@ registration unless the stock one is unusable:
      `ref_soft` change with its own ledger row, measured before and
      after. NV2A profile: DXT5 `.dds` layers once the fork's dimension
      reader accepts DDS.
+
+     **Tool written and run against the real HL25 install, 2026-09-18:
+     `tools/xbox-title-bake.py`. The arithmetic above is confirmed to
+     the second decimal; requirement (b) is downgraded from necessary to
+     optional by it; requirement (a) is untouched and still unwritten.**
+     Standard library only, for the same reason `tools/xbox-*.sh` are
+     shell: a bake that needs a `pip install` is a bake that stops being
+     run. It reads the eleven layers `TryLoad` demands rather than
+     globbing a directory - `AnimatedBanner.cpp:49-84` is all-or-nothing,
+     so a partial bake turns the title off entirely instead of dropping
+     one element, and `--check` re-reads its own manifest against that
+     same fixed list. Resize is bilinear (a 0.625 reduction, where four
+     taps cover the source; the area filter the Duke needs in step 7 is
+     for its 27x one) and **premultiplied**, which is the half worth
+     writing a separate tool for at all: `UiPacker.cpp`'s own comment
+     above `resizeBilinear` flags exactly this and leaves it for whoever
+     extends it to the title, because colour under a fully transparent
+     texel is undefined - retail's layers carry black there - so
+     averaging raw RGB across a soft edge rims every glow with a dark
+     halo. Output is 32-bit uncompressed TGA with retail's own
+     descriptor, `0x08`, bottom-up, so a baked layer drops into the same
+     `PIC_Load` path as the file it replaces; that row order was read out
+     of `img_tga.c:137-148` (bit 5 set means the loader fills forward and
+     the first row is the top; clear means it starts at the last row and
+     steps back) and checked against retail's own headers, not assumed
+     from the TGA spec.
+
+     **Measured, host-side, using `ref_soft`'s own cost formula
+     (`r_image.c:235-255`, `w*h*2*1.33` plus `w*h*2` where alpha is
+     kept): 5.24 MiB retail → 2.05 MiB baked, a 3.19 MiB saving, mips
+     and alpha both kept.** That lands on this bullet's own
+     "~2.1 MiB if the mips cannot be dropped after all" branch, which
+     settles (b): the no-mips `ref_soft` change would take it to
+     ~1.75 MiB, a further 0.3 MiB, and is worth doing on its own merits
+     for every UI pic, but the animated title fits the ceiling without
+     it. **What this number is NOT**: a measured heap delta. It is the
+     uploader's formula applied to real baked file dimensions, not
+     `memstats` on a disc - no disc has been built with this bake, so it
+     does not close anything, and the step-4 style before/after reading
+     is still owed. **(a) remains the blocker and cannot be solved by
+     this tool**: `CMenuAnimatedBanner` reads each layer's true size from
+     its TGA header (`UI_GetTargaImageDimensions`, `:30-47`) and then
+     multiplies by `scale` when drawing, so baked layers - already at
+     scale - would render at 0.39 of their intended size. The tool
+     therefore records the factor it used twice, in two formats, for two
+     readers - a distinction found by checking rather than assuming, when
+     the first version wrote only the first: `title-bake.json` beside the
+     art, this tool's own manifest for `--check` and for a human, and
+     `resource/title_bake.txt` inside the overlay, a `TITLE_BAKE_SCALE`
+     key followed by its value. **`mainui` has no JSON parser at all.**
+     It reads token streams through `EngFuncs::COM_ParseFile`, which is
+     exactly how `colors.lst` is read (`BaseMenu.cpp:1003-1020`: a KEY
+     line, then its value), so the second file is the one the fork side
+     can actually consume, and it is what tells `CMenuAnimatedBanner`
+     that its layers are already at scale rather than leaving the factor
+     hard-coded in two places that can drift apart. `--check` refuses a
+     bake whose marker and manifest disagree.
    - *Pre-HL25 strip and banners*: bake `btns_main.bmp` to a 1024x256
      atlas deliberately (so the 1024 cap never halves it blind) with the
      button rects rescaled - `Btns.cpp` slices by fixed pixel constants,
@@ -2873,6 +2932,74 @@ registration unless the stock one is unusable:
       pre-HL25 disc that carries both sets can be flipped - and it is a
       candidate for the Video screen (item 2) only if a disc that has
       both actually exists to test it with.
+   7. **Art this fork authors rather than inherits - written 2026-09-18,
+      not staged and not measured.** Everything in steps 1-6 is retail
+      content this port reshapes. The Controller screen (item 5) needs
+      one picture that has no retail ancestor at all: the pad diagram its
+      button assignments hang off. That makes it the first menu asset
+      whose *source* the fork owns, and the first that could quietly
+      become the one file nobody can regenerate or review as a diff, so
+      the provenance rule is written here once rather than per asset.
+
+      **Generator: `tools/xbox-menu-art.py`, standard library only.** It
+      bakes `assets/gfx/shell/duke.tga` from a master render and, with
+      `--check`, re-renders and compares byte for byte, so the tracked
+      asset can be proven still to come from its stated source. The same
+      `--check` validates the already-shipped `legend_button.tga`
+      (item 12) by shape rather than by bytes - square, pure white
+      wherever visible, one radially symmetric alpha island that never
+      grows outward again, which is what `Legend.cpp:157` relies on when
+      it tints one image into six glyphs. Byte equality would be the
+      wrong test there: that file was made by a different tool and
+      shipped on a verified disc, so a mismatch would mean "different
+      tool", not "wrong file". Its edge is also softer than it looks -
+      measured off the file, alpha is solid to r=12.5 and only reaches
+      zero at r=17.2 - and `--regen-legend` reproduces that falloff
+      rather than a crisp disc, so the option cannot quietly restyle
+      something that already shipped.
+
+      **Two formats, because the master and the console asset have
+      opposite requirements.** The master arrived as an 8600x4800 32-bit
+      TGA: 165 MB, of which 4582x3394 is content and the rest is the
+      drawing program's canvas padding. Tracking that is 954 times the
+      bytes of the same picture for a file no build step reads. **Rule:
+      a master is tracked as PNG RGBA, cropped to its own content, at
+      four times the baked width** - here `assets/resource/XboxDuke.png`,
+      1120x830, 173 KiB - which is lossless, keeps the alpha, and leaves
+      enough headroom to re-bake if the NV2A ever draws this menu at
+      720p, without tracking the original export. **Game art stays
+      uncompressed 32-bit TGA**, the convention every other asset on
+      these discs already uses. PNG would also work on the console -
+      `img_utils.c:99-101` registers the decoder and `img_png.c` is in
+      the Xbox build - and would be roughly a third the disc bytes, but
+      inflate wants the compressed and decompressed buffers live at once,
+      and on 64 MB that peak is worth more than 140 KiB of DVD.
+
+      **Size, chosen by looking rather than by arithmetic: 280x208.**
+      Baked at 200, 240 and 280 and compared at 1:1, which is how a
+      640x480 CRT shows them: at 200 the face-button letters and the
+      XBOX wordmark stop resolving. Flattened to opaque, not kept with
+      alpha - the HL25 tiles behind it are solid black (measured in step
+      3), so the two are indistinguishable on screen while the opaque one
+      skips the second full-resolution alpha buffer `r_image.c:254-255`
+      allocates for any texture that keeps it. Cost by the same formula
+      as the title above: **228 KiB on disc, 151 KiB resident.** The
+      reduction is 27x, so the resize is an area average, not the
+      four-tap bilinear the title bake uses, and premultiplied for the
+      same reason. A vector fallback stays in the script for when no
+      master is present; it is a diagram, not the illustration, and says
+      so when it runs.
+
+      **What this step has NOT done, and what it costs the ceiling.**
+      `duke.tga` is written into `assets/` but `tools/xbox-xiso.sh` does
+      not stage it, and nothing loads it: item 5's Controller screen is
+      unported, so there is no consumer and no `memstats` reading. When
+      it ships, its 151 KiB counts against this item's 3 MiB ceiling in
+      the same way a banner does, not in the way the background does -
+      `CImage` has no unloading destructor by design (`Image.h:40-44`),
+      so it is resident from the first visit to Controller until the
+      title exits, and it belongs in the post-traversal resident delta
+      step 5 defines, not the first-menu one.
 
    **Exit for this item:** the HL25 disc (`../XISOS/2026-09-16_hl-title-
    disc/` or its successor) boots to the tiled 800x600 background and a
@@ -3207,10 +3334,18 @@ toggle has no setting behind it (item 8).
    never an empty binding left behind for the seeder to ignore. X clear
    does leave that action empty, by the player's choice; Y is the way
    back. The
-   diagram: one 32-bit TGA under `gfx/shell/`, 512x256, no captions baked
-   in - the canvas's inline Duke drawing is the reference for the pose -
-   with labels as text at fixed anchors, so schemes swap strings, not
-   art, and the image is language-neutral.
+   diagram: one 32-bit TGA under `gfx/shell/`, no captions baked in, with
+   labels as text at fixed anchors, so schemes swap strings, not art, and
+   the image is language-neutral. **The art exists as of 2026-09-18 and
+   is not this bullet's to design any more - item 0 step 7 owns it.**
+   That step supersedes this one's "512x256, the canvas's inline Duke
+   drawing is the reference for the pose": a real master render was
+   supplied, `assets/gfx/shell/duke.tga` is baked from it at 280x208
+   opaque (228 KiB on disc, 151 KiB resident - the size chosen by
+   comparing three bakes at 1:1, where 200 loses the face-button letters),
+   and `tools/xbox-menu-art.py` regenerates and verifies it. What is left
+   for this item is only the wiring: staging it on the disc, loading it,
+   and placing the label anchors around it.
 6. **Audio** (`Audio.cpp`): Sound / Music / HEV suit volume (`volume` /
    `MP3Volume` / `suitvolume`, `:64-66`) as D-pad-adjusted rows; Speaker
    output a read-only row from the Dashboard. Hidden: `room_off` /
@@ -4382,9 +4517,13 @@ replaces every one with a text heading, which is also what makes item 0
 step 5's deferred ceiling measurement tractable - on the shipping screen
 graph there is no banner to accumulate, so the post-traversal number is
 item 0's own art plus the Duke diagram and the save previews. New art is
-one file: the Duke diagram. At 512x256x32 it is 512 KiB of texture - fine
-against X3's current numbers, and it is XB's bake that decides the final
-GPU format, not this phase. Title-safe layout (90%) for every rewritten
+one file: the Duke diagram - **baked 2026-09-18 and costed, superseding
+this paragraph's own 512x256 estimate.** It is 280x208 opaque, which
+`ref_soft`'s uploader makes 151 KiB resident rather than the 512 KiB a
+512x256x32 reading suggests (that arithmetic counted four bytes per texel
+for a renderer that stores two, and no mip chain); item 0 step 7 has the
+measurement and the reasoning. It is still XB's bake that decides the
+final GPU format, not this phase. Title-safe layout (90%) for every rewritten
 screen; minimum legible text at 640x480 on a CRT per `ui-architecture.md`
 §7 - the canvas's 2x rendering is the check: anything unreadable at 2x on
 a monitor is unreadable at 1x on a CRT.
