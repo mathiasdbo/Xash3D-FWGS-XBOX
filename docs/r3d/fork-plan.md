@@ -3672,6 +3672,143 @@ toggle has no setting behind it (item 8).
    own left/right handling on the rows the D-pad adjusts. Shared with
    XM.3, which adds no new glyph vocabulary - every multiplayer screen's
    legend is drawn from the same five.
+
+   **DONE, 2026-09-18.** A new control, `CMenuLegend`
+   (`3rdparty/mainui/controls/Legend.{h,cpp}`), wired into every screen
+   XM.1 has shipped so far: Main, New Game, Load/Save Game, Options,
+   Audio, Display, Game and Pause - the eight screens that existed
+   before this item, none of which had carried a legend of their own
+   until now. Per-screen lists follow the canvas's own explicit ones
+   where it gives one (`LoadGame`: A Load (Save) / X Delete / B Back;
+   `Pause`: A Select / B Resume / START Resume) and its generic baseline
+   everywhere else (A Select / B Back, plus D-pad Adjust on Audio and
+   Display, the two screens with D-pad-adjustable sliders - Game's three
+   rows are checkboxes, toggled with A, so it gets no D-pad entry).
+
+   Needs exactly one new asset: a plain white, alpha-edged circle
+   (`assets/gfx/shell/legend_button.tga`, 32x32, generated rather than
+   hand-drawn - a filled disc has no pose or perspective to get right,
+   unlike item 5's own Duke diagram), tinted per button at draw time via
+   `UI_DrawPic`'s existing colour parameter (already used for exactly
+   this by every other tinted-picture draw in this codebase) with the
+   canvas's own four values (A `#6dbe45`, B `#d9322d`, X `#2f79c8`, Y
+   `#f0a91c`) and a white letter centred on top. The D-pad (an outlined
+   diamond) and START (an outlined box containing the word itself, since
+   it has no natural single-letter abbreviation) are both drawn from
+   `UI_FillRect`/`UI_DrawRectangleExt` directly - no second asset. A new
+   `LEGEND_COLOR` key joins `HEADING_COLOR` in `colors.lst`
+   (`uiColorLegend`, `#cfc6b6`, the canvas's own exact value rather than
+   a placeholder default like `HEADING_COLOR`'s own).
+
+   **Real pixel coordinates, not this codebase's usual virtual space -
+   found only by reading `Main.cpp`'s own Xbox layout closely, not
+   assumed.** Every Xbox screen's `SetCoord`/`SetRect` call takes
+   coordinates in a virtual 1024x768 space that `uiStatic.scaleX/Y`
+   (`ScreenWidth/1024`, `ScreenHeight/768`) scales back down to the real
+   screen at draw time - stock behaviour, unchanged by this fork. Seven
+   of the eight screens above use plain literals in that space with no
+   conversion (`Pause.cpp`'s own `SetCoord( 72, 510 )` for its Quit
+   button, for instance). `Main.cpp`'s own Xbox `VidInit(bool)` is the
+   one exception: it explicitly computes
+   `configuration_voffset = ( 404 / 480.0 ) * 768.0` to anchor Options at
+   a specific REAL pixel row, because a plain `404` there would not land
+   at real y=404 once scaled back down - it would land higher up the
+   screen, at `404 * (480/768) = 252.5`. The canvas's own legend position
+   ("at 1x", `y=438`) is a real-pixel measurement in exactly this same
+   sense, and the legend has to land there regardless of which
+   convention happens to be true of whatever screen hosts it - so rather
+   than asking every calling screen to remember `Main.cpp`'s own
+   `(real/actual)*virtual` formula (or getting it wrong once and
+   misplacing the row relative to everything else on screen), `SetRealCoord()`
+   does that exact conversion once, inside `CMenuLegend::VidInit()`,
+   recomputed fresh from stored real-target fields on every call rather
+   than mutating `pos.x/y` in place - `VidInit()` can run again on a
+   later `Show()` (`BaseWindow.cpp`'s own contract), and mutating
+   destructively would drift the position further off target each time.
+   An earlier version of this note assumed a real-pixel collision
+   between the legend and Display's own "Video output" row (`y=450`) and
+   Game's own Done button (`y=440`), and moved both - wrong, once the
+   real/virtual distinction above is accounted for: those two elements
+   use the SAME uncorrected literal-coordinate convention Pause's own
+   button column does, so their true real position is far higher up the
+   screen than a face-value reading suggests, nowhere near the legend's
+   own real y=438. Both moves were reverted before this shipped, rather
+   than leaving an unexplained, unnecessary diff on two previously
+   verified screens.
+
+   **Codex review (round 1) found two more real defects, both fixed
+   before this PR opened.** First: LoadGame's own legend advertised "A
+   Load (Save)" and "X Delete" unconditionally, but input goes to
+   whichever control has focus first (`ItemsHolder.cpp`), and X-delete
+   exists only inside `CMenuTable::KeyDown` (`Table.cpp`) - A could just
+   as easily cancel or delete depending on focus, and X did nothing at
+   all unless the saves table specifically was focused. Fixed by
+   changing A's verb to "Select" (the same focus-agnostic verb every
+   other screen's legend already uses) and adding a
+   `CMenuLoadGame::Think()` override that toggles the X entry's own
+   visibility against `ItemAtCursor() == &savesList` once per frame - a
+   new `CMenuLegend::SetVisible()`, replacing the now-unused `SetVerb()`
+   this fix made dead code. Second: the new file and its
+   `uiColorLegend`/`LEGEND_COLOR` additions had no `#if XASH_XBOX` guard
+   at all, so both build systems (which glob every `controls/*.cpp` file
+   unconditionally) compiled the whole class on every platform,
+   contradicting this note's own "Xbox only" framing. Fixed by wrapping
+   `Legend.h`/`.cpp` the same way `Pause.cpp` wraps itself, and guarding
+   `uiColorLegend` end to end - unlike `uiColorHeading`, which stays
+   unconditional on its own established precedent, since nothing on
+   Xbox reads `uiColorLegend` except this file.
+
+   **Codex review (round 2) found two more real defects, both fixed
+   before this PR opened.** First: the round-1 fix above still wasn't
+   enough - `CMenuTable::KeyDown` buzzes instead of deleting on an empty
+   saves list, and save mode's synthetic "new save" row (index 0) is
+   deliberately not deletable either, so focus on the table alone still
+   advertised Delete in cases where X does nothing. Fixed by also
+   checking the Delete button's own grayed state in `Think()`
+   (`!(remove.iFlags & QMF_GRAYED)`) - reusing `UpdateGame()`'s own
+   already-computed verdict for exactly this condition rather than
+   duplicating its predicate. Second: the new literal legend keys
+   ("Select", "Back", "Delete", "Adjust", "Resume") had no entries in
+   `assets/resource/mainui_german.txt`, the one shipped translation
+   file - `L()` falls back to English on a miss, so every German screen
+   would have shown an English legend, a real regression against item
+   13's own already-proven localization. Fixed by adding all five keys
+   with real German translations.
+
+   Verified live, not just linked: booted the classic disc to Main and
+   read the rendered legend directly off a screenshot - a green "A
+   Select" and a red "B Back" both draw exactly where `SetRealCoord`
+   targets them, at the real bottom of the screen, not the middle a
+   virtual-space misread would have produced. `mainui` sweep clean
+   (84/84, the one new file included); the full engine sweep was not
+   re-run for this item, since nothing under `engine/` changed; classic
+   disc links clean (0 duplicate, 0 undefined) with the new control and
+   asset staged and packed. NOT verified: the D-pad and START glyphs
+   specifically (Audio/Display/Pause are all reachable from Main but not
+   screenshotted this pass), and whether the per-screen verb lists read
+   correctly against what each screen's pad input actually does - both
+   need a pad, the same limit every screen since item 4 has carried.
+
+   **A genuine tooling bug found and fixed along the way, unrelated to
+   this item's own code**: `tools/xbox-link-check.sh`'s manifest-drift
+   check (`CURRENT_SRCS`/`MANIFEST_SRCS`, compared with `comm`) assumes
+   `sweep-manifest.txt` never repeats a source line - true when
+   `tools/xbox-sweep.sh` runs to completion once, false when an earlier
+   invocation is killed mid-run (an interrupted session, this one
+   included) while another instance's own truncate-and-append (`: >
+   "$MANIFEST"`, then `exec 5>> "$MANIFEST"`) is still open on the same
+   file: the killed run's own late writes interleave with the next
+   clean run's, leaving ~30 duplicated lines. `comm -13`'s multiset
+   comparison then reports each duplicate's SECOND occurrence as a
+   source "no longer exists," failing the link-check's baseline gate
+   deterministically - not flakily, though it read as flaky at first,
+   since a single clean re-sweep (no other sweep running concurrently)
+   produces a duplicate-free manifest and passes every time. Confirmed
+   directly: `sort | uniq -d` on the manifest's own source column named
+   exactly the files the tool was reporting as missing. No code change
+   needed - a clean, uncontended sweep is the fix - but worth recording
+   since it cost real time to trace and could bite the next session that
+   interrupts a sweep mid-run.
 13. **Text rendering and localization** (new, 2026-09-17 - the work
    decision (c) above reverses into). It **retrofits items 1, 4, 6 and 8,
    which already shipped**, so it is not a screen but a change under all

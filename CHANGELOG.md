@@ -5,6 +5,13 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — a control legend at the bottom of every menu screen
+
+Every Xbox menu screen now shows what the pad actually does on it: a
+green A, a red B and so on, each with the action it performs, always
+in the same place at the bottom of the screen. Screens with a value you
+adjust with the D-pad show that too.
+
 ### Added — pressing Start during a game now opens a real pause menu
 
 Starting a map and pressing Start used to reopen the full main menu,

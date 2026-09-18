@@ -30,6 +30,13 @@
 HEADING_COLOR
 255 176 32
 
+// XM.1 item 12: the legend row's own verb text. uiColorLegend's own code
+// default already matches this value (BaseMenu.cpp) - set here anyway,
+// same as every other themed role in this file, so a disc that ships
+// without this file falls back to a value that already matches it.
+LEGEND_COLOR
+207 198 182
+
 PROMPT_TEXT_COLOR
 200 134 28
 

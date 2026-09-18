@@ -445,6 +445,28 @@ if ! cmp -s "$COLORS_SRC" "$STAGE/$GAMEDIR/gfx/shell/colors.lst"; then
 fi
 echo "xbox-xiso: menu palette staged into $GAMEDIR/gfx/shell/colors.lst and verified." >&2
 
+# The legend's own face-button glyph (XM.1 item 12) - a plain tintable
+# circle, this fork's own content, same provenance and fatal-if-missing
+# rule as the font and colors.lst above. The D-pad and START glyphs need
+# no asset at all (CMenuLegend draws them with UI_FillRect/
+# UI_DrawRectangleExt directly), so this is the only new image this item
+# adds.
+LEGEND_BUTTON_SRC="$REPO/assets/gfx/shell/legend_button.tga"
+if [ ! -f "$LEGEND_BUTTON_SRC" ]; then
+	echo "xbox-xiso: $LEGEND_BUTTON_SRC is missing." >&2
+	exit 1
+fi
+mkdir -p "$STAGE/$GAMEDIR/gfx/shell"
+if ! cp "$LEGEND_BUTTON_SRC" "$STAGE/$GAMEDIR/gfx/shell/legend_button.tga"; then
+	echo "xbox-xiso: copying legend_button.tga into the stage failed." >&2
+	exit 1
+fi
+if ! cmp -s "$LEGEND_BUTTON_SRC" "$STAGE/$GAMEDIR/gfx/shell/legend_button.tga"; then
+	echo "xbox-xiso: staged gfx/shell/legend_button.tga differs from source - copy was incomplete." >&2
+	exit 1
+fi
+echo "xbox-xiso: legend glyph staged into $GAMEDIR/gfx/shell/legend_button.tga and verified." >&2
+
 # The localization dictionaries (XM.1 item 13 step 4), and the gate that
 # makes them non-optional. Once the Xbox build draws menu rows as text
 # rather than button-strip bitmaps, every row's label is whatever the
