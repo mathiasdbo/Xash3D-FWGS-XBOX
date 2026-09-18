@@ -5,6 +5,21 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — help text under a translated menu lost its accented letters
+
+The same German test that proved menu rows translate correctly showed
+their help lines losing accents ("für" became "fr"). Both draw through
+the same text renderer, just a different typeface, and that second one
+was quietly falling back to a character set with no accented letters at
+all for the same reason the menu rows themselves needed fixing earlier —
+its intended font was never on the disc. Pointed it at the font that is.
+
+Measured with the project's own memory tooling rather than assumed:
+this fix costs under a megabyte end to end. That is the true cost of
+this change, not a claim that the menu's full memory budget has been
+checked — that check needs screens this fork hasn't built yet and stays
+open.
+
 ### Added — the menu can be translated, and one language proves it
 
 Menu strings are keyed by their own English text, which is the

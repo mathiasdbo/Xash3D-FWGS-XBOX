@@ -3842,21 +3842,68 @@ toggle has no setting behind it (item 8).
       `ui_language` → `Localize_InitLanguage` → dictionary override →
       Fira Sans Condensed glyph.
       **The help lines beneath them are mangled**: "früher" renders as
-      "frher" with the ü silently dropped, and "ändern" as "?dern". They
-      do not go through the `mainui` font at all - `PicButton.cpp:243-255`
-      and `Framework.cpp:67-79` draw `szStatusText` with
-      `EngFuncs::DrawConsoleString`, i.e. the **engine's** console glyphs,
-      which have no accented Latin. **This promotes the console-face
-      follow-up from cosmetic to required**: the note under step 1 costed
-      an unencumbered TTF for that face at 512 KiB and called it a fair
-      price for legibility - it is not a matter of legibility, it is the
-      difference between a menu that can be translated and one that can
-      only translate half of itself. Until it lands, no non-English
-      language is shippable end to end, which is why the German file is
-      staged but **no disc selects it by default**. The only test that
-      means anything: ship a real second language file on the disc, flip
-      `ui_language` (`engine/common/filesystem_engine.c:43`), and
-      screenshot a screen whose words include accented glyphs. English
+      "frher" with the ü silently dropped, and "ändern" as "?dern".
+      **DONE, 2026-09-17 - fixed, and the diagnosis above was wrong in a
+      useful way.** `PicButton.cpp:243-255` draws `szStatusText` via
+      `EngFuncs::DrawConsoleString`, which reads as "the engine's console"
+      but is not: it is a **local `mainui` function**
+      (`EngineCallback.cpp:57-69`) that calls `UI_DrawString` with
+      `uiStatic.hConsoleFont` - the exact same rasterizer already drawing
+      Fira Sans Condensed correctly for every row label. The real engine
+      developer console (`Con_DrawString`, `con_oldfont`, divergence #63)
+      is a wholly separate path this bug never touched. So the root cause
+      was the identical shape to `"Trebuchet MS"`'s own fix, just never
+      applied to this second family: `hConsoleFont` requests `"Tahoma"`
+      (`FontManager.cpp:34`, `:102`), `FindFontDataFile` mapped that only
+      to `tahoma.ttf` - the Wine/LGPL file this fork deliberately never
+      stages - so `CStbFont::Create` silently fell back to `CBitmapFont`,
+      ASCII plus Cyrillic only. Fixed by mapping `"Tahoma"` to the same
+      `FiraSansCondensed-Regular.ttf` already on the disc, under `#if
+      XASH_XBOX`, mirroring `"Trebuchet MS"`'s own branch exactly - no
+      second font, since this face is tall 11 and a second family for the
+      smallest text on screen would be a whole extra atlas nobody could
+      tell apart from the UI face at that size. **This promotes the
+      console-face follow-up from cosmetic to required**: the note under
+      step 1 costed an unencumbered TTF for that face at 512 KiB and
+      called it a fair price for legibility - it is not a matter of
+      legibility, it is the difference between a menu that can be
+      translated and one that can
+      only translate half of itself. **Re-verified after the fix, same
+      German disc**: "Trainingsgelände" and "früher" both now render
+      correctly, help lines included. **Measured with `memstats`, not
+      assumed - but this is NOT the deferred whole-profile acceptance
+      measurement (item 0, `not done this session` above), and should
+      not be read as one.** Adding the fifth font atlas costs `+162
+      pages = +648 KiB` of kernel `VirtualMemory`
+      (`tools/xemu-debug.py memstats`, same disc before/after this fix),
+      corroborating the `r_images[]`-based prediction of `610,304` B for
+      a tall-11 face at that bucket. Separately, the end-to-end move from
+      the last pre-item-13 build (strip resident, no font work at all) to
+      this one is `3277 → 3508` pages, a net `+231 pages = +0.902 MiB`.
+      **That number is complete for what it claims and no more.** All
+      five font faces are created eagerly, once, in the menu-wide
+      `UI_VidInit()` (`BaseMenu.cpp:1049,1090`) before any screen's own
+      `_VidInit` runs - unlike the `head_*.bmp` banners item 0's own
+      deferred measurement is about, which load lazily per screen
+      (`Configuration.cpp:50` and each sibling's `_Init`) and are exactly
+      why a single boot-to-Main snapshot was ruled insufficient there. So
+      this delta genuinely does capture the whole cost of item 13's own
+      work on the four screens that exist today (`Main`/`Configuration`/
+      `GameOptions`/`Audio`, all already reshaped to text headings, zero
+      banner cost on this graph by construction) - it is not partial for
+      THAT claim. What it is not, and does not attempt to be, is the
+      *whole-profile* ceiling verdict item 0 defers until `Controller`
+      and `Display` exist and a real pad traversal is run: this
+      measurement's baseline and its subject are the same narrow screen
+      set, background cost cancels out of the delta identically on both
+      sides, and no traversal into a fifth screen happened. Read it as
+      "item 13's total cost is +0.902 MiB, measured" - not as "the
+      profile passes the ceiling", which remains the same deliberate
+      deferral recorded above, unchanged by this work. The only test that
+      means anything: ship a real second
+      language file on the disc, flip `ui_language`
+      (`engine/common/filesystem_engine.c:43`), and screenshot a screen
+      whose words include accented glyphs. English
       proves nothing here - a baked bitmap label, a missing dictionary key
       and a font that cannot draw the glyph all look identical and correct
       in English, which is how this plan carried all three at once.
