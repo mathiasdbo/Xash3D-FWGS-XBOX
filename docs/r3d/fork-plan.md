@@ -3709,9 +3709,53 @@ toggle has no setting behind it (item 8).
       XASH_XBOX` (or a distinct parsed role added), which is a real if
       small divergence to record - and **the acceptance check has to read
       heading and help colour independently**, since a single sampled
-      colour cannot tell the two apart. Check also whether the classic WON
-      `pak0.pak` already ships a `colors.lst` that would win or lose
-      against ours, and whether the parse runs early enough to matter. **The focus glow is the one
+      colour cannot tell the two apart.
+
+      **DONE, 2026-09-17, base and heading colours - not help.** Checked
+      first, as this note asked: the classic WON install's `pak0.pak` has
+      no `colors.lst` (grepped, 0 hits) and the built stage carries none
+      either, so there is nothing to win or lose against - a genuinely
+      free slot. Added the distinct parsed role rather than a code-only
+      `#if XASH_XBOX` special case: `uiColorHeading` (`BaseMenu.h`/`.cpp`)
+      and a new `HEADING_COLOR` key in `UI_ApplyCustomColors`, defaulting
+      to `uiColorHelp`'s own current value so a build with no
+      `colors.lst` looks exactly as already shipped, not silently
+      different. `Audio.cpp`'s and `GameOptions.cpp`'s headings now read
+      `uiColorHeading`; `GameOptions.cpp`'s own stock, non-Xbox
+      `networkMode` label (the "Select network mode:" text sharing the
+      same primitive) is untouched, still `uiColorHelp`, since it is
+      retail's own text. `assets/gfx/shell/colors.lst` (new, fork-owned,
+      staged by `tools/xbox-xiso.sh` alongside the font - **fatal if the
+      source is missing, same as the font/dictionary gates, corrected in
+      Codex review round 1** after the first draft argued the engine's
+      own graceful runtime handling of a disc that never had this file
+      licensed the packaging script tolerating its own tracked source
+      vanishing too - two different questions with two different
+      answers; verified with a negative fixture, source removed then
+      restored byte-identical) sets `HEADING_COLOR` and
+      `PROMPT_TEXT_COLOR`/`PROMPT_FOCUS_COLOR` to the canvas's amber pair.
+      **`HELP_COLOR` is deliberately left unset, not an oversight**: it
+      is one global shared by two roles the canvas draws differently - a
+      slider's or checkbox's own label (`Slider.cpp:165/206`,
+      `CheckBox.cpp:48`, the canvas's tan `.lbl`) and a screen's
+      status/help line (`PicButton.cpp:252`, the canvas's blue-grey
+      `.hint`) - so setting it either colour gets the other role wrong.
+      That needs a second new role, the same shape as `HEADING_COLOR`,
+      not guessed here - a real, named follow-up, not a silent gap.
+      **Verified live, base colour only - the honest limit of a boot
+      screenshot**: the built disc's row labels sample as `#ce8e18`
+      against a `#c8861c` target (Main's own screenshot, sampled from
+      solid glyph pixels, not an edge) - close enough to be unmistakably
+      the new amber and nothing like stock's `#F0B418` base or `#FFFF00`
+      focus, confirming the whole `colors.lst` → `UI_ApplyCustomColors` →
+      global pipeline actually runs on Xbox, not just compiles. **NOT
+      verified live**: `HEADING_COLOR` and `PROMPT_FOCUS_COLOR` specifically,
+      since neither Audio's nor Game's heading, nor a focused row, is
+      reachable without a pad - the same limitation already accepted for
+      every one of these screens' own content since item 8. Both parse
+      through the identical mechanism the base colour just proved live,
+      which is evidence, not the same thing as having watched it happen.
+      **The focus glow is the one
       thing the design asks for that Xbox currently cannot draw**: the
       canvas's focus is colour *plus* `text-shadow: 0 0 16px
       rgba(255,176,32,0.55)`, which is precisely what

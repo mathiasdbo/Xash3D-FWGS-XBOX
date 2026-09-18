@@ -413,6 +413,38 @@ for f in FiraSansCondensed-Regular.ttf; do
 done
 echo "xbox-xiso: menu font staged into $GAMEDIR/gfx/fonts and verified." >&2
 
+# The menu palette (XM.1 item 13 step 2). Same provenance rule as the
+# font above - this fork's own content, staged unconditionally.
+#
+# Fatal if the SOURCE is missing, same as the font/dictionary gates above
+# - Codex review caught this drawing the wrong conclusion from a true
+# fact: UI_ApplyCustomColors treats an absent colors.lst *on the disc* as
+# normal at runtime (BaseMenu.cpp's own "not found" log is deliberately
+# not an error there, and every colour it can set has a stock default),
+# but that is a statement about the ENGINE's own tolerance for a disc
+# that never had this file, not licence for THIS script to tolerate its
+# own tracked source file vanishing. assets/gfx/shell/colors.lst is
+# owned content that always exists in this tree; its absence here means
+# an incomplete checkout or a broken export, not a deliberate choice to
+# ship stock colours - so it must fail loudly, exactly like a missing
+# font, rather than silently produce a disc with the wrong colours and
+# exit 0.
+COLORS_SRC="$REPO/assets/gfx/shell/colors.lst"
+if [ ! -f "$COLORS_SRC" ]; then
+	echo "xbox-xiso: $COLORS_SRC is missing." >&2
+	exit 1
+fi
+mkdir -p "$STAGE/$GAMEDIR/gfx/shell"
+if ! cp "$COLORS_SRC" "$STAGE/$GAMEDIR/gfx/shell/colors.lst"; then
+	echo "xbox-xiso: copying colors.lst into the stage failed." >&2
+	exit 1
+fi
+if ! cmp -s "$COLORS_SRC" "$STAGE/$GAMEDIR/gfx/shell/colors.lst"; then
+	echo "xbox-xiso: staged gfx/shell/colors.lst differs from source - copy was incomplete." >&2
+	exit 1
+fi
+echo "xbox-xiso: menu palette staged into $GAMEDIR/gfx/shell/colors.lst and verified." >&2
+
 # The localization dictionaries (XM.1 item 13 step 4), and the gate that
 # makes them non-optional. Once the Xbox build draws menu rows as text
 # rather than button-strip bitmaps, every row's label is whatever the

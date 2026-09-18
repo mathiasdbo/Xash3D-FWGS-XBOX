@@ -1,0 +1,37 @@
+// Resonance3D - Xbox menu palette (XM.1 item 13 step 2).
+//
+// Content only: this file is staged onto Xbox discs alone
+// (tools/xbox-xiso.sh), so it changes nothing for any other platform,
+// and nothing changes here if this file is ever missing - mainui's own
+// UI_ApplyCustomColors treats an absent colors.lst as normal, not an
+// error, and every value it can set already has a stock default.
+//
+// Two roles moved to the design canvas's amber; a third is deliberately
+// left alone. HEADING_COLOR is a key this fork added (BaseMenu.h/.cpp) -
+// stock mainui has no colour role for a screen heading at all, so every
+// Xbox heading reused HELP_COLOR by default until this file's own
+// sibling code change gave it one. PROMPT_TEXT_COLOR/PROMPT_FOCUS_COLOR
+// are stock keys already read by every CMenuBaseItem-derived control
+// (BaseItem.cpp:65-66) - the WON-style text rows this fork's own text
+// buttons render through (PicButton.cpp:354-379) pick these up directly,
+// so Main's, Options', Game's and Audio's row labels go from stock
+// amber-ish base / pure yellow focus to the canvas's dim-to-bright amber
+// with no code change at all.
+//
+// HELP_COLOR is NOT set here, on purpose, not an oversight: it is one
+// global shared by two roles the canvas draws differently - a slider's
+// or checkbox's own label (Slider.cpp:165/206, CheckBox.cpp:48, the
+// canvas's tan/bone .lbl) and a screen's status/help line
+// (PicButton.cpp:252, the canvas's blue-grey .hint). Setting it to
+// either colour would get the other role wrong. Untangling that needs
+// a second new colour role, the same shape as HEADING_COLOR above, and
+// is a tracked follow-up, not guessed here.
+
+HEADING_COLOR
+255 176 32
+
+PROMPT_TEXT_COLOR
+200 134 28
+
+PROMPT_FOCUS_COLOR
+255 176 32

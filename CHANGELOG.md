@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — the Xbox menu picks up the design's amber palette
+
+Row labels and a screen heading now use the colour the design called
+for instead of the stock game's neutral grey and yellow, on Xbox only —
+carried in a small content file the disc ships, not a code change, so
+every other platform is untouched and a build without that file looks
+exactly as it already did.
+
+A screen heading needed a colour of its own first: nothing distinguished
+it from an ordinary status line before, so giving one a colour would
+have coloured the other the same way. Verified live that the palette
+file actually takes effect; the heading colour itself still needs a
+controller in hand to see, the same limit as the screens it colours.
+
+One colour is deliberately left alone rather than guessed at: it is
+currently shared between two things the design draws differently, and
+picking one would get the other wrong. That split is tracked as its own
+follow-up.
+
 ### Fixed — help text under a translated menu lost its accented letters
 
 The same German test that proved menu rows translate correctly showed
