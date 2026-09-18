@@ -19,6 +19,9 @@ GNU General Public License for more details.
 #include "input.h"
 #include "vid_common.h"
 #include "platform/platform.h"
+#if XASH_XBOX
+#include <hal/video.h> // XVideoGetMode, XVideoGetEncoderSettings - UI_GetVideoInfo
+#endif
 
 static CVAR_DEFINE_AUTO( vid_mode, "0", FCVAR_RENDERINFO, "current video mode index (used only for storage)" );
 static CVAR_DEFINE_AUTO( vid_rotate, "0", FCVAR_RENDERINFO|FCVAR_VIDRESTART, "screen rotation (0-3)" );
@@ -30,6 +33,24 @@ CVAR_DEFINE( window_width, "width", "0", FCVAR_RENDERINFO|FCVAR_VIDRESTART, "scr
 CVAR_DEFINE( window_height, "height", "0", FCVAR_RENDERINFO|FCVAR_VIDRESTART, "screen height" );
 CVAR_DEFINE( vid_width, "vid_width", "0", FCVAR_READ_ONLY, "actual window viewport size" );
 CVAR_DEFINE( vid_height, "vid_height", "0", FCVAR_READ_ONLY, "actual window viewport size" );
+#if XASH_XBOX
+// XM.1 item 7: real Xbox display state for the Display screen's
+// read-only "Video output" row (VID_SetXboxVideoCvars, below) - plain
+// read-only cvars, the same primitive vid_width/vid_height already are,
+// not a new engine export (see that function's own comment for why).
+// Guarded, unlike vid_width/vid_height: those are real and populated on
+// every platform, but these two have exactly one caller
+// (VideoOptions.cpp's own Xbox-only "Video output" row) and exactly one
+// real populator (VID_SetXboxVideoCvars, called only from vid_sdl2.c's
+// Xbox arm) - Codex review round 2 caught the first draft registering
+// them everywhere with a permanent, meaningless "0"/"" on every other
+// platform, reserving two global cvar names a downstream game or mod
+// could otherwise register for its own purpose (Cvar_RegisterVariable's
+// own duplicate-name check would reject it), for values nothing there
+// ever computes for real. Xbox-only, cheapest divergence rule.
+CVAR_DEFINE( vid_refresh, "vid_refresh", "0", FCVAR_READ_ONLY, "actual display refresh rate in Hz" );
+CVAR_DEFINE( vid_aspect, "vid_aspect", "", FCVAR_READ_ONLY, "actual display aspect/format" );
+#endif // XASH_XBOX
 
 glwstate_t	glw_state;
 
@@ -100,6 +121,60 @@ const char *VID_GetModeString( int vid_mode )
 
 	return vidmode->desc;
 }
+
+#if XASH_XBOX
+/*
+=================
+VID_SetXboxVideoCvars
+
+XM.1 item 7: a read-only "Video output" row on the Xbox Display screen
+needs real hardware state, not a literal string (Codex review of the
+plan, round 2 - the design canvas's own "640x480 - 4:3 - 60 Hz, set in
+Dashboard" is the NTSC 4:3 case, not a fixed string). Refresh comes from
+XVideoGetMode() - after X5's own XVideoSetMode(640, 480, 32,
+REFRESH_DEFAULT) call, .refresh is the real negotiated 50 or 60, not the
+literal 0 that call passed in (video.c's XVideoListModes resolves it
+against the console's real TV standard). Aspect comes from
+XVideoGetEncoderSettings()'s VIDEO_WIDESCREEN/VIDEO_LETTERBOX bits
+(hal/video.h:34-41) - a real, cached hardware query
+(AvSendTVEncoderOption), not a stub. Width/height need no new cvar:
+vid_width/vid_height already exist and already mirror the real,
+X5-clamped 640x480.
+
+Read-only cvars, not a new ui_enginefuncs_t export - Codex review round 1
+caught the first draft of this doing exactly that: `menu_int.h` is
+explicitly commented "menu interface is freezed at version 0.75", and
+while appending past that point is the established way to grow it
+(`pfnRandomFloat`/`pfnGetModeString`/`COM_SaveFile` were all added the
+same way), `udll_int.cpp`'s `GetMenuAPI` copies `sizeof(ui_enginefuncs_t)`
+bytes using mainui's OWN compiled size, not the engine's - on the PC
+dynamic-module boundary (this header is shared by every platform, not
+just Xbox's single static link), a newer mainui loaded by an older
+engine would read past the end of the engine's shorter table and later
+call whatever garbage landed in the new slot as a function pointer. This
+project's Xbox build links everything from one source tree at once and
+could never hit that path, but the header itself is upstream-shared, so
+the fix is the same one Codex named: use the primitive this codebase
+already trusts for exactly this class of value (vid_width/vid_height
+are read-only cvars already), not a new struct field.
+=================
+*/
+void VID_SetXboxVideoCvars( void )
+{
+	VIDEO_MODE vm = XVideoGetMode();
+	DWORD enc = XVideoGetEncoderSettings();
+	const char *aspect;
+
+	if( FBitSet( enc, VIDEO_WIDESCREEN ))
+		aspect = "16:9";
+	else if( FBitSet( enc, VIDEO_LETTERBOX ))
+		aspect = "Letterbox";
+	else aspect = "4:3";
+
+	Cvar_FullSet( "vid_refresh", va( "%d", vm.refresh ), vid_refresh.flags );
+	Cvar_FullSet( "vid_aspect", aspect, vid_aspect.flags );
+}
+#endif // XASH_XBOX
 
 /*
 ==================
@@ -214,6 +289,10 @@ void VID_Init( void )
 	Cvar_RegisterVariable( &vid_maximized );
 	Cvar_RegisterVariable( &vid_width );
 	Cvar_RegisterVariable( &vid_height );
+#if XASH_XBOX
+	Cvar_RegisterVariable( &vid_refresh );
+	Cvar_RegisterVariable( &vid_aspect );
+#endif
 	Cvar_Get( "_window_xpos", "-1", FCVAR_RENDERINFO, "deprecated cvar" );
 	Cvar_Get( "_window_ypos", "-1", FCVAR_RENDERINFO, "deprecated cvar" );
 

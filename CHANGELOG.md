@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — a Display screen, showing real hardware video state
+
+Options gains a Display screen on Xbox: brightness and gamma (unchanged
+from before), texture filtering, and a new read-only row that reports
+the console's actual current resolution, refresh rate and aspect ratio
+— queried live from the hardware, not a fixed piece of text, so it
+stays correct under every Dashboard setting rather than only the common
+one.
+
+Two settings the design asked for turned out not to do what their names
+promise once checked against the code that actually reads them: one
+only ever produces a legacy letterboxing effect with no benefit on this
+console, and the other has no way to take effect at all under the
+game's own default configuration without a further change this pass
+doesn't make. Both are left out rather than shipped broken or
+mislabeled; a few settings that only apply to a rendering path this
+console doesn't use are also gone, since the game already disabled them
+permanently on its own.
+
 ### Added — the Xbox menu picks up the design's amber palette
 
 Row labels and a screen heading now use the colour the design called

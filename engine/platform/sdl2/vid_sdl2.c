@@ -1005,6 +1005,12 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 		return false;
 	}
 
+	// XM.1 item 7: real hardware state for the Display screen's
+	// read-only "Video output" row, taken right here because the real
+	// refresh rate only exists after XVideoSetMode above has resolved it
+	// against the console's own TV standard.
+	VID_SetXboxVideoCvars();
+
 	// The driver has exactly one window, always the framebuffer's own
 	// size (XBOX_CreateWindow overwrites w/h and forces FULLSCREEN, and
 	// XBOX_SetDisplayMode is a no-op) - a retail video.cfg's 1920x1080

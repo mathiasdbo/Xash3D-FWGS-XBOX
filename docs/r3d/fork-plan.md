@@ -3294,6 +3294,106 @@ toggle has no setting behind it (item 8).
    and X5's `vid_scale` lever (2.0 → 320x240 render, presented 2x2) as a
    candidate "Performance mode" toggle only if X9's hardware numbers make
    it worth a player's choice.
+
+   **DONE in part, 2026-09-17 - two of the five original rows dropped on
+   correction, not on trim.** Brightness and Gamma keep their stock
+   sliders and preview image entirely unchanged - both already work
+   identically on Xbox, and `gfx/shell/gamma.bmp` degrades clean on HL25
+   content the same way every other WON-only bitmap in this fork already
+   does (checked directly: present in the classic `pak0.pak`, absent
+   from the built HL25 stage, no error either way). Texture filtering
+   needed no Xbox-specific code at all: `ref_gl` is never compiled or
+   linked for Xbox (`tools/xbox-link-check.sh` builds `ref/soft`
+   exclusively), so `r_refdll_loaded` is always `"soft"` at runtime, and
+   stock `VideoOptions.cpp::Reload()`'s own existing `soft_active` branch
+   already links the row to `sw_texfilt` - the identical runtime
+   dispatch PC uses, unmodified. The three `gl_*`/`r_*` checkboxes this
+   item planned to hide (`r_detailtextures`, `r_ripple`, `gl_vbo`,
+   `gl_overbright`) are removed rather than merely grayed, for the same
+   reason: stock's own `Reload()` already grays every one of them
+   permanently through its existing `gl_active` check, since `gl_active`
+   can never be true on Xbox - a row that can never be un-grayed is
+   clutter, not a setting, so it is gone rather than kept as a dead
+   placeholder.
+
+   **"Screen size" and "HUD size" are dropped, and researching them
+   found the plan's own framing of both was wrong** - checked against
+   their real client-side consumers rather than trusted. `viewsize` does
+   not control inventory or status-bar visibility in the real client at
+   all: its only real effect (`SCR_TileClear`, `cl_scrn.c`) is a
+   Quake-era letterboxed-viewport shrink, a legacy aesthetic with no
+   couch-TV benefit on an already-640x480 screen. The "no inventory"/
+   "no status bar" bands this item's own citation leaned on
+   (`VideoOptions.cpp`'s own disabled `CMenuVidPreview::Draw`) were never
+   real client behaviour - only a hand-drawn approximation inside that
+   one preview thumbnail, dead code since `LEGACY_VIEWSIZE` is compiled
+   to 0. `hud_scale` fares worse, and is a real, load-bearing finding:
+   `CL_GetScreenInfo` (`cl_dll/dll_int/cl_game.c`) can only enlarge the
+   HUD when the reference width it is compared against exceeds the real
+   screen width, but Xbox's screen is a fixed 640
+   (`XVideoSetMode(640,480,...)`, divergence #50) and
+   `hud_scale_minimal_width` defaults to exactly 640 too - so **under
+   that default, no value of `hud_scale` can ever enlarge anything on
+   this console**. The canvas's "Large, for a TV" cannot be built by
+   wiring a UI control to this cvar alone; making it actually work needs
+   `hud_scale_minimal_width` lowered as its own, separately-verified
+   engine change (a real divergence, not a UI hookup) - a tracked
+   follow-up, not guessed into this row. Neither row is a design loss so
+   much as a design intent this fork cannot honestly deliver with the
+   cvars named for it.
+
+   **Added instead: a read-only "Video output" row - real hardware
+   state, never a literal**, exactly as this item's own note already
+   demanded. **The first way of wiring it in was wrong, and Codex review
+   round 1 is why**: a new `pfnGetVideoInfo` field appended to
+   `ui_enginefuncs_t` extends a struct explicitly commented "menu
+   interface is freezed at version 0.75" - appending past that point is
+   the established way to grow it (`pfnRandomFloat`/`pfnGetModeString`/
+   `COM_SaveFile` were all added the same way), but `udll_int.cpp`'s
+   `GetMenuAPI` copies `sizeof(ui_enginefuncs_t)` bytes sized from
+   `mainui`'s OWN compiled struct, not the engine's - on the PC dynamic-
+   module boundary this header is shared with (every platform, not only
+   Xbox's single static link), a newer `mainui` loaded by an older engine
+   would read past the end of the engine's shorter table and later call
+   whatever garbage landed in the new slot as a function pointer. Xbox's
+   build could never hit that path, but the header itself is not
+   Xbox-only, so the fix is the primitive this codebase already trusts
+   for exactly this class of value: `vid_width`/`vid_height` are already
+   read-only cvars, so `vid_refresh`/`vid_aspect` are now two more,
+   populated by `VID_SetXboxVideoCvars()` (`vid_common.c`) right after
+   X5's own `XVideoSetMode` call - the same point `.refresh` first
+   becomes the real negotiated 50 or 60, not the literal `0` that call
+   passed in - from `XVideoGetMode()`, and `XVideoGetEncoderSettings()`'s
+   real `VIDEO_WIDESCREEN`/`VIDEO_LETTERBOX` bits for aspect, a cached
+   hardware query, not a stub. Zero new ABI surface: every other
+   platform's build simply never calls the function that sets them, and
+   `VideoOptions.cpp` reads all four through the `EngFuncs` cvar wrappers
+   it already had (`GetCvarFloat`/`GetCvarString`), no new wrapper needed
+   either. **Verified live, not just linked**: booted the classic disc
+   and read `vid_refresh`/`vid_aspect` directly out of guest memory
+   rather than trusting compilation - `vid_refresh.value = 60.0`,
+   `vid_aspect.string = "4:3"`, both real negotiated hardware state, not
+   the cvars' own declared `"0"`/`""` defaults.
+
+   `Configuration.cpp`'s "Video" button now points straight at
+   `VideoOptions.cpp` instead of `Video.cpp`'s own two-choice hub ("Video
+   options" / "Video modes") - the hub's other choice, `VideoModes.cpp`,
+   is hidden entirely on Xbox, so the hub would offer exactly one working
+   option. `Video.cpp`/`VideoModes.cpp` themselves are untouched, same
+   "hidden, not deleted" convention item 9 already established: nothing
+   on Xbox reaches them any more, confirmed by grep, not merely
+   asserted.
+
+   Verified: classic disc links clean (0 duplicate, 0 undefined) and
+   boots to an unchanged Main, screenshotted; the full engine sweep
+   matches its established 203 ok/29 failing baseline exactly, so the
+   two new cvars introduced no regression anywhere else in the tree;
+   `menu_video`'s and `menu_vidoptions`'s static pointers both read as
+   real non-null heap addresses post-boot, confirming both objects
+   construct without crashing. NOT verified: `_Init()`/`_VidInit()`
+   themselves, same limit as every screen since item 4 - the actual
+   Options → Display navigation, the live video-output string, and the
+   visual layout need a pad live.
 8. **Game** (new screen; `GameOptions.cpp` reshaped): Auto-aim (`sv_aim`)
    and Crosshair (`crosshair`) moved in from `AdvancedControls.cpp:86-91`;
    Fast weapon switch (`hud_fastswitch`, a client cvar no mainui screen
