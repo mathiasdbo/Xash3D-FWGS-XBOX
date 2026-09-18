@@ -3616,6 +3616,35 @@ toggle has no setting behind it (item 8).
    `ServerBrowser` (both registrations), `Multiplayer`, `PlayerSetup`,
    `CreateGame`. Hidden, not deleted, either way: the files stay stock
    for the merge diff.
+
+   **DONE, 2026-09-18.** Every file this bullet names is wrapped
+   `#if !XASH_XBOX ... #endif` right after its own `#include`s, the
+   same minimal placement item 12's `Legend.{h,cpp}` established -
+   whole-file rather than just the button or the `ADD_MENU` line,
+   because several of these files call each other's show functions
+   internally and a partial guard would leave those calls pointing at
+   now-undefined symbols. `Gamepad.cpp`'s "Gyroscope" and `Controls.cpp`'s
+   "Adv. Controls" buttons are guarded the same way; `ConnectionProgress.cpp`'s
+   disconnect handler and `YesNoMessageBox.cpp`'s stray cvar-confirmation
+   callback are fixed to match. A second Codex round then found the same
+   button-only blind spot again, this time against every `ADD_MENU*`
+   registration in the tree: `ServerInfo.cpp`, `PlayerIntroduceDialog.cpp`
+   and `ConnectionWarning.cpp` (the last needing a fourth `udll_int.cpp`
+   stub, `UI_ConnectionWarning_f`) were still their own live console
+   commands with no button left. Two more registrations were checked and
+   deliberately kept, not missed: `ConnectionProgress.cpp` (the generic
+   connect/loading screen every singleplayer map start uses too, not
+   PC-multiplayer-specific) and `ScriptMenu.cpp`'s `menu_serveroptions`/
+   `menu_useroptions` (their own screens are unreachable like the rest,
+   but `UI_LoadScriptConfig()` needs both objects to exist and runs
+   unconditionally from `BaseMenu.cpp`'s own `UI_UpdateMenu`, so hiding
+   their registration would null-crash Xbox's first menu frame). Full
+   account, including the reachability gap the earlier button-only
+   survey missed twice over (`ADD_MENU`'s own console command, confirmed
+   live since this fork's dev console works) and a real bug Codex review
+   caught in an earlier draft of this change (a misread `#if`/`#else`
+   nesting briefly repointed the non-Xbox Save\\Load row instead of
+   touching anything on Xbox): `divergences.md` #76.
 10. **Single-player pause** (new screen, XM.1): the canvas's "Paused" -
    chapter and difficulty under the heading, the game scene dimmed
    behind it with the HUD still faintly visible, and Resume Game / Save

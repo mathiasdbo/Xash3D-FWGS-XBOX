@@ -5,6 +5,14 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Removed — PC-only menu screens that had no place on Xbox
+
+Options no longer offers a Gyroscope or Advanced Controls row (neither
+means anything on a pad with no gyro and no mouse), and every other
+screen that only ever existed for keyboard/mouse play, touch input, or
+PC multiplayer - none of it reachable on this fork today - no longer
+lingers reachable by console command either.
+
 ### Fixed — Load Game / Save Game could freeze on open
 
 A save whose title stripped to an empty string hit a bug that made the
