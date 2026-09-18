@@ -5,6 +5,13 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — Load Game / Save Game could freeze on open
+
+A save whose title stripped to an empty string hit a bug that made the
+menu read backwards past the end of the string instead of doing
+nothing. Not new to this fork - inherited from upstream - but this is
+the first place it's been caught, from a real freeze report.
+
 ### Added — a control legend at the bottom of every menu screen
 
 Every Xbox menu screen now shows what the pad actually does on it: a
