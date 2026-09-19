@@ -2991,10 +2991,11 @@ registration unless the stock one is unusable:
       so when it runs.
 
       **What this step has NOT done, and what it costs the ceiling.**
-      `duke.tga` is written into `assets/` but `tools/xbox-xiso.sh` does
-      not stage it, and nothing loads it: item 5's Controller screen is
-      unported, so there is no consumer and no `memstats` reading. When
-      it ships, its 151 KiB counts against this item's 3 MiB ceiling in
+      `duke.tga` is written into `assets/` and now staged onto every
+      Xbox disc build too (`tools/xbox-xiso.sh`, divergence #83), but
+      nothing loads it yet: item 5's Controller screen is unported, so
+      there is still no consumer and no `memstats` reading. When it
+      ships, its 151 KiB counts against this item's 3 MiB ceiling in
       the same way a banner does, not in the way the background does -
       `CImage` has no unloading destructor by design (`Image.h:40-44`),
       so it is resident from the first visit to Controller until the
@@ -3347,17 +3348,19 @@ toggle has no setting behind it (item 8).
    for this item is only the wiring: staging it on the disc, loading it,
    and placing the label anchors around it.
 
-   **Implementation, sequenced into five branches (2026-09-19), Phase 1
+   **Implementation, sequenced into five branches (2026-09-19), Phases 1-2
    DONE.** `3rdparty/mainui/ControllerSchemes.h`/`.cpp` (mainui submodule,
    `xm1/controller-schemes`) is the shared model - the four scheme
    tables, detection, and application - every later branch here depends
    on; full account, and a real Codex-found engine bug it fixed along the
    way (switching `joy_axis_binding` could leave a stale cached axis
-   value driving movement/look forever), in `divergences.md` #82. Nothing
-   in any menu calls it yet. Remaining: art staging (`tools/xbox-xiso.sh`),
-   the Controller screen itself (rewrites `Gamepad.cpp`), the Settings
-   sub-screen (new file), and the Customize sub-screen (rewrites
-   `Controls.cpp`).
+   value driving movement/look forever), in `divergences.md` #82. The
+   Controller screen's Duke diagram (`assets/gfx/shell/duke.tga`) is now
+   staged onto every Xbox disc build (`tools/xbox-xiso.sh`,
+   `divergences.md` #83, verified with a real `hl` disc build). Nothing
+   in any menu calls either yet. Remaining: the Controller screen itself
+   (rewrites `Gamepad.cpp`), the Settings sub-screen (new file), and the
+   Customize sub-screen (rewrites `Controls.cpp`).
 6. **Audio** (`Audio.cpp`): Sound / Music / HEV suit volume (`volume` /
    `MP3Volume` / `suitvolume`, `:64-66`) as D-pad-adjusted rows; Speaker
    output a read-only row from the Dashboard. Hidden: `room_off` /

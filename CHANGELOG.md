@@ -24,6 +24,13 @@ moment the routing changed. Fixed at the source; nothing calls the new
 scheme model yet, so this has no effect until the Controller screen
 itself ships.
 
+### Added — the Controller screen's diagram art now ships on disc (dev groundwork, not yet in any menu)
+
+`assets/gfx/shell/duke.tga`, the Duke diagram baked for the upcoming
+Controller screen, is now staged onto every Xbox disc build the same way
+the legend's own button glyph already is. Nothing loads this image yet -
+see `docs/r3d/divergences.md` #83.
+
 ### Added — synthetic pad input for live menu verification (dev tooling)
 
 Every screen this fork has shipped since Options was rebuilt has only ever

@@ -467,6 +467,28 @@ if ! cmp -s "$LEGEND_BUTTON_SRC" "$STAGE/$GAMEDIR/gfx/shell/legend_button.tga"; 
 fi
 echo "xbox-xiso: legend glyph staged into $GAMEDIR/gfx/shell/legend_button.tga and verified." >&2
 
+# The Controller screen's Duke diagram (XM.1 item 5) - this fork's own
+# content, baked by tools/xbox-menu-art.py and already logged as
+# divergence #74, same provenance and fatal-if-missing rule as the other
+# shell art above. Staged ahead of the screen that loads it (branch 2 of
+# 5 in that item's implementation sequence) so later branches don't have
+# to touch this script at all.
+DUKE_SRC="$REPO/assets/gfx/shell/duke.tga"
+if [ ! -f "$DUKE_SRC" ]; then
+	echo "xbox-xiso: $DUKE_SRC is missing." >&2
+	exit 1
+fi
+mkdir -p "$STAGE/$GAMEDIR/gfx/shell"
+if ! cp "$DUKE_SRC" "$STAGE/$GAMEDIR/gfx/shell/duke.tga"; then
+	echo "xbox-xiso: copying duke.tga into the stage failed." >&2
+	exit 1
+fi
+if ! cmp -s "$DUKE_SRC" "$STAGE/$GAMEDIR/gfx/shell/duke.tga"; then
+	echo "xbox-xiso: staged gfx/shell/duke.tga differs from source - copy was incomplete." >&2
+	exit 1
+fi
+echo "xbox-xiso: controller diagram staged into $GAMEDIR/gfx/shell/duke.tga and verified." >&2
+
 # The localization dictionaries (XM.1 item 13 step 4), and the gate that
 # makes them non-optional. Once the Xbox build draws menu rows as text
 # rather than button-strip bitmaps, every row's label is whatever the
