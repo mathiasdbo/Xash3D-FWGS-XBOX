@@ -170,6 +170,21 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  checks as pools first; readings outside
                                  0.1-1000 fps or a pureframetime outside
                                  (0, 10 s) are refused as wrong addresses.
+  cursor --map <file> --exe <pe>
+                                The index of the pad-focused item on
+                                 whatever mainui screen is on screen right
+                                 now (CMenuItemsHolder::m_iCursor), reached
+                                 by a pointer chase from uiStatic (menu ->
+                                 window stack -> active node -> the
+                                 window's own cursor field). Every offset
+                                 is computed at run time by tools/
+                                 xbox-offsetof-cxx.sh (a C++ probe, unlike
+                                 xbox-offsetof.sh's C-only one - several of
+                                 these fields are protected/private).
+                                 Same identity checks as pools/fps first;
+                                 raises rather than printing a number if
+                                 the resolved window-stack node fails its
+                                 own CUtlLinkedList::IsValidIndex check.
   Every command resumes the guest through the monitor on the way out (xemu
   pauses the VM when a client connects and a socket close or gdb detach does
   NOT resume it) and reports, with a nonzero exit, if it could not.
@@ -1135,29 +1150,67 @@ def parse_offsetof(text):
     return int(m.group(1)), int(m.group(2))
 
 
-def struct_offset(header, type_name, field, expect_size):
-    """Field offset for the Xbox build's exact flags and ABI, computed NOW by
-    tools/xbox-offsetof.sh (a probe compiled through tools/xbox-cc.sh), not
-    a constant copied into this file: XASH_LOW_MEMORY moved host_parm_t's
-    fields once already (Codex review: a copied constant has no drift
-    check). The field's size is checked against what the reader will
-    unpack."""
-    import subprocess
-    here = os.path.dirname(os.path.abspath(__file__))
+def _offsetof_bash():
     # Not a bare "bash": on this Windows host CreateProcess resolves that to
     # C:\Windows\System32\bash.exe, the WSL launcher, which answers in UTF-16
     # ("no installed distributions") - measured, the first run printed
     # spaced garbage. The project standardises on MSYS2 at C:\msys64
     # (tools/xbox-env.sh); use its bash when it exists.
-    bash = next((p for p in ("/c/msys64/usr/bin/bash.exe", "C:/msys64/usr/bin/bash.exe") if os.path.exists(p)), "bash")
-    r = subprocess.run([bash, os.path.join(here, "xbox-offsetof.sh"), header, type_name, field],
+    return next((p for p in ("/c/msys64/usr/bin/bash.exe", "C:/msys64/usr/bin/bash.exe") if os.path.exists(p)), "bash")
+
+
+def struct_offset(header, type_name, field, expect_size, cxx=False, extra_args=()):
+    """Field offset for the Xbox build's exact flags and ABI, computed NOW by
+    tools/xbox-offsetof.sh (a probe compiled through tools/xbox-cc.sh), not
+    a constant copied into this file: XASH_LOW_MEMORY moved host_parm_t's
+    fields once already (Codex review: a copied constant has no drift
+    check). The field's size is checked against what the reader will
+    unpack.
+
+    cxx=True routes through tools/xbox-offsetof-cxx.sh instead (a C++
+    probe, through tools/xbox-cxx.sh, that can read a protected/private
+    field - offsetof() on one is a hard compile error for the plain C
+    probe this function otherwise uses). extra_args forwards -I/-D flags
+    the target header needs to resolve its own #includes (mainui headers
+    need their own include path, the same way tools/xbox-mainui-sweep.sh's
+    own CXX_FLAGS do when compiling a real mainui .cpp)."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    bash = _offsetof_bash()
+    script = "xbox-offsetof-cxx.sh" if cxx else "xbox-offsetof.sh"
+    r = subprocess.run([bash, os.path.join(here, script), header, type_name, field, *extra_args],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        raise RuntimeError(f"xbox-offsetof.sh {type_name}.{field} failed: {(r.stderr or r.stdout).strip()[:300]}")
+        raise RuntimeError(f"{script} {type_name}.{field} failed: {(r.stderr or r.stdout).strip()[:300]}")
     off, size = parse_offsetof(r.stdout)
     if size != expect_size:
         raise RuntimeError(f"{type_name}.{field} is {size} bytes in this build, reader expects {expect_size}")
     return off
+
+
+def parse_sizeof(text):
+    """`T sizeof=N` (tools/xbox-offsetof-cxx.sh's whole-type mode) -> N."""
+    m = re.search(r"^\S.* sizeof=(\d+)\s*$", text.strip(), re.M)
+    if not m:
+        raise RuntimeError(f"unexpected sizeof output: {text.strip()[:200]!r}")
+    return int(m.group(1))
+
+
+def type_sizeof(header, type_name, expect_size=None, extra_args=()):
+    """Whole-type sizeof, for a type with no containing field to size
+    through (e.g. a linked list's own element struct) - always the C++
+    probe, since every type this is used for is a C++ class/struct."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    bash = _offsetof_bash()
+    r = subprocess.run([bash, os.path.join(here, "xbox-offsetof-cxx.sh"), header, type_name, *extra_args],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"xbox-offsetof-cxx.sh sizeof({type_name}) failed: {(r.stderr or r.stdout).strip()[:300]}")
+    size = parse_sizeof(r.stdout)
+    if expect_size is not None and size != expect_size:
+        raise RuntimeError(f"sizeof({type_name}) is {size} bytes in this build, reader expects {expect_size}")
+    return size
 
 
 def check_identity(g, a, data, what):
@@ -1213,6 +1266,134 @@ def cmd_fps(a):
     print(f"fps: {fc1 - fc0} frames in {elapsed:.1f}s = {fps:.1f} fps, {ms:.1f} ms/frame (wall); "
           f"host.pureframetime (last frame, no sleep) = {pure * 1000:.1f} ms "
           f"[host.framecount @ +{off_fc}, host.pureframetime @ +{off_pure}, from tools/xbox-offsetof.sh]")
+
+
+# mainui (3rdparty/mainui) is a static library linked straight into the
+# combined XBE, not a separate menu.dll the way PC Xash builds it - the
+# same --map/--exe this file's other commands already take covers it too.
+# Every mainui header needs its own include path to resolve its own
+# #include "utllinkedlist.h" and friends when compiled standalone as a
+# probe TU - the same set tools/xbox-mainui-sweep.sh's own CXX_FLAGS uses
+# to compile a real mainui .cpp.
+MAINUI_INCLUDES = [
+    "-I3rdparty/mainui", "-I3rdparty/mainui/miniutl", "-I3rdparty/mainui/font",
+    "-I3rdparty/mainui/controls", "-I3rdparty/mainui/menus", "-I3rdparty/mainui/model",
+    "-I3rdparty/mainui/sdk_includes/common", "-I3rdparty/mainui/sdk_includes/engine",
+    "-I3rdparty/mainui/sdk_includes/public", "-I3rdparty/mainui/sdk_includes/pm_shared",
+    "-DSTDINT_H=<cstdint>", "-DMAINUI_USE_CUSTOM_FONT_RENDER", "-DMAINUI_USE_STB",
+]
+
+LIST_ELEM_T = "CUtlLinkedList<CMenuBaseWindow*>::ListElem_t"
+
+
+def resolve_cursor(read_mem, uistatic_addr, off):
+    """The pointer chase from uiStatic down to the focused item's own
+    cursor index - `uiStatic.menu` (a CWindowStack, embedded by value) ->
+    its `stack` (a CUtlLinkedList<CMenuBaseWindow*>, also embedded) -> the
+    `active` node, resolved the same way CWindowStack::Current() does
+    (WindowSystem.h:33) -> that CMenuBaseWindow*, which is also its
+    CMenuItemsHolder* subobject (single, non-virtual inheritance,
+    CMenuFramework -> CMenuBaseWindow -> CMenuItemsHolder -> CMenuBaseItem,
+    confirmed from the headers - offset 0, no separate downcast needed) ->
+    its own m_iCursor.
+
+    `off` is the dict of every offset/size this needs, all computed by the
+    caller via struct_offset()/type_sizeof() against the exact running
+    build - see cmd_cursor. Pure and offline-testable: `read_mem` is any
+    `(addr, length) -> bytes` callable, real or fake.
+
+    Raises rather than returning a plausible-looking wrong number - same
+    discipline as every other command in this file - if the node CWindowStack
+    itself would reject (CWindowStack::IsValidIndex, WindowSystem.h:33,
+    CUtlLinkedList::IsValidIndex, utllinkedlist.h:316-319) or if the stack
+    is empty."""
+    def r_i32(addr):
+        return struct.unpack("<i", read_mem(addr, 4))[0]
+
+    def r_ptr(addr):
+        return struct.unpack("<I", read_mem(addr, 4))[0]
+
+    windowstack_addr = uistatic_addr + off["uistatic_menu"]
+    active = r_i32(windowstack_addr + off["windowstack_active"])
+    stack_addr = windowstack_addr + off["windowstack_stack"]
+    total = r_i32(stack_addr + off["linkedlist_total"])
+
+    if total <= 0:
+        raise RuntimeError(f"window stack is empty (m_TotalElements={total}) - nothing is showing")
+    if not (0 <= active < total):
+        raise RuntimeError(f"active index {active} out of range for {total} allocated node(s) - "
+                            "not a valid CWindowStack::Current()")
+
+    memory_addr = stack_addr + off["linkedlist_memory"]
+    base_ptr = r_ptr(memory_addr + off["memorybase_pmemory"])
+    elem_addr = base_ptr + active * off["listelem_size"]
+    prev = r_i32(elem_addr + off["listelem_previous"])
+    next_ = r_i32(elem_addr + off["listelem_next"])
+
+    # CUtlLinkedList::IsValidIndex's own condition (utllinkedlist.h:316-319):
+    # a node is valid if its own prev/next links don't both say "I'm free".
+    if not (prev != active or next_ == active):
+        raise RuntimeError(f"node {active} fails CUtlLinkedList::IsValidIndex - "
+                            "not really CWindowStack::Current(), stale or corrupt read")
+
+    window_ptr = r_ptr(elem_addr + off["listelem_element"])
+    if window_ptr == 0:
+        raise RuntimeError("CWindowStack::Current() resolved to a null window pointer")
+
+    cursor = r_i32(window_ptr + off["itemsholder_cursor"])
+    return cursor, window_ptr
+
+
+def cmd_cursor(a):
+    """The index of the currently pad-focused item on whatever menu screen
+    is active right now - CMenuItemsHolder::m_iCursor (ItemsHolder.h:87),
+    reached by resolve_cursor()'s own chase from uiStatic. Every offset
+    below is computed fresh against the exact running build via
+    tools/xbox-offsetof-cxx.sh, not a constant copied into this file -
+    the same discipline cmd_pools/cmd_fps already use for host_parm_t's
+    own fields (struct_offset's own docstring)."""
+    syms = load_map_symbols(a.map)
+    uistatic_sym = next((k for k in syms if k.endswith("uiStatic@@3UuiStatic_t@@A")), None)
+    if uistatic_sym is None:
+        raise RuntimeError(f"{a.map} has no uiStatic symbol - is it this build's map, "
+                            "with mainui actually linked in?")
+    uistatic_addr = syms[uistatic_sym]
+
+    with open(a.exe, "rb") as f:
+        data = f.read()
+
+    off = {
+        "uistatic_menu": struct_offset("BaseMenu.h", "uiStatic_t", "menu", 44,
+                                        cxx=True, extra_args=MAINUI_INCLUDES),
+        "windowstack_active": struct_offset("WindowSystem.h", "CWindowStack", "active", 4,
+                                             cxx=True, extra_args=MAINUI_INCLUDES),
+        "windowstack_stack": struct_offset("WindowSystem.h", "CWindowStack", "stack", 40,
+                                            cxx=True, extra_args=MAINUI_INCLUDES),
+        "linkedlist_memory": struct_offset("WindowSystem.h", "CUtlLinkedList<CMenuBaseWindow*>",
+                                            "m_Memory", 16, cxx=True, extra_args=MAINUI_INCLUDES),
+        "linkedlist_total": struct_offset("WindowSystem.h", "CUtlLinkedList<CMenuBaseWindow*>",
+                                           "m_TotalElements", 4, cxx=True, extra_args=MAINUI_INCLUDES),
+        "memorybase_pmemory": struct_offset(
+            "WindowSystem.h", f"CUtlMemory<{LIST_ELEM_T}>", "m_pMemory", 4,
+            cxx=True, extra_args=MAINUI_INCLUDES),
+        "listelem_element": struct_offset("WindowSystem.h", LIST_ELEM_T, "m_Element", 4,
+                                           cxx=True, extra_args=MAINUI_INCLUDES),
+        "listelem_previous": struct_offset("WindowSystem.h", LIST_ELEM_T, "m_Previous", 4,
+                                            cxx=True, extra_args=MAINUI_INCLUDES),
+        "listelem_next": struct_offset("WindowSystem.h", LIST_ELEM_T, "m_Next", 4,
+                                        cxx=True, extra_args=MAINUI_INCLUDES),
+        "itemsholder_cursor": struct_offset("ItemsHolder.h", "CMenuItemsHolder", "m_iCursor", 4,
+                                             cxx=True, extra_args=MAINUI_INCLUDES),
+        "listelem_size": type_sizeof("WindowSystem.h", LIST_ELEM_T, expect_size=12,
+                                     extra_args=MAINUI_INCLUDES),
+    }
+
+    with GdbRemote(a.host, a.port) as g:
+        check_identity(g, a, data, "cursor")
+        cursor, window_ptr = resolve_cursor(g.read_mem, uistatic_addr, off)
+
+    print(f"cursor: {cursor} (active window @ {window_ptr:#010x}) "
+          f"[uiStatic @ {uistatic_addr:#010x}, symbol {uistatic_sym}]")
 
 
 def cmd_memstats(a):
@@ -1340,6 +1521,8 @@ def main():
     s.add_argument("--min-bytes", type=lambda x: int(x, 0), default=16384); s.set_defaults(func=cmd_pools)
     s = sub.add_parser("fps"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
     s.add_argument("--seconds", type=float, default=30.0); s.set_defaults(func=cmd_fps)
+    s = sub.add_parser("cursor"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
+    s.set_defaults(func=cmd_cursor)
 
     a = p.parse_args()
     try:

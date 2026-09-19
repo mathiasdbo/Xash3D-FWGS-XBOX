@@ -4791,11 +4791,28 @@ instead is untested; until then, capture through xemu's own UI is this
 fork's working method, not a claimed general limitation of SDL GUIDs.
 Full account: `divergences.md` #77.
 
-**Phase 2, not started.** Depends on Phase 1's findings holding up under
-the harness's own more demanding, unattended use (no human watching the
-window to notice a missed press).
+**Phase 2, DONE, 2026-09-19.** `tools/xemu-pad.py` (input, a `serve`/
+client split - the virtual pad only exists while its owning process is
+alive, so one persistent process holds it open for a whole test session)
+and a new **read-only** `cursor` command in `tools/xemu-debug.py`
+(`CMenuItemsHolder::m_iCursor`, reached by a pointer chase from
+`uiStatic`), plus a new `tools/xbox-offsetof-cxx.sh` (a C++-aware sibling
+to `tools/xbox-offsetof.sh` - every field the chase needs is protected or
+private, and plain `offsetof()` on one is a hard compile error) and a thin
+`tools/xemu-pad-scenario.py` composing the two. Verified live, end to
+end, against the classic disc's real build: pressed Down, read the
+cursor via an actual memory value (not a screenshot) and confirmed it
+moved. Full account, every probed offset, and one real unexplained
+timing finding (three cursor steps for two presses, likely UI
+auto-repeat during the placeholder 200ms hold): `divergences.md` #78.
+Codex review round 2 found two more real bugs in the harness itself
+(a timed-out command's outcome conflated "never happened" with
+"already in flight, do not retry"; a dispatch exception mid-press
+could leave the virtual pad stuck holding a button down for the rest
+of a session) - both fixed, `divergences.md` #79.
 
-**Phase 3, not started.** Depends on Phase 2.
+**Phase 3, not started.** Depends on Phase 2 (done) and calibrating the
+auto-repeat finding above before trusting an exact step count.
 
 ## XN — Networking over lwIP (proposed 2026-09-17, optional to the spine)
 

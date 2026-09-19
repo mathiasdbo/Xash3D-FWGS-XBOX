@@ -647,5 +647,109 @@ class KernelExportsAndMemstats(unittest.TestCase):
         self.assertEqual(sum(by.values()) + available, 16384, "fixture is a consistent 64 MiB machine")
 
 
+def _multi_reader(regions):
+    """Reader over several (base, bytes) regions - resolve_cursor's own
+    fixture needs uiStatic, the ListElem_t backing array, and the window
+    object at three addresses far enough apart that one contiguous image
+    would be wasteful to build."""
+    def read(addr, n):
+        for base, data in regions:
+            if base <= addr < base + len(data):
+                off = addr - base
+                if off + n > len(data):
+                    raise RuntimeError(f"read past the end of a fixture region at {addr:#x}")
+                return data[off:off + n]
+        raise RuntimeError(f"unmapped fixture address {addr:#x}")
+    return read
+
+
+class Cursor(unittest.TestCase):
+    """resolve_cursor()'s own pointer chase - uiStatic.menu (a CWindowStack,
+    embedded) -> its stack (a CUtlLinkedList, also embedded) -> the active
+    node -> the CMenuBaseWindow/CMenuItemsHolder it holds -> m_iCursor.
+    Small, made-up offsets here (not the real project's own, which only a
+    live build against the real headers can produce, see
+    tools/xbox-offsetof-cxx.sh) - this exercises the algorithm, not this
+    fork's exact struct layout, which the live 'cursor' command's own
+    identity checks are what actually stands behind."""
+
+    UI = 0x500000       # uiStatic
+    ARRAY = 0x600000     # CUtlLinkedList's backing ListElem_t[]
+    WINDOW = 0x700000    # a CMenuBaseWindow/CMenuItemsHolder
+
+    OFF = {
+        "uistatic_menu": 0x10,
+        "windowstack_active": 0x28,
+        "windowstack_stack": 0,
+        "linkedlist_memory": 0,
+        "linkedlist_total": 0x20,
+        "memorybase_pmemory": 4,
+        "listelem_element": 0,
+        "listelem_previous": 4,
+        "listelem_next": 8,
+        "listelem_size": 12,
+        "itemsholder_cursor": 0x20,
+    }
+
+    def _fixture(self, active, total, prev, next_, window_ptr, cursor):
+        import struct
+        windowstack = self.UI + self.OFF["uistatic_menu"]
+        ui_region = bytearray(0x40)
+        struct.pack_into("<i", ui_region, self.OFF["uistatic_menu"] + self.OFF["windowstack_active"], active)
+        struct.pack_into("<i", ui_region, self.OFF["uistatic_menu"] + self.OFF["linkedlist_total"], total)
+        struct.pack_into("<I", ui_region, self.OFF["uistatic_menu"] + self.OFF["memorybase_pmemory"], self.ARRAY)
+
+        elem = bytearray(self.OFF["listelem_size"])
+        struct.pack_into("<I", elem, self.OFF["listelem_element"], window_ptr)
+        struct.pack_into("<i", elem, self.OFF["listelem_previous"], prev)
+        struct.pack_into("<i", elem, self.OFF["listelem_next"], next_)
+        array_region = bytes(elem) * max(total, active + 1, 1)
+
+        window_region = bytearray(self.OFF["itemsholder_cursor"] + 4)
+        struct.pack_into("<i", window_region, self.OFF["itemsholder_cursor"], cursor)
+
+        regions = [(self.UI, bytes(ui_region)), (self.ARRAY, array_region)]
+        if window_ptr:
+            regions.append((window_ptr, bytes(window_region)))
+        return _multi_reader(regions)
+
+    def test_a_valid_single_node_list_resolves_the_cursor(self):
+        # A one-element CUtlLinkedList's own head both points to and is
+        # pointed to by itself - prev == next == its own index - exactly
+        # CUtlLinkedList::IsValidIndex's own "prev != i || next == i" case.
+        read = self._fixture(active=0, total=1, prev=0, next_=0, window_ptr=self.WINDOW, cursor=3)
+        cursor, window_ptr = xd.resolve_cursor(read, self.UI, self.OFF)
+        self.assertEqual(cursor, 3)
+        self.assertEqual(window_ptr, self.WINDOW)
+
+    def test_a_later_node_in_a_longer_list_also_resolves(self):
+        read = self._fixture(active=2, total=4, prev=1, next_=3, window_ptr=self.WINDOW, cursor=7)
+        cursor, _ = xd.resolve_cursor(read, self.UI, self.OFF)
+        self.assertEqual(cursor, 7)
+
+    def test_an_empty_stack_is_an_error_not_a_wrong_cursor(self):
+        read = self._fixture(active=0, total=0, prev=0, next_=0, window_ptr=self.WINDOW, cursor=1)
+        with self.assertRaises(RuntimeError):
+            xd.resolve_cursor(read, self.UI, self.OFF)
+
+    def test_an_out_of_range_active_index_is_refused_before_reading_the_array(self):
+        read = self._fixture(active=5, total=1, prev=0, next_=0, window_ptr=self.WINDOW, cursor=1)
+        with self.assertRaises(RuntimeError):
+            xd.resolve_cursor(read, self.UI, self.OFF)
+
+    def test_a_node_failing_isvalidindex_is_refused_not_trusted(self):
+        # CUtlLinkedList::IsValidIndex (utllinkedlist.h:316-319) is
+        # "prev != i || next == i" - false exactly when prev == i AND
+        # next != i, a freed/never-linked slot, not CWindowStack::Current().
+        read = self._fixture(active=0, total=2, prev=0, next_=1, window_ptr=self.WINDOW, cursor=9)
+        with self.assertRaises(RuntimeError):
+            xd.resolve_cursor(read, self.UI, self.OFF)
+
+    def test_a_null_window_pointer_is_refused(self):
+        read = self._fixture(active=0, total=1, prev=0, next_=0, window_ptr=0, cursor=1)
+        with self.assertRaises(RuntimeError):
+            xd.resolve_cursor(read, self.UI, self.OFF)
+
+
 if __name__ == "__main__":
     unittest.main()
