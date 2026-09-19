@@ -4729,6 +4729,74 @@ unverified in this document; read them off divergence #53's seeding
 before the table exists, or Standard silently binds Fire to a button the
 pad never sends.
 
+## XM tooling — synthetic pad input for live verification (proposed 2026-09-19)
+
+**Why this exists.** Since item 4, nearly every XM.1 screen has only ever
+been verified by booting to a static screenshot - never confirmed to
+actually respond correctly to real pad input, because there was no way to
+simulate a button press. Named explicitly, repeatedly, as "NOT verified
+live... needs a pad" for items 4, 6, 7, 8, 9, 10, 12 and 13. Item 5
+(Controller: scheme switching, live rebinding) is the next unstarted XM.1
+item and is exactly the kind of screen that most needs this. `AGENTS.md`'s
+own rule stands regardless of anything below: xemu is not validation, and
+this tooling only ever narrows a gap - it never closes a phase.
+
+**Mechanism**: xemu is a real open-source project (`xemu-project/xemu`
+upstream) but this fork keeps no local checkout of it and has not built a
+custom xemu for this - the binary in daily use here
+(`G:\Games\Xemu\xemu.exe`, v0.8.136, commit `fc24584`, built 2026-06-08,
+per its own `xemu.log`) is an ordinary prebuilt release, run as-is. It
+reads whatever real controller Windows/SDL hands it, matched by SDL
+joystick GUID in `xemu.toml`. `SDL_JoystickAttachVirtual` was considered
+and rejected - it only injects into the calling process's own SDL
+instance, not a foreign process like xemu.exe. Patching xemu's own public
+SDL input path and building a custom binary was not attempted this pass -
+not because it is impossible (it demonstrably is not, the source is
+public), but because it commits this fork to building and maintaining a
+custom xemu just for testing, a materially bigger and more fragile
+undertaking than driving the existing binary from outside. The external
+route chosen instead: an OS-level virtual gamepad driver, ViGEmBus (a
+Windows kernel-mode virtual-XInput driver; archived/EOL upstream since
+2023, but still the practical current standard - its Python client
+wrapper, `vgamepad`, is itself still actively maintained) plus `vgamepad`
+to create a virtual Xbox 360 controller. If Phase 2 finds this external
+route too fragile (GUID drift across xemu versions being the likeliest
+failure), patching xemu's own SDL path directly is the fallback, not a
+closed door.
+
+**Three phases**: 1) a feasibility spike proving the mechanism works at
+all; 2) a durable harness (`tools/xemu-pad.py` for input, a new read-only
+`cursor` command in `tools/xemu-debug.py` for state verification via the
+`uiStatic.menu` → `CWindowStack` → `CMenuItemsHolder::m_iCursor` chain,
+offsets resolved live through a new C++-aware sibling to
+`tools/xbox-offsetof.sh`); 3) using that harness to actually verify
+divergence #76's still-open claim (Options → Joystick/Controls no longer
+showing Gyroscope/Adv. Controls).
+
+**Phase 1, DONE, 2026-09-19, against xemu v0.8.136 (commit `fc24584`,
+built 2026-06-08 - `xemu.log`'s own version banner; the bundled SDL2's
+own exact version is not printed anywhere and stays unknown).** Confirmed
+live: a virtual pad created via `vgamepad.VX360Gamepad()` is
+indistinguishable from real hardware to Windows (`VID_045E&PID_028E`),
+and pressing its buttons from an external Python process moved Main's
+own focus in a running xemu guest, on that exact build. Two real
+blockers found only by live experimentation, not documentation: xemu
+drops all controller input while its own window lacks OS focus unless
+`xemu.toml`'s `[input] background_input_capture = true` is set; and the
+virtual pad's SDL GUID, as computed by an external `pysdl2` probe (a
+different SDL2 build than xemu's own), did not match what xemu's own
+"press a button to bind" capture UI produced - only the latter worked.
+Whether a probe built against xemu's own exact SDL version would agree
+instead is untested; until then, capture through xemu's own UI is this
+fork's working method, not a claimed general limitation of SDL GUIDs.
+Full account: `divergences.md` #77.
+
+**Phase 2, not started.** Depends on Phase 1's findings holding up under
+the harness's own more demanding, unattended use (no human watching the
+window to notice a missed press).
+
+**Phase 3, not started.** Depends on Phase 2.
+
 ## XN — Networking over lwIP (proposed 2026-09-17, optional to the spine)
 
 **Why this exists now:** the menu design of 2026-09-17 asks for eight
