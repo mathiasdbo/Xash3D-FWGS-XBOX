@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — synthetic pad input for live menu verification (dev tooling)
+
+Every screen this fork has shipped since Options was rebuilt has only ever
+been checked with a static boot screenshot, never confirmed to actually
+respond to a real button press - there was no way to simulate one. Three
+new `tools/` scripts close that gap: `xemu-pad.py` drives a virtual Xbox
+360 controller (via ViGEmBus/vgamepad) into a running xemu instance,
+`xemu-debug.py` gained a read-only `cursor` command that reads the
+currently-focused menu item straight out of guest memory, and
+`xemu-pad-scenario.py` composes the two into scripted "press, wait,
+verify" walks. First real use: `tools/verify-entry-76.py` navigated Main
+-> Options -> Controls and Main -> Options -> Joystick with a real
+synthetic press and confirmed live what had only been claimed from source
+before - neither screen shows its PC-only row (Adv. Controls, Gyroscope).
+None of this ships to a disc or changes runtime behaviour on any
+platform; see `docs/r3d/divergences.md` #76-#80 for the full detail,
+including two live navigation surprises a source read alone would not
+have caught.
+
 ### Removed — PC-only menu screens that had no place on Xbox
 
 Options no longer offers a Gyroscope or Advanced Controls row (neither

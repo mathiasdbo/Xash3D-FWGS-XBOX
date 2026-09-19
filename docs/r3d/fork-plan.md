@@ -4811,8 +4811,25 @@ Codex review round 2 found two more real bugs in the harness itself
 could leave the virtual pad stuck holding a button down for the rest
 of a session) - both fixed, `divergences.md` #79.
 
-**Phase 3, not started.** Depends on Phase 2 (done) and calibrating the
-auto-repeat finding above before trusting an exact step count.
+**Phase 3, DONE 2026-09-19.** `tools/verify-entry-76.py`, built on Phase 2's
+harness, navigated Main -> Options -> Controls and Main -> Options ->
+Joystick with a real synthetic press, screenshotting each and confirming
+divergence #76's own still-open claim: neither screen shows its PC-only
+row (Adv. Controls, Gyroscope). Live testing overturned assumptions a
+source read alone had gotten wrong - Main to Options is five Down
+presses, not three (AdjustCursor skips two always-hidden array slots the
+same way `divergences.md` #78 already knew Main did); Options, Controls
+and Gamepad all start their own item array with a decorative banner
+picture, shifting every real button one index higher than a naive count
+of `AddButton` calls suggests - a first version of the script, unaware of
+this, checked the wrong index and would have passed even with a
+forbidden row restored there, caught by an actual live run popping the
+wrong button's own confirmation dialog. The fixed script activates each
+screen's own OK/Done button and confirms, by window pointer, that doing
+so closes back to Options rather than opening a third window. The
+auto-repeat finding above needed a longer settle between presses (400ms),
+not a shorter hold, to actually stop reproducing. Full account:
+`divergences.md` #80; the result itself is recorded on #76.
 
 ## XN — Networking over lwIP (proposed 2026-09-17, optional to the spine)
 

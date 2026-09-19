@@ -124,6 +124,16 @@ class Scenario:
         Raises ScenarioError - wrapping whatever xemu-debug.py's own cmd_cursor
         raised - if the guest isn't verifiably running the given exe, or the
         window-stack node it resolved fails its own validity check."""
+        return self.cursor_and_window()[0]
+
+    def cursor_and_window(self):
+        """Like cursor(), but also returns the CMenuBaseWindow* the cursor
+        belongs to - a cursor NUMBER alone cannot tell two different windows
+        apart (index 1 on Options' own screen means something different than
+        index 1 inside a submenu it opens), and a caller that needs to prove
+        "this is genuinely the same window as before", not merely "the cursor
+        happens to read the same number", needs the pointer, not just the
+        int cursor() throws away."""
         syms = xd.load_map_symbols(self.map_path)
         uistatic_sym = next((k for k in syms if k.endswith("uiStatic@@3UuiStatic_t@@A")), None)
         if uistatic_sym is None:
@@ -136,10 +146,10 @@ class Scenario:
             with xd.GdbRemote(self.host, self.port) as g:
                 a = argparse.Namespace(map=self.map_path, exe=self.exe_path)
                 xd.check_identity(g, a, data, "scenario")
-                cursor, _window_ptr = xd.resolve_cursor(g.read_mem, uistatic_addr, off)
+                cursor, window_ptr = xd.resolve_cursor(g.read_mem, uistatic_addr, off)
         except RuntimeError as e:
             raise ScenarioError(str(e)) from e
-        return cursor
+        return cursor, window_ptr
 
     def screenshot(self, out_path, width=640, height=480, bpp=32):
         """Shells out to xemu-debug.py's own screenshot command rather than
