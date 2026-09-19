@@ -31,6 +31,13 @@ Controller screen, is now staged onto every Xbox disc build the same way
 the legend's own button glyph already is. Nothing loads this image yet -
 see `docs/r3d/divergences.md` #83.
 
+### Added — the Controller screen's Settings sub-screen (dev groundwork, not yet in any menu)
+
+A new screen: one look-sensitivity slider (replacing four separate raw
+sliders), invert look, vibration, and the on-screen-keyboard toggle
+carried over from the old gamepad screen. Not reachable from any menu
+yet - see `docs/r3d/divergences.md` #84.
+
 ### Added — synthetic pad input for live menu verification (dev tooling)
 
 Every screen this fork has shipped since Options was rebuilt has only ever

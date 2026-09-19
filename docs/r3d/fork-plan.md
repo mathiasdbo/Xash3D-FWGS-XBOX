@@ -3358,9 +3358,19 @@ toggle has no setting behind it (item 8).
    Controller screen's Duke diagram (`assets/gfx/shell/duke.tga`) is now
    staged onto every Xbox disc build (`tools/xbox-xiso.sh`,
    `divergences.md` #83, verified with a real `hl` disc build). Nothing
-   in any menu calls either yet. Remaining: the Controller screen itself
-   (rewrites `Gamepad.cpp`), the Settings sub-screen (new file), and the
-   Customize sub-screen (rewrites `Controls.cpp`).
+   in any menu calls either yet. The Settings sub-screen
+   (`3rdparty/mainui/menus/ControllerSettings.cpp`, mainui submodule,
+   `xm1/controller-settings`) is built too - look sensitivity, invert
+   look, vibration, and the on-screen-keyboard toggle carried over from
+   the old Gamepad screen (`divergences.md` #84) - not reachable from
+   any menu yet either. **Reordered from this note's own original 3-4-5
+   listing**: the Controller screen's own Settings…/Customize… buttons
+   need those two sub-screens to already exist to compile against, so
+   this session builds Settings and Customize first and the Controller
+   screen (which wires buttons to both) last - a sequencing change
+   only, not a design one. Remaining: the Customize sub-screen (rewrites
+   `Controls.cpp`) and the Controller screen itself (rewrites
+   `Gamepad.cpp`).
 6. **Audio** (`Audio.cpp`): Sound / Music / HEV suit volume (`volume` /
    `MP3Volume` / `suitvolume`, `:64-66`) as D-pad-adjusted rows; Speaker
    output a read-only row from the Dashboard. Hidden: `room_off` /
