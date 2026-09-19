@@ -331,6 +331,59 @@ void Joy_FinalizeMove( float *fw, float *side, float *dpitch, float *dyaw )
 			}
 		}
 
+#if XASH_XBOX
+		// Re-routing which physical axis drives which logical one leaves
+		// every joyaxis[] slot holding whatever the OLD routing last wrote
+		// there - SDL only fires an axis-motion event when a physical
+		// axis's own raw value actually changes, so a stick released
+		// AFTER this remap sends its "back to centre" event to its NEW
+		// logical slot, never to the old one. Without this, that old
+		// slot's stale nonzero value keeps driving movement/look every
+		// frame from here on, forever, until the same physical axis
+		// happens to cross that exact value again under whatever new role
+		// it was just given. Found by Codex review, resonance3d
+		// docs/r3d/divergences.md #82 (XM.1 item 5's own controller
+		// schemes, which swap this cvar live while a stick may still be
+		// displaced from navigating the menu that triggered the swap).
+		// Guarded to Xbox only, not shipped as an unguarded behaviour
+		// change: this project's own divergence policy (docs/r3d/
+		// divergences.md's own "Format" section, item 5) forbids
+		// changing behaviour with no #ifdef unless the fix has already
+		// gone upstream, which this has not - no other platform's own
+		// code changes this cvar at runtime today either, so nothing on
+		// PC currently exercises the bug this closes, but leaving it
+		// unguarded would still be exactly the policy violation Codex
+		// review's own second round caught here.
+		//
+		// A plain memset() here was Codex review's own first catch, not
+		// the fix: JOY_AXIS_RT/LT derive a DIGITAL Key_Event(down/up) from
+		// crossing joy_rt_threshold/joy_lt_threshold (Joy_ProcessTrigger,
+		// above), and JOY_AXIS_SIDE/FWD derive a synthesized menu hat
+		// direction the same way (Joy_ProcessStick's own
+		// Joy_GetHatValueForAxis/Joy_HatMotionEvent call, gated to
+		// key_menu/key_console - exactly the state this function's own
+		// caller is always in). A trigger or stick already held past its
+		// threshold at the moment of this remap would have its history
+		// erased by a bare reset, so the FUTURE release event - now
+		// arriving as "value == the already-zeroed cached value" - never
+		// fires Joy_AxisMotionEvent's own early-out at all (:282-283),
+		// leaving that key's own down state latched with nothing left to
+		// release it. Routing every axis through its OWN existing
+		// process function with value 0, instead of overwriting its
+		// state directly, reuses that function's own already-correct
+		// edge detection - a currently-active trigger or hat correctly
+		// fires its release Key_Event exactly as it would for a real
+		// physical release to zero, and PITCH/YAW (which derive no
+		// digital key from their value at all) are left cleanly zeroed
+		// either way.
+		Joy_ProcessTrigger( JOY_AXIS_RT, 0 );
+		Joy_ProcessTrigger( JOY_AXIS_LT, 0 );
+		Joy_ProcessStick( JOY_AXIS_SIDE, 0 );
+		Joy_ProcessStick( JOY_AXIS_FWD, 0 );
+		Joy_ProcessStick( JOY_AXIS_PITCH, 0 );
+		Joy_ProcessStick( JOY_AXIS_YAW, 0 );
+#endif // XASH_XBOX
+
 		ClearBits( joy_axis_binding.flags, FCVAR_CHANGED );
 	}
 

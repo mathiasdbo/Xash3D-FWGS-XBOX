@@ -4,7 +4,29 @@
 # bypassing the /codex:adversarial-review slash command, which carries
 # disable-model-invocation: true and so cannot be triggered autonomously.
 #
-#   tools/codex-review.sh [--base <ref>] [extra focus text...]
+#   tools/codex-review.sh [--base <ref>] [--repo <path>] [extra focus text...]
+#
+#   tools/codex-review.sh --repo 3rdparty/mainui --base resonance3d
+#
+# --repo <path>: several submodules (3rdparty/mainui chief among them) are
+# their OWN git repos with their own remote and their own default branch
+# (mainui's is "resonance3d", not "main") - `git merge-base`/`--cwd` both
+# need to run IN that repo, not this one, to review one of its own
+# branches. Found the hard way: this script used to hardcode `cd` to this
+# repo unconditionally, so running it from inside a submodule still
+# silently reviewed the OUTER repo's history (whatever "main"/HEAD meant
+# there), not the submodule's real diff.
+# `docs/r3d/codex-review-focus.md` is always read from THIS repo regardless
+# of --repo - the review policy it states is project-wide, not per-submodule.
+#
+# --base has NO default when --repo is given: --base's own default,
+# "main", is this repo's own default branch name, not necessarily the
+# target repo's - 3rdparty/mainui has no "main" ref at all, so
+# `--repo 3rdparty/mainui` alone would resolve `git merge-base main HEAD`
+# against a ref that plain does not exist there and exit before reviewing
+# anything (a loud failure, not a false clean result, but still a footgun
+# Codex review's own second round caught in this exact script). Guessing
+# the right base per submodule is more fragile than just requiring it.
 #
 # Replaces .claude/workflows/pr-review.js (deleted 2026-09-07): that
 # workflow's 6-lens/3-refuter fan-out cost 25-37 Claude subagent calls and
@@ -19,10 +41,12 @@
 # poll for output rather than a short foreground wait.
 set -u
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$REPO" || exit 1
+TOOLS_REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$TOOLS_REPO"
 
 BASE="main"
+BASE_GIVEN=0
+REPO_GIVEN=0
 # gpt-5.6-sol, not the account's own configured default (gpt-5.6-terra,
 # ~/.codex/config.toml): sol's own model-cache entry advertises a lower
 # default reasoning effort (low vs terra's medium) for the same "everyday
@@ -43,6 +67,14 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--base)
 			BASE="$2"
+			BASE_GIVEN=1
+			shift 2
+			;;
+		--repo)
+			# Resolved against the CALLER's cwd, before any `cd` below -
+			# same convention codex-companion.mjs's own --cwd already uses.
+			REPO="$(cd "$2" && pwd)" || exit 1
+			REPO_GIVEN=1
 			shift 2
 			;;
 		*)
@@ -51,6 +83,16 @@ while [ $# -gt 0 ]; do
 			;;
 	esac
 done
+
+if [ "$REPO_GIVEN" -eq 1 ] && [ "$BASE_GIVEN" -eq 0 ]; then
+	echo "codex-review: --repo given without --base - refusing to guess." >&2
+	echo "  --base defaults to \"main\", THIS repo's own default branch, not" >&2
+	echo "  necessarily $REPO's. Pass the target repo's own base explicitly," >&2
+	echo "  e.g. --repo 3rdparty/mainui --base resonance3d." >&2
+	exit 1
+fi
+
+cd "$REPO" || exit 1
 
 # Dynamic version resolution, not hardcoded: hardcoding e.g. "1.0.6" here
 # would go stale the moment the plugin updates, and would then fail against
@@ -87,7 +129,7 @@ if [ -z "$MERGE_BASE" ]; then
 	exit 1
 fi
 
-FOCUS_FILE="$REPO/docs/r3d/codex-review-focus.md"
+FOCUS_FILE="$TOOLS_REPO/docs/r3d/codex-review-focus.md"
 if [ ! -f "$FOCUS_FILE" ]; then
 	echo "codex-review: $FOCUS_FILE not found." >&2
 	exit 1

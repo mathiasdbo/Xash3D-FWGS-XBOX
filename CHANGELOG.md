@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — the controller scheme model (dev groundwork, not yet in any menu)
+
+The data and logic the upcoming Controller screen needs: three real
+controller schemes (Standard, Southpaw, Legacy) as complete profiles -
+button bindings plus stick routing - detected from and applied through
+the existing config system. Standard fixes two real mix-ups in the
+gamepad's stock defaults; Legacy keeps those defaults exactly as they
+are today, under a name, for anyone who already has them. Nothing in the
+game's menus uses this yet - see `docs/r3d/divergences.md` #82.
+
+Building this found and fixed a real, if not yet reachable, engine bug
+along the way: switching which stick drives movement vs. look
+(`joy_axis_binding`) could leave a stale analog value cached under its
+old role, latching phantom movement, look, or a held fire/use/duck
+action indefinitely if a stick or trigger was still displaced at the
+moment the routing changed. Fixed at the source; nothing calls the new
+scheme model yet, so this has no effect until the Controller screen
+itself ships.
+
 ### Added — synthetic pad input for live menu verification (dev tooling)
 
 Every screen this fork has shipped since Options was rebuilt has only ever

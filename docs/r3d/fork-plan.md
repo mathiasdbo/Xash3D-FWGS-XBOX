@@ -3346,6 +3346,18 @@ toggle has no setting behind it (item 8).
    and `tools/xbox-menu-art.py` regenerates and verifies it. What is left
    for this item is only the wiring: staging it on the disc, loading it,
    and placing the label anchors around it.
+
+   **Implementation, sequenced into five branches (2026-09-19), Phase 1
+   DONE.** `3rdparty/mainui/ControllerSchemes.h`/`.cpp` (mainui submodule,
+   `xm1/controller-schemes`) is the shared model - the four scheme
+   tables, detection, and application - every later branch here depends
+   on; full account, and a real Codex-found engine bug it fixed along the
+   way (switching `joy_axis_binding` could leave a stale cached axis
+   value driving movement/look forever), in `divergences.md` #82. Nothing
+   in any menu calls it yet. Remaining: art staging (`tools/xbox-xiso.sh`),
+   the Controller screen itself (rewrites `Gamepad.cpp`), the Settings
+   sub-screen (new file), and the Customize sub-screen (rewrites
+   `Controls.cpp`).
 6. **Audio** (`Audio.cpp`): Sound / Music / HEV suit volume (`volume` /
    `MP3Volume` / `suitvolume`, `:64-66`) as D-pad-adjusted rows; Speaker
    output a read-only row from the Dashboard. Hidden: `room_off` /
