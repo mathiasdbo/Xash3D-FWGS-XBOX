@@ -3368,9 +3368,13 @@ toggle has no setting behind it (item 8).
    need those two sub-screens to already exist to compile against, so
    this session builds Settings and Customize first and the Controller
    screen (which wires buttons to both) last - a sequencing change
-   only, not a design one. Remaining: the Customize sub-screen (rewrites
-   `Controls.cpp`) and the Controller screen itself (rewrites
-   `Gamepad.cpp`).
+   only, not a design one. The Customize sub-screen
+   (`3rdparty/mainui/menus/Controls.cpp`, mainui submodule,
+   `xm1/controller-customize`) is rewritten too - a filtered action
+   list, a locked Start row, and A/X/Y/B reassign/clear/reset/back
+   (`divergences.md` #85) - not reachable from any menu yet either.
+   Remaining: the Controller screen itself (rewrites `Gamepad.cpp`),
+   which wires buttons to both of these now-built sub-screens.
 6. **Audio** (`Audio.cpp`): Sound / Music / HEV suit volume (`volume` /
    `MP3Volume` / `suitvolume`, `:64-66`) as D-pad-adjusted rows; Speaker
    output a read-only row from the Dashboard. Hidden: `room_off` /

@@ -35,8 +35,15 @@ see `docs/r3d/divergences.md` #83.
 
 A new screen: one look-sensitivity slider (replacing four separate raw
 sliders), invert look, vibration, and the on-screen-keyboard toggle
-carried over from the old gamepad screen. Not reachable from any menu
-yet - see `docs/r3d/divergences.md` #84.
+carried over from the old gamepad screen. Not linked from the Controller
+screen yet (still unbuilt) - see `docs/r3d/divergences.md` #84.
+
+### Added — the Controller screen's Customize sub-screen (dev groundwork, not yet in any menu)
+
+The controller key-binding screen: a filtered action list showing only
+what a controller scheme actually binds, a locked row for the pause-menu
+button, and reassign/clear/reset-to-scheme controls. Not linked from the
+Controller screen yet (still unbuilt) - see `docs/r3d/divergences.md` #85.
 
 ### Added — synthetic pad input for live menu verification (dev tooling)
 
