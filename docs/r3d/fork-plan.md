@@ -3348,33 +3348,41 @@ toggle has no setting behind it (item 8).
    for this item is only the wiring: staging it on the disc, loading it,
    and placing the label anchors around it.
 
-   **Implementation, sequenced into five branches (2026-09-19), Phases 1-2
-   DONE.** `3rdparty/mainui/ControllerSchemes.h`/`.cpp` (mainui submodule,
-   `xm1/controller-schemes`) is the shared model - the four scheme
-   tables, detection, and application - every later branch here depends
-   on; full account, and a real Codex-found engine bug it fixed along the
-   way (switching `joy_axis_binding` could leave a stale cached axis
-   value driving movement/look forever), in `divergences.md` #82. The
-   Controller screen's Duke diagram (`assets/gfx/shell/duke.tga`) is now
-   staged onto every Xbox disc build (`tools/xbox-xiso.sh`,
-   `divergences.md` #83, verified with a real `hl` disc build). Nothing
-   in any menu calls either yet. The Settings sub-screen
-   (`3rdparty/mainui/menus/ControllerSettings.cpp`, mainui submodule,
-   `xm1/controller-settings`) is built too - look sensitivity, invert
-   look, vibration, and the on-screen-keyboard toggle carried over from
-   the old Gamepad screen (`divergences.md` #84) - not reachable from
-   any menu yet either. **Reordered from this note's own original 3-4-5
-   listing**: the Controller screen's own Settings…/Customize… buttons
-   need those two sub-screens to already exist to compile against, so
-   this session builds Settings and Customize first and the Controller
-   screen (which wires buttons to both) last - a sequencing change
-   only, not a design one. The Customize sub-screen
-   (`3rdparty/mainui/menus/Controls.cpp`, mainui submodule,
-   `xm1/controller-customize`) is rewritten too - a filtered action
-   list, a locked Start row, and A/X/Y/B reassign/clear/reset/back
-   (`divergences.md` #85) - not reachable from any menu yet either.
-   Remaining: the Controller screen itself (rewrites `Gamepad.cpp`),
-   which wires buttons to both of these now-built sub-screens.
+   **Implementation, sequenced into five branches (2026-09-19), all five
+   built.** `3rdparty/mainui/ControllerSchemes.h`/`.cpp` (mainui
+   submodule, `xm1/controller-schemes`) is the shared model - the four
+   scheme tables, detection, and application; full account, and a real
+   Codex-found engine bug it fixed along the way (switching
+   `joy_axis_binding` could leave a stale cached axis value driving
+   movement/look forever), in `divergences.md` #82. The Duke diagram
+   (`assets/gfx/shell/duke.tga`) is staged onto every Xbox disc build
+   (`tools/xbox-xiso.sh`, `divergences.md` #83). The Settings sub-screen
+   (`ControllerSettings.cpp`, `xm1/controller-settings`) - look
+   sensitivity, invert look, vibration, the on-screen-keyboard toggle
+   carried over from the old Gamepad screen - and the Customize
+   sub-screen (`Controls.cpp` rewritten in place, `xm1/controller-
+   customize`) - a filtered action list, a locked Start row, A/X/Y/B
+   reassign/clear/reset/back - are both built (`divergences.md` #84,
+   #85). **Reordered from this note's own original 3-4-5 listing**: the
+   Controller screen's own Settings…/Customize… buttons need those two
+   sub-screens to already exist to compile against, so this session
+   built Settings and Customize before the Controller screen that wires
+   buttons to both - a sequencing change only, not a design one.
+   Finally, `Gamepad.cpp` itself is rewritten into the real Controller
+   screen - the Scheme switch, description, Duke diagram with its
+   eight-item live mapping list, and the two sub-screen buttons, all
+   tied together (`divergences.md` #86). Submodule PRs for all five
+   merged; main-repo pointer-bump PRs for the first four merged, the
+   fifth open as of this note. **Live pad verification was attempted,
+   not just deferred, and remains genuinely incomplete** (`divergences.md`
+   #86's own detailed account) - a real disc built and booted clean, but
+   synthetic pad input never reached the guest across four independent
+   troubleshooting attempts, a local xemu/ViGEmBus tooling problem this
+   session could not resolve, unrelated to this branch's own code
+   (already reviewed and fixed across four rounds). Carried forward as a
+   tracked gap for whoever next has a working pad-input setup to close,
+   for #84/#85 too, since this screen is the first real on-screen path to
+   either.
 6. **Audio** (`Audio.cpp`): Sound / Music / HEV suit volume (`volume` /
    `MP3Volume` / `suitvolume`, `:64-66`) as D-pad-adjusted rows; Speaker
    output a read-only row from the Dashboard. Hidden: `room_off` /

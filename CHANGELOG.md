@@ -5,45 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
-### Added — the controller scheme model (dev groundwork, not yet in any menu)
+### Added — a Controller screen with real, named control schemes
 
-The data and logic the upcoming Controller screen needs: three real
-controller schemes (Standard, Southpaw, Legacy) as complete profiles -
-button bindings plus stick routing - detected from and applied through
-the existing config system. Standard fixes two real mix-ups in the
-gamepad's stock defaults; Legacy keeps those defaults exactly as they
-are today, under a name, for anyone who already has them. Nothing in the
-game's menus uses this yet - see `docs/r3d/divergences.md` #82.
+The Xbox pad's own settings screen, rebuilt from the ground up. Pick
+Standard, Southpaw (sticks swapped), or Legacy (today's stock defaults,
+under a name) from one row, see what every button does on a picture of
+the pad, and apply it immediately - Standard also fixes two real
+mix-ups in the gamepad's old stock defaults. From there:
 
-Building this found and fixed a real, if not yet reachable, engine bug
-along the way: switching which stick drives movement vs. look
-(`joy_axis_binding`) could leave a stale analog value cached under its
-old role, latching phantom movement, look, or a held fire/use/duck
-action indefinitely if a stick or trigger was still displaced at the
-moment the routing changed. Fixed at the source; nothing calls the new
-scheme model yet, so this has no effect until the Controller screen
-itself ships.
+- **Settings**: one look-sensitivity slider (replacing four separate raw
+  sliders), invert look, vibration, and the on-screen-keyboard toggle
+  carried over from the old gamepad screen.
+- **Customize**: reassign or clear any individual button, or reset back
+  to the active scheme with one press. The pause-menu button is shown
+  but can't be reassigned or cleared - it's the only way back to the
+  menu from gameplay.
 
-### Added — the Controller screen's diagram art now ships on disc (dev groundwork, not yet in any menu)
-
-`assets/gfx/shell/duke.tga`, the Duke diagram baked for the upcoming
-Controller screen, is now staged onto every Xbox disc build the same way
-the legend's own button glyph already is. Nothing loads this image yet -
-see `docs/r3d/divergences.md` #83.
-
-### Added — the Controller screen's Settings sub-screen (dev groundwork, not yet in any menu)
-
-A new screen: one look-sensitivity slider (replacing four separate raw
-sliders), invert look, vibration, and the on-screen-keyboard toggle
-carried over from the old gamepad screen. Not linked from the Controller
-screen yet (still unbuilt) - see `docs/r3d/divergences.md` #84.
-
-### Added — the Controller screen's Customize sub-screen (dev groundwork, not yet in any menu)
-
-The controller key-binding screen: a filtered action list showing only
-what a controller scheme actually binds, a locked row for the pause-menu
-button, and reassign/clear/reset-to-scheme controls. Not linked from the
-Controller screen yet (still unbuilt) - see `docs/r3d/divergences.md` #85.
+See `docs/r3d/divergences.md` #82-#86 for the full account, including a
+real engine bug (stale analog input after switching which stick drives
+movement vs. look) found and fixed along the way.
 
 ### Added — synthetic pad input for live menu verification (dev tooling)
 
