@@ -5,6 +5,30 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — a fix for the recurring live-verification test-environment blocker
+
+Every X9 live-boot attempt so far had silently failed for the same
+reason: this fork's own packaging tools give every XBE the identical
+hardcoded certificate TitleID, so every test boot on the shared xemu
+test HDD writes into the exact same `E:\UDATA\<TitleID>\valve\`
+directory, and a stale `video.cfg` left there by any earlier, unrelated
+boot permanently shadows a fresh disc's own copy. A new one-shot tool,
+`tools/xbox-e-wipe`, mounts E: and deletes exactly `video.cfg` and its
+own interrupted-write staging file - nothing else in that directory
+(not the whole TitleID directory another nxdk homebrew project could in
+principle also be using, and not this fork's own real config/save data
+sitting right alongside it). Running it and rebooting fixed the blocker
+for real: for the first time, a live boot reached
+`ref/nv2a`'s own `R_Init` and ran it to completion, confirmed by reading
+guest memory directly.
+
+That surfaced a second, different problem: the engine now hangs before
+ever presenting a first real frame, and a control test confirmed this
+is not specific to the still-in-progress NV2A renderer - the already-
+working software renderer hits the identical hang on the same disc.
+This second issue remains open; see `docs/r3d/divergences.md` #92 for
+the full account.
+
 ### Added — the first four slices of the NV2A hardware renderer (not yet verified running)
 
 A new `ref/nv2a` module builds and links into the engine, meant to drive

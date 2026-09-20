@@ -728,6 +728,18 @@ static void R_FillTriAPI( triangleapi_t *api )
    initialised. */
 uint32_t debug_marker;
 int32_t  debug_pb_status;
+/* Increments once per R_EndFrame call that actually reaches the real
+   draw path (nv2a_ready true) - the concrete answer to "is this module's
+   own per-frame code running at all, repeatedly, in real time" that a
+   single memory snapshot of debug_marker/nv2a_ready cannot give: those
+   two only prove R_Init finished successfully once, not that the engine
+   ever calls back into this module's own frame loop afterward. Read the
+   same way as debug_marker (mem <addr> 4), twice with a real delay
+   between reads - a live boot with the engine actually driving this
+   module every frame shows this incrementing; a boot that never gets
+   back here (stuck elsewhere before the first frame, or stuck in this
+   same frame) shows it static. */
+uint32_t debug_frame_count;
 
 static qboolean pb_initialized;
 
@@ -1447,6 +1459,8 @@ static void R_EndFrame( void )
 {
 	if( !nv2a_ready )
 		return;
+
+	debug_frame_count++;
 
 	pb_wait_for_vbl();
 	pb_reset();
