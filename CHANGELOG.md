@@ -25,6 +25,16 @@ See `docs/r3d/divergences.md` #82-#86 for the full account, including a
 real engine bug (stale analog input after switching which stick drives
 movement vs. look) found and fixed along the way.
 
+### Fixed — Options no longer has a stale second door into Customize
+
+The standalone "Controls" row on the Options screen used to open the
+same screen the Controller screen's own Customize button does, but
+with an outdated "keyboard and mouse" label left over from before that
+screen became gamepad-only. Hidden, since Customize is already
+reachable properly from Controller. "Video" is also renamed to
+"Display", matching its own rebuilt screen. See `docs/r3d/divergences.md`
+#87.
+
 ### Added — synthetic pad input for live menu verification (dev tooling)
 
 Every screen this fork has shipped since Options was rebuilt has only ever

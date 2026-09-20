@@ -3265,9 +3265,23 @@ toggle has no setting behind it (item 8).
    heap-allocates the button and stores it in `m_apBtns` with
    `m_iBtnsNum` incremented in the same statement, exactly matching
    `AddButton()`'s own ownership contract - only the `SetPicture()` call
-   is left out). Controls and Video stay exactly as stock for now,
-   pointing at their PC screens - not a final state, the next honest
-   step once 5 or 7 lands.
+   is left out).
+
+   **DONE, 2026-09-20 - the dependency was cleared.** Once items 5 and 7
+   both actually landed, the "Video" row renamed to "Display" (the same
+   rule item 5's own "Controller" rename already applied), and the
+   standalone "Controls" button hid entirely rather than renaming to
+   "Controller" as this bullet's own original text expected - the actual
+   implementation took a different path than planned here: item 5
+   renamed the *Joystick* row to "Controller" instead, leaving `Controls.cpp`
+   itself to become the Controller screen's own Customize sub-screen
+   (divergence #85), reachable only through it. Keeping the old
+   "Controls" button pointing directly at that now-repurposed screen
+   would have been a second, stale-labelled door into it, not a
+   simplification - hidden instead, matching how this fork already
+   retires a screen's old direct entry point once a new one absorbs its
+   role (`Video.cpp`'s hub, `AdvancedControls.cpp`). Full account in
+   `divergences.md` #87.
 5. **Controller** (replaces `Gamepad.cpp` in place; `Controls.cpp` becomes
    its Customize sub-screen) - three screens. **Scheme**: Standard /
    Southpaw / Legacy / Custom as one horizontal row with a description
