@@ -5,6 +5,17 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — the first slice of the NV2A hardware renderer (not yet verified running)
+
+A new `ref/nv2a` module builds and links into the engine, meant to drive
+the Xbox's own GPU through the real renderer-selection path and draw one
+fixed textured triangle every frame - real geometry, lighting, and the
+rest of the hardware renderer are follow-on work. Its build/link/selection
+wiring is verified correct by direct memory inspection, but a live boot
+has not yet actually exercised it (a test-environment issue, not a known
+code defect - see `docs/r3d/divergences.md` #88 for the full account and
+what's still unproven).
+
 ### Added — a Controller screen with real, named control schemes
 
 The Xbox pad's own settings screen, rebuilt from the ground up. Pick

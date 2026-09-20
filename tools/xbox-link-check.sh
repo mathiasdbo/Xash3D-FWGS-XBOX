@@ -690,6 +690,46 @@ done
 STUB_GAME_OBJS="$STUB_GAME_OBJS $REF_SOFT_OBJS"
 echo "xbox-link-check: ref_soft registered in the static library table (real, isolated GetRefAPI)." >&2
 
+# ref_nv2a: X9 bring-up. A minimal ref_interface_t - everything but
+# R_Init/R_Shutdown/R_EndFrame is a no-op stub copied from ref/null/
+# r_context.c - whose only real job is proving pbkit can drive the NV2A
+# through the actual engine ref-module path: R_Init brings up pbkit
+# (reusing tools/x4-triangle's own already-proven, linear-texture-only
+# init sequence), and R_EndFrame draws one fixed textured triangle every
+# frame and presents it. No MPAK-derived geometry, no register combiners
+# beyond the single stage X4 already proved, no swizzled textures (X4's
+# own open defect stays untouched) - see docs/r3d/fork-plan.md's X9
+# section and docs/r3d/divergences.md for the rest of what's deliberately
+# out of scope. Registered the same way ref_soft was: compiled and
+# isolated by tools/xbox-ref-isolate.sh, auto-tried by R_Init()'s own
+# renderer loop because tools/xbox-cc.sh compiles the engine with
+# XASH_REF_NV2A_ENABLED=1 - but selected explicitly via `r_refdll "nv2a"`
+# in a disc's video.cfg for this bring-up, so it never silently displaces
+# the already-working ref_soft in the auto-try order.
+REF_NV2A_EXPORTS_C="$SCRATCH/gen/generated_lib_ref_nv2a_exports.c"
+if [ ! -f "$REF_NV2A_EXPORTS_C" ]; then
+	echo "xbox-link-check: $REF_NV2A_EXPORTS_C does not exist." >&2
+	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
+	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	exit 1
+fi
+REF_NV2A_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$REF_NV2A_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
+if ! tools/xbox-cc.sh "$REF_NV2A_EXPORTS_C" -o "$REF_NV2A_EXPORTS_OBJ" 2>"$SCRATCH/gen/stub-lasterr.txt"; then
+	echo "xbox-link-check: generated_lib_ref_nv2a_exports.c failed to compile:" >&2
+	cat "$SCRATCH/gen/stub-lasterr.txt" >&2
+	exit 2
+fi
+if ! REF_NV2A_ISO_DIR="$(bash tools/xbox-ref-isolate.sh nv2a)"; then
+	echo "xbox-link-check: tools/xbox-ref-isolate.sh nv2a failed - see above." >&2
+	exit 2
+fi
+REF_NV2A_OBJS="$REF_NV2A_EXPORTS_OBJ"
+for o in "$REF_NV2A_ISO_DIR"/*.obj; do
+	[ -f "$o" ] && REF_NV2A_OBJS="$REF_NV2A_OBJS $o"
+done
+STUB_GAME_OBJS="$STUB_GAME_OBJS $REF_NV2A_OBJS"
+echo "xbox-link-check: ref_nv2a registered in the static library table (real, isolated GetRefAPI)." >&2
+
 for f in stub_game/server/server_stub.c "$SCRATCH/gen/generated_lib_server_exports.c" "$SCRATCH/gen/generated_lib_client_exports.c"; do
 	if [ ! -f "$f" ]; then
 		echo "xbox-link-check: $f does not exist." >&2

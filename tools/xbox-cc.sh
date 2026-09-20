@@ -205,14 +205,16 @@ if [ ! -f "$GEN_DIR/generated_library_tables.h" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_menu_exports.c" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ] \
 	|| [ ! -f "$GEN_DIR/generated_lib_ref_null_exports.c" ] \
-	|| [ ! -f "$GEN_DIR/generated_lib_ref_soft_exports.c" ]; then
+	|| [ ! -f "$GEN_DIR/generated_lib_ref_soft_exports.c" ] \
+	|| [ ! -f "$GEN_DIR/generated_lib_ref_nv2a_exports.c" ]; then
 	GEN_STALE=1
 elif [ "$REPO/stub_game/server/exports.txt" -nt "$GEN_DIR/generated_lib_server_exports.c" ] \
 	|| [ "$REPO/stub_game/client/exports.txt" -nt "$GEN_DIR/generated_lib_client_exports.c" ] \
 	|| [ "$REPO/3rdparty/mainui/exports.txt" -nt "$GEN_DIR/generated_lib_menu_exports.c" ] \
 	|| [ "$REPO/filesystem/exports.txt" -nt "$GEN_DIR/generated_lib_filesystem_stdio_exports.c" ] \
 	|| [ "$REPO/ref/null/exports.txt" -nt "$GEN_DIR/generated_lib_ref_null_exports.c" ] \
-	|| [ "$REPO/ref/soft/exports.txt" -nt "$GEN_DIR/generated_lib_ref_soft_exports.c" ]; then
+	|| [ "$REPO/ref/soft/exports.txt" -nt "$GEN_DIR/generated_lib_ref_soft_exports.c" ] \
+	|| [ "$REPO/ref/nv2a/exports.txt" -nt "$GEN_DIR/generated_lib_ref_nv2a_exports.c" ]; then
 	GEN_STALE=1
 fi
 if [ "$GEN_STALE" = "1" ]; then
@@ -223,6 +225,7 @@ if [ "$GEN_STALE" = "1" ]; then
 		"filesystem_stdio:$REPO/filesystem/exports.txt" \
 		"ref_null:$REPO/ref/null/exports.txt" \
 		"ref_soft:$REPO/ref/soft/exports.txt" \
+		"ref_nv2a:$REPO/ref/nv2a/exports.txt" \
 		> /dev/null
 fi
 
@@ -326,6 +329,15 @@ ENGINE_DEFINES=(
 	                              # video.cfg (`r_refdll ""`) then selects soft
 	                              # through R_Init()'s own loop, ref_null
 	                              # staying the last resort it always was.
+	-DXASH_REF_NV2A_ENABLED=1     # X9 bring-up: same mechanism as
+	                              # XASH_REF_SOFT_ENABLED above, puts "nv2a" in
+	                              # R_CollectRendererNames()'s auto-try list.
+	                              # ref/nv2a + ref/common are compiled and
+	                              # linked by tools/xbox-link-check.sh; a
+	                              # disc's video.cfg selects it explicitly
+	                              # (`r_refdll "nv2a"`) rather than relying on
+	                              # auto-try order, so it never silently
+	                              # displaces the already-working ref_soft.
 	-DXASH_LOW_MEMORY=1           # X3: upstream's own low-memory mode, level 1
 	                              # (the level MotoMAGX ships with, wscript:288;
 	                              # level 2 changes the protocol, 1 does not -

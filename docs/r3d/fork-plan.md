@@ -7373,6 +7373,31 @@ shape, and this document should not have implied it did.
 The hardware renderer, replacing X5's software path against a picture already
 known to be correct, consuming the format XB decided.
 
+**X9-A (bring-up), 2026-09-20 - the module scaffolding and build/link/
+selection wiring are done and verified; the renderer has not yet actually
+run, and this is NOT closed as a rendering milestone.** A new `ref/nv2a/`
+module (mirroring `ref/soft`'s own structure) builds, isolates and links
+cleanly (`tools/xbox-link-check.sh` and `tools/xbox-game-link-check.sh`
+both report 0 duplicate/0 undefined with it included). Its intended job -
+reusing X4's own already-proven pbkit/VP20/fp20 sequence to draw one fixed
+textured triangle every frame, deliberately not touching MPAK geometry,
+register combiners beyond the one stage X4 proved, VP20 skinning, or X4's
+own still-open swizzled-texture defect - has not been observed happening
+even once. Runtime memory reads DID confirm every piece of the static
+module/build/link/selection wiring is correct (the renderer name
+registers, the static-library table resolves to the real linked
+`GetRefAPI`, the function table's `R_Init` entry matches this module's own
+compiled address), but `R_Init` itself was never actually entered on the
+one live boot attempted, traced to a real test-environment artifact (a
+stale `E:`-side `video.cfg` on the shared xemu HDD shadowing the disc's
+own copy, per this project's own `fs_rootdir`-before-`fs_rodir` search
+order) rather than a defect found in the module. Whether the triangle
+actually draws correctly - the thing this slice exists to prove - remains
+completely unverified and is the concrete next step, not a formality.
+Full account in `divergences.md` #88; X9-B onward (real
+geometry, combiners, skinning, lighting, the frame-time exit criterion)
+sketched in this section's own bullets below, not started.
+
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised
   SHORT only.
