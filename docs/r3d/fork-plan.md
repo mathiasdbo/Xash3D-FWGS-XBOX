@@ -7414,9 +7414,27 @@ into a fifth retry, per this project's own "stop and document" rule. One
 accepted, documented simplification (a per-vertex, not per-pixel, UV
 atlas remap - exact for a non-tiling face, visibly flat instead of
 repeating for a tiling one, which the very first real face tested happens
-to be). Full account in `divergences.md` #89; X9-C onward (combiners,
-lightmaps, skinning, lighting, the frame-time exit criterion) sketched in
-this section's own bullets below, not started.
+to be). Full account in `divergences.md` #89.
+
+**X9-C, 2026-09-20 - the real lightmap bound and combined with the
+diffuse texture, coded and statically verified; not yet seen rendering.**
+A second, genuinely new Cg shader pair (`ref/nv2a/vs_lit.vs.cg`/
+`ps_lit.ps.cg`, a second texcoord passthrough and a `diffuse × lightmap ×
+2` pixel shader) compiled fresh through `cgc`/`vp20compiler`/
+`fp20compiler` - the first slice needing a real new shader rather than a
+reused `.inl`, and the toolchain was confirmed present and working before
+committing to this approach. `nv2a_load_map_geometry()` now reads each
+vertex's own lightmap UV into a second UV pair and binds the face's real
+RGBA8 lightmap on texture stage 1. Compiles, isolates and links cleanly,
+same bar as X9-A/X9-B. Not yet observed rendering - the same live-boot
+blockers X9-B already hit apply unchanged and were not re-attempted. One
+real mistake this slice's own "compile, don't hand-derive" discipline
+caught before it could ship: an earlier round of research had guessed at
+the combiner's own register values by reading `nv_regs.h` in isolation:
+wrong, in a way the real compiler output (used instead) proved. Full
+account in `divergences.md` #90; X9-D onward (skinning, dynamic lighting,
+native alpha test, the frame-time exit criterion) sketched in this
+section's own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised

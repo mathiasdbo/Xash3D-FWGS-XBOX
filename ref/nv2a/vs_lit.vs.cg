@@ -1,0 +1,35 @@
+/*
+ * X9-C vertex shader: tools/x4-triangle/vs.vs.cg's own single-matrix
+ * transform, extended with a second texcoord passthrough (the lightmap
+ * UV) alongside the existing diffuse UV - no other change. Compiled via
+ * the same cgc -profile vp20 -> vp20compiler pipeline vs.inl already was;
+ * see docs/r3d/divergences.md's X9-C entry for the toolchain verification.
+ */
+struct vIn {
+	float4 texcoord0 : TEXCOORD0;
+	float4 texcoord1 : TEXCOORD1;
+	float4 position  : POSITION;
+};
+
+struct vOut {
+	float4 pos  : POSITION;
+	float2 tex0 : TEXCOORD0;
+	float2 tex1 : TEXCOORD1;
+};
+
+vOut main(
+	vIn              I,
+	uniform float4x4 m_viewport
+	)
+{
+	vOut   result;
+	float4 position;
+
+	position = mul(float4(I.position.xyz, 1.0f), m_viewport);
+	position.xyz = position.xyz / position.w;
+
+	result.tex0 = I.texcoord0.xy;
+	result.tex1 = I.texcoord1.xy;
+	result.pos = position;
+	return result;
+}

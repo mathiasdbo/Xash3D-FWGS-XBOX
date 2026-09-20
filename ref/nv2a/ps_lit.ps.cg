@@ -1,0 +1,20 @@
+/*
+ * X9-C pixel shader: diffuse x lightmap x 2 - the x2 matches GoldSrc's own
+ * convention of storing lightmap data at half brightness so a flat-lit
+ * surface doesn't clip. Same struct/sampler shape as tools/x4-triangle/
+ * ps.ps.cg, extended with a second sampler and texcoord for the lightmap
+ * stage.
+ */
+struct vOut {
+	float2 tex0 : TEXCOORD0;
+	float2 tex1 : TEXCOORD1;
+};
+
+float4 main(
+	vOut              I,
+	uniform sampler2D diffuseMap,
+	uniform sampler2D lightMap
+	) : COLOR
+{
+	return tex2D(diffuseMap, I.tex0.xy) * tex2D(lightMap, I.tex1.xy) * 2.0f;
+}

@@ -70,6 +70,19 @@ typedef struct
 	float uv[2];
 } __attribute__(( packed )) nv2a_test_vertex_t;
 
+/* X9-C: the real map-geometry vertex format, adding a second UV pair for
+   the lightmap stage. Position + diffuse UV stay first and in the SAME
+   layout as nv2a_test_vertex_t on purpose - attribute slots 0 (position)
+   and 9 (diffuse UV) are set up identically for both vertex formats, only
+   the new slot 10 (lightmap UV, ref/nv2a/vs_lit.vs.cg's own TEXCOORD1 -
+   confirmed by a real vp20compiler run to map there, not assumed) is new. */
+typedef struct
+{
+	float pos[3];
+	float uv0[2];
+	float uv1[2];
+} __attribute__(( packed )) nv2a_lit_vertex_t;
+
 /* Same triangle and checkerboard tools/x4-triangle/main.c already proved
    renders correctly under xemu (its own X4_TEXTURE_SWIZZLED=0 path). */
 static const nv2a_test_vertex_t nv2a_test_verts[] =
@@ -126,6 +139,11 @@ static uint32_t  nv2a_map_index_dwords[( NV2A_MAP_MAX_INDICES + 1 ) / 2];
 static uint32_t  nv2a_map_dword_count;
 static void     *nv2a_map_atlas;
 static uint32_t  nv2a_map_atlas_width, nv2a_map_atlas_height, nv2a_map_atlas_pitch;
+static void     *nv2a_map_lightmap;     /* GPU-visible, RGBA8, no format conversion needed -
+                                            LU_IMAGE_A8R8G8B8 is the same proven-working
+                                            uncompressed linear format X9-A's own checkerboard
+                                            already used, just bound on texture stage 1 */
+static uint32_t  nv2a_map_lightmap_width, nv2a_map_lightmap_height, nv2a_map_lightmap_pitch;
 static float     nv2a_map_viewproj[4][4];
 
 static void nv2a_matrix_viewport( float out[4][4], float x, float y, float width, float height, float z_min, float z_max )
@@ -278,6 +296,7 @@ typedef struct
 	mpak_lump_t indices;
 	mpak_lump_t faceDrawCmds;
 	mpak_lump_t atlas;
+	mpak_lump_t lightmapAtlas;
 } nv2a_mpak_geometry_t;
 
 static qboolean nv2a_mpak_place( fs_offset_t fileSize, fs_offset_t *cursor, uint64_t length, mpak_lump_t *out )
@@ -322,6 +341,15 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenAtlas, &out->atlas )) return false;
 
+	/* X9-C: continue the walk far enough to reach lightmapAtlas - assetDict
+	   and assetData are always empty under X2's own narrowed scope
+	   (MpakHeader.h's own note) but still real cursor steps to skip if a
+	   stale pre-narrowing archive ever declares them non-empty. */
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenAssetDict, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenAssetData, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenEntities, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLightmapAtlas, &out->lightmapAtlas )) return false;
+
 	return true;
 }
 
@@ -363,6 +391,52 @@ static void nv2a_init_shader( void )
 
 	p = pb_begin();
 	#include "ps.inl"
+	pb_end( p );
+}
+
+/* X9-C: the diffuse x lightmap x 2 program pair (ref/nv2a/vs_lit.vs.cg,
+   ps_lit.ps.cg - both real, freshly-authored Cg sources compiled through
+   the same cgc/vp20compiler/fp20compiler pipeline vs.inl/ps.inl already
+   were, verified reproducible before being committed). The NV2A only
+   holds one active vertex/pixel program at a time, so whichever draw path
+   runs this frame re-uploads its OWN program right before drawing rather
+   than both programs staying resident together - simple and correct for
+   a bring-up slice with only two draw paths, at the cost of a small,
+   irrelevant-for-correctness re-upload every frame. Otherwise identical
+   in shape to nv2a_init_shader() above. */
+static void nv2a_init_lit_shader( void )
+{
+	uint32_t *p;
+	int i;
+
+	uint32_t vs_program[] =
+	{
+		#include "vs_lit.inl"
+	};
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
+	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
+		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
+		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
+	pb_end( p );
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
+	pb_end( p );
+
+	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); i++ )
+	{
+		p = pb_begin();
+		pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
+		memcpy( p, &vs_program[i * 4], 4 * 4 );
+		p += 4;
+		pb_end( p );
+	}
+
+	p = pb_begin();
+	#include "ps_lit.inl"
 	pb_end( p );
 }
 
@@ -411,6 +485,13 @@ static void nv2a_draw_test_triangle( void )
 	uint32_t *p;
 	uint32_t tex_phys;
 	int i;
+
+	/* X9-C: the NV2A only holds one resident vertex/pixel program at a
+	   time, and nv2a_draw_map_geometry() may have uploaded its own
+	   two-texcoord/two-texture program since this path last ran - re-load
+	   this path's own single-texture program every time it draws, matching
+	   the same on-demand-upload discipline the lit path uses. */
+	nv2a_init_shader();
 
 	/* Texture stage 0: 8x8 A8R8G8B8, clamped, bilinear, LINEAR unswizzled
 	   (LU_IMAGE_A8R8G8B8) - see tools/x4-triangle/main.c's own citations
@@ -475,6 +556,12 @@ static void nv2a_draw_map_geometry( void )
 	uint32_t tex_phys;
 	uint32_t i;
 
+	/* This path's own two-texcoord/two-texture program, re-uploaded every
+	   time it draws for the same reason nv2a_draw_test_triangle() now
+	   re-uploads its own - see that function's own comment. */
+	nv2a_init_lit_shader();
+
+	/* Texture stage 0: the real DXT1 diffuse atlas, unchanged from X9-B. */
 	p = pb_begin();
 	tex_phys = (uint32_t)nv2a_map_atlas & 0x03ffffff;
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, tex_phys );
@@ -490,6 +577,41 @@ static void nv2a_draw_map_geometry( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x04074000 );
 	pb_end( p );
 
+	/* X9-C: texture stage 1, the real RGBA8 lightmap - the SAME proven
+	   uncompressed-linear path X9-A's own checkerboard used on stage 0,
+	   just at stage 1's own register offset (+0x40 per stage, tools/
+	   x4-triangle/main.c's own documented per-stage addressing), and a
+	   DIFFERENT color format (codex review, TWO rounds, real finding both
+	   times - the first fix was itself wrong): the baker writes each
+	   texel bytewise as R,G,B,A in memory (tools/asset-studio/src/
+	   formats/BspParser.cpp's writeBlock(), `page.rgba[destOffset+0..3] =
+	   R,G,B,A`). X9-A's own checkerboard uses LU_IMAGE_A8R8G8B8 correctly
+	   because it writes native uint32_t INTEGER literals (0xFFFFFFFFu
+	   etc.) matching that format's own packed-integer convention
+	   (verified against the checkerboard's own "opaque HEV orange" value,
+	   0xFFFF8000 -> A=FF,R=FF,G=80,B=00, a real orange), not raw bytes.
+	   For a raw LITTLE-ENDIAN byte buffer, the format name has to match
+	   the INTEGER that byte order forms when read as a little-endian
+	   word, not the byte order itself directly: [R,G,B,A] in memory reads
+	   as the word 0xAABBGGRR (byte0=R is the LOW byte), which is
+	   LU_IMAGE_A8B8G8R8's own name (A=MSB..R=LSB), NOT LU_IMAGE_R8G8B8A8
+	   (round 1's own fix - wrong, corrected in round 2: that name would
+	   match memory order [A,B,G,R], not this buffer's real [R,G,B,A]). */
+	p = pb_begin();
+	tex_phys = (uint32_t)nv2a_map_lightmap & 0x03ffffff;
+	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET + 0x40, tex_phys );
+	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT + 0x40,
+		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1 + 0x40, nv2a_map_lightmap_pitch << 16 );
+	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT + 0x40, ( nv2a_map_lightmap_width << 16 ) | nv2a_map_lightmap_height );
+	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS + 0x40, 0x00030303 );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0x4003ffc0 );
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER + 0x40, 0x04074000 );
+	pb_end( p );
+
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
 	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 16 );
@@ -503,8 +625,11 @@ static void nv2a_draw_map_geometry( void )
 		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
 	pb_end( p );
 
-	nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_test_vertex_t ), &nv2a_map_vb[0] );
-	nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_test_vertex_t ), &nv2a_map_vb[3] );
+	nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_lit_vertex_t ), &nv2a_map_vb[0] );
+	nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &nv2a_map_vb[3] );
+	/* Lightmap UV, attribute slot 10 - vs_lit.vs.cg's own TEXCOORD1,
+	   confirmed by a real vp20compiler run (not assumed) to map there. */
+	nv2a_set_attrib_pointer( 10, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &nv2a_map_vb[5] );
 
 	for( i = 0; i < nv2a_map_dword_count; )
 	{
@@ -623,8 +748,9 @@ static void nv2a_free_map_resources( void )
 	nv2a_map_owner = NULL;
 	nv2a_map_vert_count = 0;
 	nv2a_map_dword_count = 0;
-	if( nv2a_map_vb )    { MmFreeContiguousMemory( nv2a_map_vb );    nv2a_map_vb    = NULL; }
-	if( nv2a_map_atlas ) { MmFreeContiguousMemory( nv2a_map_atlas ); nv2a_map_atlas = NULL; }
+	if( nv2a_map_vb )       { MmFreeContiguousMemory( nv2a_map_vb );       nv2a_map_vb       = NULL; }
+	if( nv2a_map_atlas )    { MmFreeContiguousMemory( nv2a_map_atlas );    nv2a_map_atlas    = NULL; }
+	if( nv2a_map_lightmap ) { MmFreeContiguousMemory( nv2a_map_lightmap ); nv2a_map_lightmap = NULL; }
 }
 
 static qboolean R_Init( void )
@@ -883,7 +1009,7 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 {
 	nv2a_mpak_geometry_t geo;
 	nv2a_face_draw_cmd_t face;
-	nv2a_test_vertex_t local_verts[NV2A_MAP_MAX_VERTS];
+	nv2a_lit_vertex_t local_verts[NV2A_MAP_MAX_VERTS];
 	nv2a_vec3_t world_pos[NV2A_MAP_MAX_VERTS];
 	uint32_t seen_global[NV2A_MAP_MAX_VERTS];
 	uint32_t local_indices[NV2A_MAP_MAX_INDICES];
@@ -938,6 +1064,15 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 
 			memcpy( &v, buffer + geo.vertices.offset + (uint64_t)global_idx * sizeof( mpak_vertex_t ), sizeof( v ));
 
+			/* X9-C: this bring-up slice only handles a face whose vertices
+			   all sample lightmap page 0 - crossfire.mpak's own atlas has
+			   exactly one page, and this test face's own four vertices are
+			   all on it (verified in Python before writing this), but a
+			   future test face spanning more than one page must fail
+			   cleanly here, not silently sample the wrong page. */
+			if( v.lightmap_layer != 0 )
+				return false;
+
 			local = vert_count;
 			seen_global[local] = global_idx;
 			world_pos[local].x = v.x;
@@ -946,8 +1081,13 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			local_verts[local].pos[0] = v.x;
 			local_verts[local].pos[1] = v.y;
 			local_verts[local].pos[2] = v.z;
-			local_verts[local].uv[0] = v.rect[0] + ( v.u - floorf( v.u )) * v.rect[2];
-			local_verts[local].uv[1] = v.rect[1] + ( v.v - floorf( v.v )) * v.rect[3];
+			local_verts[local].uv0[0] = v.rect[0] + ( v.u - floorf( v.u )) * v.rect[2];
+			local_verts[local].uv0[1] = v.rect[1] + ( v.v - floorf( v.v )) * v.rect[3];
+			/* Lightmap UV is already page-normalized by the baker
+			   (BspParser.cpp's own lu/lv computation) - unlike the diffuse
+			   UV, no atlas-rect remap is needed here. */
+			local_verts[local].uv1[0] = v.lu;
+			local_verts[local].uv1[1] = v.lv;
 			vert_count++;
 		}
 
@@ -969,10 +1109,23 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	if( header->atlasWidth == 0 || header->atlasHeight == 0 || blocksW * blocksH * 8 != (uint64_t)geo.atlas.length )
 		return false;
 
-	nv2a_map_vb = MmAllocateContiguousMemoryEx( vert_count * sizeof( nv2a_test_vertex_t ), 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+	/* Same "don't trust dimensions independent of the lump's own real,
+	   bounds-checked length" discipline the atlas check above already
+	   established (codex review, X9-B round 2) - RGBA8 is a plain 4 bytes
+	   per texel, no block rounding needed. */
+	{
+		uint64_t expected_lm = (uint64_t)header->lightmapWidth * header->lightmapHeight * header->lightmapLayers * 4;
+
+		if( header->lightmapWidth == 0 || header->lightmapHeight == 0 || header->lightmapLayers == 0
+			|| header->lightmapFormat != 0 /* 0 = RGBA8, the only format anything bakes today */
+			|| expected_lm != (uint64_t)geo.lightmapAtlas.length )
+			return false;
+	}
+
+	nv2a_map_vb = MmAllocateContiguousMemoryEx( vert_count * sizeof( nv2a_lit_vertex_t ), 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
 	if( !nv2a_map_vb )
 		return false;
-	memcpy( nv2a_map_vb, local_verts, vert_count * sizeof( nv2a_test_vertex_t ));
+	memcpy( nv2a_map_vb, local_verts, vert_count * sizeof( nv2a_lit_vertex_t ));
 	nv2a_map_vert_count = vert_count;
 
 	nv2a_map_atlas = MmAllocateContiguousMemoryEx( geo.atlas.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
@@ -985,6 +1138,17 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	nv2a_map_atlas_width  = header->atlasWidth;
 	nv2a_map_atlas_height = header->atlasHeight;
 	nv2a_map_atlas_pitch  = (uint32_t)( blocksW * 8 ); /* same ceil(width/4)*8 the length check above already validated */
+
+	nv2a_map_lightmap = MmAllocateContiguousMemoryEx( geo.lightmapAtlas.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+	if( !nv2a_map_lightmap )
+	{
+		nv2a_free_map_resources();
+		return false;
+	}
+	memcpy( nv2a_map_lightmap, buffer + geo.lightmapAtlas.offset, geo.lightmapAtlas.length );
+	nv2a_map_lightmap_width  = header->lightmapWidth;
+	nv2a_map_lightmap_height = header->lightmapHeight;
+	nv2a_map_lightmap_pitch  = nv2a_map_lightmap_width * 4; /* RGBA8, LU_IMAGE - no block rounding */
 
 	/* Pack pairs of local indices into dwords for NV20_TCL_PRIMITIVE_3D_
 	   INDEX_DATA (see nv2a_map_index_dwords's own declaration comment for
