@@ -105,15 +105,15 @@ static void     *nv2a_tex;
 static float     nv2a_viewport[4][4];
 static int       nv2a_width, nv2a_height;
 
-/* X9-B: one real face from a real baked map, drawn instead of the fixed
-   test triangle once a map's own .mpak data is loaded. FaceDrawCmd
-   (tools/asset-studio/src/formats/PakManager.h) is a plain 2xuint32_t on
-   disk - no C++ header worth cross-including for that. */
-typedef struct { uint32_t start_index; uint32_t index_count; } nv2a_face_draw_cmd_t;
-
-#define NV2A_MAP_MAX_VERTS   16
-#define NV2A_MAP_MAX_INDICES 64
-
+/* X9-B/C drew one hard-coded real face from a real baked map, instead of
+   the fixed test triangle, once a map's own .mpak data was loaded. X9-D
+   scales this to the whole map's own real geometry - the baked index
+   buffer is already one flat, contiguous list of every face's own
+   triangles concatenated in bake order (confirmed reading
+   tools/asset-studio/src/formats/PakManager.cpp's own write sequence), so
+   drawing all of it needs no per-FaceDrawCmd lookup at all; there is no
+   longer a fixed vertex/index cap sized for one test face either - both
+   buffers below are allocated at their real, per-map size. */
 static qboolean  nv2a_map_ready;
 static const model_t *nv2a_map_owner; /* which model_t's own Mod_ProcessRenderData(create=true)
                                           populated the state below - Mod_ProcessRenderData is
@@ -135,7 +135,14 @@ static uint32_t  nv2a_map_vert_count;
    at the GPU. nv2a_map_dword_count counts DWORDS, not logical indices -
    an odd logical index count pads its final dword by repeating the last
    real index (a harmless degenerate triangle, not corrupt data). */
-static uint32_t  nv2a_map_index_dwords[( NV2A_MAP_MAX_INDICES + 1 ) / 2];
+static uint32_t *nv2a_map_index_dwords;             /* Ordinary engine-pooled CPU memory (r_temppool,
+                                                        Mem_Malloc/Mem_Free) - unlike nv2a_map_vb this
+                                                        is only ever CPU-read into the pushbuffer, never
+                                                        touched by the GPU directly, so it has no reason
+                                                        to cost scarce contiguous write-combined memory
+                                                        (codex review, real finding). Packed pairs,
+                                                        sized to the real map's own iCount, not a fixed
+                                                        bring-up cap. */
 static uint32_t  nv2a_map_dword_count;
 static void     *nv2a_map_atlas;
 static uint32_t  nv2a_map_atlas_width, nv2a_map_atlas_height, nv2a_map_atlas_pitch;
@@ -276,25 +283,25 @@ nothing to reuse since they carry no linkage.
 
 This mirror walks every section in the SAME order for the SAME reason the
 real one does (no offset table - byte order IS the format), but only
-CAPTURES the four this bring-up slice actually reads (vertices, indices,
-faceDrawCmds, atlas); every other section still has to be stepped over
-correctly to reach them. Verified independently against a real baked
-archive (crossfire.mpak, nv2a profile) by hand in Python before writing
-this - the final cursor landed exactly on the real file size and the
-computed offsets read back real, sane vertex/index/FaceDrawCmd data - see
-docs/r3d/divergences.md's X9-B entry. Deliberately simpler than the real
-Mpak_ComputeLayout(): no fixed-record-size divisibility checks, no
-overflow-hardened lightmap cross-validation (this slice never reads the
-lightmap section at all) - a corrupted archive fails a bounds check here
-and this function returns false, not a crash, but the diagnostics are
-coarser than the real implementation's. If mpak_layout.c's own section
-order or record sizes ever change, this must change with it - there is no
-compiler-enforced link between the two copies. */
+CAPTURES the ones this slice actually reads (vertices, indices, atlas,
+lightmapAtlas); every other section (FaceDrawCmd included - X9-D draws
+the whole shared index buffer directly and no longer needs any per-face
+lookup) still has to be stepped over correctly to reach the ones that
+matter. Verified independently against a real baked archive
+(crossfire.mpak, nv2a profile) by hand in Python before writing this - the
+final cursor landed exactly on the real file size and the computed
+offsets read back real, sane vertex/index data - see
+docs/r3d/divergences.md's X9-B/X9-D entries. Deliberately simpler than the
+real Mpak_ComputeLayout(): no fixed-record-size divisibility checks, no
+overflow-hardened lightmap cross-validation - a corrupted archive fails a
+bounds check here and this function returns false, not a crash, but the
+diagnostics are coarser than the real implementation's. If mpak_layout.c's
+own section order or record sizes ever change, this must change with it -
+there is no compiler-enforced link between the two copies. */
 typedef struct
 {
 	mpak_lump_t vertices;
 	mpak_lump_t indices;
-	mpak_lump_t faceDrawCmds;
 	mpak_lump_t atlas;
 	mpak_lump_t lightmapAtlas;
 } nv2a_mpak_geometry_t;
@@ -331,7 +338,7 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenNodes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLeaves, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenMarksurfaces, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceDrawCmds, &out->faceDrawCmds )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceDrawCmds, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenPlanes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenClipnodes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenModels, &skip )) return false;
@@ -546,10 +553,10 @@ static void nv2a_draw_test_triangle( void )
    linear checkerboard, and an indexed draw over real baked vertices
    instead of X4's own plain sequential NV097_DRAW_ARRAYS. Batches indices
    in groups of <=120 (deps/nxdk/samples/mesh/main.c's own
-   NV20_TCL_PRIMITIVE_3D_INDEX_DATA limit) even though this slice's own
-   NV2A_MAP_MAX_INDICES cap (64) never needs more than one batch - matching
-   the real, general mechanism rather than a one-batch shortcut that would
-   silently need rewriting the moment a later slice raises that cap. */
+   NV20_TCL_PRIMITIVE_3D_INDEX_DATA limit) - written as the real, general
+   batching loop from the start rather than a one-batch shortcut, which is
+   what let X9-D scale this same function to a whole map's own dword count
+   with no changes here at all. */
 static void nv2a_draw_map_geometry( void )
 {
 	uint32_t *p;
@@ -748,9 +755,10 @@ static void nv2a_free_map_resources( void )
 	nv2a_map_owner = NULL;
 	nv2a_map_vert_count = 0;
 	nv2a_map_dword_count = 0;
-	if( nv2a_map_vb )       { MmFreeContiguousMemory( nv2a_map_vb );       nv2a_map_vb       = NULL; }
-	if( nv2a_map_atlas )    { MmFreeContiguousMemory( nv2a_map_atlas );    nv2a_map_atlas    = NULL; }
-	if( nv2a_map_lightmap ) { MmFreeContiguousMemory( nv2a_map_lightmap ); nv2a_map_lightmap = NULL; }
+	if( nv2a_map_vb )            { MmFreeContiguousMemory( nv2a_map_vb );            nv2a_map_vb            = NULL; }
+	if( nv2a_map_index_dwords )  { Mem_Free( nv2a_map_index_dwords );                nv2a_map_index_dwords  = NULL; }
+	if( nv2a_map_atlas )         { MmFreeContiguousMemory( nv2a_map_atlas );         nv2a_map_atlas         = NULL; }
+	if( nv2a_map_lightmap )      { MmFreeContiguousMemory( nv2a_map_lightmap );      nv2a_map_lightmap      = NULL; }
 }
 
 static qboolean R_Init( void )
@@ -759,11 +767,19 @@ static qboolean R_Init( void )
 
 	debug_marker = 1;
 
+	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
+	   declaration comment) belongs in ordinary engine-pooled memory, not
+	   contiguous GPU-visible memory - r_temppool is the same real,
+	   engine-backed allocator ref/soft and ref/gl already use for their
+	   own CPU-side data (ref/soft/r_main.c, ref/gl/gl_opengl.c). */
+	r_temppool = Mem_AllocPool( "ref_nv2a zone" );
+
 	video_ok = gEngfuncs.R_Init_Video( REF_SOFTWARE );
 	debug_marker = video_ok ? 3 : 2;
 
 	if( !video_ok )
 	{
+		Mem_FreePool( &r_temppool );
 		gEngfuncs.R_Free_Video();
 		return false;
 	}
@@ -787,6 +803,7 @@ static qboolean R_Init( void )
 	{
 		debug_marker = 4;
 		gEngfuncs.Con_Printf( "ref_nv2a: pb_init failed (%d)\n", debug_pb_status );
+		Mem_FreePool( &r_temppool );
 		gEngfuncs.R_Free_Video();
 		return false;
 	}
@@ -804,6 +821,7 @@ static qboolean R_Init( void )
 		debug_marker = 6;
 		pb_kill();
 		pb_initialized = false;
+		Mem_FreePool( &r_temppool );
 		gEngfuncs.R_Free_Video();
 		return false;
 	}
@@ -820,6 +838,7 @@ static qboolean R_Init( void )
 		pb_kill();
 		pb_initialized = false;
 		nv2a_free_resources();
+		Mem_FreePool( &r_temppool );
 		gEngfuncs.R_Free_Video();
 		return false;
 	}
@@ -850,6 +869,7 @@ static void R_Shutdown( void )
 
 	nv2a_free_resources();
 	nv2a_free_map_resources();
+	Mem_FreePool( &r_temppool );
 
 	gEngfuncs.R_Free_Video();
 }
@@ -983,115 +1003,124 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
 	return true;
 }
 
-/* Reads ONE real face (the map's own FaceDrawCmd[0]) out of a real,
-   nv2a-profile-baked .mpak buffer and prepares it to be drawn in place of
-   the X9-A test triangle: a small remapped vertex buffer (position +
-   atlas-space UV), a small local index list, the real DXT1 atlas copied
-   verbatim (already in the right hardware layout - no un-swizzle needed,
-   see this file's own header comment and docs/r3d/divergences.md's X9-B
-   entry), and a real look-at + perspective camera framing that one face.
-   Caller (Mod_ProcessRenderData) has already confirmed the header itself
-   is a real nv2a-profile archive via nv2a_mpak_header_valid() - this
-   function only has to validate everything PAST the header.
+/* Reads the WHOLE map's real geometry (every baked vertex, the whole
+   shared index buffer, the whole DXT1 atlas, the whole lightmap atlas)
+   out of a real, nv2a-profile-baked .mpak buffer and prepares it to be
+   drawn in place of the X9-A test triangle: a real, per-map-sized
+   remapped vertex buffer (position + atlas-space UV + lightmap UV), a
+   real per-map-sized packed index-dword buffer, the real DXT1 atlas
+   copied verbatim (already in the right hardware layout - no un-swizzle
+   needed, see this file's own header comment and
+   docs/r3d/divergences.md's X9-B entry), the real lightmap atlas copied
+   verbatim, and a real look-at + perspective camera framing the map's own
+   first baked triangle. Caller (Mod_ProcessRenderData) has already
+   confirmed the header itself is a real nv2a-profile archive via
+   nv2a_mpak_header_valid() - this function only has to validate
+   everything PAST the header.
 
    UV remap is `atlas_uv = rect.xy + frac(raw_uv) * rect.zw` - a per-VERTEX
    remap, not per-pixel. This is exact for a face whose raw UV range fits
    in one texture repeat, and a known, accepted, documented approximation
    for a tiling face (the interpolated UV between two vertices that wrap
-   to the SAME fractional value is flat, not repeating, across that edge -
-   crossfire.mpak's own FaceDrawCmd[0] is exactly this case, u wrapping by
-   an integer 2.0 between its corners) - fixing that for real needs a
-   pixel-shader-side wrap, out of scope for this bring-up slice. Returns
-   false (leaving the caller to keep drawing the X9-A triangle) for
-   anything past the header that doesn't parse as expected - never
-   crashes on a truncated or corrupted archive. */
+   to the SAME fractional value is flat, not repeating, across that edge) -
+   fixing that for real needs a pixel-shader-side wrap, out of scope for
+   this bring-up slice. Returns false (leaving the caller to keep drawing
+   the X9-A triangle) for anything past the header that doesn't parse as
+   expected, or that would exceed NV2A_MAP_BUDGET_BYTES - never crashes on
+   a truncated, malformed, or just very large archive. */
+/* A coarse guard against a malformed or just implausibly large archive
+   attempting a doomed giant allocation - NOT a real accounting of the
+   Xbox's own 64MiB total budget (codex review, real finding: the
+   engine's own static state, pbkit's front/back/depth buffers, every
+   other subsystem's own allocations, and allocator fragmentation are
+   all real, all already resident by the time this function runs, and
+   NONE of them are visible to this narrowly-scoped ref module - a
+   proper admission-control budget belongs at BAKE time, in
+   tools/asset-studio, where the real total per-map cost is known before
+   a single byte reaches the console, not guessed at here from four
+   numbers this one function happens to compute). The buffer this
+   function is CALLED with is already real and already resident though
+   (Mod_ProcessRenderData's own contract - engine/common/model.c's
+   Mod_LoadModel FS_LoadFile's the whole archive before calling in), so
+   it belongs in the sum this function CAN check. Cross-checked in
+   Python against the real crossfire.mpak (docs/r3d/divergences.md #91):
+   19,480 verts * 28B + 34,326 indices/2*4B + a real 2048x2048 DXT1 atlas
+   + a real 1024x1024 RGBA8 lightmap page + the archive's own 10.5MB on
+   disk totals ~16.6MB - comfortably under this cap, with real margin
+   left to catch a corrupt or absurdly oversized archive before it can
+   hurt a 64MiB console, without pretending this one function can see
+   the platform's whole memory picture. */
+#define NV2A_MAP_BUDGET_BYTES ( 24u * 1024u * 1024u )
+
 static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte *buffer, size_t buffersize )
 {
 	nv2a_mpak_geometry_t geo;
-	nv2a_face_draw_cmd_t face;
-	nv2a_lit_vertex_t local_verts[NV2A_MAP_MAX_VERTS];
-	nv2a_vec3_t world_pos[NV2A_MAP_MAX_VERTS];
-	uint32_t seen_global[NV2A_MAP_MAX_VERTS];
-	uint32_t local_indices[NV2A_MAP_MAX_INDICES];
-	uint32_t vert_count = 0;
-	uint32_t index_count;
+	uint32_t vert_count, index_count, dword_count;
 	uint32_t i;
-	nv2a_vec3_t centroid, normal, up, eye;
+	uint64_t vb_bytes, idx_bytes, total_bytes;
+	nv2a_vec3_t v0, v1, v2, centroid, normal, up, eye;
 	float view[4][4], proj[4][4], ndc_to_screen[4][4], combined[4][4];
 	uint64_t blocksW, blocksH;
 
 	if( !nv2a_compute_mpak_layout( header, (fs_offset_t)buffersize, &geo ))
 		return false;
 
-	if( geo.faceDrawCmds.length < (fs_offset_t)sizeof( nv2a_face_draw_cmd_t ) || geo.atlas.length == 0 )
+	if( geo.atlas.length == 0 || geo.lightmapAtlas.length == 0 )
 		return false;
 
-	memcpy( &face, buffer + geo.faceDrawCmds.offset, sizeof( face ));
-
-	index_count = face.index_count;
-	if( index_count == 0 || index_count > NV2A_MAP_MAX_INDICES )
+	vert_count = header->vCount;
+	index_count = header->iCount;
+	if( vert_count < 3 || index_count == 0 )
 		return false;
-	if(( (uint64_t)face.start_index + index_count ) * sizeof( uint16_t ) > (uint64_t)geo.indices.length )
+	if( (uint64_t)vert_count * sizeof( mpak_vertex_t ) != (uint64_t)geo.vertices.length )
+		return false;
+	if( (uint64_t)index_count * sizeof( uint16_t ) != (uint64_t)geo.indices.length )
 		return false;
 
+	dword_count = ( index_count + 1 ) / 2;
+	vb_bytes = (uint64_t)vert_count * sizeof( nv2a_lit_vertex_t );
+	idx_bytes = (uint64_t)dword_count * sizeof( uint32_t );
+	/* buffersize (the source archive, already resident per
+	   Mod_ProcessRenderData's own contract) is real, known cost this
+	   function CAN account for - see NV2A_MAP_BUDGET_BYTES's own comment
+	   for what this check does and does not cover. */
+	total_bytes = vb_bytes + idx_bytes + (uint64_t)geo.atlas.length + (uint64_t)geo.lightmapAtlas.length + (uint64_t)buffersize;
+	if( total_bytes > NV2A_MAP_BUDGET_BYTES )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: map exceeds NV2A_MAP_BUDGET_BYTES (%u > %u bytes) - not drawing its real geometry\n",
+			(unsigned int)total_bytes, (unsigned int)NV2A_MAP_BUDGET_BYTES );
+		return false;
+	}
+
+	/* Every baked vertex is remapped 1:1 - the shared index buffer already
+	   references vertices by their final position in this same array
+	   (that's what makes shared indexing possible at all), so unlike the
+	   old one-face slice there is no "which vertices does this face touch"
+	   deduplication to do here. */
+	for( i = 0; i < vert_count; i++ )
+	{
+		mpak_vertex_t v;
+
+		memcpy( &v, buffer + geo.vertices.offset + (uint64_t)i * sizeof( mpak_vertex_t ), sizeof( v ));
+
+		/* X9-D still only handles vertices on lightmap page 0 - multi-page
+		   lightmap support stays explicitly deferred (same limit X9-C
+		   already documented), so a vertex on any other page must fail the
+		   whole load cleanly rather than silently sample the wrong page. */
+		if( v.lightmap_layer != 0 )
+			return false;
+	}
+
+	/* Every raw index must reference a real slot in the vertex array above
+	   - malformed data must fail cleanly here, not be trusted into a GPU
+	   attribute-array read out of bounds later. */
 	for( i = 0; i < index_count; i++ )
 	{
-		uint16_t global_idx;
-		uint32_t local, j;
-		qboolean found = false;
+		uint16_t idx;
 
-		memcpy( &global_idx, buffer + geo.indices.offset + ( face.start_index + i ) * sizeof( uint16_t ), sizeof( global_idx ));
-
-		if( (uint64_t)global_idx * sizeof( mpak_vertex_t ) >= (uint64_t)geo.vertices.length )
+		memcpy( &idx, buffer + geo.indices.offset + (uint64_t)i * sizeof( uint16_t ), sizeof( idx ));
+		if( idx >= vert_count )
 			return false;
-
-		for( j = 0; j < vert_count; j++ )
-		{
-			if( seen_global[j] == global_idx )
-			{
-				local = j;
-				found = true;
-				break;
-			}
-		}
-
-		if( !found )
-		{
-			mpak_vertex_t v;
-
-			if( vert_count >= NV2A_MAP_MAX_VERTS )
-				return false;
-
-			memcpy( &v, buffer + geo.vertices.offset + (uint64_t)global_idx * sizeof( mpak_vertex_t ), sizeof( v ));
-
-			/* X9-C: this bring-up slice only handles a face whose vertices
-			   all sample lightmap page 0 - crossfire.mpak's own atlas has
-			   exactly one page, and this test face's own four vertices are
-			   all on it (verified in Python before writing this), but a
-			   future test face spanning more than one page must fail
-			   cleanly here, not silently sample the wrong page. */
-			if( v.lightmap_layer != 0 )
-				return false;
-
-			local = vert_count;
-			seen_global[local] = global_idx;
-			world_pos[local].x = v.x;
-			world_pos[local].y = v.y;
-			world_pos[local].z = v.z;
-			local_verts[local].pos[0] = v.x;
-			local_verts[local].pos[1] = v.y;
-			local_verts[local].pos[2] = v.z;
-			local_verts[local].uv0[0] = v.rect[0] + ( v.u - floorf( v.u )) * v.rect[2];
-			local_verts[local].uv0[1] = v.rect[1] + ( v.v - floorf( v.v )) * v.rect[3];
-			/* Lightmap UV is already page-normalized by the baker
-			   (BspParser.cpp's own lu/lv computation) - unlike the diffuse
-			   UV, no atlas-rect remap is needed here. */
-			local_verts[local].uv1[0] = v.lu;
-			local_verts[local].uv1[1] = v.lv;
-			vert_count++;
-		}
-
-		local_indices[i] = local;
 	}
 
 	/* codex review, real finding: atlasWidth/Height came straight from the
@@ -1122,15 +1151,47 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			return false;
 	}
 
-	nv2a_map_vb = MmAllocateContiguousMemoryEx( vert_count * sizeof( nv2a_lit_vertex_t ), 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+	nv2a_map_vb = MmAllocateContiguousMemoryEx( (uint32_t)vb_bytes, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
 	if( !nv2a_map_vb )
+	{
+		/* codex review, real finding: a validated, real nv2a-profile
+		   archive that fails an allocation here fell back to the test
+		   triangle with no diagnostic at all - the NV2A_MAP_BUDGET_BYTES
+		   check above only guards against a corrupt/absurd archive, not
+		   real contiguous-memory fragmentation on an already-running
+		   console, so this path is genuinely reachable and worth a real
+		   message when it happens. */
+		gEngfuncs.Con_Printf( "ref_nv2a: map vertex buffer allocation failed (%u bytes)\n", (unsigned int)vb_bytes );
 		return false;
-	memcpy( nv2a_map_vb, local_verts, vert_count * sizeof( nv2a_lit_vertex_t ));
+	}
+	{
+		nv2a_lit_vertex_t *dst = (nv2a_lit_vertex_t *)nv2a_map_vb;
+
+		for( i = 0; i < vert_count; i++ )
+		{
+			mpak_vertex_t v;
+
+			memcpy( &v, buffer + geo.vertices.offset + (uint64_t)i * sizeof( mpak_vertex_t ), sizeof( v ));
+
+			dst[i].pos[0] = v.x;
+			dst[i].pos[1] = v.y;
+			dst[i].pos[2] = v.z;
+			dst[i].uv0[0] = v.rect[0] + ( v.u - floorf( v.u )) * v.rect[2];
+			dst[i].uv0[1] = v.rect[1] + ( v.v - floorf( v.v )) * v.rect[3];
+			dst[i].uv1[0] = v.lu;
+			dst[i].uv1[1] = v.lv;
+		}
+
+		v0.x = dst[0].pos[0]; v0.y = dst[0].pos[1]; v0.z = dst[0].pos[2];
+		v1.x = dst[1].pos[0]; v1.y = dst[1].pos[1]; v1.z = dst[1].pos[2];
+		v2.x = dst[2].pos[0]; v2.y = dst[2].pos[1]; v2.z = dst[2].pos[2];
+	}
 	nv2a_map_vert_count = vert_count;
 
 	nv2a_map_atlas = MmAllocateContiguousMemoryEx( geo.atlas.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
 	if( !nv2a_map_atlas )
 	{
+		gEngfuncs.Con_Printf( "ref_nv2a: map atlas allocation failed (%u bytes)\n", (unsigned int)geo.atlas.length );
 		nv2a_free_map_resources();
 		return false;
 	}
@@ -1142,6 +1203,7 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	nv2a_map_lightmap = MmAllocateContiguousMemoryEx( geo.lightmapAtlas.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
 	if( !nv2a_map_lightmap )
 	{
+		gEngfuncs.Con_Printf( "ref_nv2a: map lightmap allocation failed (%u bytes)\n", (unsigned int)geo.lightmapAtlas.length );
 		nv2a_free_map_resources();
 		return false;
 	}
@@ -1150,34 +1212,54 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	nv2a_map_lightmap_height = header->lightmapHeight;
 	nv2a_map_lightmap_pitch  = nv2a_map_lightmap_width * 4; /* RGBA8, LU_IMAGE - no block rounding */
 
-	/* Pack pairs of local indices into dwords for NV20_TCL_PRIMITIVE_3D_
+	/* Pack pairs of raw indices into dwords for NV20_TCL_PRIMITIVE_3D_
 	   INDEX_DATA (see nv2a_map_index_dwords's own declaration comment for
 	   why - low half first, matching deps/nxdk/samples/mesh/verts.h's own
 	   data). An odd index_count pads its final dword's high half by
-	   repeating the last real index. */
-	nv2a_map_dword_count = ( index_count + 1 ) / 2;
-	for( i = 0; i < nv2a_map_dword_count; i++ )
+	   repeating the last real index. Unlike X9-B/C there is no local-index
+	   remap here - every raw index already names its final slot in
+	   nv2a_map_vb directly, so this is a straight widen-and-pack walk over
+	   the whole buffer. */
+	nv2a_map_index_dwords = Mem_Malloc( r_temppool, (size_t)idx_bytes );
+	if( !nv2a_map_index_dwords )
 	{
-		uint32_t lo = local_indices[i * 2];
-		uint32_t hi = ( i * 2 + 1 < index_count ) ? local_indices[i * 2 + 1] : lo;
+		gEngfuncs.Con_Printf( "ref_nv2a: map index buffer allocation failed (%u bytes)\n", (unsigned int)idx_bytes );
+		nv2a_free_map_resources();
+		return false;
+	}
+	nv2a_map_dword_count = dword_count;
+	for( i = 0; i < dword_count; i++ )
+	{
+		uint16_t lo16, hi16;
+		uint32_t lo, hi;
+
+		memcpy( &lo16, buffer + geo.indices.offset + (uint64_t)( i * 2 ) * sizeof( uint16_t ), sizeof( lo16 ));
+		lo = lo16;
+		if( i * 2 + 1 < index_count )
+		{
+			memcpy( &hi16, buffer + geo.indices.offset + (uint64_t)( i * 2 + 1 ) * sizeof( uint16_t ), sizeof( hi16 ));
+			hi = hi16;
+		}
+		else
+		{
+			hi = lo;
+		}
 		nv2a_map_index_dwords[i] = lo | ( hi << 16 );
 	}
 
-	/* A fixed debug camera: look at this face's own centroid from along its
-	   own normal - not part of the real game's own view pipeline (a much
-	   later X9 slice's job), just enough to frame one real face for this
-	   bring-up's own proof. */
-	centroid.x = centroid.y = centroid.z = 0.0f;
-	for( i = 0; i < vert_count; i++ )
-	{
-		centroid.x += world_pos[i].x / vert_count;
-		centroid.y += world_pos[i].y / vert_count;
-		centroid.z += world_pos[i].z / vert_count;
-	}
+	/* A fixed debug camera: look at the map's own first baked triangle from
+	   along its own normal - not part of the real game's own view pipeline
+	   (a much later X9 slice's job), just enough to frame real, actual
+	   geometry for this bring-up's own proof; still an arbitrary rather
+	   than a good vantage point, same honest limitation X9-B/C already
+	   documented for their own one-face version of this. */
+	centroid.x = ( v0.x + v1.x + v2.x ) / 3.0f;
+	centroid.y = ( v0.y + v1.y + v2.y ) / 3.0f;
+	centroid.z = ( v0.z + v1.z + v2.z ) / 3.0f;
 
 	normal = nv2a_vec3_normalize( nv2a_vec3_cross(
-		nv2a_vec3_sub( world_pos[1], world_pos[0] ),
-		nv2a_vec3_sub( world_pos[2], world_pos[0] )));
+		nv2a_vec3_sub( v1, v0 ),
+		nv2a_vec3_sub( v2, v0 )));
 
 	up.x = 0.0f; up.y = 0.0f; up.z = 1.0f; /* GoldSrc's own Z-up convention */
 	if( fabsf( normal.z ) > 0.99f )

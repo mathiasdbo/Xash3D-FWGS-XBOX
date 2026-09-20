@@ -7432,9 +7432,32 @@ real mistake this slice's own "compile, don't hand-derive" discipline
 caught before it could ship: an earlier round of research had guessed at
 the combiner's own register values by reading `nv_regs.h` in isolation:
 wrong, in a way the real compiler output (used instead) proved. Full
-account in `divergences.md` #90; X9-D onward (skinning, dynamic lighting,
-native alpha test, the frame-time exit criterion) sketched in this
-section's own bullets below, not started.
+account in `divergences.md` #90.
+
+**X9-D, 2026-09-20 - scaled from one hard-coded face to a whole map's
+real baked geometry, coded and statically verified; not yet seen
+rendering.** `nv2a_load_map_geometry()` no longer reads `FaceDrawCmd` at
+all - the baker's shared index buffer is already one flat, contiguous
+list of every face's own triangles in bake order, so the whole map draws
+with no per-face lookup. Every one of the header's own `vCount`/`iCount`
+records is now remapped/packed directly into GPU-visible buffers
+allocated at their real final size, replacing X9-B/C's own small
+fixed-size stack arrays (a real stack-overflow risk at real-map scale -
+`crossfire.mpak` alone is 19,480 vertices/34,326 indices), behind a new
+upfront memory-budget check that rejects cleanly rather than attempting
+a doomed giant allocation. `nv2a_draw_map_geometry()`'s own batched
+indexed-draw loop needed no changes at all - written generically from
+X9-B onward, this is the first slice to actually need more than one
+batch (144, by real cross-check against `crossfire.mpak`). Compiles,
+isolates and links cleanly through both `tools/xbox-link-check.sh` and
+`tools/xbox-game-link-check.sh hl` (including a full real `hl`
+server-module link), same bar as every prior X9 slice. Not yet observed
+rendering - the same live-boot blockers X9-A/B/C already hit apply
+unchanged and were deliberately not re-attempted a third time, per this
+project's own "stop and document, don't loop" rule. Full account in
+`divergences.md` #91; X9-E onward (a real view/visibility system,
+skinning, dynamic lighting, native alpha test, the frame-time exit
+criterion) sketched in this section's own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised
