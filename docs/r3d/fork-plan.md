@@ -7394,9 +7394,29 @@ own copy, per this project's own `fs_rootdir`-before-`fs_rodir` search
 order) rather than a defect found in the module. Whether the triangle
 actually draws correctly - the thing this slice exists to prove - remains
 completely unverified and is the concrete next step, not a formality.
-Full account in `divergences.md` #88; X9-B onward (real
-geometry, combiners, skinning, lighting, the frame-time exit criterion)
-sketched in this section's own bullets below, not started.
+Full account in `divergences.md` #88.
+
+**X9-B, 2026-09-20 - one real face from a real baked map, coded and
+statically verified; not yet seen rendering.** `Mod_ProcessRenderData`
+(previously a stub) now parses a real, nv2a-profile `.mpak`'s own baked
+vertex/index/`FaceDrawCmd`/DXT-atlas sections (a private mirror of
+`filesystem/mpak_layout.c`'s own layout math, validated in Python against
+a real bake before being ported to C - the computed offsets landed exactly
+on the real file size and read back sane, real geometry), and `R_EndFrame`
+draws it with a real look-at/perspective camera and the real DXT1 atlas -
+no shader or combiner change needed, X9-A's own transform shader already
+does the one matrix-multiply-plus-divide either camera needs. Compiles,
+isolates and links cleanly, same bar as X9-A. Not yet observed actually
+rendering: a real map's own boot left the guest unresponsive to this
+project's debug tooling well past X9-A's own much simpler menu-boot
+timings, compounding #88's own already-open `r_refdll` gap - not chased
+into a fifth retry, per this project's own "stop and document" rule. One
+accepted, documented simplification (a per-vertex, not per-pixel, UV
+atlas remap - exact for a non-tiling face, visibly flat instead of
+repeating for a tiling one, which the very first real face tested happens
+to be). Full account in `divergences.md` #89; X9-C onward (combiners,
+lightmaps, skinning, lighting, the frame-time exit criterion) sketched in
+this section's own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised

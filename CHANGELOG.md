@@ -5,16 +5,19 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
-### Added — the first slice of the NV2A hardware renderer (not yet verified running)
+### Added — the first two slices of the NV2A hardware renderer (not yet verified running)
 
 A new `ref/nv2a` module builds and links into the engine, meant to drive
-the Xbox's own GPU through the real renderer-selection path and draw one
-fixed textured triangle every frame - real geometry, lighting, and the
-rest of the hardware renderer are follow-on work. Its build/link/selection
-wiring is verified correct by direct memory inspection, but a live boot
-has not yet actually exercised it (a test-environment issue, not a known
-code defect - see `docs/r3d/divergences.md` #88 for the full account and
-what's still unproven).
+the Xbox's own GPU through the real renderer-selection path. It's grown
+from drawing one fixed textured triangle to parsing one real face out of
+a real baked map file and drawing it with a real camera and its own real
+compressed texture - real geometry, lighting, and the rest of the
+hardware renderer are still follow-on work. Its build/link/parsing logic
+is verified correct by direct memory inspection and by validating the
+file-format math against a real baked map in isolation, but a live boot
+has not yet actually shown either stage rendering (a test-environment
+issue, not a known code defect - see `docs/r3d/divergences.md` #88/#89
+for the full account and what's still unproven).
 
 ### Added — a Controller screen with real, named control schemes
 
