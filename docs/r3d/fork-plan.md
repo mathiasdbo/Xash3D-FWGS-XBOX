@@ -7559,9 +7559,83 @@ and the baked archive already carries real, populated, byte-for-byte
 GoldSrc BSP30 visibility/node/leaf/marksurface lumps for it, so that next
 slice needs no baker work either.
 
-X9-G onward (PVS culling, backface culling, skinning, dynamic lighting,
-native alpha test, the frame-time exit criterion itself) sketched in this
-section's own bullets below, not started.
+**X9-G, 2026-09-21 - real PVS culling, closing the last half of #91/#95's
+own carried-forward scope limit; coded and statically verified, not yet
+live-boot confirmed.** `ref/nv2a` no longer submits every frustum-visible
+face regardless of whether a wall stands between it and the camera.
+Needed no baker or format work at all, confirming what X9-F's own exit
+paragraph predicted: the v7 "classic core" lumps (`docs/r3d/mpak-loading-
+design.md`) make a map archive a real, valid BSP30 file, so the engine
+already loads a real `mnode_t`/`mleaf_t`/marksurfaces/visdata tree for it
+through its completely standard, unmodified `Mod_LoadBmodelLumps` path -
+the same tree `ref/gl` and `ref/soft` already read PVS from. A new
+function, `nv2a_mark_leaves()`, ports `ref/gl`'s own `R_FindViewLeaf` +
+`R_MarkLeaves` (folded into one function, since this module has no
+separate per-frame setup pass to host the first half in): finds which
+leaf the real, live camera stands in via the engine's own
+`gEngfuncs.Mod_PointInLeaf`, including the reference's own crossing-line-
+contents merge for a camera sitting on a leaf boundary; fetches the real
+PVS row via `gEngfuncs.R_FatPVS`; and marks every face any visible leaf's
+own real marksurfaces list references, into a new per-face
+`nv2a_map_face_visible[]` table. `nv2a_map_faces[i]` (X9-F's own table)
+and the engine's `WORLDMODEL->surfaces[i]` are the same face at the same
+index - both are built by walking the archive's one real `LUMP_FACES` in
+write order - so a marksurface pointer's offset from `WORLDMODEL->surfaces`
+is directly a valid `nv2a_map_faces` index, no translation table needed;
+verified by bounds-checking that offset against `WORLDMODEL->numsurfaces`
+rather than trusting it blindly, the same discipline this module already
+applies to every archive-sourced index. `nv2a_draw_map_geometry()`'s own
+streaming cull-and-merge pass (X9-F, unchanged in shape) now skips a face
+if it fails EITHER the frustum test or the PVS test. A new
+`nv2a_r_novis` convar (mirroring `ref/gl`'s own `r_novis`) makes PVS
+culling a real, independent A/B toggle, the same pattern `nv2a_r_nocull`
+already established for the frustum test - including porting the
+reference's own `FCVAR_CHANGED` handling, so toggling the convar forces
+an immediate recompute rather than waiting for the next leaf crossing.
+`CHECKVISBIT`/`MAX_MAP_LEAFS`/`FATPVS_RADIUS` are ordinarily engine-
+internal (`engine/common/mod_local.h`, which `ref/gl` includes directly
+since it shares a build with the engine); `ref/nv2a` is compiled as an
+isolated static-lib unit, so these three constants are mirrored locally
+under an `NV2A_` prefix rather than pulling in that header's much larger
+surface (`edict_t`, `entvars_t`, `studio.h`) for three values - the same
+"private, narrowly-scoped mirror" precedent `nv2a_compute_mpak_layout()`
+already set for the mpak layout types. Fails open, not closed, at every
+new failure point, matching this module's own established discipline:
+an allocation failure for the new visibility table leaves it `NULL` and
+the draw path treats that exactly like `nv2a_map_faces == NULL` already
+means (frustum-only, never a black screen); the table defaults to
+all-visible at map load, so the very first frame after a map loads draws
+correctly even before `nv2a_mark_leaves()` has run once; a stale viewleaf
+pointer from a PREVIOUS map is never dereferenced, because
+`nv2a_free_map_resources()` (already called on every unload, before any
+new load) now also resets it to `NULL`. Compiles clean
+(`tools/xbox-cc.sh`, single file); the standalone
+`tools/xbox-ref-isolate.sh nv2a` self-check could not be used to confirm
+"0 leaked" the way X9-F's own entry did - re-running it against the
+*unmodified* pre-X9-G tree in this same session reproduced a nonzero
+leaked-symbol count too, an environment/toolchain discrepancy unrelated
+to this change (confirmed identical on both sides of a `git stash`), not
+chased further per this project's own "stop and escalate with data"
+rule rather than "fresh hypothesis" discipline - filed as an open
+question below, not swept under this entry. The real gate,
+`tools/xbox-sweep.sh` (203 of 232 files compiling clean, the 29 failures
+all other-platform backends - SDL2/win32/vitasdk/dos - unrelated to this
+change and expected for an Xbox-scoped sweep) followed by
+`tools/xbox-link-check.sh` and `tools/xbox-game-link-check.sh hl
+--include-client --include-freevgui`, is recorded in
+`docs/r3d/divergences.md` #97 with its own real duplicate/undefined
+counts. Not yet live-boot confirmed: no real hardware or xemu run has
+observed this slice's own effect (a further reduction in submitted
+geometry beyond X9-F's frustum-only numbers, and pixel-identical output
+with `nv2a_r_novis` forced on vs. off) the way X9-F's own entry did
+end-to-end - that is the concrete next step for this slice, not a
+formality, following the same "coded and statically verified, not yet
+seen rendering" bar X9-B/C/D each shipped at before a later slice
+confirmed them live. Full account in `divergences.md` #97.
+
+X9-H onward (backface culling, skinning, dynamic lighting, native alpha
+test, the frame-time exit criterion itself) sketched in this section's
+own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised

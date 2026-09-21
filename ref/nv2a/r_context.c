@@ -265,6 +265,84 @@ uint32_t nv2a_cull_dwords;
    identically) is a real toggle, not an assertion. */
 static CVAR_DEFINE_AUTO( nv2a_r_nocull, "0", 0, "ref_nv2a: disable frustum culling" );
 
+/* X9-G: PVS culling, mirroring ref/gl's own r_novis (gl_rmain.c) in name
+   and meaning - same private, module-local convar pattern as
+   nv2a_r_nocull above, for the same reason (a real A/B toggle, not an
+   assertion). CHECKVISBIT/MAX_MAP_LEAFS are ordinarily engine-internal
+   (engine/common/mod_local.h - ref/gl includes that header directly,
+   sharing a build with the engine); ref/nv2a is an isolated static-lib
+   unit (tools/xbox-ref-isolate.sh, same isolation nv2a_mpak_geometry_t's
+   own comment above already documents for the mpak layout types) with no
+   reason to pull in mod_local.h's much larger surface (edict_t,
+   entvars_t, studio.h) for two constants - a private, narrowly-scoped
+   copy is the cheaper divergence, same call mod_local.h's real values
+   are mirrored from verbatim.
+
+   nv2a-xbox-specialist review, real finding: an earlier version of this
+   block also mirrored mod_local.h's own FATPVS_RADIUS (8.0f) and used it
+   as the R_FatPVS radius below - wrong constant. FATPVS_RADIUS is a
+   SERVER-side value (engine/common/sv_game.c's own entity-visibility PVS/
+   PHS checks); the CLIENT RENDERER'S own real radius is the shared
+   r_pvs_radius cvar (engine/client/dll_int/ref_common.c, default 0.1, 80x
+   smaller) - the exact one ref/gl (gl_rsurf.c) and ref/soft (r_main.c)
+   both actually pass to their own R_FatPVS calls. At 8.0 instead of 0.1,
+   Mod_FatPVS's own split-plane recursion (mod_bmodel.c) would OR together
+   both children's PVS rows for every splitting plane within 8 world units
+   of the camera - not just the boundary-straddling case the crossing-test
+   above already handles - silently inflating the visible set in ordinary
+   GoldSrc-density geometry (doorways, vents, stairwells) and defeating a
+   real fraction of this slice's own cull ratio with no visual symptom to
+   catch it. Fixed below by using r_pvs_radius directly - REAL, SHARED
+   (DECLARE_ENGINE_SHARED_CVAR_LIST(), ref_common.h, already in scope),
+   not a second private mirror - the cheapest correct form, and it stays
+   in sync with whatever the user or a future tuning pass sets it to. */
+#define NV2A_MAX_MAP_LEAFS 131072 /* common/bspfile.h's own MAX_MAP_LEAFS */
+#define NV2A_CHECKVISBIT( vis, b ) ( (b) >= 0 ? (byte)(( vis )[( b ) >> 3] & ( 1 << (( b ) & 7 ))) : (byte)0 )
+
+static CVAR_DEFINE_AUTO( nv2a_r_novis, "0", 0, "ref_nv2a: disable PVS culling" );
+
+/* Mirrors ref/gl's own r_lockpvs (gl_local.h/gl_rsurf.c): a development
+   aid that freezes the visibility table at its current contents so the
+   camera can be moved around to inspect what a given PVS state actually
+   covers, without a real leaf crossing recomputing it out from under the
+   inspection. reference-renderer-specialist review flagged this as
+   missing from an earlier version of this port. */
+static CVAR_DEFINE_AUTO( nv2a_r_lockpvs, "0", 0, "ref_nv2a: freeze the PVS visibility table (dev aid)" );
+
+/* One byte per baked face (nv2a_map_face_count entries), allocated
+   alongside nv2a_map_faces at map load - see nv2a_load_map_geometry()'s
+   own X9-G addition. NULL = no PVS table for this map (allocation
+   failed, or nv2a_mark_leaves() has never matched WORLDMODEL to
+   nv2a_map_owner) - nv2a_draw_map_geometry() treats that the same
+   "fail open, draw it anyway" way nv2a_map_faces == NULL already does
+   for frustum culling. */
+static byte *nv2a_map_face_visible;
+
+/* The engine's own already-loaded world model's notion of "which leaf is
+   the camera in right now" - mnode_s/mleaf_s (common/com_model.h),
+   reachable here as plain pointers with no extra include, since
+   ref_common.h (included above) already pulls in engine/ref_api.h ->
+   common/com_model.h for gEngfuncs's own function-pointer signatures.
+   Reset to NULL in nv2a_free_map_resources() on every map unload/reload -
+   see that function's own comment for why a stale pointer here would be
+   a real dangling-pointer risk, not just a stale cache. */
+static mleaf_t *nv2a_viewleaf;
+static mleaf_t *nv2a_oldviewleaf;
+
+/* X9-G, render-architecture-specialist review: which world model
+   nv2a_mark_leaves() has already parity-checked against nv2a_map_faces
+   (below) - reset alongside nv2a_viewleaf/nv2a_oldviewleaf on every
+   unload, so a new map gets its own fresh check rather than skipping it
+   because an old, different model's own pointer happened to match. */
+static const model_t *nv2a_pvs_parity_checked_for;
+
+/* The real PVS row for nv2a_viewleaf, filled by gEngfuncs.R_FatPVS() -
+   same size and bit convention ref/gl's own RI.visbytes (gl_local.h)
+   uses, sized off NV2A_MAX_MAP_LEAFS above rather than off
+   mod_local.h's real MAX_MAP_LEAFS for the same "no extra include" reason
+   the constant itself is mirrored, not shared. */
+static byte nv2a_visbytes[( NV2A_MAX_MAP_LEAFS + 7 ) / 8];
+
 static void nv2a_matrix_viewport( float out[4][4], float x, float y, float width, float height, float z_min, float z_max )
 {
 	memset( out, 0, 4 * 4 * sizeof( float ));
@@ -859,8 +937,17 @@ static void nv2a_draw_map_geometry( void )
 		for( i = 0; i < nv2a_map_face_count; i++ )
 		{
 			const nv2a_map_face_t *face = &nv2a_map_faces[i];
+			/* X9-G: a face is drawn only if it survives BOTH cull tests -
+			   frustum (X9-F, unchanged) and PVS (nv2a_map_face_visible,
+			   this slice). nv2a_map_face_visible == NULL (no table for
+			   this map) and nv2a_r_novis.value (the A/B toggle) both fall
+			   through to "not PVS-culled", matching nv2a_r_nocull's own
+			   already-established meaning for the frustum test. */
+			qboolean pvs_culled = nv2a_map_face_visible != NULL
+				&& !nv2a_r_novis.value
+				&& !nv2a_map_face_visible[i];
 
-			if( nv2a_frustum_cull_box( face->mins, face->maxs ))
+			if( nv2a_frustum_cull_box( face->mins, face->maxs ) || pvs_culled )
 				continue;
 
 			nv2a_cull_faces_visible++;
@@ -1008,8 +1095,30 @@ static void nv2a_free_map_resources( void )
 	if( nv2a_map_vb )            { MmFreeContiguousMemory( nv2a_map_vb );            nv2a_map_vb            = NULL; }
 	if( nv2a_map_index_dwords )  { Mem_Free( nv2a_map_index_dwords );                nv2a_map_index_dwords  = NULL; }
 	if( nv2a_map_faces )         { Mem_Free( nv2a_map_faces );                       nv2a_map_faces         = NULL; }
+	if( nv2a_map_face_visible )  { Mem_Free( nv2a_map_face_visible );                nv2a_map_face_visible  = NULL; }
 	if( nv2a_map_atlas )         { MmFreeContiguousMemory( nv2a_map_atlas );         nv2a_map_atlas         = NULL; }
 	if( nv2a_map_lightmap )      { MmFreeContiguousMemory( nv2a_map_lightmap );      nv2a_map_lightmap      = NULL; }
+
+	/* X9-G: both point into the outgoing world model's own leafs[] array
+	   (freed by the engine as part of this same unload) - clearing them
+	   here, on every unload, is what keeps nv2a_mark_leaves() from ever
+	   comparing against or dereferencing a dangling pointer left over
+	   from a previous map. */
+	nv2a_viewleaf = NULL;
+	nv2a_oldviewleaf = NULL;
+
+	/* codex review round 2, real finding, high confidence: this was
+	   missing. The engine keeps the world model in FIXED mod_known[0]
+	   storage across level changes (engine/common/model.c) - a real map
+	   transition can hand back the exact same model_t* pointer value a
+	   previous, different map already used, not just a coincidentally-
+	   similar one. Without this reset, nv2a_mark_leaves()'s own
+	   `nv2a_pvs_parity_checked_for != world` guard would wrongly read as
+	   "already checked" for every map AFTER the first one loaded this
+	   session, silently skipping the one check that exists specifically
+	   to catch a baker/loader face-count mismatch - exactly the failure
+	   the check above this comment was added to fail open against. */
+	nv2a_pvs_parity_checked_for = NULL;
 }
 
 static qboolean R_Init( void )
@@ -1020,6 +1129,8 @@ static qboolean R_Init( void )
 	nv2a_view_valid = false; /* X9-E: no real GL_RenderFrame call yet this init */
 
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_nocull );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_novis );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lockpvs );
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not
@@ -1340,8 +1451,15 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	/* X9-F: the per-face table is 4x its own on-disk FaceDrawCmds size
 	   (nv2a_map_face_t is 32 bytes; each on-disk FaceDrawCmd is 8) - real
 	   memory this function can and should account for, same as every
-	   other buffer below. */
+	   other buffer below. X9-G, nv2a-xbox-specialist review: the new
+	   per-face PVS visibility table (nv2a_map_face_visible, 1 byte/face =
+	   faceDrawCmds.length/8) belongs in this same ledger for the same
+	   reason - it was being allocated (further below) without ever
+	   passing through this check, the one inconsistency this file's own
+	   "real memory this function CAN and should account for" rule was
+	   supposed to rule out. */
 	total_bytes = vb_bytes + idx_bytes + (uint64_t)geo.faceDrawCmds.length * 4
+		+ (uint64_t)geo.faceDrawCmds.length / 8
 		+ (uint64_t)geo.atlas.length + (uint64_t)geo.lightmapAtlas.length + (uint64_t)buffersize;
 	if( total_bytes > NV2A_MAP_BUDGET_BYTES )
 	{
@@ -1593,6 +1711,26 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			{
 				nv2a_map_faces = faces;
 				nv2a_map_face_count = face_count;
+
+				/* X9-G: the per-face PVS visibility table, index-parallel
+				   with nv2a_map_faces (both walk the archive's one real
+				   LUMP_FACES in the same order - see
+				   nv2a_map_face_visible's own declaration comment).
+				   Defaults to all-visible (nv2a_mark_leaves() has not
+				   run yet for this map) so the very first frame draws
+				   the frustum-culled set rather than nothing, matching
+				   nv2a_map_faces == NULL's own "fail open" fallback in
+				   spirit - GL_RenderFrame always calls nv2a_mark_leaves()
+				   before R_EndFrame ever draws, so this default is a
+				   safety net, not the expected steady state. Allocation
+				   failure is not fatal to the load: the map still draws,
+				   frustum-culled only, exactly as it did before X9-G. */
+				nv2a_map_face_visible = Mem_Malloc( r_temppool, (size_t)face_count );
+				if( nv2a_map_face_visible )
+					memset( nv2a_map_face_visible, 1, (size_t)face_count );
+				else
+					gEngfuncs.Con_Printf( "ref_nv2a: PVS visibility table allocation failed (%u bytes) - frustum culling only\n",
+						(unsigned int)face_count );
 			}
 			else
 			{
@@ -1711,6 +1849,274 @@ static void GL_Bind( int tmu, unsigned int texnum )
 	;
 }
 
+/* X9-G: real PVS culling, closing the last half of #91/#95's own
+   carried-forward scope limit ("no visibility/frustum culling" - X9-F
+   closed the frustum half, this closes visibility). Port of
+   ref/gl/gl_rmain.c's own R_FindViewLeaf plus ref/gl/gl_rsurf.c's own
+   R_MarkLeaves, folded into one function since this module has no
+   separate per-frame setup pass to host the first half the way ref/gl
+   does - RI.viewleaf/RI.oldviewleaf exist for several OTHER ref/gl
+   consumers (decal placement, ambient sound, sky) this module does not
+   implement, so nv2a_viewleaf/nv2a_oldviewleaf only ever need to serve
+   this one function, called once per real frame from GL_RenderFrame
+   (see nv2a_view_captured_this_frame's own guard for why that really is
+   at most once per frame).
+
+   codex review, real citation correction - THIRD round, the previous two
+   were each wrong in turn: the loop below that marks faces visible by
+   walking each PVS-visible leaf's own firstmarksurface/nummarksurfaces
+   is NOT what R_MarkLeaves does (it only walks mleaf_t::parent chains,
+   stamping node->visframe for a later top-down walk to consume) - that
+   correction stands. But the SECOND correction (crediting only the
+   disused, overview-only R_DrawTopViewLeaf, and claiming the normal
+   single-player path "does not derive visibility from leaf marksurfaces
+   at all") was itself wrong, confirmed by reading R_RecursiveWorldNode
+   in full (gl_rsurf.c:3457-3496) and R_CullSurface (gl_cull.c:66-77):
+   the SAME function that does the node-based firstsurface/numsurfaces
+   walk ALSO, when its recursive descent reaches an actual leaf
+   (`if( node->contents < 0 )`, gl_rsurf.c:3482-3489), stamps
+   `mark[i]->visframe = tr.framecount` for every one of THAT LEAF's own
+   marksurfaces - literally the identical "for a PVS-visible leaf, mark
+   its own marksurfaces" step this port's loop performs. The later
+   node-based walk (gl_rsurf.c:3507-3516) then calls R_CullSurface on
+   each of a NODE's own firstsurface/numsurfaces range, which rejects
+   any surface whose visframe was NOT stamped this way
+   (`surf->visframe != tr.framecount`, gl_cull.c:70) - so a surface
+   compiled onto a given node only actually gets drawn if it was ALSO
+   reached through some visible leaf's own marksurfaces list. The node
+   walk is ref/gl's own iteration/draw-chain-building order; the leaf-
+   marksurface stamp is what actually DECIDES per-surface visibility,
+   and this port's loop computes exactly that decision directly, with no
+   need for the node-based iteration on top of it (X9-F's own
+   nv2a_map_faces is already a flat per-face table, not a node tree, so
+   there is no draw-chain-building order to replicate - only the
+   visibility decision matters here). The visible-face SET this produces
+   is therefore not merely "provably equivalent" to some indirect
+   reference mechanism, it performs the SAME concrete step
+   (gl_rsurf.c:3487-3488) the reference's own normal, currently-active
+   single-player path performs - traced through the real, current
+   ref/gl source both times this comment was corrected, not assumed
+   from a plausible-sounding shape either time.
+
+   One further, deliberate, accepted difference from the reference - the
+   FCVAR_CHANGED handling above sets `recompute = true` rather than
+   nulling nv2a_viewleaf the way R_MarkLeaves' own `RI.viewleaf = NULL`
+   does (see that block's own comment for why nulling doesn't work here,
+   and `recompute`'s own declaration comment for why it is intentionally
+   a SEPARATE flag from `force` - codex review, real finding: an earlier
+   version reused `force` for this, which also wrongly enabled the
+   merged R_FatPVS(test,...) call below on every convar toggle even when
+   the crossing test never ran); the reference's null forces exactly one
+   fully-UNculled frame on ANY nv2a_r_novis toggle regardless of
+   direction (novis latches true off the null, independent of the new
+   convar value), whereas this port's `recompute` only forces a
+   RECOMPUTE - a toggle from on to off draws a correctly-culled frame
+   immediately, with no stray unculled frame in between. Different
+   observable behaviour for exactly one frame, only at the moment a
+   debug/A-B convar is toggled by a developer - judged a real
+   improvement, not a bug, and not worth reproducing the reference's own
+   incidental quirk to match it. */
+
+/* Needs no baker work and no private mirror of the engine's own node/
+   leaf/visdata loader (unlike nv2a_compute_mpak_layout()'s own geometry
+   mirror above): the v7 "classic core" lumps (MpakHeader.h's own v6->v7
+   note) make a map archive a real, valid BSP30 file, so the engine loads
+   a real mnode_t/mleaf_t/marksurfaces/visdata tree for it through its
+   completely standard, unmodified Mod_LoadBmodelLumps path - the exact
+   same tree ref/soft's own R_MarkLeaves-equivalent (r_main.c) already
+   reads via gp_cl->models[1]. nv2a_map_faces[i] and world->surfaces[i]
+   are the SAME face at the SAME index: both are built by walking the
+   archive's one real LUMP_FACES in write order (MpakFaceInfo's own doc
+   comment, MpakHeader.h) - one by the baker into FaceDrawCmds, the other
+   by the engine's own loader into msurface_t - so a marksurface pointer's
+   offset from world->surfaces is directly a valid nv2a_map_faces index,
+   no translation table needed. */
+static void nv2a_mark_leaves( const vec3_t vieworigin )
+{
+	const model_t *world = gp_cl->models[1];
+	qboolean novis = false;
+	qboolean force = false; /* codex review, real finding: this must stay
+	                            true ONLY for the real crossing-line-
+	                            contents case below (it gates the SECOND,
+	                            merged R_FatPVS call further down) - the
+	                            reference's own FCVAR_CHANGED path nulls
+	                            RI.viewleaf instead, which SKIPS that same
+	                            crossing-test block entirely (RI.viewleaf
+	                            is NULL, so `if (RI.viewleaf != NULL)`
+	                            never runs), meaning `force` stays false
+	                            there too. An earlier version of this port
+	                            set `force = true` directly on
+	                            FCVAR_CHANGED to force a recompute (see
+	                            nv2a_recompute below for why that still
+	                            can't null nv2a_viewleaf the way the
+	                            reference does) - but reusing this SAME
+	                            flag also mistakenly enabled the merged
+	                            R_FatPVS(test,...) call on every convar
+	                            toggle, even when `test` was never
+	                            confirmed to be a genuinely different,
+	                            non-solid leaf - merging in a degenerate
+	                            test point's PVS row (e.g. one that lands
+	                            in solid space, where Mod_FatPVS fills all
+	                            bits set) could silently defeat culling
+	                            until the next real leaf crossing. */
+	qboolean recompute = false; /* separate from `force` - true forces the
+	                                same-leaf skip check below to fall
+	                                through to a real recompute, WITHOUT
+	                                also implying the crossing test found
+	                                a real second leaf to merge in. */
+	mleaf_t *leaf = NULL;
+	vec3_t test;
+	uint32_t i;
+
+	/* world != nv2a_map_owner covers both "no map loaded yet" and the
+	   (currently unreachable, since this port has no inline-brushmodel
+	   consumer of this path) case of a non-world model owning the last
+	   loaded geometry - either way, there is no world model whose
+	   leafs/marksurfaces this function could safely walk. */
+	if( !nv2a_map_face_visible || !world || world != nv2a_map_owner )
+		return;
+
+	/* X9-G, render-architecture-specialist review: nv2a_map_faces[i] and
+	   world->surfaces[i] being the same face at the same index rests on
+	   an unenforced cross-subsystem invariant (this baker's own face loop
+	   and the engine's Mod_LoadSurfaces independently walking the same
+	   LUMP_FACES the same way) - the pointer-range check below catches a
+	   garbage offset, but not a silent reordering. This won't catch a
+	   reordering either, but it is a near-zero-cost check for the far
+	   more likely failure - the two loaders disagreeing on HOW MANY faces
+	   exist at all - logged once per map, not every call. */
+	if( nv2a_pvs_parity_checked_for != world )
+	{
+		nv2a_pvs_parity_checked_for = world;
+		if( (uint32_t)world->numsurfaces != nv2a_map_face_count )
+		{
+			/* codex review, real finding: a mismatch here means the index-
+			   bridging invariant this whole function depends on
+			   (nv2a_map_faces[i] == world->surfaces[i]) is not just
+			   unverifiable, it is KNOWN FALSE for this map - continuing
+			   to compute visibility from marksurface offsets under a
+			   known-false assumption could zero out nv2a_map_face_visible
+			   entries for perfectly valid, currently-visible faces
+			   (silently missing geometry), the opposite of this file's
+			   own established "fail open" discipline for every other
+			   PVS/frustum failure mode. Disable PVS culling for this map
+			   PERMANENTLY (not just this call) by freeing the table and
+			   returning - every future call hits the same "no table"
+			   guard at the top of this function, and
+			   nv2a_draw_map_geometry() already treats NULL exactly like
+			   nv2a_map_faces == NULL: frustum-only, never a black screen
+			   and never missing geometry a visible leaf should show. */
+			gEngfuncs.Con_Printf( "ref_nv2a: WARNING - world->numsurfaces (%d) != nv2a_map_face_count (%u); "
+				"disabling PVS culling for this map (frustum culling only)\n",
+				world->numsurfaces, nv2a_map_face_count );
+			Mem_Free( nv2a_map_face_visible );
+			nv2a_map_face_visible = NULL;
+			return;
+		}
+	}
+
+	if( FBitSet( nv2a_r_novis.flags, FCVAR_CHANGED ))
+	{
+		/* Force a recompute below even if the camera has not moved to a
+		   new leaf since last frame - toggling the convar must be visible
+		   immediately, not on the next real leaf crossing. Setting
+		   `recompute` (not `force` - see its own declaration comment for
+		   why the two must stay separate) directly, rather than
+		   nv2a_viewleaf = NULL (the reference's own RI.viewleaf = NULL),
+		   is deliberate: unlike ref/gl, this function recomputes
+		   nv2a_viewleaf itself a few lines below on every call, so
+		   clearing it here would just be overwritten immediately and
+		   never actually reach the skip check that needs it. */
+		ClearBits( nv2a_r_novis.flags, FCVAR_CHANGED );
+		recompute = true;
+	}
+
+	/* R_FindViewLeaf's own job (gl_rmain.c) - this module has no separate
+	   per-frame pass to host it in, so it runs here, immediately before
+	   the crossing test below that depends on its result being current
+	   for THIS frame, not last frame's. */
+	nv2a_viewleaf = gEngfuncs.Mod_PointInLeaf( vieworigin, world->nodes, (model_t *)world );
+
+	/* R_MarkLeaves' own crossing-line-contents merge (gl_rsurf.c): a
+	   camera sitting exactly on a leaf boundary (a door, a water surface)
+	   can read as one leaf while a point a few units off it reads as
+	   another - test a point offset toward solid ground and force a
+	   recompute if that lands in a genuinely different, non-solid leaf,
+	   so the PVS used this frame is not missing whatever that other leaf
+	   can see. */
+	VectorCopy( vieworigin, test );
+	if( nv2a_viewleaf != NULL )
+	{
+		if( nv2a_viewleaf->contents == CONTENTS_EMPTY )
+			test[2] -= 16.0f;
+		else
+			test[2] += 16.0f;
+
+		leaf = gEngfuncs.Mod_PointInLeaf( test, world->nodes, (model_t *)world );
+
+		if( leaf->contents != CONTENTS_SOLID && nv2a_viewleaf != leaf )
+			force = true;
+	}
+
+	if( nv2a_viewleaf == nv2a_oldviewleaf && nv2a_viewleaf != NULL && !force && !recompute )
+		return; /* same leaf as last call - the visibility table already reflects it */
+
+	if( nv2a_r_lockpvs.value )
+		return; /* frozen for inspection - same position ref/gl's own r_lockpvs check uses */
+
+	nv2a_oldviewleaf = nv2a_viewleaf;
+
+	/* reference-renderer-specialist review: the reference's own novis
+	   OR-chain (gl_rsurf.c) has a fourth term, RF_DRAW_OVERVIEW, dropped
+	   here - deliberately, not an oversight, same reasoning GL_RenderFrame
+	   already gives for dropping the same flag from its own frustum
+	   construction below: RF_DRAW_OVERVIEW requires CL_IsDevOverviewMode(),
+	   itself gated on dev_overview>0 AND (host_developer or
+	   cls.spectator) - unreachable in this fork's own real, single-
+	   player-only, Xbox-networking-disabled configuration today. Cited
+	   here rather than re-argued, since the call site is different but
+	   the fact being relied on is the same one. */
+	if( nv2a_r_novis.value || !nv2a_viewleaf || !world->visdata )
+		novis = true;
+
+	gEngfuncs.R_FatPVS( vieworigin, r_pvs_radius->value, nv2a_visbytes, false, novis );
+	if( force && !novis )
+		gEngfuncs.R_FatPVS( test, r_pvs_radius->value, nv2a_visbytes, true, novis );
+
+	memset( nv2a_map_face_visible, 0, (size_t)nv2a_map_face_count );
+
+	for( i = 0; i < (uint32_t)world->numleafs; i++ )
+	{
+		const mleaf_t *vleaf;
+		int j;
+
+		if( !NV2A_CHECKVISBIT( nv2a_visbytes, i ))
+			continue;
+
+		/* leafs[0] is the shared CONTENTS_SOLID leaf and carries no
+		   visdata bit of its own - bit i always names leafs[i+1], the
+		   same off-by-one ref/gl's own R_MarkLeaves uses. */
+		vleaf = &world->leafs[i + 1];
+		for( j = 0; j < vleaf->nummarksurfaces; j++ )
+		{
+			/* Bounds-checked against world->surfaces/numsurfaces directly
+			   (no bare ptrdiff_t subtraction trusted on its own) - same
+			   "malformed/unexpected data fails cleanly, never an
+			   out-of-range write" discipline this file already applies to
+			   every archive-sourced index above. */
+			const msurface_t *surf = vleaf->firstmarksurface[j];
+			uint32_t idx;
+
+			if( surf < world->surfaces || surf >= world->surfaces + world->numsurfaces )
+				continue;
+
+			idx = (uint32_t)( surf - world->surfaces );
+			if( idx < nv2a_map_face_count )
+				nv2a_map_face_visible[idx] = 1;
+		}
+	}
+}
+
 /* X9-E: the real per-frame camera, replacing the fixed one-time debug
    camera nv2a_load_map_geometry() used to compute. Called by the engine
    (engine/client/cl_view.c's own V_RenderView, BEFORE R_EndFrame runs
@@ -1752,6 +2158,13 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	if( nv2a_view_captured_this_frame )
 		return;
 	nv2a_view_captured_this_frame = true;
+
+	/* X9-G: recompute (or confirm unchanged) which of this map's faces
+	   are PVS-visible from here, before this frame's own draw call reads
+	   nv2a_map_face_visible. No-ops cheaply when the camera has not
+	   crossed a leaf boundary - see nv2a_mark_leaves()'s own early
+	   return. */
+	nv2a_mark_leaves( rvp->vieworigin );
 
 	AngleVectors( (float *)rvp->viewangles, forward, right, up );
 	f.x = forward[0]; f.y = forward[1]; f.z = forward[2];

@@ -5,6 +5,22 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `ref/nv2a` now PVS-culls its draw list
+
+Frustum culling (the previous entry below) still submitted every face
+the camera's field of view could geometrically contain, even the ones
+behind a wall a few feet away. The renderer now also asks the engine's
+own already-loaded world model which leaves are potentially visible from
+the camera's current position - the same PVS data `ref/gl` and `ref/soft`
+already use - and skips faces that belong to no visible leaf, on top of
+the existing frustum test. No baker or format changes were needed: the
+map archive is already a real BSP file the engine loads through its
+completely standard path, so the visibility data was already there,
+just unread by this renderer until now. A new console variable,
+`nv2a_r_novis`, disables it for comparison, the same way `nv2a_r_nocull`
+already does for the frustum test. See `docs/r3d/divergences.md` #97
+for the full account.
+
 ### Added — a repo-native agentic-loop Workflow for driving project phases
 
 A new Claude Code Workflow (`.claude/workflows/agentic-loop.js`) and six
