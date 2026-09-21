@@ -5,6 +5,21 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `ref/nv2a` now draws from the real, live player camera
+
+Replaced the hardware renderer's fixed, one-time debug camera (aimed at
+an arbitrary point in the map, computed once when a level loaded) with
+the engine's own real, live, per-frame player camera - the same real
+position/facing/field-of-view every other renderer uses. Verified two
+ways before trusting it: independently reproducing the exact camera
+math in Python from the engine's own real captured values and testing
+off-axis points (not just dead ahead, which can't tell a correct
+camera from a mirrored one) to confirm they land on the geometrically
+correct side of the screen in all four directions, and a live boot
+showing real geometry roughly centered in the frame - a much more
+normal-looking view than the old fixed camera's own arbitrary framing.
+See `docs/r3d/divergences.md` #95 for the full account.
+
 ### Added — a fix for the recurring live-verification test-environment blocker
 
 Every X9 live-boot attempt so far had silently failed for the same

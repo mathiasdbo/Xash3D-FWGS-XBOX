@@ -7496,12 +7496,42 @@ every frame" - and never disabled afterward by anything in `ref/nv2a`),
 clear value `0xFFFFFF` (far) - a real, correctly-configured setup.
 **Genuinely still open**: neither
 a pixel-perfect ground truth (real rasterization in the check) nor a
-`ref_soft` cross-check of the same view exists yet; X9's own full exit
-criterion (a hardware frame time matching X5, on real hardware, not
-xemu) remains open too. X9-E onward (a real view/visibility system,
-skinning, dynamic lighting, native alpha test, the frame-time exit
-criterion itself) sketched in this section's own bullets below, not
-started.
+`ref_soft` cross-check of the same view exists yet.
+
+**X9-E, 2026-09-21 - the real, live player camera, replacing the fixed
+debug one; coded, math independently verified, live-boot confirmed.**
+`GL_RenderFrame` (previously a no-op stub) now builds the real view/
+projection matrix every frame from the engine's own real, live
+`vieworigin`/`viewangles`/`fov_y` (`ref_viewpass_t`, via the same real
+per-frame hook - `engine/client/cl_view.c` - every other ref module
+uses), using the engine's own canonical `AngleVectors()` for the camera
+axes instead of re-deriving them from an arbitrary eye/target/up hint
+the way the old fixed camera did. Filters out the menu's own
+playermodel-preview pass (`RF_DRAW_WORLD`), which also calls
+`GL_RenderFrame` and would otherwise clobber the real world view. A new
+`nv2a_view_valid` guard keeps the draw path falling back to the
+already-proven test triangle if a map loads before the first real
+frame, rather than ever drawing with a degenerate all-zero matrix.
+Verified two ways before trusting it: independently reproducing the
+exact matrix chain in Python from the engine's own real, captured
+`rvp` values and testing OFF-AXIS points (not just dead ahead, which
+codex review correctly flagged as unable to detect a handedness bug -
+a point with zero right/up displacement lands at screen center
+regardless of axis sign) - points offset along the camera's own real
+`right`/`up` land on the geometrically correct side of the screen in
+all four directions, sanity-checked against what the OLD, negated
+convention would have produced instead; and a live boot showing real,
+distinct geometry roughly centered in the frame, a qualitatively more
+normal FPS-camera composition than X9-D's own fixed-camera screenshot.
+Full account in `divergences.md` #95 -
+this closes `divergences.md` #91's own "no real camera/view system"
+scope limit; "no visibility/frustum culling" carries forward unchanged,
+since the whole map is still submitted every frame regardless of what
+this real camera can actually see.
+
+X9-F onward (frustum/PVS culling, skinning, dynamic lighting, native
+alpha test, the frame-time exit criterion itself) sketched in this
+section's own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised

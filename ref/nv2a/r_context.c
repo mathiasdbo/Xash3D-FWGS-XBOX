@@ -33,6 +33,10 @@ under xemu.
 #include "const.h"
 #include "cvardef.h"
 #include "ref_common.h"
+#include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
+                            RF_DRAW_WORLD - only forward-declared via
+                            ref_api.h otherwise. ref/soft's own r_local.h
+                            includes this same header for the same reason. */
 #include "mpak_layout.h" /* filesystem/mpak_layout.h - types/constants only, see
                             nv2a_compute_mpak_layout()'s own comment for why the
                             offset-COMPUTING function body still needs its own
@@ -152,6 +156,45 @@ static void     *nv2a_map_lightmap;     /* GPU-visible, RGBA8, no format convers
                                             already used, just bound on texture stage 1 */
 static uint32_t  nv2a_map_lightmap_width, nv2a_map_lightmap_height, nv2a_map_lightmap_pitch;
 static float     nv2a_map_viewproj[4][4];
+static qboolean  nv2a_view_valid; /* X9-E: true only once GL_RenderFrame has
+                                      processed a real world pass this
+                                      session - R_EndFrame must not draw
+                                      map geometry with whatever this
+                                      matrix defaults to (all-zero BSS)
+                                      before that first real frame, since
+                                      the vertex shader's own w-divide
+                                      turns an all-zero matrix into a
+                                      divide by zero. Reset in R_Init()
+                                      only - not tied to map load/unload,
+                                      since a one-frame-stale-but-real
+                                      matrix across a level transition is
+                                      harmless. */
+static qboolean  nv2a_view_captured_this_frame; /* X9-E, codex review, real
+                                      finding: V_RenderView's own do/while
+                                      loop (engine/client/cl_view.c) can
+                                      call GL_RenderFrame more than once
+                                      per real frame - a real client
+                                      spectator/PIP inset pass is a second,
+                                      real example, distinct RF_DRAW_WORLD
+                                      viewport and all - and this module
+                                      only ever draws ONE full-screen pass
+                                      per frame (R_EndFrame), with no per-
+                                      viewport rendering at all. Without
+                                      this guard, a second pass would
+                                      silently replace the primary camera
+                                      with whatever that pass's own (likely
+                                      tiny, off-center) view is and draw it
+                                      full-screen - last-writer-wins,
+                                      exactly backwards. Real per-viewport
+                                      rendering is out of scope for this
+                                      bring-up module; until it exists,
+                                      only the FIRST real world pass each
+                                      frame is captured, matching this
+                                      project's own single, full-screen
+                                      draw. Reset at the top of R_EndFrame,
+                                      so it re-arms for the NEXT frame's
+                                      own first GL_RenderFrame call, not
+                                      the current one still in progress. */
 
 static void nv2a_matrix_viewport( float out[4][4], float x, float y, float width, float height, float z_min, float z_max )
 {
@@ -183,34 +226,15 @@ same NDC-to-screen matrix - no shader change needed, just a different
 
 typedef struct { float x, y, z; } nv2a_vec3_t;
 
-static nv2a_vec3_t nv2a_vec3_sub( nv2a_vec3_t a, nv2a_vec3_t b )
-{
-	nv2a_vec3_t r = { a.x - b.x, a.y - b.y, a.z - b.z };
-	return r;
-}
-
-static nv2a_vec3_t nv2a_vec3_cross( nv2a_vec3_t a, nv2a_vec3_t b )
-{
-	nv2a_vec3_t r = { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
-	return r;
-}
-
+/* X9-E: sub/cross/normalize are gone - they only ever existed to
+   re-derive orthonormal axes from an eye/target/up hint for X9-A
+   through D's own fixed, one-time debug camera, removed now that the
+   real per-frame camera gets already-orthonormal axes directly from
+   the engine's own AngleVectors(). dot survives - nv2a_matrix_view_from_axes()
+   still needs it for the translation row. */
 static float nv2a_vec3_dot( nv2a_vec3_t a, nv2a_vec3_t b )
 {
 	return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-static nv2a_vec3_t nv2a_vec3_normalize( nv2a_vec3_t a )
-{
-	float len = sqrtf( nv2a_vec3_dot( a, a ));
-	nv2a_vec3_t r = { 0 };
-	if( len > 0.0001f )
-	{
-		r.x = a.x / len;
-		r.y = a.y / len;
-		r.z = a.z / len;
-	}
-	return r;
 }
 
 /* result = a * b (row-vector convention: v' = v * result = v * a * b). */
@@ -232,22 +256,28 @@ static void nv2a_matrix_multiply( float result[4][4], const float a[4][4], const
 	memcpy( result, tmp, sizeof( tmp ));
 }
 
-/* Standard left-handed row-vector LookAt (matches D3DXMatrixLookAtLH) -
-   eye/target/up in world space, up need not be exactly orthogonal to the
-   view direction. */
-static void nv2a_matrix_lookat( float out[4][4], nv2a_vec3_t eye, nv2a_vec3_t target, nv2a_vec3_t up )
+/* X9-A through D used a look-at built from an eye/target/up HINT
+   (D3DXMatrixLookAtLH-style: re-deriving orthonormal axes via
+   normalize/cross from three arbitrary points) for their own fixed,
+   one-time debug camera - removed in X9-E, since the real per-frame
+   camera (GL_RenderFrame) already has real, orthonormal forward/right/
+   up axes straight from the engine's own AngleVectors(), and re-
+   deriving axes from a hint would be redundant and would not
+   necessarily reproduce AngleVectors()'s own exact axes anyway. Same
+   output shape a look-at matrix would have (right/up/forward become the
+   matrix's own three column vectors, translation via negative dot
+   products against eye) - still chains into
+   nv2a_matrix_perspective()/nv2a_matrix_viewport() unchanged, only how
+   the axes are OBTAINED differs. */
+static void nv2a_matrix_view_from_axes( float out[4][4], nv2a_vec3_t eye, nv2a_vec3_t forward, nv2a_vec3_t right, nv2a_vec3_t up )
 {
-	nv2a_vec3_t zaxis = nv2a_vec3_normalize( nv2a_vec3_sub( target, eye ));
-	nv2a_vec3_t xaxis = nv2a_vec3_normalize( nv2a_vec3_cross( up, zaxis ));
-	nv2a_vec3_t yaxis = nv2a_vec3_cross( zaxis, xaxis );
-
 	memset( out, 0, 4 * 4 * sizeof( float ));
-	out[0][0] = xaxis.x; out[1][0] = xaxis.y; out[2][0] = xaxis.z;
-	out[0][1] = yaxis.x; out[1][1] = yaxis.y; out[2][1] = yaxis.z;
-	out[0][2] = zaxis.x; out[1][2] = zaxis.y; out[2][2] = zaxis.z;
-	out[3][0] = -nv2a_vec3_dot( xaxis, eye );
-	out[3][1] = -nv2a_vec3_dot( yaxis, eye );
-	out[3][2] = -nv2a_vec3_dot( zaxis, eye );
+	out[0][0] = right.x;   out[1][0] = right.y;   out[2][0] = right.z;
+	out[0][1] = up.x;      out[1][1] = up.y;      out[2][1] = up.z;
+	out[0][2] = forward.x; out[1][2] = forward.y; out[2][2] = forward.z;
+	out[3][0] = -nv2a_vec3_dot( right, eye );
+	out[3][1] = -nv2a_vec3_dot( up, eye );
+	out[3][2] = -nv2a_vec3_dot( forward, eye );
 	out[3][3] = 1.0f;
 }
 
@@ -256,9 +286,10 @@ static void nv2a_matrix_lookat( float out[4][4], nv2a_vec3_t eye, nv2a_vec3_t ta
    (near=0, far=1) in the SAME convention nv2a_matrix_viewport() above
    already expects as ITS OWN input - chaining lookat * perspective *
    nv2a_matrix_viewport reuses that function completely unchanged.
-   fovYRadians/aspect/zNear/zFar are all compile-time constants for this
-   bring-up (a fixed debug camera), so no runtime tan() is needed - the
-   caller passes a precomputed yScale. */
+   yScale is precomputed by the caller either way: X9-A/D's own fixed
+   debug camera used a literal 1.0 (a compile-time 90-degree FOV, no
+   runtime tan() needed); X9-E's own real per-frame camera instead
+   computes it from the engine's own real, live fov_y each frame. */
 static void nv2a_matrix_perspective( float out[4][4], float yScale, float aspect, float zNear, float zFar )
 {
 	memset( out, 0, 4 * 4 * sizeof( float ));
@@ -778,6 +809,7 @@ static qboolean R_Init( void )
 	qboolean video_ok;
 
 	debug_marker = 1;
+	nv2a_view_valid = false; /* X9-E: no real GL_RenderFrame call yet this init */
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not
@@ -1023,9 +1055,10 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
    real per-map-sized packed index-dword buffer, the real DXT1 atlas
    copied verbatim (already in the right hardware layout - no un-swizzle
    needed, see this file's own header comment and
-   docs/r3d/divergences.md's X9-B entry), the real lightmap atlas copied
-   verbatim, and a real look-at + perspective camera framing the map's own
-   first baked triangle. Caller (Mod_ProcessRenderData) has already
+   docs/r3d/divergences.md's X9-B entry), and the real lightmap atlas
+   copied verbatim. The camera is NOT set up here as of X9-E - see
+   GL_RenderFrame's own real, live, per-frame camera and
+   nv2a_view_valid's own declaration comment for why. Caller (Mod_ProcessRenderData) has already
    confirmed the header itself is a real nv2a-profile archive via
    nv2a_mpak_header_valid() - this function only has to validate
    everything PAST the header.
@@ -1070,8 +1103,6 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	uint32_t vert_count, index_count, dword_count;
 	uint32_t i;
 	uint64_t vb_bytes, idx_bytes, total_bytes;
-	nv2a_vec3_t v0, v1, v2, centroid, normal, up, eye;
-	float view[4][4], proj[4][4], ndc_to_screen[4][4], combined[4][4];
 	uint64_t blocksW, blocksH;
 
 	if( !nv2a_compute_mpak_layout( header, (fs_offset_t)buffersize, &geo ))
@@ -1193,10 +1224,6 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			dst[i].uv1[0] = v.lu;
 			dst[i].uv1[1] = v.lv;
 		}
-
-		v0.x = dst[0].pos[0]; v0.y = dst[0].pos[1]; v0.z = dst[0].pos[2];
-		v1.x = dst[1].pos[0]; v1.y = dst[1].pos[1]; v1.z = dst[1].pos[2];
-		v2.x = dst[2].pos[0]; v2.y = dst[2].pos[1]; v2.z = dst[2].pos[2];
 	}
 	nv2a_map_vert_count = vert_count;
 
@@ -1259,38 +1286,12 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 		nv2a_map_index_dwords[i] = lo | ( hi << 16 );
 	}
 
-	/* A fixed debug camera: look at the map's own first baked triangle from
-	   along its own normal - not part of the real game's own view pipeline
-	   (a much later X9 slice's job), just enough to frame real, actual
-	   geometry for this bring-up's own proof; still an arbitrary rather
-	   than a good vantage point, same honest limitation X9-B/C already
-	   documented for their own one-face version of this. */
-	centroid.x = ( v0.x + v1.x + v2.x ) / 3.0f;
-	centroid.y = ( v0.y + v1.y + v2.y ) / 3.0f;
-	centroid.z = ( v0.z + v1.z + v2.z ) / 3.0f;
-
-	normal = nv2a_vec3_normalize( nv2a_vec3_cross(
-		nv2a_vec3_sub( v1, v0 ),
-		nv2a_vec3_sub( v2, v0 )));
-
-	up.x = 0.0f; up.y = 0.0f; up.z = 1.0f; /* GoldSrc's own Z-up convention */
-	if( fabsf( normal.z ) > 0.99f )
-	{
-		up.x = 1.0f; up.y = 0.0f; up.z = 0.0f;
-	}
-
-	eye.x = centroid.x + normal.x * 200.0f;
-	eye.y = centroid.y + normal.y * 200.0f;
-	eye.z = centroid.z + normal.z * 200.0f;
-
-	nv2a_matrix_lookat( view, eye, centroid, up );
-	/* yScale = 1/tan(fovY/2) with fovY = 90 degrees, so tan(45 deg) = 1 -
-	   a literal 1.0, no runtime tan() needed for a fixed debug FOV. */
-	nv2a_matrix_perspective( proj, 1.0f, (float)nv2a_width / (float)nv2a_height, 1.0f, 8192.0f );
-	nv2a_matrix_viewport( ndc_to_screen, 0, 0, (float)nv2a_width, (float)nv2a_height, 0, 65536.0f );
-
-	nv2a_matrix_multiply( combined, view, proj );
-	nv2a_matrix_multiply( nv2a_map_viewproj, combined, ndc_to_screen );
+	/* X9-E: the camera is no longer computed here. nv2a_map_viewproj is
+	   now written every real frame by GL_RenderFrame's own real
+	   vieworigin/viewangles/fov - see nv2a_view_valid's own declaration
+	   comment for why a map loaded before the first real frame still
+	   draws safely (falls back to the test triangle) instead of ever
+	   reading whatever this matrix defaults to. */
 
 	return true;
 }
@@ -1401,9 +1402,80 @@ static void GL_Bind( int tmu, unsigned int texnum )
 	;
 }
 
+/* X9-E: the real per-frame camera, replacing the fixed one-time debug
+   camera nv2a_load_map_geometry() used to compute. Called by the engine
+   (engine/client/cl_view.c's own V_RenderView, BEFORE R_EndFrame runs
+   later in the same frame - confirmed by reading the real call order,
+   not assumed) with the real, live vieworigin/viewangles/fov for a
+   pass. NOT guaranteed once per frame - V_RenderView's own do/while
+   loop can call this more than once (a real client spectator/PIP inset
+   pass is a second, real example) - see nv2a_view_captured_this_frame's
+   own declaration comment for why only the first real world pass each
+   frame is used. */
 static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 {
-	;
+	vec3_t forward, right, up;
+	nv2a_vec3_t f, r, u, eye;
+	float view[4][4], proj[4][4], ndc_to_screen[4][4], combined[4][4];
+	float yscale, aspect;
+
+	if( !nv2a_ready )
+		return;
+
+	/* The menu's own playermodel preview (engine/client/dll_int/
+	   cl_gameui.c's pfnRenderScene) also calls GL_RenderFrame, with an
+	   unrelated tiny-preview camera, AFTER the real world pass but
+	   BEFORE R_EndFrame - it would silently become the last writer of
+	   nv2a_map_viewproj this frame if not filtered out here. It clears
+	   RF_DRAW_WORLD on its own pass specifically so real world passes
+	   can be told apart from it. */
+	if( !FBitSet( rvp->flags, RF_DRAW_WORLD ))
+		return;
+
+	/* codex review, real finding: without this, a second real world
+	   pass in the SAME frame (a spectator/PIP inset view, its own
+	   distinct and much smaller rvp->viewport) would replace the
+	   primary camera here and then get drawn FULL-SCREEN by R_EndFrame,
+	   which has no per-viewport rendering at all - last-writer-wins,
+	   backwards from what should be shown. Keep the first real world
+	   pass each frame instead. */
+	if( nv2a_view_captured_this_frame )
+		return;
+	nv2a_view_captured_this_frame = true;
+
+	AngleVectors( (float *)rvp->viewangles, forward, right, up );
+	f.x = forward[0]; f.y = forward[1]; f.z = forward[2];
+	r.x = right[0];   r.y = right[1];   r.z = right[2];
+	u.x = up[0];      u.y = up[1];      u.z = up[2];
+	eye.x = rvp->vieworigin[0]; eye.y = rvp->vieworigin[1]; eye.z = rvp->vieworigin[2];
+
+	/* Deliberately using the real `right` axis AngleVectors() gives,
+	   NOT its negation: this is the geometrically correct choice (world-
+	   right maps to positive screen-X, given nv2a_matrix_viewport()'s
+	   own already-proven Y-flip), and matches every other real ref
+	   module's own convention (ref/soft/r_main.c's AngleVectors() call).
+	   The OLD fixed debug camera's own nv2a_matrix_lookat() derived its
+	   own col0 axis as cross(up,zaxis), which for the same orientation
+	   is the LITERAL NEGATION of AngleVectors()'s own `right` - an
+	   arbitrary choice nobody had ever visually checked, since a fixed
+	   debug camera never needed to agree with a real player's own sense
+	   of left/right. This is a real, deliberate correction: X9-E's own
+	   first live screenshot is expected to look horizontally mirrored
+	   relative to every X9-A through D screenshot, not a regression. */
+	nv2a_matrix_view_from_axes( view, eye, f, r, u );
+
+	/* rvp->viewport[2]/[3] (not nv2a_width/nv2a_height) is the strictly
+	   correct pairing with rvp->fov_y - both are 640/480 on this fixed-
+	   resolution Xbox target either way. fov_y is in degrees (confirmed:
+	   engine/client/cl_view.c's own V_CalcFov returns RAD2DEG(...)). */
+	aspect = (float)rvp->viewport[2] / (float)rvp->viewport[3];
+	yscale = 1.0f / tanf( (float)( DEG2RAD( rvp->fov_y ) * 0.5 ));
+	nv2a_matrix_perspective( proj, yscale, aspect, 1.0f, 8192.0f );
+	nv2a_matrix_viewport( ndc_to_screen, 0, 0, (float)nv2a_width, (float)nv2a_height, 0, 65536.0f );
+
+	nv2a_matrix_multiply( combined, view, proj );
+	nv2a_matrix_multiply( nv2a_map_viewproj, combined, ndc_to_screen );
+	nv2a_view_valid = true;
 }
 
 static void GL_OrthoBounds( const float *mins, const float *maxs )
@@ -1462,6 +1534,13 @@ static void R_EndFrame( void )
 
 	debug_frame_count++;
 
+	/* X9-E, codex review: R_EndFrame runs LAST in a frame, after every
+	   GL_RenderFrame call this same frame was ever going to get - so
+	   resetting nv2a_view_captured_this_frame here re-arms it for the
+	   NEXT frame's own first real world pass, without affecting anything
+	   about the frame that just finished. */
+	nv2a_view_captured_this_frame = false;
+
 	pb_wait_for_vbl();
 	pb_reset();
 	pb_target_back_buffer();
@@ -1473,7 +1552,14 @@ static void R_EndFrame( void )
 	while( pb_busy())
 		;
 
-	if( nv2a_map_ready )
+	/* X9-E: nv2a_map_viewproj is now written by GL_RenderFrame's own
+	   real per-frame camera, not computed once at map-load time - a map
+	   loaded before the engine has ever called GL_RenderFrame with a
+	   real world pass (loading/plaque frames) must not draw with
+	   whatever that matrix defaults to (all-zero BSS - a divide by zero
+	   in the vertex shader's own w-divide), so this falls back to the
+	   already-proven test triangle until nv2a_view_valid is real. */
+	if( nv2a_map_ready && nv2a_view_valid )
 		nv2a_draw_map_geometry();
 	else
 		nv2a_draw_test_triangle();
