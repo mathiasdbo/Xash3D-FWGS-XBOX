@@ -22,14 +22,20 @@ for real: for the first time, a live boot reached
 `ref/nv2a`'s own `R_Init` and ran it to completion, confirmed by reading
 guest memory directly.
 
-That surfaced a second, different problem: the engine now hangs before
-ever presenting a first real frame, and a control test confirmed this
-is not specific to the still-in-progress NV2A renderer - the already-
-working software renderer hits the identical hang on the same disc.
-This second issue remains open; see `docs/r3d/divergences.md` #92 for
-the full account.
+That surfaced a second, different problem: the engine appeared to hang
+before ever presenting a first real frame, on both renderers alike -
+this turned out to be a testing-methodology gap, not a new engine
+defect. Every live-boot attempt this session had linked a deliberately
+empty stub client module, which the engine correctly, deliberately
+halts on rather than running with; the real fix was already built and
+proven months of project-time ago (X7.4 step 2) and just needed to
+actually be used: `tools/xbox-game-link-check.sh hl --include-client
+--include-freevgui`. With it, `ref/nv2a` is now confirmed - live, for
+the first time - genuinely drawing real baked map geometry, sustained
+over thousands of frames. See `docs/r3d/divergences.md` #92/#93 for the
+full account.
 
-### Added — the first four slices of the NV2A hardware renderer (not yet verified running)
+### Added — the first four slices of the NV2A hardware renderer, now confirmed rendering live
 
 A new `ref/nv2a` module builds and links into the engine, meant to drive
 the Xbox's own GPU through the real renderer-selection path. It's grown
@@ -40,10 +46,14 @@ real view/visibility system, dynamic lighting, and the rest of the
 hardware renderer are still follow-on work. Its build/link/parsing logic
 is verified correct by direct memory inspection and by validating the
 file-format and shader-compiler output against a real baked map (a full
-retail map, not just one face) in isolation, but a live boot has not yet
-actually shown any of these stages rendering (a test-environment issue,
-not a known code defect - see `docs/r3d/divergences.md` #88/#89/#90/#91
-for the full account and what's still unproven).
+retail map, not just one face) in isolation, and - for the first time -
+a live boot now confirms it actually running: a real map genuinely
+parsed and drawn, sustained over thousands of frames, real distinct
+per-face texture/lightmap variation visible on screen. A real
+view/visibility system, dynamic lighting, and the rest of the hardware
+renderer are still follow-on work, and the frame-time comparison against
+X5 on real hardware (not xemu) remains the real, open exit criterion -
+see `docs/r3d/divergences.md` #88-#93 for the full account.
 
 ### Added — a Controller screen with real, named control schemes
 

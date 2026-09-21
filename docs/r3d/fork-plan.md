@@ -7451,13 +7451,36 @@ X9-B onward, this is the first slice to actually need more than one
 batch (144, by real cross-check against `crossfire.mpak`). Compiles,
 isolates and links cleanly through both `tools/xbox-link-check.sh` and
 `tools/xbox-game-link-check.sh hl` (including a full real `hl`
-server-module link), same bar as every prior X9 slice. Not yet observed
-rendering - the same live-boot blockers X9-A/B/C already hit apply
-unchanged and were deliberately not re-attempted a third time, per this
-project's own "stop and document, don't loop" rule. Full account in
-`divergences.md` #91; X9-E onward (a real view/visibility system,
-skinning, dynamic lighting, native alpha test, the frame-time exit
-criterion) sketched in this section's own bullets below, not started.
+server-module link), same bar as every prior X9 slice. Full account in
+`divergences.md` #91.
+
+**Live rendering CONFIRMED, 2026-09-20 (divergences #92/#93) - the first
+time in this project's history.** The "engine won't reach a menu at all"
+blocker that appeared right after fixing #88's own stale-`video.cfg`
+issue turned out to be a testing-methodology gap, not a new engine
+defect: every X9 boot attempt had linked the still-stubbed client
+module, which `CL_LoadProgs()` correctly, deliberately hard-fails
+against (missing required HL SDK exports), halting the console before
+either renderer's own frame loop is ever reached again - on both
+`ref_soft` and `ref_nv2a` alike, unrelated to anything X9 itself does.
+The real fix already existed, already proven in X7.4 step 2
+(divergences #41-48): `tools/xbox-game-link-check.sh hl --include-client
+--include-freevgui` links the real client against `3rdparty/freevgui`.
+Rebuilding X9-D's own `crossfire.mpak` test disc with that combination
+produced a real, valid XBE (0 duplicate, 0 undefined) that, booted with
+`r_refdll "nv2a"`, shows `nv2a_map_ready == 1` and a `debug_frame_count`
+that genuinely advances (10,572 → 16,124 across two live reads) - a
+real .mpak parsed, accepted, and drawn, sustained, not a static wire-up
+claim. A brightness-boosted screenshot of the running guest shows real,
+distinct, differently-tinted polygon silhouettes - genuine per-face
+texture/lightmap variation, not a solid placeholder. Not yet claimed:
+whether the (very dark, at this specific fixed debug-camera angle)
+result is photometrically CORRECT was not checked against `ref_soft`'s
+own rendering of the same view, and X9's own full exit criterion (a
+hardware frame time matching X5, on real hardware, not xemu) remains
+open. X9-E onward (a real view/visibility system, skinning, dynamic
+lighting, native alpha test, the frame-time exit criterion itself)
+sketched in this section's own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised

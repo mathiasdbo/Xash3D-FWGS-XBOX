@@ -1273,3 +1273,25 @@ right image booting, X7.4 step 4's whole chain ran in under two seconds
 and the tram changelevel followed in 43 - the "900-second slowness"
 being explained as first-time directory scanning was another artifact
 of tracing the wrong binary, never a real finding.
+
+### ALWAYS confirm which module composition produced the XBE under test before diagnosing engine behavior from it
+
+Four separate live-boot attempts (X9-A through the divergences.md #92
+investigation) all built with `tools/xbox-game-link-check.sh hl --xbe`
+(the still-stubbed client, correct for server-only testing) and then
+read a "black screen, frozen `memstats`, no forward progress" as a
+mysterious engine hang affecting both `ref_soft` and `ref_nv2a` alike.
+It was neither: `CL_LoadProgs()` (`engine/client/dll_int/cl_game.c`)
+correctly, deliberately hard-fails against a stub client missing its
+required exports, and `Host_Error`→`Sys_Error` correctly halts the
+console - exactly the observed symptom, with zero renderer involvement.
+The real, already-proven-working combination
+(`--include-client --include-freevgui`, closed in X7.4 step 2,
+divergences #41-48) was sitting in this same file's own git history the
+entire time. **Before spending a debugging session on "why does this
+boot behave strangely," re-read the exact build/link command that
+produced the binary being tested and compare it against what a working
+milestone for that same boot shape actually used - a link summary line
+(`hl server - ...` vs `hl server+client+freevgui - ...`) is one grep
+away and settles in seconds what hours of live instrumentation would
+otherwise "discover" as a false engine defect.** See divergences.md #93.
