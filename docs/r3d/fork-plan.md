@@ -7529,8 +7529,38 @@ scope limit; "no visibility/frustum culling" carries forward unchanged,
 since the whole map is still submitted every frame regardless of what
 this real camera can actually see.
 
-X9-F onward (frustum/PVS culling, skinning, dynamic lighting, native
-alpha test, the frame-time exit criterion itself) sketched in this
+**X9-F, 2026-09-21 - frustum culling, closing the "no visibility/frustum
+culling" half of #91/#95's own carried-forward scope limit.** `ref/nv2a`
+no longer submits a whole map's entire index buffer every frame
+regardless of what the real X9-E camera can see. `nv2a_compute_mpak_layout()`
+now captures the `FaceDrawCmds` lump (previously skipped - a perfect,
+gap-free per-BSP-face tiling of the index buffer, confirmed against the
+real `crossfire.mpak`) into a per-face table built once at map load:
+world-space AABBs from the already-remapped vertex positions (the baked
+format itself carries none), and each face's own index range snapped
+outward to a 6-index/3-dword boundary so it stays addressable in the
+packed index buffer without ever shifting a triangle boundary. Validated,
+not trusted - a tiling that doesn't check out leaves the table unbuilt
+and the draw path degrades to the old, unculled behaviour automatically.
+`GL_RenderFrame` now also builds a real 5-plane frustum from the same
+forward/right/up/eye its view matrix already uses (a direct port of
+`ref/gl/gl_frustum.c`'s own `GL_FrustumInitProj`), and
+`nv2a_draw_map_geometry()`'s own batching loop - unchanged in shape - is
+now fed by a streaming cull-and-merge pass instead of one call over the
+whole buffer. A new `nv2a_r_nocull` convar (mirroring `ref/gl`'s own)
+makes the required on/off visual A/B a real toggle. Measured, not
+assumed, before committing to the design: a Python prototype against the
+real `crossfire.mpak` and the real camera X9-E captured live shows the
+spawn view culling to ~35% of the index buffer in 50 runs, and BSP face
+order is already spatially coherent enough (19-62 runs at every camera
+tried) that no gap-merging heuristic is needed. Full account in
+`divergences.md` #96 - PVS is what remains of #91/#95's own scope limit,
+and the baked archive already carries real, populated, byte-for-byte
+GoldSrc BSP30 visibility/node/leaf/marksurface lumps for it, so that next
+slice needs no baker work either.
+
+X9-G onward (PVS culling, backface culling, skinning, dynamic lighting,
+native alpha test, the frame-time exit criterion itself) sketched in this
 section's own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.

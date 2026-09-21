@@ -196,6 +196,75 @@ static qboolean  nv2a_view_captured_this_frame; /* X9-E, codex review, real
                                       own first GL_RenderFrame call, not
                                       the current one still in progress. */
 
+/* X9-F: one entry per baked BSP face, built once at map load from the
+   FaceDrawCmds lump (captured above) plus the already-remapped vertex
+   positions in nv2a_map_vb - the baked format itself carries no bounding
+   volume (tools/asset-studio/src/formats/MpakHeader.h's own MpakFaceInfo
+   has planenum/texinfo/lightmap fields only, nothing spatial), so this is
+   computed here, not read from the archive.
+
+   dword_begin/dword_end address nv2a_map_index_dwords directly, snapped
+   OUTWARD from the face's own [start_index,start_index+index_count) range
+   to a multiple of 6 logical indices (= 3 dwords, since each dword packs
+   two indices) - 6 is lcm(2,3), so a snapped boundary is simultaneously a
+   dword boundary AND a whole-triangle boundary. A face can start at an
+   odd logical index (real example, crossfire.mpak's own face 4: index
+   45) where the enclosing dword also holds the tail of the PREVIOUS
+   face's own triangles - submitting an unsnapped range would prepend a
+   stray index and shift every triangle boundary in the draw, not just
+   round a byte count. Over-draw from this snap is at most two triangles
+   per emitted run; verified in Python against the real crossfire.mpak
+   that snapping every face and re-merging contiguous runs reconstructs
+   the exact same single 17,163-dword range this module already submits
+   today when nothing is culled (docs/r3d/divergences.md #96). */
+typedef struct
+{
+	vec3_t   mins, maxs;
+	uint32_t dword_begin, dword_end;
+} nv2a_map_face_t;
+
+static nv2a_map_face_t *nv2a_map_faces;      /* NULL = no per-face table this
+                                                 map (never built, or the
+                                                 FaceDrawCmds tiling failed
+                                                 validation) - the draw path
+                                                 falls back to submitting the
+                                                 whole index buffer uncculled,
+                                                 exactly like every X9 slice
+                                                 before this one, rather than
+                                                 drawing nothing. */
+static uint32_t          nv2a_map_face_count;
+
+/* X9-F: the real per-frame view frustum, built in GL_RenderFrame from the
+   SAME forward/right/up/eye the view matrix already uses - see that
+   function's own comment for why this means the frustum and the
+   projection can never disagree about handedness or FOV the way two
+   independently-derived cameras could. Port of ref/gl/gl_frustum.c's own
+   GL_FrustumInitProj (LEFT/RIGHT/BOTTOM/TOP/FAR planes, inward-pointing
+   normals, no near plane - the reference passes flZNear=0.0f from
+   R_SetupFrustum and returns before setting one). */
+static mplane_t nv2a_frustum[5];
+#define NV2A_FRUSTUM_LEFT   0
+#define NV2A_FRUSTUM_RIGHT  1
+#define NV2A_FRUSTUM_BOTTOM 2
+#define NV2A_FRUSTUM_TOP    3
+#define NV2A_FRUSTUM_FAR    4
+
+/* Bring-up diagnostic only, same discipline as debug_frame_count above -
+   read via tools/xemu-debug.py mem, not part of the ref_interface_t
+   contract. Updated once per real nv2a_draw_map_geometry() call. */
+uint32_t nv2a_cull_faces_total;
+uint32_t nv2a_cull_faces_visible;
+uint32_t nv2a_cull_runs;
+uint32_t nv2a_cull_dwords;
+
+/* Mirrors ref/gl's own r_nocull (ref/gl/gl_local.h) in name and meaning -
+   a private, module-local convar (CVAR_DEFINE_AUTO, the same pattern
+   ref/soft/r_main.c uses for its own sw_ and r_novis convars), not one of
+   the engine's shared convars. Exists so the live A/B check
+   divergences.md #96 describes (culling on vs. off must render
+   identically) is a real toggle, not an assertion. */
+static CVAR_DEFINE_AUTO( nv2a_r_nocull, "0", 0, "ref_nv2a: disable frustum culling" );
+
 static void nv2a_matrix_viewport( float out[4][4], float x, float y, float width, float height, float z_min, float z_max )
 {
 	memset( out, 0, 4 * 4 * sizeof( float ));
@@ -286,14 +355,36 @@ static void nv2a_matrix_view_from_axes( float out[4][4], nv2a_vec3_t eye, nv2a_v
    (near=0, far=1) in the SAME convention nv2a_matrix_viewport() above
    already expects as ITS OWN input - chaining lookat * perspective *
    nv2a_matrix_viewport reuses that function completely unchanged.
-   yScale is precomputed by the caller either way: X9-A/D's own fixed
-   debug camera used a literal 1.0 (a compile-time 90-degree FOV, no
-   runtime tan() needed); X9-E's own real per-frame camera instead
-   computes it from the engine's own real, live fov_y each frame. */
-static void nv2a_matrix_perspective( float out[4][4], float yScale, float aspect, float zNear, float zFar )
+   xScale/yScale are precomputed by the caller either way: X9-A/D's own
+   fixed debug camera used a literal 1.0 for yScale and derived xScale
+   from a fixed aspect (a compile-time 90-degree FOV, no runtime tan()
+   needed); X9-E's own real per-frame camera instead computes yScale
+   from the engine's own real, live fov_y each frame.
+
+   X9-F, codex review, real finding: this used to take (yScale, aspect)
+   and derive xScale = yScale/aspect, silently assuming fov_x is always
+   exactly the aspect-consistent angle for fov_y - true at this port's
+   fixed 640x480/4:3 target under ordinary rendering (V_AdjustFov,
+   engine/client/cl_view.c, returns early exactly at 4:3, and V_CalcFov's
+   own math makes tan(fov_x/2) == aspect*tan(fov_y/2) exactly whenever it
+   does), but NOT an invariant the reference engine itself relies on:
+   V_ApplyRefUnderwater (cl_view.c) warps fov_x and fov_y by DIFFERENT,
+   independent factors when set (gated behind RF_DRAW_CUBEMAP/
+   RF_DRAW_OVERVIEW - see GL_RenderFrame's own frustum-construction
+   comment for why that gate makes this specific warp unreachable on
+   this port's own real, single-player-only world pass today, same as
+   ref/nv2a's own already-documented per-viewport limit). ref/gl's own
+   real projection (gl_rmain.c's R_SetupProjectionMatrix) never took this
+   shortcut either - it derives xMax from tan(fov_x/2) and yMax from
+   tan(fov_y/2) completely independently, matching the NEW frustum code
+   below exactly. Taking xScale directly, the same way, removes the
+   assumption entirely rather than merely documenting it - a real fix,
+   not just a defensive comment, and closer to the reference than this
+   function was before X9-F touched it at all. */
+static void nv2a_matrix_perspective( float out[4][4], float xScale, float yScale, float zNear, float zFar )
 {
 	memset( out, 0, 4 * 4 * sizeof( float ));
-	out[0][0] = yScale / aspect;
+	out[0][0] = xScale;
 	out[1][1] = yScale;
 	out[2][2] = zFar / ( zFar - zNear );
 	out[2][3] = 1.0f;
@@ -314,11 +405,13 @@ nothing to reuse since they carry no linkage.
 
 This mirror walks every section in the SAME order for the SAME reason the
 real one does (no offset table - byte order IS the format), but only
-CAPTURES the ones this slice actually reads (vertices, indices, atlas,
-lightmapAtlas); every other section (FaceDrawCmd included - X9-D draws
-the whole shared index buffer directly and no longer needs any per-face
-lookup) still has to be stepped over correctly to reach the ones that
-matter. Verified independently against a real baked archive
+CAPTURES the ones this slice actually reads (vertices, indices,
+faceDrawCmds, atlas, lightmapAtlas); every other section still has to be
+stepped over correctly to reach the ones that matter. X9-F adds
+faceDrawCmds to the capture list - X9-D's own comment here used to say it
+was unneeded (the whole shared index buffer draws with no per-face lookup
+at all), which was true until frustum culling needed exactly that lookup
+to skip ranges. Verified independently against a real baked archive
 (crossfire.mpak, nv2a profile) by hand in Python before writing this - the
 final cursor landed exactly on the real file size and the computed
 offsets read back real, sane vertex/index data - see
@@ -333,6 +426,8 @@ typedef struct
 {
 	mpak_lump_t vertices;
 	mpak_lump_t indices;
+	mpak_lump_t faceDrawCmds; /* X9-F: captured for frustum culling - see
+	                              nv2a_map_face_t's own declaration comment. */
 	mpak_lump_t atlas;
 	mpak_lump_t lightmapAtlas;
 } nv2a_mpak_geometry_t;
@@ -369,7 +464,7 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenNodes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLeaves, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenMarksurfaces, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceDrawCmds, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceDrawCmds, &out->faceDrawCmds )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenPlanes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenClipnodes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenModels, &skip )) return false;
@@ -578,6 +673,65 @@ static void nv2a_draw_test_triangle( void )
 	pb_draw_text_screen();
 }
 
+/* X9-F: port of ref/gl/gl_frustum.c's own GL_FrustumCullBox - the same
+   signbits switch, literally, minus the clipFlags early-out (there is no
+   BSP node hierarchy here to propagate a shrinking clip mask down through,
+   so every face is tested against all 5 planes; see docs/r3d/fork-plan.md's
+   X9-F entry for why that is the right scope for this slice). Returns true
+   if the box is entirely outside at least one plane. */
+static qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs )
+{
+	int i;
+
+	for( i = 0; i < 5; i++ )
+	{
+		const mplane_t *p = &nv2a_frustum[i];
+
+		switch( p->signbits )
+		{
+		case 0: if( p->normal[0] * maxs[0] + p->normal[1] * maxs[1] + p->normal[2] * maxs[2] < p->dist ) return true; break;
+		case 1: if( p->normal[0] * mins[0] + p->normal[1] * maxs[1] + p->normal[2] * maxs[2] < p->dist ) return true; break;
+		case 2: if( p->normal[0] * maxs[0] + p->normal[1] * mins[1] + p->normal[2] * maxs[2] < p->dist ) return true; break;
+		case 3: if( p->normal[0] * mins[0] + p->normal[1] * mins[1] + p->normal[2] * maxs[2] < p->dist ) return true; break;
+		case 4: if( p->normal[0] * maxs[0] + p->normal[1] * maxs[1] + p->normal[2] * mins[2] < p->dist ) return true; break;
+		case 5: if( p->normal[0] * mins[0] + p->normal[1] * maxs[1] + p->normal[2] * mins[2] < p->dist ) return true; break;
+		case 6: if( p->normal[0] * maxs[0] + p->normal[1] * mins[1] + p->normal[2] * mins[2] < p->dist ) return true; break;
+		case 7: if( p->normal[0] * mins[0] + p->normal[1] * mins[1] + p->normal[2] * mins[2] < p->dist ) return true; break;
+		default: return false;
+		}
+	}
+
+	return false;
+}
+
+/* The existing X9-D batching loop, unchanged in shape, factored out so
+   X9-F's own run-merging pass (nv2a_draw_map_geometry() below) can call
+   it once per contiguous visible run instead of once for the whole
+   buffer - state setup (textures/attributes/constants) stays completely
+   outside this function and outside the loop that calls it. */
+static void nv2a_draw_index_range( uint32_t begin, uint32_t end )
+{
+	uint32_t i = begin;
+
+	while( i < end )
+	{
+		uint32_t *p;
+		uint32_t batch = end - i;
+		if( batch > 120 )
+			batch = 120;
+
+		p = pb_begin();
+		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLES );
+		pb_push( p++, 0x40000000 | NV20_TCL_PRIMITIVE_3D_INDEX_DATA, batch );
+		memcpy( p, &nv2a_map_index_dwords[i], batch * sizeof( uint32_t ));
+		p += batch;
+		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
+		pb_end( p );
+
+		i += batch;
+	}
+}
+
 /* X9-B: the real geometry path - same VP20 transform shader and the same
    single-texture-stage fp20 combiner X9-A already proved (no shader or
    combiner changes this slice), a real DXT1 atlas instead of the 8x8
@@ -587,7 +741,12 @@ static void nv2a_draw_test_triangle( void )
    NV20_TCL_PRIMITIVE_3D_INDEX_DATA limit) - written as the real, general
    batching loop from the start rather than a one-batch shortcut, which is
    what let X9-D scale this same function to a whole map's own dword count
-   with no changes here at all. */
+   with no changes here at all. X9-F adds frustum culling ahead of the
+   batching loop itself: nv2a_map_faces (built once at load) is walked in
+   bake order, contiguous VISIBLE faces are merged into a single run, and
+   each run is handed to nv2a_draw_index_range() above unchanged - state
+   setup (below) does not change at all, only which dword ranges reach the
+   batching loop. */
 static void nv2a_draw_map_geometry( void )
 {
 	uint32_t *p;
@@ -669,21 +828,68 @@ static void nv2a_draw_map_geometry( void )
 	   confirmed by a real vp20compiler run (not assumed) to map there. */
 	nv2a_set_attrib_pointer( 10, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &nv2a_map_vb[5] );
 
-	for( i = 0; i < nv2a_map_dword_count; )
+	nv2a_cull_faces_total = nv2a_map_face_count;
+	nv2a_cull_faces_visible = 0;
+	nv2a_cull_runs = 0;
+	nv2a_cull_dwords = 0;
+
+	if( nv2a_map_faces == NULL || nv2a_r_nocull.value )
 	{
-		uint32_t batch = nv2a_map_dword_count - i;
-		if( batch > 120 )
-			batch = 120;
+		/* No validated per-face table for this map, or culling disabled
+		   by nv2a_r_nocull - submit the whole buffer as one run, exactly
+		   what this function did before X9-F. */
+		nv2a_draw_index_range( 0, nv2a_map_dword_count );
+		nv2a_cull_faces_visible = nv2a_cull_faces_total;
+		nv2a_cull_runs = nv2a_map_dword_count ? 1 : 0;
+		nv2a_cull_dwords = nv2a_map_dword_count;
+	}
+	else
+	{
+		/* Single streaming pass over faces in bake order: accumulate a
+		   run of contiguous visible faces' own dword ranges, flush it
+		   through nv2a_draw_index_range() the moment a culled face (or
+		   the end of the list) breaks the run. No run array - the run is
+		   just two locals. BSP face order is already spatially coherent
+		   (real crossfire.mpak measurement: 19-62 runs at every camera
+		   tried, never anything approaching one run per face), so plain
+		   contiguous merging is enough - no gap-tolerance heuristic. */
+		uint32_t run_begin = 0, run_end = 0;
+		qboolean have_run = false;
 
-		p = pb_begin();
-		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLES );
-		pb_push( p++, 0x40000000 | NV20_TCL_PRIMITIVE_3D_INDEX_DATA, batch );
-		memcpy( p, &nv2a_map_index_dwords[i], batch * sizeof( uint32_t ));
-		p += batch;
-		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
-		pb_end( p );
+		for( i = 0; i < nv2a_map_face_count; i++ )
+		{
+			const nv2a_map_face_t *face = &nv2a_map_faces[i];
 
-		i += batch;
+			if( nv2a_frustum_cull_box( face->mins, face->maxs ))
+				continue;
+
+			nv2a_cull_faces_visible++;
+
+			if( have_run && face->dword_begin <= run_end )
+			{
+				if( face->dword_end > run_end )
+					run_end = face->dword_end;
+			}
+			else
+			{
+				if( have_run )
+				{
+					nv2a_draw_index_range( run_begin, run_end );
+					nv2a_cull_runs++;
+					nv2a_cull_dwords += run_end - run_begin;
+				}
+				run_begin = face->dword_begin;
+				run_end = face->dword_end;
+				have_run = true;
+			}
+		}
+
+		if( have_run )
+		{
+			nv2a_draw_index_range( run_begin, run_end );
+			nv2a_cull_runs++;
+			nv2a_cull_dwords += run_end - run_begin;
+		}
 	}
 
 	pb_print( "ref_nv2a: real baked geometry\n" );
@@ -798,8 +1004,10 @@ static void nv2a_free_map_resources( void )
 	nv2a_map_owner = NULL;
 	nv2a_map_vert_count = 0;
 	nv2a_map_dword_count = 0;
+	nv2a_map_face_count = 0;
 	if( nv2a_map_vb )            { MmFreeContiguousMemory( nv2a_map_vb );            nv2a_map_vb            = NULL; }
 	if( nv2a_map_index_dwords )  { Mem_Free( nv2a_map_index_dwords );                nv2a_map_index_dwords  = NULL; }
+	if( nv2a_map_faces )         { Mem_Free( nv2a_map_faces );                       nv2a_map_faces         = NULL; }
 	if( nv2a_map_atlas )         { MmFreeContiguousMemory( nv2a_map_atlas );         nv2a_map_atlas         = NULL; }
 	if( nv2a_map_lightmap )      { MmFreeContiguousMemory( nv2a_map_lightmap );      nv2a_map_lightmap      = NULL; }
 }
@@ -810,6 +1018,8 @@ static qboolean R_Init( void )
 
 	debug_marker = 1;
 	nv2a_view_valid = false; /* X9-E: no real GL_RenderFrame call yet this init */
+
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_nocull );
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not
@@ -1127,7 +1337,12 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   Mod_ProcessRenderData's own contract) is real, known cost this
 	   function CAN account for - see NV2A_MAP_BUDGET_BYTES's own comment
 	   for what this check does and does not cover. */
-	total_bytes = vb_bytes + idx_bytes + (uint64_t)geo.atlas.length + (uint64_t)geo.lightmapAtlas.length + (uint64_t)buffersize;
+	/* X9-F: the per-face table is 4x its own on-disk FaceDrawCmds size
+	   (nv2a_map_face_t is 32 bytes; each on-disk FaceDrawCmd is 8) - real
+	   memory this function can and should account for, same as every
+	   other buffer below. */
+	total_bytes = vb_bytes + idx_bytes + (uint64_t)geo.faceDrawCmds.length * 4
+		+ (uint64_t)geo.atlas.length + (uint64_t)geo.lightmapAtlas.length + (uint64_t)buffersize;
 	if( total_bytes > NV2A_MAP_BUDGET_BYTES )
 	{
 		gEngfuncs.Con_Printf( "ref_nv2a: map exceeds NV2A_MAP_BUDGET_BYTES (%u > %u bytes) - not drawing its real geometry\n",
@@ -1293,6 +1508,100 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   draws safely (falls back to the test triangle) instead of ever
 	   reading whatever this matrix defaults to. */
 
+	/* X9-F: build the per-face bounding-box/index-range table for
+	   frustum culling, from the FaceDrawCmds lump captured above. The
+	   tiling is VALIDATED here, not trusted - a running-cursor check
+	   confirming every start_index lines up with the end of the
+	   previous face, every index_count is a non-zero multiple of 3, and
+	   the final cursor lands exactly on index_count, matching what was
+	   independently confirmed in Python against the real crossfire.mpak
+	   (docs/r3d/divergences.md #96). On any failure (a stale archive, or
+	   a future baker change this module's own layout mirror has not
+	   caught up with), nv2a_map_faces is left NULL and
+	   nv2a_draw_map_geometry() falls back to submitting the whole index
+	   buffer unculled - the map still draws exactly as it does today,
+	   just without this optimisation, never a black screen. */
+	if( geo.faceDrawCmds.length != 0 && ( geo.faceDrawCmds.length % 8 ) == 0 )
+	{
+		uint32_t face_count = (uint32_t)( geo.faceDrawCmds.length / 8 );
+		nv2a_map_face_t *faces = Mem_Malloc( r_temppool, (size_t)face_count * sizeof( nv2a_map_face_t ));
+
+		if( !faces )
+		{
+			gEngfuncs.Con_Printf( "ref_nv2a: face-culling table allocation failed (%u bytes) - drawing this map unculled\n",
+				(unsigned int)( (uint64_t)face_count * sizeof( nv2a_map_face_t )));
+		}
+		else
+		{
+			uint32_t expect_cursor = 0;
+			qboolean tiling_ok = true;
+			nv2a_lit_vertex_t *verts = (nv2a_lit_vertex_t *)nv2a_map_vb;
+
+			for( i = 0; i < face_count; i++ )
+			{
+				uint32_t start_index, face_indices, k;
+
+				memcpy( &start_index,  buffer + geo.faceDrawCmds.offset + (uint64_t)i * 8,     sizeof( start_index ));
+				memcpy( &face_indices, buffer + geo.faceDrawCmds.offset + (uint64_t)i * 8 + 4, sizeof( face_indices ));
+
+				if( face_indices == 0 || ( face_indices % 3 ) != 0 || start_index != expect_cursor
+					|| (uint64_t)start_index + face_indices > index_count )
+				{
+					tiling_ok = false;
+					break;
+				}
+
+				ClearBounds( faces[i].mins, faces[i].maxs );
+				for( k = start_index; k < start_index + face_indices; k++ )
+				{
+					uint16_t vi;
+
+					memcpy( &vi, buffer + geo.indices.offset + (uint64_t)k * sizeof( uint16_t ), sizeof( vi ));
+					AddPointToBounds( verts[vi].pos, faces[i].mins, faces[i].maxs );
+				}
+
+				/* Snap outward to a multiple of 6 logical indices (= 3
+				   dwords) - see nv2a_map_face_t's own declaration
+				   comment for why 6, not 2 or 3 alone, is the right
+				   granularity for a packed two-indices-per-dword
+				   buffer. Codex review, real finding: the format
+				   imposes no even-triangle-count constraint on the
+				   MAP TOTAL, only on each face's own count (a
+				   multiple of 3), so index_count itself can be
+				   6k+3 - dword_count (the buffer's own real
+				   allocation, ceil(index_count/2)) is then NOT a
+				   multiple of 3, and the last face's outward snap
+				   can round past it (index_count==3: dword_count==2,
+				   but the unclamped snap gives 3) - a real one-dword
+				   out-of-bounds read submitted straight to the GPU
+				   as two bogus vertex indices. dword_count is always
+				   the correct upper bound regardless (it already
+				   accounts for the odd-index_count padding
+				   half-dword nv2a_map_index_dwords itself fills in),
+				   so clamping to it is not a workaround, it is the
+				   exact right end position for whichever face is
+				   actually last. */
+				faces[i].dword_begin = ( start_index / 6 ) * 3;
+				faces[i].dword_end   = (( start_index + face_indices + 5 ) / 6 ) * 3;
+				if( faces[i].dword_end > dword_count )
+					faces[i].dword_end = dword_count;
+
+				expect_cursor = start_index + face_indices;
+			}
+
+			if( tiling_ok && expect_cursor == index_count )
+			{
+				nv2a_map_faces = faces;
+				nv2a_map_face_count = face_count;
+			}
+			else
+			{
+				gEngfuncs.Con_Printf( "ref_nv2a: FaceDrawCmds tiling did not validate - drawing this map unculled\n" );
+				Mem_Free( faces );
+			}
+		}
+	}
+
 	return true;
 }
 
@@ -1417,7 +1726,8 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	vec3_t forward, right, up;
 	nv2a_vec3_t f, r, u, eye;
 	float view[4][4], proj[4][4], ndc_to_screen[4][4], combined[4][4];
-	float yscale, aspect;
+	float xscale, yscale;
+	int i;
 
 	if( !nv2a_ready )
 		return;
@@ -1464,17 +1774,84 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   relative to every X9-A through D screenshot, not a regression. */
 	nv2a_matrix_view_from_axes( view, eye, f, r, u );
 
-	/* rvp->viewport[2]/[3] (not nv2a_width/nv2a_height) is the strictly
-	   correct pairing with rvp->fov_y - both are 640/480 on this fixed-
-	   resolution Xbox target either way. fov_y is in degrees (confirmed:
-	   engine/client/cl_view.c's own V_CalcFov returns RAD2DEG(...)). */
-	aspect = (float)rvp->viewport[2] / (float)rvp->viewport[3];
+	/* xScale and yScale are each taken directly from their own real,
+	   live fov_x/fov_y (both in degrees - confirmed: engine/client/
+	   cl_view.c's own V_CalcFov returns RAD2DEG(...)) - not derived from
+	   one another via the viewport's aspect ratio. See
+	   nv2a_matrix_perspective's own declaration comment (X9-F, codex
+	   review) for why deriving xScale from fov_y+aspect used to be an
+	   unstated assumption rather than a real invariant. */
+	xscale = 1.0f / tanf( (float)( DEG2RAD( rvp->fov_x ) * 0.5 ));
 	yscale = 1.0f / tanf( (float)( DEG2RAD( rvp->fov_y ) * 0.5 ));
-	nv2a_matrix_perspective( proj, yscale, aspect, 1.0f, 8192.0f );
+	nv2a_matrix_perspective( proj, xscale, yscale, 1.0f, 8192.0f );
 	nv2a_matrix_viewport( ndc_to_screen, 0, 0, (float)nv2a_width, (float)nv2a_height, 0, 65536.0f );
 
 	nv2a_matrix_multiply( combined, view, proj );
 	nv2a_matrix_multiply( nv2a_map_viewproj, combined, ndc_to_screen );
+
+	/* X9-F: the view frustum, from the SAME forward/right/up/eye the view
+	   matrix above was just built from - so the cull and the projection
+	   can never disagree about handedness or FOV the way two
+	   independently-derived cameras could. Port of ref/gl/gl_frustum.c's
+	   own GL_FrustumInitProj: inward-pointing normals, dist = eye . normal
+	   (the FAR plane excepted - its own point is out along forward, not
+	   the eye itself), no near plane (the reference passes flZNear=0.0f
+	   from R_SetupFrustum and returns before setting one). Far is THIS
+	   module's own literal 8192.0f, matching the nv2a_matrix_perspective()
+	   call just above - not the reference's gp_movevars->zmax*1.73f, which
+	   would let the cull disagree with what this projection actually
+	   clips.
+
+	   This uses rvp->fov_x/fov_y directly, same as the projection above
+	   now does (X9-F, codex review) - so LEFT/RIGHT here and the
+	   projection's own xScale always describe the exact same horizontal
+	   angle, with no aspect-ratio-derived assumption between them, even
+	   if fov_x and fov_y were ever independently perturbed (as
+	   V_ApplyRefUnderwater, engine/client/cl_view.c, really does - by
+	   different, non-matching factors on each - but only when
+	   RF_DRAW_CUBEMAP or RF_DRAW_OVERVIEW is set on the pass; verified by
+	   reading V_RenderView's own call order that neither bit is ever set
+	   on the ordinary single-player world pass this filters down to
+	   above: RF_DRAW_CUBEMAP is set only inside ref/gl's/ref/soft's own
+	   internal env-map capture, a pass this module does not implement,
+	   and RF_DRAW_OVERVIEW requires CL_IsDevOverviewMode(), itself gated
+	   on dev_overview>0 AND (host_developer or spectator) - a developer/
+	   spectator-only mode, unreachable in this fork's own real, single-
+	   player-only, Xbox-networking-disabled configuration today). */
+	{
+		float xs, xc, ys, yc;
+		vec3_t normal, farpoint;
+
+		SinCos( DEG2RAD( rvp->fov_x ) * 0.5f, &xs, &xc );
+		VectorMAM( xs, forward, -xc, right, normal );
+		VectorCopy( normal, nv2a_frustum[NV2A_FRUSTUM_LEFT].normal );
+		nv2a_frustum[NV2A_FRUSTUM_LEFT].dist = DotProduct( rvp->vieworigin, normal );
+
+		VectorMAM( xs, forward, xc, right, normal );
+		VectorCopy( normal, nv2a_frustum[NV2A_FRUSTUM_RIGHT].normal );
+		nv2a_frustum[NV2A_FRUSTUM_RIGHT].dist = DotProduct( rvp->vieworigin, normal );
+
+		SinCos( DEG2RAD( rvp->fov_y ) * 0.5f, &ys, &yc );
+		VectorMAM( ys, forward, -yc, up, normal );
+		VectorCopy( normal, nv2a_frustum[NV2A_FRUSTUM_BOTTOM].normal );
+		nv2a_frustum[NV2A_FRUSTUM_BOTTOM].dist = DotProduct( rvp->vieworigin, normal );
+
+		VectorMAM( ys, forward, yc, up, normal );
+		VectorCopy( normal, nv2a_frustum[NV2A_FRUSTUM_TOP].normal );
+		nv2a_frustum[NV2A_FRUSTUM_TOP].dist = DotProduct( rvp->vieworigin, normal );
+
+		VectorNegate( forward, normal );
+		VectorMA( rvp->vieworigin, 8192.0f, forward, farpoint );
+		VectorCopy( normal, nv2a_frustum[NV2A_FRUSTUM_FAR].normal );
+		nv2a_frustum[NV2A_FRUSTUM_FAR].dist = DotProduct( normal, farpoint );
+
+		for( i = 0; i < 5; i++ )
+		{
+			nv2a_frustum[i].type = PlaneTypeForNormal( nv2a_frustum[i].normal );
+			nv2a_frustum[i].signbits = SignbitsForPlane( nv2a_frustum[i].normal );
+		}
+	}
+
 	nv2a_view_valid = true;
 }
 

@@ -5,6 +5,22 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `ref/nv2a` now frustum-culls its draw list
+
+The hardware renderer used to submit a whole map's entire index buffer
+every frame regardless of where the real player camera was pointing.
+It now builds a real view frustum from that same camera each frame and
+skips faces outside it, merging contiguous visible faces back into as
+few draw ranges as possible so the existing batched-draw path needs no
+changes. A real test map's own spawn camera now submits about a third
+of the index buffer instead of all of it, in a few dozen draw ranges
+rather than one - measured against the real baked map data and the
+real camera the engine captured live, not estimated, and confirmed by
+booting it: the live numbers matched the prediction exactly. A new
+console variable, `nv2a_r_nocull`, disables it for comparison - with it
+off, a screenshot of the same view is pixel-identical to culling being
+on. See `docs/r3d/divergences.md` #96 for the full account.
+
 ### Added — `ref/nv2a` now draws from the real, live player camera
 
 Replaced the hardware renderer's fixed, one-time debug camera (aimed at
