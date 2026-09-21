@@ -1,4 +1,8 @@
-# Specialist agents
+# Agents
+
+Two groups here, kept deliberately separate.
+
+## Specialist agents
 
 One per real risk area in this project. Pick the ones a change actually
 touches; never ask permission first (see `/AGENTS.md`).
@@ -13,3 +17,30 @@ or refutes any statement about what the reference renderer does, by reading
 it and citing the line. It was added after five of nineteen planned "ports
 from Ironwail" turned out to already be in the tree, and one claim about the
 reference had been copied into another specialist's prompt while false.
+
+The 8: `asset-pipeline-specialist`, `build-toolchain-specialist`,
+`console-performance-specialist`, `memory-budget-specialist`,
+`nv2a-xbox-specialist`, `reference-renderer-specialist`,
+`render-architecture-specialist`, `upstream-fidelity-specialist`.
+
+## Loop-stage agents (`loop-*`)
+
+The six stages of `.claude/workflows/agentic-loop.js` (SetUp, Research,
+Implementation, QA, Publisher, Retrospector). See
+`docs/r3d/agentic-loop.md` for the full design, the model/effort choice per
+stage and why, and the logging convention. Not meant for ad-hoc standalone
+use the way the specialists are — each one's own job only really makes
+sense inside that workflow's own control flow, though each carries a
+sensible default `model`/`effort` in its frontmatter in case it's ever
+invoked directly.
+
+Neither group can spawn further subagents (no `Agent`/`Task` in any of
+their tool lists, specialists and loop-stage agents alike). All fan-out —
+which specialist gets called for which topic, how many topics run in
+parallel, how many QA retries a task gets — is scripted in the open, in
+`agentic-loop.js` itself, not left to a model deciding to delegate further
+at runtime. That's a direct, deliberate answer to a real, expensive mistake
+this project already made once: see `docs/r3d/agentic-loop.md`'s own
+account of `.claude/workflows/pr-review.js`, the multi-agent review
+workflow this project built and then deleted for costing 25-37 subagent
+calls and 2-2.6M tokens per round.

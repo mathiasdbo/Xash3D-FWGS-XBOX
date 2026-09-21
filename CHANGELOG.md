@@ -5,6 +5,22 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — a repo-native agentic-loop Workflow for driving project phases
+
+A new Claude Code Workflow (`.claude/workflows/agentic-loop.js`) and six
+new subagents (`.claude/agents/loop-*.md`) turn one general instruction
+into a bounded set of atomic tasks, each researched, implemented, QA'd
+(with an automatic, capped retry), and published as its own PR, followed
+by a retrospective. The 8 existing specialist agents are unchanged and get
+consulted from the workflow itself, not by the new agents delegating
+further - no agent in either group can spawn further subagents, so total
+fan-out per run is fixed by the script, not decided by a model at runtime.
+QA delegates code review to the existing `tools/codex-review.sh` rather
+than re-implementing it with more Claude subagents, directly answering a
+real, expensive mistake this project already made and reversed once (see
+`docs/r3d/agentic-loop.md`, which also has the model/effort choice for
+each stage and the reasoning behind it). Not yet run on a real task.
+
 ### Added — `ref/nv2a` now frustum-culls its draw list
 
 The hardware renderer used to submit a whole map's entire index buffer
