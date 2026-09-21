@@ -7473,14 +7473,35 @@ that genuinely advances (10,572 → 16,124 across two live reads) - a
 real .mpak parsed, accepted, and drawn, sustained, not a static wire-up
 claim. A brightness-boosted screenshot of the running guest shows real,
 distinct, differently-tinted polygon silhouettes - genuine per-face
-texture/lightmap variation, not a solid placeholder. Not yet claimed:
-whether the (very dark, at this specific fixed debug-camera angle)
-result is photometrically CORRECT was not checked against `ref_soft`'s
-own rendering of the same view, and X9's own full exit criterion (a
-hardware frame time matching X5, on real hardware, not xemu) remains
-open. X9-E onward (a real view/visibility system, skinning, dynamic
-lighting, native alpha test, the frame-time exit criterion itself)
-sketched in this section's own bullets below, not started.
+texture/lightmap variation, not a solid placeholder.
+
+**Photometric check, same day (divergence #94) - a real attempt, an
+honestly incomplete answer.** The map's own real baked lightmap data at
+this fixed camera's own framing vertices is genuinely dim (11-14%
+brightness) against a mostly-bright atlas (82% average) - real,
+byte-verified, but only proof the SOURCE data is plausible, not that
+the renderer reproduces it. A deeper, quantitative check followed:
+reproducing the exact camera matrix in Python, projecting every
+referenced vertex, and comparing a predicted `diffuse × lightmap × 2`
+against the real screenshot at each vertex's own screen position - only
+9.7% matched. That result does NOT confirm a bug either: the check has
+no real triangle rasterization, so "the nearest vertex landing on a
+pixel" often isn't "the true nearest surface at that pixel," and a high
+mismatch rate is an expected property of the method itself. The
+likeliest concrete bug this mismatch pattern suggested - a depth-test
+misconfiguration - was checked directly against `pbkit.c` and ruled
+out: `DEPTH_FUNC=LEQUAL`, `DEPTH_WRITE_ENABLE=1`, `DEPTH_TEST_ENABLE`
+set once (correctly skipped on later, identical calls - not "forced
+every frame" - and never disabled afterward by anything in `ref/nv2a`),
+clear value `0xFFFFFF` (far) - a real, correctly-configured setup.
+**Genuinely still open**: neither
+a pixel-perfect ground truth (real rasterization in the check) nor a
+`ref_soft` cross-check of the same view exists yet; X9's own full exit
+criterion (a hardware frame time matching X5, on real hardware, not
+xemu) remains open too. X9-E onward (a real view/visibility system,
+skinning, dynamic lighting, native alpha test, the frame-time exit
+criterion itself) sketched in this section's own bullets below, not
+started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised

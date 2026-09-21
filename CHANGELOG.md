@@ -49,11 +49,18 @@ file-format and shader-compiler output against a real baked map (a full
 retail map, not just one face) in isolation, and - for the first time -
 a live boot now confirms it actually running: a real map genuinely
 parsed and drawn, sustained over thousands of frames, real distinct
-per-face texture/lightmap variation visible on screen. A real
-view/visibility system, dynamic lighting, and the rest of the hardware
-renderer are still follow-on work, and the frame-time comparison against
-X5 on real hardware (not xemu) remains the real, open exit criterion -
-see `docs/r3d/divergences.md` #88-#93 for the full account.
+per-face texture/lightmap variation visible on screen. Whether that
+dark overall look is correct stayed a real, open question after a
+deeper look: the map's own baked lighting data at that spot is
+genuinely dim, but a rigorous, pixel-level comparison against the
+actual rendered screenshot didn't confirm the renderer reproduces it
+correctly - the most likely concrete bug that result suggested (a
+depth-test misconfiguration) was checked and ruled out, but a real
+ground-truth comparison remains undone. A real view/visibility system, dynamic lighting, and the
+rest of the hardware renderer are still follow-on work, and the
+frame-time comparison against X5 on real hardware (not xemu) remains
+the real, open exit criterion - see `docs/r3d/divergences.md` #88-#94
+for the full account.
 
 ### Added — a Controller screen with real, named control schemes
 
