@@ -7580,7 +7580,11 @@ own copy, per this project's own `fs_rootdir`-before-`fs_rodir` search
 order) rather than a defect found in the module. Whether the triangle
 actually draws correctly - the thing this slice exists to prove - remains
 completely unverified and is the concrete next step, not a formality.
-Full account in `divergences.md` #88.
+Full account in `divergences.md` #88. (Correction, 2026-09-22: "X4's own
+already-proven ... sequence" was itself wrong - X4's checkerboard triangle
+never rendered as a checkerboard, only as a smooth two-texel gradient that
+was eyeballed as one, because its 0..1 UVs address a LINEAR texture NV2A
+samples in texel units; see X9-J below and `divergences.md` #100.)
 
 **X9-B, 2026-09-20 - one real face from a real baked map, coded and
 statically verified; not yet seen rendering.** `Mod_ProcessRenderData`
@@ -7945,7 +7949,105 @@ proves the feature doesn't crash or corrupt anything, not that its
 actual cutout behavior was ever exercised. Default stays disabled.
 Full account in `divergences.md` #99.
 
-X9-J onward (skinning, dynamic lighting, the frame-time exit criterion
+**X9-J, 2026-09-22 - the map finally renders lit AND textured; two
+texture-setup bugs that had masked each other since X9-B/X9-C.** Every
+real map (c1a0, crossfire) had rendered near-black and perfectly
+monochrome since X9-B - screenshot mean ~1.8/255, pixel values only
+{0,1,2}, at most 1/255 of channel difference - and every session from
+#92 onward had brightness-boosted its screenshots and moved on, with
+#94's own 9.7% photometric match filed as inconclusive. Not one bug but
+two, each hiding the other, found by refusing to debug the product:
+a temporary lightmap-only debug pixel shader showed the lightmap term
+took exactly two values across the whole frame (0 on 254,979 px, 1 on
+50,263 px), and a diffuse-only one showed the atlas term was one flat
+colour - both texture-addressing statements, not lighting ones. Bug 1:
+the lightmap page is bound LINEAR (`LU_IMAGE_A8B8G8R8` + pitch +
+`IMAGE_RECT`), and NV2A addresses linear textures in unnormalized texel
+units, like GL rectangle textures (xemu `psh.c` normalizes only
+`f.linear` stages by `textureSize()`; the nxdk mesh sample this module's
+stage registers were copied from feeds integer UVs such as `{44,143}` to
+its 256x256 linear texture), while the remap loop copied the baker's
+`lu/lv / LM_PAGE_SIZE` verbatim - so clamp + bilinear only ever blended
+page texels (0,0) and (1,0), the ramp strip's own 0 and 1. The live
+vertex buffer's `uv1` and the baked luxels at exactly those texels were
+verified correct (mean 105/255) BEFORE blaming the GPU: the data was
+right, the addressing wrong. Bug 2: the DXT1 atlas was bound with the
+same linear pattern and no `BASE_SIZE_U/V`, and NV2A sizes compressed
+textures from those log2 fields alone (`IMAGE_RECT`/pitch size linear
+textures only; xemu `texture.c` forces `width = 1 << log_width, pitch =
+0` for non-linear formats; the XDK documents the same bits as "only set
+for swizzled or compressed", preserved in Cxbx-Reloaded
+`src/core/hle/D3D8/XbD3D8Types.h:565-570` - the swizzled half of that
+sentence is not relied on here, X4's `SZ_` defect being still open) - a
+2^0 x 2^0 texture, so every fragment read the first BC1 block's texel (0,0),
+(239,255,214) pale green-white. The original {0,1,2} is exactly that
+colour x {0,1}/255 x the combiner's x2; with only the lightmap fixed
+the frame was lit but flat (mean 228/255, R/G/B 218/240/226); with both,
+textured and lit at sane exposure - mean 90.4/255, ~251K px with real
+colour spread. Both bugs trace to the same wrong baseline: X4's linear
+path was never "proven" - its 0..1 UVs on an 8x8 linear checkerboard
+produced the smooth orange-to-white gradient every X4/X9-A screenshot
+shows, a two-texel blend misread as success, and each later slice
+copied a stage setup with a green checkmark that was never earned.
+Final shape (`ref/nv2a/r_context.c` only, no baker/format/shader
+change): atlas log2 dimensions validated power-of-two <= 4096 at map
+load and stored in two statics rather than recomputed per frame
+(fails closed to the test triangle with a console diagnostic);
+`BASE_SIZE_U/V` OR'd into stage 0's FORMAT word (pushed `0x0BB10C22`
+for 2048x2048 - confirmed by `xmex` disassembly of BOTH the diagnostic
+build's per-frame log2 loop and the final load-time-statics build's
+XBE, the two producing the same word as claimed; the final build was
+also booted live under xemu and its `c1a0` screenshot is pixel-identical
+to the already-verified diagnostic build's, 0 of 307,200 pixels
+differing); `uv1 = lu *
+lightmapWidth, lv * lightmapHeight` from the header fields stage 1 also
+pushes to `IMAGE_RECT`, and because that scale is only the correct
+inverse of the baker's fixed 1024-luxel `LM_PAGE_SIZE` divisor - a codex
+review round caught that a same-but-wrong-size square page (checked only
+`lightmapWidth == lightmapHeight`, not against the actual constant)
+would pass that weaker check yet still silently mis-scale every luxel -
+the load-time check now requires `lightmapWidth == lightmapHeight ==
+1024` exactly, rather than scrambling rows silently the way the
+deferred trim-to-usedHeight bake optimisation would; the atlas's
+pitch/`IMAGE_RECT` pushes kept on purpose (ignored
+for a compressed format, but the exact sequence the live measurement
+used, and what nxdk_pgraph_tests - hardware-captured goldens - push
+too); the bring-up triangle's UVs moved to texel units and, booted live, no
+longer show the old 0..1-UV gradient - but under both the mesh sample's
+convolution filter constant and a plain-bilinear one they still rendered
+as a smooth orange/white blend rather than a crisp checkerboard; booted
+a third time with a NEAREST filter (bring-up path only, the real map's
+stages unchanged) the triangle renders a real, crisp 8x8 checkerboard,
+confirming the blend was bilinear filtering of a single-texel-period
+pattern, not a remaining UV bug, and making NEAREST this canary's
+permanent, more sensitive filter; the
+file header's "linear path X4 already proved correct"
+claim corrected. Ruled out with live evidence so they
+are not re-chased: baked-data corruption (GPU copies byte-identical to
+the `.mpak`), attribute binding, the vertex program, fog/dither/alpha
+test, the final combiner. Still real, still open: both conventions are
+verified against xemu 0.8.136's source and corroborated by nxdk's mesh
+sample, nxdk_pgraph_tests' hardware-captured goldens and Cxbx-Reloaded's
+XDK-derived headers, but not measured on a physical Xbox by this
+project; `FILTER 0x04074000` decodes to a 3x3 Gaussian convolution
+filter per the register enums (MIN=7/MAG=4, `CONVOLUTION_2D_LOD0`), but
+xemu maps that enum to plain `GL_LINEAR` (a `TODO: unimplemented`
+comment in its own constant tables), so what hardware does with it is
+unobserved; swapping it for a plain-bilinear constant (`0x02020000`,
+`TENT_LOD0` both ways) on the test triangle, live, produced the same
+smooth blend, ruling the filter constant's specific decode out as the
+checkerboard-vs-blend cause on xemu; a NEAREST filter (`0x01010000`),
+live, renders a real crisp checkerboard, confirming the blend under
+either prior filter was bilinear/tent filtering of a single-texel-period
+pattern - unrelated to the UV fix - and this bring-up path now ships
+with NEAREST as its permanent, more sensitive canary filter, unrelated
+to `nv2a_draw_map_geometry`'s own unchanged `0x04074000`; multi-page
+lightmaps now need a
+per-page V offset, not a scale; X4's swizzled-path defect is still open
+and was judged against this same wrong baseline. Full account in
+`divergences.md` #100, which also closes #94 and annotates #89-#93.
+
+X9-K onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.

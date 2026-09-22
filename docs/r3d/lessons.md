@@ -1521,3 +1521,64 @@ before writing the lesson down.
 See `docs/r3d/divergences.md` #98/#99's own resolution notes for the
 real live confirmation this recipe finally produced, and the real
 screenshots taken.
+
+### NEVER debug a wrong picture as one bug - isolate each term with a shader that outputs ONLY that term, and verify the data at the exact coordinates the GPU reads before blaming the GPU
+
+Every real map drew near-black and monochrome under `ref/nv2a` in every
+session since X9-B (2026-09-20) through X9-I (screenshot mean ~1.8/255,
+pixel values only {0,1,2}), and every one of those sessions brightness-boosted its
+screenshots, called the polygon silhouettes "encouraging", and moved
+on to culling or alpha test. `divergences.md` #94 even measured it -
+a 9.7% match against a predicted `diffuse × lightmap × 2` - and filed
+the result as a limitation of the check. It was two independent bugs,
+each of which made the other invisible: the lightmap term was {0,1}/255
+for every fragment, and the diffuse term was one flat colour, and the
+product of a wrong brightness and a wrong colour looks exactly like
+"a dark frame", which gives no hint that either factor is wrong on its
+own. No amount of staring at, boosting, or statistically comparing the
+product could have separated them.
+
+What worked, in order: (1) a temporary debug pixel shader per term -
+lightmap-only produced exactly two values in the whole frame (0 on
+254,979 px, 1 on 50,263 px), diffuse-only produced one colour - and
+each of those is a texture-ADDRESSING statement, not a lighting one;
+(2) reading the data at the exact coordinates the GPU consumes, before
+touching a register: the live vertex buffer's `uv1` (`nv2a_map_vb`,
+`tools/xemu-debug.py` memory reads) was correct, the baked luxels at
+those exact texels were lit (mean 105/255 over 400 vertices), and the
+atlas's GPU copy was byte-identical to the `.mpak` - so "the data is
+wrong" was off the table and only "the addressing is wrong" remained;
+(3) then, and only then, the register-level facts. Those facts, so
+they are never re-derived: NV2A addresses LINEAR textures (`LU_IMAGE_*`,
+`deps/nxdk/lib/pbkit/nv_regs.h:577`) in unnormalized texel units and
+sizes them from `IMAGE_RECT`/`CONTROL1` pitch, while it addresses
+compressed textures (`L_DXT1_*`, `nv_regs.h:547`) in 0..1 and sizes
+them ONLY from the FORMAT word's `BASE_SIZE_U/V` log2 fields
+(`nv_regs.h:581-583`) - xemu `pgraph/texture.c`
+`pgraph_get_texture_shape()`, `if (f.linear) width = rect_width; else
+width = 1 << log_width, pitch = 0`, and `glsl/psh.c` dividing only
+linear stages' coordinates by `textureSize()`; `deps/nxdk/samples/mesh/
+verts.h` feeds integer UVs like `{44,143}` to its 256x256 linear texture
+for the same reason. (The same sources size swizzled `SZ_*` textures by
+`BASE_SIZE` too, but X4's swizzled-path defect is still open, so that
+half is not established here.) Both conventions are verified against
+xemu 0.8.136's source and corroborated by nxdk's mesh sample,
+`nxdk_pgraph_tests`' hardware-captured goldens and Cxbx-Reloaded's
+XDK-derived headers, but not measured on a physical Xbox by this
+project - xemu is not validation. The lightmap (linear) got 0..1
+coordinates; the atlas (DXT1) got no `BASE_SIZE` and was a 1x1 texture.
+
+The tell had been in every screenshot since X4: a triangle textured
+with an 8x8 checkerboard rendered as a smooth orange-to-white gradient,
+and `tools/x4-triangle/main.c:150-152` and X9-A both recorded that as
+"verified rendering the checkerboard correctly". A smooth gradient
+where a checkerboard was expected is a two-texel bilinear blend - it is
+the symptom of exactly this addressing bug, and reading it as success
+put a green checkmark on a baseline that every later slice then copied.
+Generalizes: when the picture is wrong, never compare the product to an
+expectation - factor it, render each factor alone, and check each
+factor's INPUT bytes at the coordinates the hardware actually reads;
+and when a test image was designed to have structure (a checkerboard,
+a gradient, a grid) and comes back smooth, that is a failed test, not a
+passed one, no matter how plausible the colours look. See
+`docs/r3d/divergences.md` #100.

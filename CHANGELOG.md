@@ -5,6 +5,58 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `ref/nv2a` maps rendered near-black: two texture-setup bugs
+
+Every real map drawn by the NV2A renderer had come out near-black and
+perfectly monochrome since its first live frame (screenshot mean
+~1.8/255, pixel values only {0,1,2}), and an earlier photometric check
+(`divergences.md` #94) had been filed as inconclusive. Two independent
+bugs in `ref/nv2a/r_context.c`, each masking the other, isolated with
+per-term debug shaders and live memory reads under xemu: the lightmap
+page is bound as a LINEAR texture, which NV2A addresses in unnormalized
+texel units, but was fed the baker's 0..1 page coordinates, so every
+fragment blended the page's texels (0,0) and (1,0) - the lightmap term
+was {0,1}/255 across the whole frame; and the DXT1 diffuse atlas was
+bound with the linear-texture pattern and no `BASE_SIZE_U/V`, the only
+size a compressed texture has on this GPU, so it was sampled as a 1x1
+texture - one flat pale green-white colour. The vertex data, the baked
+luxels and the atlas bytes were all verified correct at the exact
+coordinates the GPU reads before either fix was made. Fixed by scaling
+the lightmap UVs by the page size at map load and by setting the atlas's
+log2 dimensions in the texture FORMAT word (validated power-of-two and
+<= 4096 per side at load, failing closed with a console diagnostic
+otherwise); the map now renders textured and lit at sane exposure
+(mean 90.4/255, real colour across the frame). Because that UV scale is
+only the correct inverse of the baker's fixed 1024-luxel page divisor,
+the load-time check now requires the archive's own lightmap page
+dimensions to equal 1024x1024 exactly - not merely be square to each
+other, which a codex review round caught as still allowing a
+same-but-wrong divisor to silently mis-scale every luxel - failing
+closed with a console diagnostic instead of scrambling rows silently.
+The fix was booted live (this real corridor and reception-desk view of
+`c1a0`, mean 90.4/255, 260,833 px with channel spread > 8) and is
+pixel-identical to the already-verified diagnostic build, and `xmex`
+disassembly of the final XBE reproduces the same register construction.
+The bring-up test triangle's own checkerboard UVs had the same
+linear-addressing mistake - it had only ever shown a smooth two-texel
+gradient, misread as a checkerboard - and is corrected to texel-unit
+UVs as a visual canary for that convention; under both the original
+filter constant and a plain-bilinear one it still rendered as a smooth
+blend rather than a crisp 8x8 checkerboard, but booted a third time
+with a NEAREST filter (bring-up path only - the real map's atlas and
+lightmap stages are unchanged), it renders a real, crisp 8x8
+checkerboard - the blend was bilinear filtering of a single-texel-period
+pattern, not a remaining UV bug, and NEAREST is now the bring-up
+triangle's permanent, more sensitive regression indicator for this
+convention. Register sequence otherwise unchanged; no baker, format or
+shader change. Both addressing conventions are verified against
+xemu 0.8.136's source and corroborated by nxdk's mesh sample,
+nxdk_pgraph_tests' hardware-captured goldens and Cxbx-Reloaded's
+XDK-derived headers, but not measured on a physical Xbox by this
+project. See
+`docs/r3d/fork-plan.md`'s X9-J entry, `divergences.md` #100 and the new
+`lessons.md` entry.
+
 ### Added — native alpha test for masked textures in `ref/nv2a` (X9-I)
 
 `ref/nv2a` now enables NV2A's own fixed-function alpha-test stage

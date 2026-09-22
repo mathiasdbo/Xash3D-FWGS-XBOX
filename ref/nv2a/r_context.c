@@ -13,7 +13,7 @@ textured triangle every frame and presents it. The init/per-frame sequence
 - pb_init, the vp20 program upload loop, the fp20 pixel-shader block, the
 texture-stage register values, pb_wait_for_vbl/reset/target_back_buffer/
 erase_depth_stencil_buffer/pb_finished/pb_show_front_screen - is
-tools/x4-triangle/main.c's own already-proven sequence, unmodified in
+tools/x4-triangle/main.c's own already-used sequence, unmodified in
 shape; see that file's own citations for where each piece originally came
 from (deps/nxdk/samples/triangle and deps/nxdk/samples/mesh).
 
@@ -21,10 +21,28 @@ Deliberately out of scope for this bring-up (see docs/r3d/fork-plan.md's
 X9 section and docs/r3d/divergences.md for the rest of the story): no
 MPAK-derived geometry, no register combiner stages beyond the single one
 X4 already proved (a plain textured triangle, no lighting), no VP20
-skinning, no swizzled textures - X4's own open defect (SZ_A8R8G8B8 renders
-as a flat fill of texel (0,0), root cause unresolved) stays untouched, so
-this module uses ONLY the linear texture path X4 already proved correct
-under xemu.
+skinning, no swizzled textures. This module uses the linear texture path,
+whose X4 "verification" was itself wrong: tools/x4-triangle/main.c:60-65
+feeds 0..1 UVs to an 8x8 LU_IMAGE texture, which NV2A addresses in texel
+units, so it rendered a two-texel gradient that was eyeballed as a
+checkerboard (main.c:150-152, "verified rendering the checkerboard
+correctly"). X4's open swizzled-path defect (SZ_A8R8G8B8 + BASE_SIZE renders
+a flat fill of texel (0,0)) is therefore still open AND was judged against a
+wrong baseline; it is the same texture-addressing-convention class of
+problem (which formats take texel vs normalized coordinates, and which are
+sized by BASE_SIZE vs IMAGE_RECT - deps/nxdk/lib/pbkit/nv_regs.h:581-583)
+that blacked out every map here, docs/r3d/divergences.md #100. Left
+untouched in tools/x4-triangle on purpose.
+
+One caveat that applies to every NV2A texture-addressing statement in this
+file (stated here once rather than at each comment): both conventions -
+linear textures take unnormalized texel coordinates and are sized by
+IMAGE_RECT/CONTROL1, compressed textures are sized by the FORMAT word's
+BASE_SIZE_U/V - are verified against xemu 0.8.136's source and corroborated
+by nxdk's mesh sample, abaire/nxdk_pgraph_tests (whose goldens are hardware
+captures) and Cxbx-Reloaded's XDK-derived headers, but have NOT been
+measured on a physical Xbox by this project. xemu is not validation; a
+real-console run is the only definitive close-out (divergences.md #100 (a)).
 */
 
 #include <math.h>
@@ -87,19 +105,41 @@ typedef struct
 	float uv1[2];
 } __attribute__(( packed )) nv2a_lit_vertex_t;
 
-/* Same triangle and checkerboard tools/x4-triangle/main.c already proved
-   renders correctly under xemu (its own X4_TEXTURE_SWIZZLED=0 path). */
-static const nv2a_test_vertex_t nv2a_test_verts[] =
-{
-	//  X     Y     Z       U     V
-	{{ -1.0f, -1.0f, 1.0f }, { 0.0f, 1.0f }},
-	{{  0.0f,  1.0f, 1.0f }, { 0.5f, 0.0f }},
-	{{  1.0f, -1.0f, 1.0f }, { 1.0f, 1.0f }},
-};
-
 #define NV2A_TEST_TEX_SIZE_LOG2 3
 #define NV2A_TEST_TEX_SIZE ( 1 << NV2A_TEST_TEX_SIZE_LOG2 ) /* 8x8 */
 #define NV2A_TEST_MAXRAM 0x03FFAFFF
+
+/* Same triangle and checkerboard as tools/x4-triangle/main.c, but with UVs
+   in TEXEL units: the texture is bound LINEAR (LU_IMAGE_A8R8G8B8,
+   nv2a_draw_test_triangle), and NV2A addresses linear textures
+   unnormalized, 0..width x 0..height, like a GL rectangle texture (see the
+   lightmap remap in nv2a_load_map_geometry for the evidence). X4's 0..1
+   UVs (main.c:60-65) only ever covered texels (0..1, 0..1), so every
+   screenshot of that triangle showed a smooth orange-to-white gradient - a
+   bilinear blend of two texels - which X4/X9-A misread as "renders
+   correctly". With texel-unit UVs and the mesh sample's own convolution
+   filter constant or a plain-bilinear one, this triangle, booted live,
+   no longer shows that 0..1-UV gradient - but still rendered as a smooth
+   orange/white blend rather than a crisp 8x8 checkerboard, under both
+   filters. Booted a third time with the bring-up-only NEAREST filter
+   nv2a_draw_test_triangle() now sets (see its own FILTER comment), it
+   renders a real, crisp 8x8 checkerboard (`.sweep/triangle_nearest.png`):
+   the blend was bilinear/tent filtering a single-texel-period pattern,
+   not a remaining UV bug. This triangle is the regression indicator for
+   the texel-unit convention: any checker squares merging, or a return to
+   a smooth gradient covering the WHOLE triangle, means linear-texture
+   coordinates are broken again (the same bug that blacked out every map
+   from X9-B to X9-I, docs/r3d/divergences.md #100).
+   vs.inl (X4's own shader, tools/x4-triangle/vs.vs.cg:28 `result.tex0 =
+   I.texcoord.xy;`) passes TEXCOORD0 through unscaled, so no shader change
+   is involved. */
+static const nv2a_test_vertex_t nv2a_test_verts[] =
+{
+	//  X     Y     Z       U                            V
+	{{ -1.0f, -1.0f, 1.0f }, { 0.0f,                       (float)NV2A_TEST_TEX_SIZE }},
+	{{  0.0f,  1.0f, 1.0f }, { 0.5f * NV2A_TEST_TEX_SIZE,  0.0f }},
+	{{  1.0f, -1.0f, 1.0f }, { (float)NV2A_TEST_TEX_SIZE,  (float)NV2A_TEST_TEX_SIZE }},
+};
 
 #define MASK( mask, val ) ( ( ( val ) << ( __builtin_ffs( mask ) - 1 ) ) & ( mask ) )
 
@@ -150,10 +190,25 @@ static uint32_t *nv2a_map_index_dwords;             /* Ordinary engine-pooled CP
 static uint32_t  nv2a_map_dword_count;
 static void     *nv2a_map_atlas;
 static uint32_t  nv2a_map_atlas_width, nv2a_map_atlas_height, nv2a_map_atlas_pitch;
+/* log2 of the atlas dimensions, validated power-of-two at load
+   (nv2a_load_map_geometry) - the FORMAT word's BASE_SIZE_U/V fields
+   (deps/nxdk/lib/pbkit/nv_regs.h:581-582) are the ONLY size a compressed
+   (DXT1) texture has on NV2A; IMAGE_RECT/CONTROL1 size linear textures
+   only. Computed once here rather than per draw call: a property of the
+   loaded map, not of the frame. No reset in nv2a_free_map_resources() -
+   like nv2a_map_atlas_width/height these are gated by nv2a_map_ready and
+   rewritten on every successful load. */
+static uint32_t  nv2a_map_atlas_log2w, nv2a_map_atlas_log2h;
 static void     *nv2a_map_lightmap;     /* GPU-visible, RGBA8, no format conversion needed -
-                                            LU_IMAGE_A8R8G8B8 is the same proven-working
-                                            uncompressed linear format X9-A's own checkerboard
-                                            already used, just bound on texture stage 1 */
+                                            bound on texture stage 1 as LU_IMAGE_A8B8G8R8 (the
+                                            baker's [R,G,B,A] byte order read as a little-endian
+                                            word, see nv2a_draw_map_geometry's stage-1 comment),
+                                            the same uncompressed LINEAR path X9-A's checkerboard
+                                            uses on stage 0. That path was NOT "proven working"
+                                            by X9-A as this comment once claimed: linear textures
+                                            take texel-unit coordinates (file header), which the
+                                            X9-A triangle and this lightmap both got wrong until
+                                            X9-J, docs/r3d/divergences.md #100. */
 static uint32_t  nv2a_map_lightmap_width, nv2a_map_lightmap_height, nv2a_map_lightmap_pitch;
 static float     nv2a_map_viewproj[4][4];
 static qboolean  nv2a_view_valid; /* X9-E: true only once GL_RenderFrame has
@@ -890,8 +945,11 @@ static void nv2a_init_lit_shader( void )
 }
 
 /* tools/x4-triangle/main.c's own init_texture(), LINEAR PATH ONLY - no
-   swizzled copy, since that path is X4's own open, unresolved defect
-   (see this file's header comment). Returns false (leaving nv2a_tex NULL)
+   swizzled copy, since that path is X4's own open, unresolved defect (see
+   this file's header comment - and note that X4's linear path was never a
+   correct baseline either: fed 0..1 UVs, a LINEAR texture only ever shows
+   its texels (0..1, 0..1), which is why nv2a_test_verts above carries
+   texel-unit UVs). Returns false (leaving nv2a_tex NULL)
    on allocation failure - a 64 MiB unified-memory console can genuinely
    run out of contiguous pages, and this must fail R_Init cleanly rather
    than memcpy into a null pointer (found in codex review). */
@@ -957,7 +1015,23 @@ static void nv2a_draw_test_triangle( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( NV2A_TEST_TEX_SIZE << 16 ) | NV2A_TEST_TEX_SIZE );
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x04074000 );
+	/* MIN=NEAREST(1)/MAG=NEAREST(1), point-sampled, deliberately NOT the
+	   mesh sample's 0x04074000 (used unchanged by nv2a_draw_map_geometry's
+	   real atlas/lightmap stages, docs/r3d/divergences.md #100 (b) - this
+	   filter choice is local to the bring-up canary only). With
+	   texel-unit UVs (above) and EITHER the convolution-kernel enum or a
+	   plain-bilinear one (0x02020000), this triangle rendered as a smooth
+	   orange/white blend, not a checkerboard - live-tested both ways.
+	   Booted with NEAREST instead, it renders a crisp 8x8 checkerboard
+	   (`.sweep/triangle_nearest.png`): the blend was bilinear/tent
+	   filtering doing exactly what it does to a single-texel-period
+	   pattern (every sample point between texel centers interpolates two
+	   or four alternating colours), not a remaining UV bug, and a
+	   point-sampled checkerboard is a far more sensitive regression
+	   indicator for the texel-unit-addressing convention than a blended
+	   one - any squares merging or a return to a two-texel gradient means
+	   this convention broke again. */
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x01010000 );
 	pb_end( p );
 
 	/* X9-I: this path shares the GPU with nv2a_draw_map_geometry(), which
@@ -1104,7 +1178,32 @@ static void nv2a_draw_map_geometry( void )
 	   re-uploads its own - see that function's own comment. */
 	nv2a_init_lit_shader();
 
-	/* Texture stage 0: the real DXT1 diffuse atlas, unchanged from X9-B. */
+	/* Texture stage 0: the real DXT1 diffuse atlas. DXT1 (L_DXT1_A1R5G5B5,
+	   deps/nxdk/lib/pbkit/nv_regs.h:547) is a compressed, power-of-two
+	   format, and NV2A sizes compressed textures from the FORMAT word's
+	   own BASE_SIZE_U/V log2 fields (nv_regs.h:581-583) - IMAGE_RECT/
+	   CONTROL1 size LINEAR (LU_IMAGE_*) textures only (xemu hw/xbox/nv2a/
+	   pgraph/texture.c pgraph_get_texture_shape(): `if (f.linear) width =
+	   rect_width; else width = 1 << log_width, pitch = 0`; the XDK's
+	   D3DFORMAT USIZE/VSIZE/PSIZE fields are these same bits and are
+	   documented "only set for swizzled or compressed" - Cxbx-Reloaded
+	   src/core/hle/D3D8/XbD3D8Types.h:565-570, which preserves the XDK
+	   header's own comments). The same sources say swizzled (SZ_*)
+	   textures are sized the same way, but that half is NOT established
+	   here: X4's SZ_A8R8G8B8 + BASE_SIZE path still renders a flat
+	   texel-(0,0) fill (file header), so only the compressed case is
+	   relied on. X9-B
+	   through X9-I copied tools/x4-triangle/main.c's LINEAR stage setup
+	   (which never sets BASE_SIZE, main.c:194-202) onto this compressed
+	   format, so the atlas was a 2^0 x 2^0 = 1x1 texture: every fragment
+	   sampled its first BC1 block's texel (0,0), (239,255,214) pale
+	   green-white - exactly the flat frame seen live (mean 228/255, R/G/B
+	   218/240/226) once the lightmap bug (nv2a_load_map_geometry's remap
+	   loop) was fixed alone, and the {0,1,2} near-black frames before that
+	   ((239,255,214)/255 x {0,1}/255 x ps_lit.ps.cg's x2). With BASE_SIZE
+	   set (log2 validated at load, nv2a_load_map_geometry) real map
+	   textures render: mean 1.8 -> 90.4/255, 251K px with channel spread
+	   > 8. docs/r3d/divergences.md #100. */
 	p = pb_begin();
 	tex_phys = (uint32_t)nv2a_map_atlas & 0x03ffffff;
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, tex_phys );
@@ -1112,7 +1211,21 @@ static void nv2a_draw_map_geometry( void )
 		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
+		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_U, nv2a_map_atlas_log2w )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_V, nv2a_map_atlas_log2h ));
+	/* CONTROL1 pitch / IMAGE_RECT are ignored for a compressed format (xemu
+	   texture.c forces pitch = 0 for non-linear shapes; the XDK zeroes the
+	   Size dword for compressed textures) but are kept on purpose: this is
+	   the exact register sequence the live fix was measured with
+	   (.sweep/c1a0_both_fixes.png), the values are self-consistent
+	   (blocksW*8 == width*2 is the pitch BASE_SIZE implies), and
+	   abaire/nxdk_pgraph_tests' TextureStage pushes pitch + IMAGE_RECT
+	   alongside BASE_SIZE for every format including DXT1, so they are
+	   expected harmless on hardware too (that suite's goldens are hardware
+	   captures) - not measured here, see the file header's caveat.
+	   Dropping them to match the XDK-exact path would change the tested
+	   pushbuffer for no functional gain and needs its own gated sweep. */
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, nv2a_map_atlas_pitch << 16 );
 	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( nv2a_map_atlas_width << 16 ) | nv2a_map_atlas_height );
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
@@ -1120,8 +1233,9 @@ static void nv2a_draw_map_geometry( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x04074000 );
 	pb_end( p );
 
-	/* X9-C: texture stage 1, the real RGBA8 lightmap - the SAME proven
-	   uncompressed-linear path X9-A's own checkerboard used on stage 0,
+	/* X9-C: texture stage 1, the real RGBA8 lightmap - the SAME
+	   uncompressed-linear path X9-A's own checkerboard used on stage 0
+	   (not "proven" by it - see nv2a_map_lightmap's declaration comment),
 	   just at stage 1's own register offset (+0x40 per stage, tools/
 	   x4-triangle/main.c's own documented per-stage addressing), and a
 	   DIFFERENT color format (codex review, TWO rounds, real finding both
@@ -1744,6 +1858,35 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
    the platform's whole memory picture. */
 #define NV2A_MAP_BUDGET_BYTES ( 24u * 1024u * 1024u )
 
+/* The baker's own fixed lightmap page edge, tools/asset-studio/src/
+   formats/BspParser.cpp:25 (`constexpr uint32_t LM_PAGE_SIZE = 1024`) -
+   every lu/lv the baker emits is divided by exactly THIS constant
+   (BspParser.cpp:853-854), never by the archive's own header fields, so
+   nv2a_load_map_geometry's validation below must compare
+   header->lightmapWidth/Height against this literal, not merely against
+   each other (codex review: a square-but-not-1024 page would otherwise
+   pass validation and still sample with the wrong divisor). */
+#define NV2A_LM_PAGE_SIZE 1024u
+
+/* Stores log2(v) in *out and returns true only when v is a non-zero power
+   of two. A compressed (DXT1) texture's ONLY size on NV2A is the FORMAT
+   word's BASE_SIZE_U/V log2 fields (deps/nxdk/lib/pbkit/nv_regs.h:581-583),
+   so a non-power-of-two atlas cannot be described to the hardware at all -
+   an exact test, not a round-up, so nv2a_load_map_geometry fails closed
+   instead of programming a size the GPU would read with a wrong implied
+   pitch. */
+static qboolean nv2a_log2_pow2( uint32_t v, uint32_t *out )
+{
+	uint32_t l = 0;
+
+	if( v == 0 || ( v & ( v - 1 )) != 0 )
+		return false;
+	while(( 1u << l ) < v )
+		l++;
+	*out = l;
+	return true;
+}
+
 static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte *buffer, size_t buffersize )
 {
 	nv2a_mpak_geometry_t geo;
@@ -1751,6 +1894,7 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	uint32_t i;
 	uint64_t vb_bytes, idx_bytes, total_bytes;
 	uint64_t blocksW, blocksH;
+	uint32_t atlas_log2w, atlas_log2h;
 
 	if( !nv2a_compute_mpak_layout( header, (fs_offset_t)buffersize, &geo ))
 		return false;
@@ -1840,6 +1984,29 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	if( header->atlasWidth == 0 || header->atlasHeight == 0 || blocksW * blocksH * 8 != (uint64_t)geo.atlas.length )
 		return false;
 
+	/* The DXT1 atlas is sized by the FORMAT word's BASE_SIZE_U/V/P 4-bit
+	   log2 fields alone (deps/nxdk/lib/pbkit/nv_regs.h:581-583 - see
+	   nv2a_draw_map_geometry's stage-0 comment for why IMAGE_RECT/pitch do
+	   not apply to a compressed format), so the dimensions must be exact
+	   powers of two, and no larger than NV2A's real 4096 texture edge even
+	   though the field itself could encode up to 2^15. With a power-of-two
+	   width the length check just above (blocksW*8 == width*2 bytes per
+	   block row) already equals the pitch BASE_SIZE implies, so no second
+	   pitch validation is needed. Fails closed here, in the same
+	   validation section as every other header field and before anything
+	   is allocated, so the early return needs no nv2a_free_map_resources()
+	   - the same discipline as the two checks around it. Refusing the
+	   archive beats sampling garbage: a wrong log2 would not crash, it
+	   would silently draw a scrambled or flat atlas again. */
+	if( header->atlasWidth > 4096 || header->atlasHeight > 4096
+		|| !nv2a_log2_pow2( header->atlasWidth, &atlas_log2w )
+		|| !nv2a_log2_pow2( header->atlasHeight, &atlas_log2h ))
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: atlas %ux%u is not a power-of-two <= 4096 - DXT1 textures are sized only by BASE_SIZE_U/V (log2), not drawing its real geometry\n",
+			(unsigned int)header->atlasWidth, (unsigned int)header->atlasHeight );
+		return false;
+	}
+
 	/* Same "don't trust dimensions independent of the lump's own real,
 	   bounds-checked length" discipline the atlas check above already
 	   established (codex review, X9-B round 2) - RGBA8 is a plain 4 bytes
@@ -1851,6 +2018,29 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			|| header->lightmapFormat != 0 /* 0 = RGBA8, the only format anything bakes today */
 			|| expected_lm != (uint64_t)geo.lightmapAtlas.length )
 			return false;
+
+		/* The baker normalizes BOTH lu and lv by ONE fixed compile-time
+		   constant, LM_PAGE_SIZE = 1024 (tools/asset-studio/src/formats/
+		   BspParser.cpp:25,853-854) - not by whatever this archive's own
+		   header->lightmapWidth/Height happen to say. The remap loop below
+		   undoes that divisor using the header fields (matching what stage
+		   1 pushes to IMAGE_RECT), which is only the correct inverse when
+		   those fields actually equal 1024: a square-but-not-1024 page
+		   (e.g. 512x512, codex review) would pass a width==height check yet
+		   still be scaled by the wrong divisor, silently sampling every
+		   luxel from roughly the wrong quadrant of the page instead of
+		   failing closed. Comparing directly against the baker's own
+		   constant closes that gap; if a future baker ever emits a
+		   different page size this reads its own header->lightmapWidth/
+		   Height as the divisor, not a hardcoded 1024, so this check would
+		   need to move with it. */
+		if( header->lightmapWidth != NV2A_LM_PAGE_SIZE || header->lightmapHeight != NV2A_LM_PAGE_SIZE )
+		{
+			gEngfuncs.Con_Printf( "ref_nv2a: lightmap page %ux%u is not %ux%u - the baker's lu/lv are normalized by a fixed %u-luxel divisor, not drawing its real geometry\n",
+				(unsigned int)header->lightmapWidth, (unsigned int)header->lightmapHeight,
+				NV2A_LM_PAGE_SIZE, NV2A_LM_PAGE_SIZE, NV2A_LM_PAGE_SIZE );
+			return false;
+		}
 	}
 
 	nv2a_map_vb = MmAllocateContiguousMemoryEx( (uint32_t)vb_bytes, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
@@ -1880,8 +2070,35 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			dst[i].pos[2] = v.z;
 			dst[i].uv0[0] = v.rect[0] + ( v.u - floorf( v.u )) * v.rect[2];
 			dst[i].uv0[1] = v.rect[1] + ( v.v - floorf( v.v )) * v.rect[3];
-			dst[i].uv1[0] = v.lu;
-			dst[i].uv1[1] = v.lv;
+			/* The lightmap is bound as a LINEAR texture (LU_IMAGE_A8B8G8R8 +
+			   CONTROL1 pitch + IMAGE_RECT, stage 1 in nv2a_draw_map_geometry),
+			   and NV2A addresses linear textures in UNNORMALIZED texel
+			   coordinates (0..width, 0..height), like GL rectangle textures -
+			   not 0..1 (xemu hw/xbox/nv2a/pgraph/glsl/psh.c: `rect_tex[i] =
+			   f.linear` and `norm(coord) = coord / textureSize()` for linear
+			   stages only; deps/nxdk/samples/mesh/verts.h feeds integer texel
+			   UVs such as {44,143} to its 256x256 LU_IMAGE_A8R8G8B8 texture,
+			   main.c:145-150, and vs.vs.cg passes them through unscaled). The
+			   baker normalizes lu/lv by LM_PAGE_SIZE (tools/asset-studio/src/
+			   formats/BspParser.cpp:853-854) and its flatten() guarantees
+			   lightmapWidth == lightmapHeight == LM_PAGE_SIZE, never trimmed
+			   (BspParser.cpp:160-182, enforced at load above), so header->
+			   lightmapWidth/Height - the same values stage 1 pushes to
+			   IMAGE_RECT (nv2a_map_lightmap_width/height are assigned from
+			   them further down, after this loop) - are the exact inverse of
+			   that divisor. Fed 0..1, clamp + bilinear only ever blended page
+			   texels (0,0) and (1,0), i.e. the ramp strip's values 0 and 1: a
+			   lightmap-only debug shader produced exactly two values across
+			   the whole frame, 0 (254,979 px) and 1 (50,263 px), while the
+			   GPU-visible uv1 and the baked luxels at those texels were
+			   correct (mean 105/255). The DXT1 atlas (uv0 above) is a
+			   compressed, normalized-coordinate format and needs no scaling.
+			   Multi-page lightmaps (lightmap_layer != 0) stay rejected at
+			   load (above); with texel coordinates a page > 0 would need a
+			   per-page V offset or a separate binding, not just a scale.
+			   docs/r3d/divergences.md #100. */
+			dst[i].uv1[0] = v.lu * (float)header->lightmapWidth;
+			dst[i].uv1[1] = v.lv * (float)header->lightmapHeight;
 		}
 	}
 	nv2a_map_vert_count = vert_count;
@@ -1897,6 +2114,8 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	nv2a_map_atlas_width  = header->atlasWidth;
 	nv2a_map_atlas_height = header->atlasHeight;
 	nv2a_map_atlas_pitch  = (uint32_t)( blocksW * 8 ); /* same ceil(width/4)*8 the length check above already validated */
+	nv2a_map_atlas_log2w  = atlas_log2w; /* validated power-of-two above; BASE_SIZE_U/V for the draw path */
+	nv2a_map_atlas_log2h  = atlas_log2h;
 
 	nv2a_map_lightmap = MmAllocateContiguousMemoryEx( geo.lightmapAtlas.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
 	if( !nv2a_map_lightmap )
