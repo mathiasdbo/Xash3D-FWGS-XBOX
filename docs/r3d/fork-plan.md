@@ -7633,9 +7633,50 @@ formality, following the same "coded and statically verified, not yet
 seen rendering" bar X9-B/C/D each shipped at before a later slice
 confirmed them live. Full account in `divergences.md` #97.
 
-X9-H onward (backface culling, skinning, dynamic lighting, native alpha
-test, the frame-time exit criterion itself) sketched in this section's
-own bullets below, not started.
+**X9-H, 2026-09-21 - backface culling, addressing the "backface culling
+(cheap...)" bullet this section already carried forward since X9-F.
+NOT closed - single-file compile only, ships disabled by default
+(codex review, real finding: shipping this enabled before the real
+Xbox link/sweep/boot chain and a live `nv2a_r_nocullback` A/B check
+both complete would not match this project's own "compile and boot
+before calling anything done" rule - see below and
+`divergences.md` #98).** `ref/nv2a`
+no longer submits a face that survives the frustum and PVS tests but
+faces directly away from the camera. `nv2a_draw_map_geometry()` now
+reads the engine's own already-loaded world model's real
+`msurface_t::plane`/`::flags` for each baked face - the SAME "same face,
+same index" bridge X9-G's PVS code already established and bounds-
+checks, reused rather than re-derived - and applies the reference's own
+default world-surface cull test verbatim: `dist = PlaneDiff(camera_eye,
+plane)`, negated if `SURF_PLANEBACK` is set, culled if `dist <=
+BACKFACE_EPSILON`. Confirmed, not assumed, that this is really what the
+reference does by default for ordinary world geometry: `ref/gl`'s own
+`R_SetupGL(true)` sets `GL_Cull(GL_FRONT)` once per frame before the world
+draw runs, and nothing in `gl_rsurf.c` overrides it for world surfaces
+(grepped the whole file), so `R_CullSurface`'s `GL_FRONT` branch applies
+uniformly - sky surfaces included, since the reference's own
+`SURF_DRAWSKY` special-case runs AFTER `R_CullSurface`, not instead of
+it. Needed no baker or format work, same reason X9-G needed none: the
+real `mplane_t`/`SURF_PLANEBACK` data was already sitting in the engine's
+already-loaded world model, just unread by this renderer's own per-face
+loop until now. `BACKFACE_EPSILON`/`PlaneDiff()` are used directly,
+already in scope; only `SURF_PLANEBACK`'s literal value is mirrored
+locally (matching the established precedent for constants this isolated
+module can't cheaply pull a whole header in for). A new `nv2a_r_nocullback`
+convar (this module's own dev-aid - the reference's own backface culling
+is controlled by an internal state variable, not a user convar) matches
+the `nv2a_r_nocull`/`nv2a_r_novis` A/B-toggle pattern. Compiles clean
+(`tools/xbox-cc.sh`, re-verified after every edit). Specialist review
+(`reference-renderer-specialist`, `nv2a-xbox-specialist`,
+`upstream-fidelity-specialist`) run per `AGENTS.md`; findings folded in
+before this paragraph was written. Not yet live-boot confirmed - see
+`divergences.md` #98 for the same honest build-verification gap #97
+recorded, still open in this environment. Full account in
+`divergences.md` #98.
+
+X9-I onward (skinning, dynamic lighting, native alpha test, the
+frame-time exit criterion itself) sketched in this section's own
+bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised

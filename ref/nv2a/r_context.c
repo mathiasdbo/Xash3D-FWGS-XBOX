@@ -256,6 +256,25 @@ uint32_t nv2a_cull_faces_total;
 uint32_t nv2a_cull_faces_visible;
 uint32_t nv2a_cull_runs;
 uint32_t nv2a_cull_dwords;
+/* X9-H: counts only faces the frustum/PVS tests did NOT already reject
+   but the backface test did - a LOGICAL face-classification count, not
+   a guaranteed dword/bandwidth measurement (codex review, real finding:
+   an earlier version of this comment overclaimed the latter). The
+   run-merging logic below snaps each face's own index range OUTWARD to
+   a 6-index boundary and then merges CONTIGUOUS runs - so a backface-
+   culled face immediately adjacent (in bake order and dword range) to a
+   surviving one can still have its own indices fall inside that
+   neighbour's own submitted run, meaning this counter can increment
+   with NO matching reduction in nv2a_cull_dwords for that specific
+   face. It is still a real, useful number - how many faces this test
+   alone judged backfacing, independent of whether their own bytes
+   happened to piggyback on a surviving neighbour's run - just not the
+   same thing as "dwords saved". A true bandwidth delta would need
+   comparing nv2a_cull_dwords with this test on vs. off (two full passes
+   or a shadow accumulator), not attempted here - disproportionate to
+   what a bring-up counter needs to prove real geometry is being
+   classified, which is what this one actually does. */
+uint32_t nv2a_cull_faces_backface_only;
 
 /* Mirrors ref/gl's own r_nocull (ref/gl/gl_local.h) in name and meaning -
    a private, module-local convar (CVAR_DEFINE_AUTO, the same pattern
@@ -342,6 +361,119 @@ static const model_t *nv2a_pvs_parity_checked_for;
    mod_local.h's real MAX_MAP_LEAFS for the same "no extra include" reason
    the constant itself is mirrored, not shared. */
 static byte nv2a_visbytes[( NV2A_MAX_MAP_LEAFS + 7 ) / 8];
+
+/* X9-H: backface culling. Port of ref/gl's own default world-draw cull
+   state: R_SetupGL(true) (gl_rmain.c - reference-renderer-specialist
+   review, real correction: an earlier version of this comment named
+   GL_SetupGL, which does not exist; the real function is R_SetupGL,
+   called as R_SetupGL(true) from R_RenderScene) calls GL_Cull(GL_FRONT)
+   once per frame, BEFORE R_MarkLeaves/R_DrawWorld/R_RecursiveWorldNode/
+   R_DrawTextureChains run, and no GL_Cull call anywhere in gl_rsurf.c
+   itself overrides it for world surfaces - confirmed by grepping every
+   GL_Cull call site under ref/gl, not assumed - so R_CullSurface's own
+   GL_FRONT branch (gl_cull.c:96-104) applies uniformly to every
+   ordinary world surface X9 currently draws, sky surfaces included
+   (R_RecursiveWorldNode's own SURF_DRAWSKY branch runs AFTER
+   R_CullSurface, not instead of it) - confirmed true for the reference
+   itself, not merely "doesn't matter yet for this port's own narrower
+   scope": R_CullSurface is called identically for opaque, SURF_DRAWTURB
+   and SURF_TRANSPARENT surfaces alike in R_RecursiveWorldNode
+   (gl_rsurf.c:3457-3534); the type-based split into wateralpha/alpha-
+   surface draw passes happens strictly LATER, in R_DrawTextureChains,
+   on whatever already survived this same cull test - there is no
+   surface-type exemption from backface culling anywhere in the
+   reference's own cull decision. One real, disclosed simplification:
+   the reference's own input is tr.modelorg (RI.cullorigin, set from
+   rvp.vieworigin unless r_lockfrustum is active - gl_rmain.c), not raw
+   vieworigin directly; this port's nv2a_eye_origin is captured straight
+   from rvp->vieworigin, which is EQUAL to tr.modelorg for this fork's
+   own real single-player path (no mirror/portal path exists here to
+   reassign cullorigin differently, and r_lockfrustum defaults off) -
+   an equivalence for the case that actually runs, not an identity, and
+   worth re-checking if a lockfrustum-equivalent or a mirror/portal pass
+   is ever added to this module. SURF_PLANEBACK is mirrored locally
+   (common/bspfile.h's own value, BIT(1) = 0x0002) rather than pulling in
+   bspfile.h for one constant - same "private, narrowly-scoped copy"
+   precedent NV2A_MAX_MAP_LEAFS/NV2A_CHECKVISBIT already established
+   above. BACKFACE_EPSILON and PlaneDiff() are NOT mirrored - both are
+   already in scope verbatim (common/com_model.h via ref_common.h's own
+   include of engine/ref_api.h; public/xash3d_mathlib.h via
+   ref_common.h's own direct include) - reusing the real ones here is
+   strictly cheaper than mirroring, and there is no isolation reason not
+   to (they are header-only macros/constants, not linked symbols).
+
+   nv2a-xbox-specialist review, real finding this comment did not
+   originally disclose: the NV2A already has its OWN, always-on,
+   hardware backface cull, unconditionally enabled since X9-A and never
+   touched since (deps/nxdk/lib/pbkit/pbkit.c: NV20_TCL_PRIMITIVE_3D_
+   CULL_FACE_ENABLE=1, FRONT_FACE=clockwise screen-space winding,
+   CULL_FACE=back) - grepped the whole module for CULL/WINDING/
+   FRONT_FACE and confirmed nothing here ever reprograms it. This CPU
+   test is therefore a SECOND, independently-computed cull decision
+   layered on top of an already-active one, not the introduction of
+   backface culling where none existed - its real value is skipping the
+   vertex-transform and pushbuffer-submission cost for faces the GPU's
+   own post-transform winding test would have discarded anyway, not
+   correctness the GPU test lacked. The two tests must AGREE (this CPU
+   plane/SURF_PLANEBACK test vs. the GPU's screen-space winding test) or
+   this test can create real holes in walls the GPU alone would have
+   drawn - a one-directional failure mode (this test being too
+   permissive is merely redundant with the GPU's own cull; too
+   aggressive is a visible defect). By construction they should agree:
+   the baker's own fan triangulation (tools/asset-studio's BspParser)
+   walks each face's real edge loop the identical way ref/gl/ref/soft's
+   own glpoly_t reconstruction does and preserves its rotational sense
+   with no reversal, so SURF_PLANEBACK (computed against that same
+   preserved winding) and the GPU's clockwise test are testing the same
+   underlying geometry the same way. Real maps have also been rendering
+   correctly under the GPU's own always-on cull since X9-B, which is
+   circumstantial support. Neither is a substitute for actually
+   checking: the concrete, cheap verification step for whoever next has
+   live-boot access is an nv2a_r_nocullback 0 vs 1 A/B walk of a real
+   level looking for any face that only appears with this test
+   disabled - nobody has done that check yet, only reasoned about why
+   it should pass. */
+#define NV2A_SURF_PLANEBACK BIT( 1 )
+
+/* Mirrors ref/gl's own r_nocull/r_novis precedent for this module's
+   third cull test - a real, independent A/B toggle. No reference
+   analog exists for this SPECIFIC name (ref/gl's own backface culling
+   is controlled by glState.faceCull, an internal state variable, not a
+   user-facing convar), so this is this module's own dev-aid, in the
+   same spirit as nv2a_r_nocull/nv2a_r_novis rather than a port of a
+   named reference convar.
+
+   codex review, real finding, high confidence (0.99): this test's own
+   correctness depends on agreeing with the NV2A's separate, always-on
+   HARDWARE backface cull (see NV2A_SURF_PLANEBACK's own declaration
+   comment) - a real, disclosed, but genuinely UNVERIFIED risk this
+   session could not close (no live-boot access - divergences.md #98's
+   own honest verification gap). Shipping a correctness-risking cull
+   test ENABLED by default, with the one check that would confirm it
+   safe explicitly not yet done, is not consistent with this project's
+   own "compile and boot before calling anything done" discipline - so,
+   default to "1" (DISABLED) rather than "0": this test exists in the
+   tree, ready to enable and verify the moment live-boot access exists
+   (an nv2a_r_nocullback 0 vs 1 A/B walk, exactly as already planned),
+   but does not silently risk real geometry on every boot until that
+   verification actually happens. Flip the default to "0" in a follow-up
+   commit once that A/B walk confirms no face disappears with it
+   enabled - cite the verification when that commit lands, the same way
+   X9-F's own nv2a_r_nocull A/B was later confirmed live
+   (divergences.md #96). */
+static CVAR_DEFINE_AUTO( nv2a_r_nocullback, "1", 0, "ref_nv2a: disable backface culling (default ON - unverified live, see divergences.md #98)" );
+
+/* The real, live camera eye position, captured once per real frame by
+   GL_RenderFrame alongside nv2a_map_viewproj/nv2a_frustum - needed here
+   because nv2a_draw_map_geometry() (called later the same frame, from
+   R_EndFrame) has no ref_viewpass_t of its own to read vieworigin from.
+   Valid exactly when nv2a_view_valid is true - see that flag's own
+   declaration comment for why a map loaded before the first real frame
+   must never read whatever this defaults to (all-zero BSS is a
+   perfectly valid, if wrong, coordinate here, unlike nv2a_map_viewproj's
+   own divide-by-zero risk - so nv2a_view_valid still gates every use of
+   this, for consistency, not because zero itself would crash anything). */
+static vec3_t nv2a_eye_origin;
 
 static void nv2a_matrix_viewport( float out[4][4], float x, float y, float width, float height, float z_min, float z_max )
 {
@@ -830,6 +962,17 @@ static void nv2a_draw_map_geometry( void )
 	uint32_t *p;
 	uint32_t tex_phys;
 	uint32_t i;
+	/* X9-H: the engine's own already-loaded world model, read directly
+	   for its real per-surface plane/flags (backface test below) - the
+	   SAME model_t X9-G's nv2a_mark_leaves() already trusts, guarded the
+	   same way (world == nv2a_map_owner, never dereferenced otherwise).
+	   NULL here just means "no backface test this call, draw whatever
+	   frustum+PVS already allowed" - fail open, same discipline as every
+	   other optional cull test in this function. */
+	const model_t *world = gp_cl->models[1];
+
+	if( world != nv2a_map_owner )
+		world = NULL;
 
 	/* This path's own two-texcoord/two-texture program, re-uploaded every
 	   time it draws for the same reason nv2a_draw_test_triangle() now
@@ -910,6 +1053,7 @@ static void nv2a_draw_map_geometry( void )
 	nv2a_cull_faces_visible = 0;
 	nv2a_cull_runs = 0;
 	nv2a_cull_dwords = 0;
+	nv2a_cull_faces_backface_only = 0;
 
 	if( nv2a_map_faces == NULL || nv2a_r_nocull.value )
 	{
@@ -947,8 +1091,39 @@ static void nv2a_draw_map_geometry( void )
 				&& !nv2a_r_novis.value
 				&& !nv2a_map_face_visible[i];
 
+			/* X9-H, nv2a-xbox-specialist review, real finding: the
+			   backface test (below) is the most expensive of the three -
+			   the only one with a pointer chase off this map's own
+			   arrays, into a separate, deduplicated plane pool - so it
+			   must not run on a face the cheaper frustum/PVS tests
+			   already reject. Short-circuit here, before paying for the
+			   plane fetch at all. */
 			if( nv2a_frustum_cull_box( face->mins, face->maxs ) || pvs_culled )
 				continue;
+
+			/* X9-H: same "same face, same index" bridge X9-G already
+			   established and bounds-checks the same way (never trust a
+			   raw index past the engine's own real numsurfaces, even
+			   though nv2a_map_face_count SHOULD equal it - a mismatch
+			   here means only this cull test degrades, not a crash). */
+			if( world != NULL && !nv2a_r_nocullback.value && i < (uint32_t)world->numsurfaces )
+			{
+				const msurface_t *surf = &world->surfaces[i];
+
+				if( !VectorIsNull( surf->plane->normal ))
+				{
+					float dist = PlaneDiff( nv2a_eye_origin, surf->plane );
+
+					if( FBitSet( surf->flags, NV2A_SURF_PLANEBACK ))
+						dist = -dist;
+
+					if( dist <= BACKFACE_EPSILON )
+					{
+						nv2a_cull_faces_backface_only++;
+						continue;
+					}
+				}
+			}
 
 			nv2a_cull_faces_visible++;
 
@@ -1131,6 +1306,7 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_nocull );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_novis );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lockpvs );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_nocullback );
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not
@@ -2165,6 +2341,12 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   crossed a leaf boundary - see nv2a_mark_leaves()'s own early
 	   return. */
 	nv2a_mark_leaves( rvp->vieworigin );
+
+	/* X9-H: the real eye position nv2a_draw_map_geometry()'s own
+	   per-face backface test reads later this same frame (from
+	   R_EndFrame) - captured here since that function has no
+	   ref_viewpass_t of its own. */
+	VectorCopy( rvp->vieworigin, nv2a_eye_origin );
 
 	AngleVectors( (float *)rvp->viewangles, forward, right, up );
 	f.x = forward[0]; f.y = forward[1]; f.z = forward[2];

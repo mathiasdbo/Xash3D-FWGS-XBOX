@@ -5,6 +5,22 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `ref/nv2a` now backface-culls its draw list
+
+Frustum and PVS culling (the two entries below) both still submitted a
+face pointing directly away from the camera as long as it was inside
+the view volume and its leaf was potentially visible - a wall you are
+standing right in front of, facing it, still had its own back side
+(the side facing away from you, into the wall) submitted every frame.
+The renderer now also asks, per face, which side of that face's own
+plane the camera is on - the same default test the PC and software
+renderers already apply to every world surface - and skips the ones
+facing away. Ships **disabled by default** (`nv2a_r_nocullback` defaults
+to on): this test needs to agree with the NV2A's own separate, always-on
+hardware backface cull, and that agreement has not been live-verified
+yet - see `docs/r3d/divergences.md` #98 for the full account, including
+what live check flips the default back on.
+
 ### Added — `ref/nv2a` now PVS-culls its draw list
 
 Frustum culling (the previous entry below) still submitted every face
