@@ -189,6 +189,15 @@ namespace formats {
         uint32_t mAtlasWidth = 2048;
         uint32_t mAtlasHeight = 2048;
         std::vector<uint8_t> mAtlasRgba;
+        // Set by addTexture() the moment a texture doesn't fit; save() checks
+        // this and fails the bake outright (codex-review finding: block-
+        // aligning every texture's footprint - see addTexture()'s own comment -
+        // grows atlas occupancy, so a map that used to just fit can now
+        // overflow, and addTexture() itself can only warn and hand back a
+        // zero-initialized TextureLocation, which the caller stores as if
+        // packing had succeeded). A bake that silently aliases overflowed
+        // faces onto atlas slot 0 is worse than one that fails loudly.
+        bool mAtlasOverflowed = false;
     };
 
 } // namespace formats

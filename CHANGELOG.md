@@ -5,6 +5,66 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the Xbox texture atlas never carried usable alpha for masked textures
+
+`tools/asset-studio`'s Xbox atlas compression call has always passed
+`punchThroughAlpha=false`, so masked ('{'-prefixed - fences, grates,
+vents) textures baked with zero real transparency, silently blocking
+the renderer's own planned native-alpha-test work on baker output
+nobody had traced to its real cause. The per-pixel alpha data needed
+was already correct end to end, so the fix started as a one-line flip
+to `true` - but texel-level verification (decoding real baked output
+against the pre-compression source, not just counting blocks) caught a
+real regression the first pass introduced: the atlas packer placed
+textures at unaligned pixel offsets, so 10 genuinely opaque texels
+(including 2 inside an unrelated non-masked texture) got compressed as
+transparent by bleed across block boundaries. Fixed with two changes:
+4-pixel-aligned atlas placement with border replication in
+`PakManager.cpp` (eliminates cross-texture bleed entirely), and a
+per-block transparency gate in `TextureOpt.cpp::compressToDXT` that
+only offers punch-through encoding to a block containing at least one
+real transparent texel (eliminates the "block never needed
+transparency" sub-case). Six texel mismatches remained on the same test
+map (0.00014% of texels checked) after those two fixes - a distinct BC1
+least-squares tradeoff where a block that genuinely needs some
+transparency could still absorb an adjacent near-black opaque texel
+into the transparent selector. Closed with a third, self-verifying
+pass: `TextureOpt.cpp::fixOpaqueTexelsPunchedThrough` decodes the block
+already produced, reassigns exactly the wrongly-transparent texels to
+the nearest legal opaque selector, and re-encodes with rgbcx's
+`pForce_selectors` - but only ever adopts the retry after re-decoding
+and confirming it actually fixed the block, falling back to the
+original result otherwise, so it can only fix or no-op, never regress.
+A second asset-pipeline-specialist review confirmed the fix correct by
+tracing the actual rgbcx internals, but also pointed out that "0
+mismatches on one map" doesn't demonstrate completeness across the
+corpus and that this defect class had no standing regression
+protection - so a real unit test was added
+(`tools/asset-studio/tests/texture_opt_test.cpp`, verified to actually
+fail without the fix on a brute-force-found violating block), the ad
+hoc verification script was promoted to a reusable tool
+(`tools/verify-atlas-alpha.py`), and the full 125-map retail corpus was
+re-baked with every successfully-baked map's atlas decoded and compared
+texel-by-texel against its source - not just checked for bake
+success/failure. Result: **0 opaque-source-but-transparent-decoded
+mismatches across all 121 clean-baking maps**, the same 4 pre-existing
+unrelated failures as before. See `docs/r3d/fork-plan.md`'s XB section
+for the full account, including why the first response to this finding
+(a written justification instead of a fix) didn't hold up under a
+second review round.
+
+Also fixed by the same codex-review pass: atlas overflow (a texture
+that doesn't fit the fixed 2048x2048 atlas) used to only print a
+warning and hand back a zero-initialized texture location, which the
+caller stored as if packing had succeeded - some faces would silently
+alias onto atlas slot 0. `PakManager::save()` now refuses to write when
+this happens, matching its existing failed-file-open behavior. A full
+125-map retail corpus bake confirmed 2 maps (`disposal`,
+`rocket_frenzy`) already overflow this atlas on unmodified `main` -
+this is a pre-existing capacity limit, not one this branch introduced,
+though block-alignment does make it very slightly worse; the other 123
+maps are unaffected.
+
 ### Fixed — four `tools/*.sh` scripts silently no-op'd on a GNU BRE/grep-and-sed-build mismatch
 
 `tools/xbox-ref-isolate.sh`'s own self-check (every symbol in an

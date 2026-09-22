@@ -41,3 +41,7 @@ enable_testing()
 add_executable(miptex_lump_test tests/miptex_lump_test.cpp)
 target_link_libraries(miptex_lump_test PRIVATE AssetStudioFormats)
 add_test(NAME miptex_lump_test COMMAND miptex_lump_test)
+
+add_executable(texture_opt_test tests/texture_opt_test.cpp)
+target_link_libraries(texture_opt_test PRIVATE AssetStudioFormats)
+add_test(NAME texture_opt_test COMMAND texture_opt_test)

@@ -21,34 +21,98 @@ namespace formats {
         loc.height = height;
 
         if (mIsXboxTarget) {
+            // asset-pipeline-specialist review, real finding, confirmed by
+            // decoding a real bake byte-for-byte: DXT1/BC1 compresses this
+            // whole atlas in one fixed 4x4-pixel grid (TextureOpt.cpp's own
+            // compressToDXT), but this shelf packer never aligned a
+            // texture's own placement to that grid - GoldSrc miptex widths
+            // are always multiples of 16, so `width+2` (the old paddedW)
+            // is always ≡2 (mod 4), and packing them back-to-back walks
+            // mAtlasCurrentX through every residue EXCEPT a clean multiple
+            // of 4. A block that isn't 4-aligned can span this texture's
+            // own real edge pixels AND either a neighbouring texture's
+            // pixels or the atlas's own uninitialised (0,0,0,0) void -
+            // harmless colour bleed before punch-through alpha existed
+            // (rgbcx's block-wide least-squares fit just blended two
+            // similar opaque colours), but a real, measured defect once a
+            // block's own aggregate fit can pick BC1's transparent
+            // selector for a texel whose own true alpha was 255 (10 such
+            // texels confirmed in one real retail bake, two of them in a
+            // texture with no masking involved at all - the void beyond
+            // its own shelf row, not another texture, but the same root
+            // cause). Fixed by reserving each texture its own whole
+            // number of 4x4 blocks (`blockW`x`blockH`, rounded up from the
+            // existing 1px-bordered footprint) and filling the ENTIRE
+            // reserved footprint - not just the original 1px border - by
+            // repeating each row/column's own real edge pixel outward.
+            // mAtlasCurrentX/Y stay exact multiples of 4 by construction
+            // (both start at 0 and only ever advance by a `block*`
+            // value), so every block inside one texture's own reserved
+            // footprint now contains only that texture's own real content
+            // or its own repeated edge - never a neighbour's, and never
+            // unrelated void.
             uint32_t paddedW = width + 2;
             uint32_t paddedH = height + 2;
+            uint32_t blockW = ((paddedW + 3) / 4) * 4;
+            uint32_t blockH = ((paddedH + 3) / 4) * 4;
 
-            if (mAtlasCurrentX + paddedW > mAtlasWidth) {
+            if (mAtlasCurrentX + blockW > mAtlasWidth) {
                 mAtlasCurrentX = 0;
                 mAtlasCurrentY += mAtlasMaxRowHeight;
                 mAtlasMaxRowHeight = 0;
             }
 
-            if (mAtlasCurrentY + paddedH > mAtlasHeight) {
-                std::cerr << "WARNING: Atlas overflow! Texture won't fit.\n";
-                return loc; 
+            if (mAtlasCurrentY + blockH > mAtlasHeight) {
+                std::cerr << "ERROR: Atlas overflow! Texture won't fit - failing this bake (save() will refuse to write).\n";
+                mAtlasOverflowed = true;
+                return loc;
             }
 
             uint32_t destX = mAtlasCurrentX + 1;
             uint32_t destY = mAtlasCurrentY + 1;
+            // How far the reserved footprint extends past the real 1px
+            // border on the right/bottom - 0..3 pixels, whatever rounding
+            // up to a block boundary added.
+            uint32_t extraRight = (mAtlasCurrentX + blockW) - (destX + width + 1);
+            uint32_t extraBottom = (mAtlasCurrentY + blockH) - (destY + height + 1);
 
             for (uint32_t y = 0; y < height; ++y) {
                 size_t srcOffset = y * width * 4;
                 size_t destOffset = ((destY + y) * mAtlasWidth + destX) * 4;
                 std::memcpy(&mAtlasRgba[destOffset], &rgbaData[srcOffset], width * 4);
-                
+
+                // Real 1px border (left/right), matching the original
+                // logic exactly, then repeat the SAME right-edge pixel
+                // across any extra block-alignment columns so every pixel
+                // out to the reserved footprint's own right edge is this
+                // texture's own real edge colour/alpha, never void. The
+                // left side needs no such extension - destX-1 already
+                // sits exactly on this texture's own reserved footprint's
+                // left edge, since mAtlasCurrentX is always block-aligned.
+                const uint8_t* rightPx = &rgbaData[srcOffset + (width - 1) * 4];
                 std::memcpy(&mAtlasRgba[((destY + y) * mAtlasWidth + destX - 1) * 4], &rgbaData[srcOffset], 4);
-                std::memcpy(&mAtlasRgba[((destY + y) * mAtlasWidth + destX + width) * 4], &rgbaData[srcOffset + (width - 1) * 4], 4);
+                for (uint32_t bx = 0; bx <= extraRight; ++bx) {
+                    std::memcpy(&mAtlasRgba[((destY + y) * mAtlasWidth + destX + width + bx) * 4], rightPx, 4);
+                }
             }
-            
-            std::memcpy(&mAtlasRgba[(mAtlasCurrentY * mAtlasWidth + destX - 1) * 4], &mAtlasRgba[(destY * mAtlasWidth + destX - 1) * 4], paddedW * 4);
-            std::memcpy(&mAtlasRgba[((destY + height) * mAtlasWidth + destX - 1) * 4], &mAtlasRgba[((destY + height - 1) * mAtlasWidth + destX - 1) * 4], paddedW * 4);
+
+            // Top/bottom border rows across the full reserved footprint
+            // width (destX-1 .. destX+width+extraRight - includes the
+            // right-edge extension already written above), by repeating
+            // the nearest real content row's own already-bordered pixels.
+            // Top is a single real border row (matches the original logic
+            // exactly - the top has no alignment gap of its own, since
+            // destY sits exactly on this texture's reserved footprint's
+            // top edge for the same reason destX does). Bottom repeats
+            // for both the real 1px border row (by=0) and any extra
+            // alignment rows beyond it (by=1..extraBottom).
+            uint32_t footprintW = 1 + width + 1 + extraRight; // left border + content + right border(+extra)
+            std::memcpy(&mAtlasRgba[(mAtlasCurrentY * mAtlasWidth + destX - 1) * 4],
+                        &mAtlasRgba[(destY * mAtlasWidth + destX - 1) * 4], footprintW * 4);
+            for (uint32_t by = 0; by <= extraBottom; ++by) {
+                std::memcpy(&mAtlasRgba[((destY + height + by) * mAtlasWidth + destX - 1) * 4],
+                            &mAtlasRgba[((destY + height - 1) * mAtlasWidth + destX - 1) * 4], footprintW * 4);
+            }
 
             loc.array_index = 0;
             loc.layer = 0;
@@ -57,8 +121,8 @@ namespace formats {
             loc.rect[2] = static_cast<float>(width) / static_cast<float>(mAtlasWidth);
             loc.rect[3] = static_cast<float>(height) / static_cast<float>(mAtlasHeight);
 
-            mAtlasCurrentX += paddedW;
-            if (paddedH > mAtlasMaxRowHeight) mAtlasMaxRowHeight = paddedH;
+            mAtlasCurrentX += blockW;
+            if (blockH > mAtlasMaxRowHeight) mAtlasMaxRowHeight = blockH;
 
         } else {
             uint32_t maxDim = std::max(width, height);
@@ -183,6 +247,13 @@ namespace formats {
     }
 
     bool PakManager::save(const std::string& outputPath) {
+        if (mAtlasOverflowed) {
+            std::cerr << "Failed to save MPAK archive: the Xbox atlas overflowed during baking "
+                         "(see the earlier \"Atlas overflow\" error) - refusing to write a file with "
+                         "faces silently aliased onto atlas slot 0.\n";
+            return false;
+        }
+
         std::ofstream file(outputPath, std::ios::binary);
         if (!file.is_open()) {
             std::cerr << "Failed to open output file for MPAK serialization: " << outputPath << "\n";
@@ -270,11 +341,33 @@ namespace formats {
         if (nv2a && mIsXboxTarget) {
             header.atlasWidth = mAtlasWidth;
             header.atlasHeight = mAtlasHeight;
-            // Xbox atlas path: per-texture masked tracking doesn't exist here (many
-            // textures share one shelf-packed atlas with no per-region alpha mode),
-            // so punch-through is deferred - pass false, preserving the exact
-            // (alpha-less) output this call always produced before A3 landed.
-            dxtAtlas = TextureOpt::compressToDXT(mAtlasRgba.data(), mAtlasWidth, mAtlasHeight, false);
+            // Xbox atlas path: an earlier version of this call passed
+            // punchThroughAlpha=false, reasoning that per-texture masked
+            // tracking "doesn't exist here" since many textures share one
+            // shelf-packed atlas with no per-region alpha mode - true, but not
+            // actually needed. compressToDXT's own punch-through decision is
+            // PER-PIXEL (a<128 within each 4x4 block, TextureOpt.cpp:47-65),
+            // not per-region, and the alpha channel already IS correct on a
+            // per-pixel basis across the whole atlas before it ever reaches
+            // this call: WadParser::decodeMiptex (WadParser.cpp:98) sets
+            // alpha=255 for every texel except a masked ('{'-prefixed)
+            // texture's own transparent-key palette index (255), which gets
+            // alpha=0 - for EVERY texture the atlas packs, not just masked
+            // ones - and BspParser's own missing-texture placeholder
+            // (BspParser.cpp:566) is alpha=255 throughout too. So there is
+            // nothing this call needs to know about WHICH source texture a
+            // given block came from; the alpha already carried into
+            // mAtlasRgba by addTexture()'s own full 4-byte-per-pixel copy
+            // (this file, ~line 44) tells compressToDXT everything it needs,
+            // block by block. Turning this on is what actually makes masked
+            // ('{'-prefixed) Xbox textures render as masked at all - X9's own
+            // native-alpha-test slice (fork-plan.md's X9 section) was blocked
+            // on exactly this being a no-op before now.
+            if (const char* dbg = std::getenv("R3D_DUMP_ATLAS_RGBA")) {
+                std::ofstream dbgf(dbg, std::ios::binary);
+                dbgf.write(reinterpret_cast<const char*>(mAtlasRgba.data()), mAtlasRgba.size());
+            }
+            dxtAtlas = TextureOpt::compressToDXT(mAtlasRgba.data(), mAtlasWidth, mAtlasHeight, true);
             header.lenAtlas = static_cast<uint32_t>(dxtAtlas.size());
         }
 

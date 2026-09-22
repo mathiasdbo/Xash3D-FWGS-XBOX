@@ -7368,6 +7368,192 @@ actually happens. The D4 principle (the console path runs first on the machine
 with a debugger) holds for the data; it does not hold for the submission
 shape, and this document should not have implied it did.
 
+**FIXED, 2026-09-21** — the Xbox atlas's own DXT1 compression call
+(`PakManager.cpp`) has always passed `punchThroughAlpha=false`, meaning
+masked (`{`-prefixed - fences, grates, vents) textures have never carried
+usable alpha in the baked atlas at all, blocking X9's own planned "native
+alpha test" slice on baker work nobody had traced to its real cause. An
+X9-I scoping pass (forked research, comparing alpha test against skinning/
+dynamic-lighting/aspect-ratio candidates) found this was the actual
+blocker, not anything in `ref/nv2a` itself: `WadParser::decodeMiptex`
+already writes correct per-pixel alpha for every texture (255 unless a
+masked texture's own transparent-key palette index, which gets 0) before
+any of it reaches the atlas, and `TextureOpt::compressToDXT`'s own
+punch-through logic already decides per 4×4 block from that alpha, not
+from an external per-region flag — so the atlas's earlier reasoning ("no
+per-region masked tracking exists for a shared, shelf-packed atlas") was
+solving a problem the per-pixel design had already made moot.
+
+The first version of the fix was the single-line flip to `true`, verified
+by baking the real retail `crossfire.bsp` (6 real masked textures used:
+`{blue`, `{fence2`, `{fence3`, `{grate2a`, `{ladder3a`, `{rail1`) both ways
+and decoding every BC1 block in both atlases. That verification pass
+looked clean at the block-classification level, but `asset-pipeline-
+specialist` review didn't stop there — it independently decoded the new
+atlas texel-by-texel against the pre-compression RGBA source and found a
+real regression the block counts alone couldn't show: **10 texels that
+were genuinely opaque in the source got encoded as fully transparent**,
+including 2 texels inside a completely unrelated *non-masked* texture.
+Root cause: the atlas packer placed each texture's footprint at an
+arbitrary (non-4-pixel-aligned) pixel offset, so a texture's edge could
+land mid-block alongside whatever the packer had placed next to it —
+including, for an unlucky placement, a masked texture's transparent
+border bleeding into a neighboring texture's own block.
+
+Fixed in two parts, both verified against the same texel-level decode:
+
+1. **Block-aligned atlas placement** (`PakManager.cpp`, Xbox-target
+   branch of `addTexture()`): every texture now reserves a 4-pixel-
+   aligned footprint with a 1px border, with edge pixels replicated into
+   the border/padding rather than left as whatever the previous
+   occupant's leftovers were. This alone took the regression from 10 real
+   mismatches down to 6, by construction eliminating any *cross-texture*
+   or *cross-void* bleed — no block can straddle two unrelated textures
+   or a texture and empty atlas space anymore.
+2. **Per-block `blockNeedsTransparency` gating** (`TextureOpt.cpp`,
+   `compressToDXT`): rather than passing the caller's blanket
+   `punchThroughAlpha` flag straight through to
+   `rgbcx::encode_bc1`'s `use_transparent_texels_for_black`, each 4×4
+   block is now checked for at least one real (source alpha < 128) texel
+   before punch-through mode is even offered to the encoder. This is a
+   preventive fix for a *different* sub-case — a block with no genuine
+   masking need at all being miscoded anyway — and was confirmed (by
+   re-running the same texel-level decode before and after) to leave the
+   6 residual mismatches from step 1 untouched, correctly isolating them
+   as a separate root cause rather than papering over the same one.
+
+The 6 remaining mismatches (out of 4,194,304 texels checked in this map,
+0.00014%) were a distinct root cause from either fix above: a block that
+legitimately contains some real transparent texels could still have an
+adjacent near-black-but-opaque texel absorbed into the transparent
+selector by `rgbcx`'s own block-wide least-squares color fit — the
+decision is fundamentally per-block, not per-texel, so no per-texel lift
+threshold can guarantee safety on its own (see the comment in
+`TextureOpt.cpp::compressToDXT` for the full reasoning).
+
+`tools/codex-review.sh --base main` raised two MUST-FIX-OR-JUSTIFY
+findings against this state (round 1), both real:
+
+1. **Atlas overflow was still only a warning, not a bake failure**
+   (`PakManager.cpp`). `addTexture()`'s own overflow branch only ever
+   printed to stderr and handed the caller a zero-initialized
+   `TextureLocation` — `BspParser.cpp` stored that as if packing had
+   succeeded, so an overflowed map could still "successfully" bake with
+   some faces silently aliased onto atlas slot 0. **Fixed**: `addTexture()`
+   now sets a `mAtlasOverflowed` flag, and `save()` checks it first and
+   refuses to write, so `main()`'s existing `if (!pak.save(...))` fatal
+   path (already there for a failed file open) now also catches this.
+   Verified this isn't theoretical: baking the full 125-map retail
+   corpus found 2 maps (`disposal`, `rocket_frenzy`) that genuinely
+   overflow the 2048×2048 atlas even after this branch's block-alignment
+   fix. Checked against `main` with a second worktree build to see
+   whether the alignment fix's footprint growth was what tipped them
+   over — it wasn't: both already overflowed on unmodified `main` (90
+   and 121 warnings respectively, vs. 104 and 143 on this branch) with
+   the OLD unaligned packer, so this is a pre-existing atlas-capacity
+   limit this branch made slightly worse, not one it introduced. No map
+   in the corpus crossed from fitting-before to overflowing-after. The
+   other 123 maps bake clean on both. (Both overflowing maps also hit
+   an unrelated, already-tracked, pre-existing `PakManager.cpp:214`
+   `std::abort()` on vertex count exceeding the u16 index limit before
+   reaching this atlas code at all — not in scope here, not caused by
+   this branch.)
+2. **The `blockNeedsTransparency` gate doesn't guarantee an opaque
+   texel can't still land on selector 3 within a block that DOES need
+   transparency** (`TextureOpt.cpp`) — exactly the 6-mismatch residual
+   above. First response to round 1: a written justification (not a
+   fix), reasoning that `rgbcx`'s forced-selector path reaches deep,
+   unfamiliar internals that couldn't be trusted without a broad visual
+   regression sweep this session had no way to run.
+
+   Round 2 (`tools/codex-review.sh`'s policy cap) re-raised the same
+   finding at HIGH severity/confidence 1.0 and rejected that
+   justification outright ("the observed percentage does not bound
+   other maps... this can produce visible pinholes"). Since this
+   session's own toolchain already had a working texel-level
+   round-trip verifier (used throughout this fix), the theoretical risk
+   named in the justification was actually testable, not just
+   arguable — so **fixed for real** instead of re-justifying:
+   `TextureOpt.cpp`'s `fixOpaqueTexelsPunchedThrough()` decodes the
+   block `compressToDXT` already produced, and for exactly the texels
+   that landed on selector 3 despite a real (source) alpha >= 128,
+   reassigns them to whichever of the block's own color0/color1/
+   midpoint is closest by RGB distance, then re-encodes with
+   `rgbcx::encode_bc1`'s `pForce_selectors` pinning that corrected
+   selector set. Every already-correct texel (real transparent -> 3,
+   real opaque -> non-3) keeps its existing selector untouched, so only
+   the specific wrong texels move.
+
+   `pForce_selectors`'s own contract
+   (`rgbcx.cpp:1088-1106`/`1128-1148` — `memcpy(sels, pForce_selectors,
+   16)`) guarantees the re-encode's selector *bits* equal what's
+   forced, regardless of which endpoint candidate wins the search — but
+   whether the winning candidate still emits `color0<=color1` (3-color
+   mode; the only mode where index 3 means transparent, versus a valid
+   opaque blend in 4-color mode) isn't something the library's contract
+   promises on its own. Rather than trust that by reading the code, the
+   retry's result is decoded again and checked against the exact
+   invariant this function exists to guarantee (every real-transparent
+   texel decodes to 3, every real-opaque texel doesn't) — the corrected
+   block is only ever adopted if verified strictly correct; otherwise
+   the pre-retry block (whatever `compressToDXT` already produced) is
+   kept unchanged. This makes the pass monotonic: it can fix or no-op,
+   never regress, regardless of any rgbcx internal this project hasn't
+   independently proven.
+
+   Re-verified with the same texel-level round-trip tool used
+   throughout this fix: **0 mismatches** on the same `crossfire.bsp`
+   bake (down from 6), and the block classification counts (below) are
+   byte-for-byte identical before and after this pass, confirming it
+   touched only the specific wrong texels and nothing else.
+
+   asset-pipeline-specialist reviewed this fix in a second pass and
+   confirmed it correct by tracing the actual `rgbcx.cpp` internals
+   (not just reading the comment): the `rc0<=rc1` re-verification is
+   genuinely load-bearing, not defensive paranoia — `bc1_find_sels4`
+   (`rgbcx.cpp:1084-1119`) still evaluates a 4-color candidate against
+   the forced selector array too, and a 4-color winner is a real,
+   reachable outcome (`bc1_encode4` always emits `lc16>hc16`), so the
+   retry's mode genuinely isn't guaranteed without checking. The review
+   also flagged that "0 mismatches on `crossfire.bsp`" alone was the
+   same "doesn't bound other maps" shape of claim codex round 2 had
+   already rejected once — the fix's *safety* (fix-or-no-op, never
+   regress) is proven structurally regardless of map, but its
+   *completeness* wasn't demonstrated beyond one map, and no regression
+   test existed to protect this defect class going forward.
+
+   Closed both gaps rather than re-asserting the single-map result:
+   added `tools/asset-studio/tests/texture_opt_test.cpp`, a real
+   regression test on a 16-texel block found by brute-force random
+   search (one real-transparent texel among fifteen varied opaque
+   ones) that reproduces the actual defect — confirmed by temporarily
+   disabling `fixOpaqueTexelsPunchedThrough` and re-running this exact
+   data, which fails without it (texel 9 wrongly decodes transparent)
+   and passes with it restored; it now runs on every `ctest` invocation.
+   Promoted the ad hoc verification script to `tools/verify-atlas-
+   alpha.py`, a real reusable tool with the project's usual `tools/*.py`
+   documentation. Then re-ran the full 125-map retail corpus, this time
+   decoding and comparing **every texel of every successfully-baked
+   map's atlas** against its pre-compression source (not just checking
+   bake success/failure as the earlier corpus sweep had) — **121 maps
+   checked, 0 opaque-source-but-transparent-decoded mismatches on ANY
+   of them**, 4 skipped (the same pre-existing, unrelated
+   `contamination`/`disposal`/`pool_party`/`rocket_frenzy` vertex-limit
+   and atlas-overflow cases documented above). This is what actually
+   answers codex's objection: not a stronger claim about one map, but
+   the same check run exhaustively across the whole corpus.
+
+Final verified numbers on the same `crossfire.bsp` bake: 199,517 3-color
+(punch-through-capable) blocks, of which 195,661 are fully transparent
+(uniform masked-out regions) and 3,856 are genuine mixed
+transparent/opaque edge blocks; 62,627 blocks remain 4-color/opaque
+(unchanged by the selector-correction pass, as expected — it only ever
+reassigns a selector within an already-3-color block, never changes
+3-color/4-color classification). `ref/nv2a` itself is unaffected by this
+change today (it doesn't read alpha or enable alpha test yet) — this
+closes the baker-side half of what blocks that slice, not the slice
+itself.
+
 ## X9 — `ref/nv2a`
 
 The hardware renderer, replacing X5's software path against a picture already
