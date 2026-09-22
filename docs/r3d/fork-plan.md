@@ -7855,9 +7855,23 @@ the `nv2a_r_nocull`/`nv2a_r_novis` A/B-toggle pattern. Compiles clean
 (`tools/xbox-cc.sh`, re-verified after every edit). Specialist review
 (`reference-renderer-specialist`, `nv2a-xbox-specialist`,
 `upstream-fidelity-specialist`) run per `AGENTS.md`; findings folded in
-before this paragraph was written. Not yet live-boot confirmed - see
-`divergences.md` #98 for the same honest build-verification gap #97
-recorded, still open in this environment. Full account in
+before this paragraph was written. **Live-boot A/B done, 2026-09-22**:
+a real disc, booted live in xemu, with this convar temporarily flipped
+enabled showed 0 of 307,200 pixels differing from the shipped baseline
+at the real, live camera `GL_RenderFrame` captures every frame (X9-E/
+#95, not X9-B/D's earlier fixed camera - an earlier draft of this
+entry named the wrong one, corrected per codex-review). Codex-review's
+own real finding against this entry's first draft: a pixel-identical
+result alone can't rule out the test simply never running - so this
+was checked directly, not left as an assumption, by reading the
+module's own existing live stats (`nv2a_cull_faces_total/_visible/
+_backface_only`): 4385 total faces (exactly `crossfire.mpak`'s own
+real count), 299 visible, and **68 real faces the backface test itself
+rejected** this frame - genuine, exercised work, not a no-op, and the
+image stayed pixel-identical anyway. Real evidence, on the same bar
+#96's own `nv2a_r_nocull` A/B used to flip its default - flipping this
+one is left to a smaller, dedicated follow-up rather than folded into
+this docs-only change. Default stays disabled here. Full account in
 `divergences.md` #98.
 
 **X9-I, 2026-09-22 - native alpha test for masked world textures. NOT
@@ -7914,10 +7928,22 @@ doubled A×B product). Full static chain clean: `tools/xbox-cc.sh`, `tools/xbox-
 and `tools/xbox-game-link-check.sh hl --include-client
 --include-freevgui` (0 duplicate, 0 undefined, real valid XBE with the
 real hl server+client+freevgui modules). `nv2a_r_noalphatest` ships
-`"1"` (disabled), matching `nv2a_r_nocullback`'s own precedent - flip
-once a live A/B confirms masked textures actually cut out correctly
-with no regression elsewhere, and cite it. Full account in
-`divergences.md` #99.
+`"1"` (disabled), matching `nv2a_r_nocullback`'s own precedent.
+**Booted live, 2026-09-22** (same real disc/boot infrastructure
+as X9-H's own entry above, first real live boot this session - one
+genuine, previously-undocumented bug found and fixed along the way,
+see `lessons.md`'s new entry on `.mpak` placement): with this convar
+temporarily flipped enabled, 0 of 307,200 pixels differed from the
+shipped baseline at the real, live camera `GL_RenderFrame` captures
+every frame (X9-E/#95) - no crash, no corruption. Codex-review
+correctly rejected calling this "A/B done" though: unlike X9-H's own
+backface-culling check (which has a real live counter proving the test
+actively culled 68 real faces), alpha test has no equivalent
+software-side counter, and crossfire.bsp's own masked textures weren't
+confirmed to be in this specific camera's frame at all - so this boot
+proves the feature doesn't crash or corrupt anything, not that its
+actual cutout behavior was ever exercised. Default stays disabled.
+Full account in `divergences.md` #99.
 
 X9-J onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.

@@ -1449,3 +1449,75 @@ nonzero exit, and reject an empty post-rewrite symbol set outright.
 See `docs/r3d/divergences.md` #97/#98's own resolution notes for the
 full account, including the real `0 duplicate, 0 undefined` link
 result this fix finally produced.
+
+### ALWAYS isolate ONE variable per boot attempt, and check the .mpak archive-discovery scan directory specifically - a real, confirmed bug blocked every prior live X9 boot attempt this session, silently, and a second suspected "bug" was never actually isolated
+
+Setting up a real xemu boot of a real, baked `crossfire.mpak` to finally
+close X9-G/H/I's own "not yet live-boot confirmed" gap took three
+attempts, two of which changed more than one thing between boots - a
+real methodology mistake, caught by `codex-review` on the first draft
+of this entry, not by this session's own review of its own work. Keep
+both the real confirmed bug AND the correction on record, since the
+correction is itself the more generalizable lesson.
+
+**Confirmed: an `.mpak` answering to `maps/<name>.bsp` must sit at the
+GAME DIRECTORY'S OWN ROOT, not inside `maps/`.** `filesystem/mpak.c`'s
+own header comment is clear that a mounted `.mpak` archive "remembers
+which single virtual name its one archive answers to" (derived from
+its own basename: `crossfire.mpak` -> `maps/crossfire.bsp`) - true, but
+says nothing about WHERE the archive itself must physically live to be
+discovered and mounted in the first place. That's `filesystem/
+searchpath.c`'s `FS_AddGameDirectory()`: `listdirectory( &list, dir,
+false )` - the trailing `false` is NOT recursive, so archive discovery
+(`.pak`/`.wad`/`.pk3`/`.mpak` alike) only ever scans the TOP LEVEL of a
+game directory (`valve/`), exactly where retail `.wad`/`.pak` files
+already live. A `.mpak` placed at `valve/maps/crossfire.mpak` (a
+reasonable-looking mirror of where the loose `.bsp` it replaces would
+sit) is never even seen by this scan - it isn't rejected, isn't logged,
+just never enumerated, so `maps/crossfire.bsp` resolves to nothing and
+"map crossfire" fails exactly as it would if no file existed. This is
+the ONE variable that actually changed between the second (failed) and
+third (succeeded) boot attempts, so it is the one real, isolated,
+reproducible finding here: moving the file to `valve/crossfire.mpak`
+(no `maps/` prefix) made the map load on the very first poll of the
+very next boot, after two prior attempts each ran for 90+ real seconds
+with zero state change.
+
+**NOT confirmed, and corrected here (codex-review, real finding,
+0.99 confidence): a flat `valve/userconfig.cfg` was never proven not
+to work.** The first attempt used a flat `userconfig.cfg` with "map
+crossfire" in it and failed; the second attempt switched to
+`userconfig.d/00-crossfire.cfg` (reasoning that `Host_InitCommon`'s own
+direct `Cbuf_AddText( "userconfigd\n" )`, `engine/common/host.c:1377-
+1379`, is unconditional, while a flat file only runs if something
+execs it) and ALSO failed, identically - proving the userconfig.d
+switch itself changed nothing observable, since the real bug (the
+`.mpak` location, above) was still present in both. The real disc's
+own retail `config.cfg` (copied verbatim from the Steam install, not
+authored by this session) contains `exec userconfig.cfg` at line 150 -
+written there by `Host_WriteConfig` (`engine/common/con_utils.c:1424`)
+during some earlier PC session - so a flat `userconfig.cfg` on this
+exact disc would very likely have worked too, indirectly, once the
+real bug was fixed. This was never actually tested in isolation.
+`userconfig.d` is still the more ROBUST choice for a scripted test
+recipe going forward (guaranteed by `Host_InitCommon` itself, not
+contingent on whichever `config.cfg` happens to be staged), but "flat
+userconfig.cfg doesn't work on this engine" was an overclaim from
+correlation, not a tested causal claim - struck from this entry's own
+first version, corrected here rather than left standing.
+
+**Generalizes past this one boot**: when two candidate fixes are bundled
+into the same next attempt, a success proves at most one of them
+matters and says nothing about the other - change one thing per boot,
+or be explicit that a claim about an untested variable is a hypothesis,
+not a finding. A test setup that "should" produce a state change but
+silently doesn't is exactly as diagnosable by reading the consuming
+code's own real file-discovery/exec logic (here: `filesystem/
+searchpath.c`) as a genuine engine bug is - don't spend more polling
+cycles hoping a slow boot will eventually change what a wrong file path
+never could - but do isolate which specific change actually mattered
+before writing the lesson down.
+
+See `docs/r3d/divergences.md` #98/#99's own resolution notes for the
+real live confirmation this recipe finally produced, and the real
+screenshots taken.
