@@ -5,6 +5,34 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — four `tools/*.sh` scripts silently no-op'd on a GNU BRE/grep-and-sed-build mismatch
+
+`tools/xbox-ref-isolate.sh`'s own self-check (every symbol in an
+isolated ref module must carry the module's prefix) has been silently,
+deterministically wrong: the `grep` this script's own `PATH` export
+resolves to does not support `\?` as an "optional preceding character"
+the way the interactive shell's own `grep` does, so the check always
+reported the symbol count as leaked regardless of whether the rename
+had actually worked (it always had). This made `tools/xbox-link-
+check.sh` unusable for verifying real Xbox link output for however long
+it went unnoticed. Auditing the rest of `tools/*.sh` for the same
+pattern, and a follow-up specialist review, found three more live
+instances: `tools/xbox-gen-exports.sh`'s stdcall-decorated symbol
+lookup (`\+`) had been silently failing to find every real match;
+`tools/xbox-link-check.sh`'s own safety net against leftover raw
+`ref/soft`/`ref/common` compile artifacts (`\(...\|...\)`) had been
+silently doing nothing; `tools/xbox-dedicated-link-check.sh`'s own
+`sed` manifest parser (the identical `\(...\)` capture-group issue, in
+`sed` rather than `grep`) had been unconditionally failing, blocking
+that script from ever producing a result. Fixed the grep cases by
+switching to `grep -E` with the plain, unescaped forms, and the sed
+case by dropping the second subprocess entirely in favor of bash's own
+`=~`/`BASH_REMATCH`, matching the pattern `tools/xbox-link-check.sh`'s
+own mainui-manifest check already used. With the fixes, the full link
+chain now runs clean: `0 duplicate, 0 undefined` against the current
+tree. See `docs/r3d/lessons.md` and `docs/r3d/divergences.md` #97/#98's
+own resolution notes for the full account.
+
 ### Added — `ref/nv2a` now backface-culls its draw list
 
 Frustum and PVS culling (the two entries below) both still submitted a

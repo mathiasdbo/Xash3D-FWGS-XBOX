@@ -195,7 +195,20 @@ fi
 # isolated form (below), and the raw copies re-create exactly the 20
 # duplicate symbols isolation exists to remove - measured, X5, when
 # leftovers from a compile experiment sat next to the isolated set.
-ENGINE_OBJS=$(echo "$ENGINE_OBJS" | grep -v '/ref_\(soft\|common\)_[^/]*\.obj$')
+# grep -E with plain, unescaped grouping/alternation - NOT the backslash-
+# escaped `\(...\|...\)` GNU BRE form. Same real bug tools/xbox-ref-
+# isolate.sh's own leak-check had (docs/r3d/lessons.md): the grep this
+# script's PATH resolves to on this host silently treats `\(`/`\|` as
+# literal characters rather than grouping/alternation, so this exclusion
+# has always been a silent no-op here - every line survives `-v`
+# unfiltered, defeating the exact safety net the comment above describes.
+# Never manifested as a real duplicate-symbol failure only because the
+# sweep scope this project currently uses never compiles ref/ at all
+# (`tools/xbox-sweep.sh engine filesystem public common compat ...`) - a
+# by-hand or future-scope-change compile of ref/soft or ref/common would
+# have hit exactly the X5 leftover-artifact scenario this line exists to
+# prevent, silently.
+ENGINE_OBJS=$(echo "$ENGINE_OBJS" | grep -vE '/ref_(soft|common)_[^/]*\.obj$')
 
 # Third-party scope: found compiling, X1, 2026-09-08. Each of these four
 # submodules' own wscript names its real source list - not everything

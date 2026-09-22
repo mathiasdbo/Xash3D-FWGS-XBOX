@@ -244,7 +244,15 @@ find_symbol_for() {
 		echo "$name"
 		return 0
 	fi
-	hit=$(grep -x "_${name}@[0-9]\+" "$WORK/all_syms.txt" 2>/dev/null | head -1) || true
+	# grep -E with a plain, unescaped + - NOT the backslash-escaped `\+`
+	# GNU BRE form. Same real bug tools/xbox-ref-isolate.sh's own leak-
+	# check had (docs/r3d/lessons.md): the grep this script's PATH
+	# resolves to on this host silently treats `\+` as a literal
+	# backslash-plus rather than the "one or more" extension, so this
+	# line always failed to find a stdcall-decorated match (`_Name@8`)
+	# even when one genuinely existed - found while auditing tools/ for
+	# other instances of the same class of bug, not by symptom.
+	hit=$(grep -xE "_${name}@[0-9]+" "$WORK/all_syms.txt" 2>/dev/null | head -1) || true
 	if [ -n "$hit" ]; then
 		echo "$name $hit"
 		return 0

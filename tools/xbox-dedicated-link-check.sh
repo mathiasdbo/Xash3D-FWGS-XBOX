@@ -56,12 +56,35 @@ if [ ! -f "$MANIFEST" ]; then
 	echo "  file after a clean, non-empty sweep." >&2
 	exit 1
 fi
-MANIFEST_OK=$(sed -n 's/OK=\([0-9]*\).*/\1/p' "$MANIFEST")
-MANIFEST_FAIL=$(sed -n 's/.*FAIL=\([0-9]*\).*/\1/p' "$MANIFEST")
-MANIFEST_TOTAL=$(sed -n 's/.*TOTAL=\([0-9]*\).*/\1/p' "$MANIFEST")
+# build-toolchain-specialist review, real finding: `sed -n 's/OK=\([0-9]*\).*/\1/p'`
+# (backslash-escaped BRE capture group) silently matched nothing on this
+# project's own pinned sed, unconditionally - not intermittently - so
+# this script could never actually run; the `-z` guard just below turned
+# that into a loud, immediate failure rather than a silent bad pass, but
+# it still meant this script had never produced a real result. Same bug
+# class as tools/xbox-ref-isolate.sh's own grep \? issue
+# (docs/r3d/lessons.md), on sed instead of grep. Fixed the same way
+# tools/xbox-link-check.sh's own mainui-manifest check already handles
+# this exact file shape: read the manifest once with `cat` (no repeat
+# sed/file access) and extract each field with bash's own `=~`/
+# BASH_REMATCH, not a second subprocess whose BRE behavior this project
+# has now twice found unreliable.
+MANIFEST_CONTENT="$(cat "$MANIFEST" 2>/dev/null)"
+MANIFEST_OK=""
+MANIFEST_FAIL=""
+MANIFEST_TOTAL=""
+if [[ "$MANIFEST_CONTENT" =~ OK=([0-9]+) ]]; then
+	MANIFEST_OK="${BASH_REMATCH[1]}"
+fi
+if [[ "$MANIFEST_CONTENT" =~ FAIL=([0-9]+) ]]; then
+	MANIFEST_FAIL="${BASH_REMATCH[1]}"
+fi
+if [[ "$MANIFEST_CONTENT" =~ TOTAL=([0-9]+) ]]; then
+	MANIFEST_TOTAL="${BASH_REMATCH[1]}"
+fi
 if [ -z "$MANIFEST_OK" ] || [ -z "$MANIFEST_FAIL" ] || [ "$MANIFEST_FAIL" -gt 0 ] \
 	|| [ -z "$MANIFEST_TOTAL" ] || [ "$MANIFEST_TOTAL" -eq 0 ]; then
-	echo "xbox-dedicated-link-check: $MANIFEST is not clean - ($(cat "$MANIFEST" 2>/dev/null))." >&2
+	echo "xbox-dedicated-link-check: $MANIFEST is not clean - ($MANIFEST_CONTENT)." >&2
 	echo "  Fix the failures and re-run tools/xbox-dedicated-sweep.sh." >&2
 	exit 1
 fi

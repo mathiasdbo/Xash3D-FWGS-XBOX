@@ -157,17 +157,70 @@ done
 # Step 4: self-check - every symbol still defined must carry the prefix,
 # and the one name the engine will look up (exports.txt's second column)
 # must actually exist now.
+#
+# Real bug, found and root-caused here, not assumed: this whole isolate
+# step (both `soft` and `nv2a`) reported "N symbol(s) leaked" every time
+# it ran, with the printed list already showing the CORRECT prefix on
+# every entry (e.g. "_soft_GetRefAPI" listed as failing a check for
+# "starts with soft_"). Chased through three wrong hypotheses first (a
+# stale re-read of a just-written text file; a stale re-read of the
+# just-`objcopy`'d .obj files themselves, "fixed" by inserting `sync`;
+# neither changed the result) before isolating the real cause with a
+# byte-level, side-by-side test: `_\?` (the BRE "optional preceding
+# character" extension, GNU-only, not POSIX) is silently treated as a
+# LITERAL backslash-question-mark by /c/msys64/usr/bin/grep.exe - the
+# grep this script's own PATH export resolves to - even though it
+# self-reports the identical "GNU grep 3.0" version string this
+# project's other interactive shells use, where `\?` DOES work. `echo
+# _soft_GetRefAPI | grep "^_\?soft_"` (msys64's own grep.exe, by full
+# path) matches nothing; the same test through `grep -E "^_?soft_"`
+# (extended regex, portable, no backslash escape needed) matches
+# correctly on both grep builds. The same class of trap this project's
+# own lessons.md already has an entry for (tools/xbox-check-nxdk-cc-
+# drift.sh: "PATH, not the pattern, first" - the exact grep/sed pipeline
+# giving silently different results depending on which binary the
+# invoking shell's PATH resolves to) - a second, independent instance of
+# it, in a different script, not yet fixed here. Every symbol this
+# module's own object files genuinely carry HAS always had the correct
+# prefix; only this check's own pattern was wrong, on this one grep
+# build, the entire time. Extended regex (grep -E) with a plain,
+# unescaped question mark, below, is the portable fix - do not
+# reintroduce the backslash-escaped form here.
+#
+# Persistent fd 4, opened once and closed once, not reopened via `>>`
+# once per loop iteration - this project's own lessons.md ("Reopening
+# the SAME file for append once per iteration... silently loses data on
+# this setup") already names that exact pattern as unreliable here.
+# codex review round 2, real finding: an earlier version of this loop
+# silenced llvm-nm's own stderr (`2>/dev/null`) and never checked its
+# exit status - the exact "a measuring tool that cannot report its own
+# failure will eventually lie" shape this project's own lessons.md
+# already warns about. A failing nm on one rewritten object would have
+# silently dropped that object's own symbols from post_defined.txt,
+# letting a genuinely leaked symbol in THAT object go uncounted while
+# the script still reported LEAKED=0. Checked the same way Step 3's own
+# nm loop already is (:117-124) - capture stdout/stderr separately,
+# abort loudly on any nonzero exit, never swallow the error.
 LEAKED=0
 : > "$WORK/post_defined.txt"
 exec 4>> "$WORK/post_defined.txt"
 for o in "$ISO_DIR"/*.obj; do
-	"$NM" --defined-only --extern-only "$o" 2>/dev/null | awk '{print $NF}' >&4
+	if ! "$NM" --defined-only --extern-only "$o" > "$WORK/nm_out2.txt" 2> "$WORK/nm_err2.txt"; then
+		echo "xbox-ref-isolate: llvm-nm failed on $o (post-rewrite scan):" >&2
+		cat "$WORK/nm_err2.txt" >&2
+		exit 1
+	fi
+	awk '{print $NF}' "$WORK/nm_out2.txt" >&4
 done
 exec 4>&-
-LEAKED=$(grep -v "^??_C@" "$WORK/post_defined.txt" | grep -vc "^_\?${PREFIX}_" || true)
+if [ ! -s "$WORK/post_defined.txt" ]; then
+	echo "xbox-ref-isolate: zero defined symbols after rewrite - impossible." >&2
+	exit 1
+fi
+LEAKED=$(grep -v "^??_C@" "$WORK/post_defined.txt" | grep -Evc "^_?${PREFIX}_" || true)
 if [ "$LEAKED" -ne 0 ]; then
 	echo "xbox-ref-isolate: $LEAKED symbol(s) leaked without the ${PREFIX}_ prefix:" >&2
-	grep -v "^??_C@" "$WORK/post_defined.txt" | grep -v "^_\?${PREFIX}_" | head -20 >&2
+	grep -v "^??_C@" "$WORK/post_defined.txt" | grep -Ev "^_?${PREFIX}_" | head -20 >&2
 	exit 1
 fi
 MISSING=0

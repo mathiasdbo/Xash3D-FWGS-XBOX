@@ -811,6 +811,13 @@ generic timing race - avoid depending on it for this kind of extraction
 at all rather than chasing why: read the file once with `cat` (proven
 reliable in this exact spot) into a variable, then extract fields with
 bash's own `[[ =~ ]]` regex against that string, no second subprocess.
+**Later identified, likely: the real cause of "whatever is wrong" here
+was almost certainly the same `sed`/`grep` GNU-BRE-extension-vs-build
+mismatch the "a script's own self-check can be silently, permanently
+wrong" entry further down this file root-causes directly (`\( \)`
+capture groups silently matching nothing on this project's own pinned
+`sed`) - not a timing race after all, confirming this entry's own
+correct call to rule timing out, just not what to blame instead.
 There were TWO separate `sed` calls against the same manifest a few lines
 apart (`FAIL=`/`TOTAL=` together, then a separate `OK=` further down) -
 fixing the first let execution reach the second, which then failed the
@@ -1295,3 +1302,150 @@ milestone for that same boot shape actually used - a link summary line
 (`hl server - ...` vs `hl server+client+freevgui - ...`) is one grep
 away and settles in seconds what hours of live instrumentation would
 otherwise "discover" as a false engine defect.** See divergences.md #93.
+
+### A script's own self-check can be silently, permanently wrong - when a "flaky" tool fails identically every time, stop calling it flaky and diff its check against ground truth
+
+`tools/xbox-ref-isolate.sh`'s leak-check (`0 leaked` required before a
+renamed module is trusted) reported real failures - "112", "114",
+"585" symbols leaked - on every single run, for both `ref/soft` and
+`ref/nv2a`, across an entire session, with `tools/xbox-link-check.sh`
+itself stalling or reporting the same false failures further up the
+same chain. The printed "leaked" symbols were themselves already
+correctly prefixed (`_soft_GetRefAPI` reported as failing a check for
+"starts with `soft_`") - the first, cheap, honest signal that the
+*check* was wrong, not the renamed objects, and that this was never
+about I/O timing at all. Two plausible-sounding, individually-testable
+hypotheses were tried and both failed to fix it (a stale re-read of a
+just-written text file; a stale re-read of the just-`objcopy`'d `.obj`
+files, "fixed" with `sync`) before a byte-level, side-by-side test
+found the real cause: `grep`'s `\?` (the GNU BRE "optional preceding
+character" extension) is silently treated as a LITERAL
+backslash-question-mark by `/c/msys64/usr/bin/grep.exe` specifically -
+the exact binary this script's own `PATH` export resolves `grep` to -
+even though it self-reports the identical `GNU grep 3.0` version string
+as the grep every interactive shell on this same host uses, where `\?`
+works. `echo _soft_GetRefAPI | grep "^_\?soft_"` (msys64's own
+grep.exe) matches nothing; the same test through `grep -E "^_?soft_"`
+matches correctly on both grep builds. This project's own lessons.md
+already had an entry for this class of bug in a *different* script
+(`tools/xbox-check-nxdk-cc-drift.sh`, "PATH, not the pattern, first")
+and it recurred anyway, undetected, in a script every X9 slice's own
+review process had been trusting for weeks.
+
+**When a measuring tool fails "flakily" but the SAME way every time
+(not intermittently, not with varying numbers), it is not flaky - a
+truly random environment fault does not reproduce byte-identical
+output across independent runs.** Deterministic-looking failure is
+itself evidence the bug is in the tool, not the environment. Before
+accepting "the environment is unhealthy" as the explanation and moving
+on (documenting it as an open gap is not wrong, but stopping the
+investigation there was too early here), check whether the tool's own
+report is internally self-contradictory the way this one was - a
+"failing" line that already shows the expected content is the tell.
+And once a script pins its own `PATH` for `clang`/`nm`/`objcopy` (for
+good reason - reproducibility), remember that pin applies to `grep`/
+`sed`/every other tool the script calls too, not just the ones it was
+written to pin for.
+
+**Auditing the rest of `tools/*.sh` for the same class of bug found two
+more real, live instances, not hypothetical ones** - confirming this
+was worth a real search, not a one-off. `tools/xbox-gen-exports.sh`'s
+own `find_symbol_for()` used `grep -x "_${name}@[0-9]\+"` (unescaped-vs-
+backslash-escaped `+`) to find stdcall-decorated export symbols - broken
+the identical way, meaning it had been silently failing to find every
+real stdcall match since it was written. `tools/xbox-link-check.sh`
+used `grep -v '/ref_\(soft\|common\)_[^/]*\.obj$'` (backslash-escaped
+grouping+alternation) as a safety net against a real, previously-
+measured failure mode (X5: leftover raw `ref/soft`/`ref/common` compile
+artifacts sitting next to the isolated, renamed set, recreating the
+duplicate symbols isolation exists to remove) - broken the same way, so
+that net had been silently doing nothing since it was written; it never
+surfaced as a real duplicate-symbol failure only because this project's
+current sweep scope happens to never compile `ref/` at all, not because
+the guard worked. **Interesting, narrower finding worth recording
+precisely**: plain `\|` alone (no grouping) was tested directly and DID
+work correctly on the same buggy grep build - only `\?`, `\+`, and
+`\(...\)` grouping (bare or combined with `\|`) were confirmed broken.
+Do not over-generalize "all GNU BRE extensions are broken here" from
+one build's behavior on a subset of them - test each one you rely on.
+Prefer `grep -E` with the plain, unescaped forms (`?`, `+`, `(...)`,
+`|`) everywhere going forward regardless, since it sidesteps the whole
+question rather than relying on which specific escapes happen to work
+on which grep build.
+
+**A `build-toolchain-specialist` review of the fix (independently
+re-testing every claim rather than trusting the commit) found a THIRD
+live instance, in `sed` rather than `grep`:**
+`tools/xbox-dedicated-link-check.sh` used
+`sed -n 's/OK=\([0-9]*\).*/\1/p'` - the same backslash-escaped BRE
+capture-group grouping, broken the same way on this project's own
+pinned `sed`, unconditionally rather than intermittently. This left
+the script permanently unable to run at all (its own `-z` guard turned
+the empty extraction into an immediate loud failure, not a silent bad
+pass - the one mercy in this instance). Fixed by matching the pattern
+`tools/xbox-link-check.sh`'s own mainui-manifest check already
+uses for this identical file shape: read the manifest once with `cat`,
+extract every field with bash's own `=~`/`BASH_REMATCH`, no second
+`sed` subprocess at all. **That sibling script's own fix predates this
+investigation and was attributed to a different cause at the time**
+("sed right after heavy I/O returns empty" - the file-consistency
+theory this file's own earlier entry on that topic describes). With
+what this investigation now knows, that original diagnosis was very
+likely ALSO the same BRE incompatibility, not an I/O race - the fix
+(stop depending on this project's own `sed`'s `\( \)` support at all)
+happens to be correct either way, but the recorded ROOT CAUSE for that
+older entry may itself be wrong. Left as-is rather than rewritten,
+since the fix it produced was right regardless of which theory
+explained it - but a reader relying on that older entry's own causal
+story specifically (not just its fix) should treat it as suspect.
+
+**Codex review then disputed this specific finding, with its own
+directly-run counter-test claiming `sed -n 's/OK=\([0-9]*\).*/\1/p'`
+against `OK=96 FAIL=0 TOTAL=96` outputs `96` correctly on this exact
+pinned `sed` - i.e., that the capture group works fine and the fix
+above was unnecessary. Re-tested independently, a third time, with the
+MOST faithful possible reproduction of the real script's own execution
+shape (a real script FILE - not an inline `-c` string - with the exact
+`export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"` line
+every `tools/xbox-*.sh` script uses, invoked as `MSYSTEM=MINGW64 bash
+script.sh` against a real file in the real working directory, never
+`/tmp`):**
+```
+sed resolves to: /c/msys64/usr/bin/sed
+/usr/bin/sed (GNU sed) 4.9
+RESULT=[]
+```
+**Empty - confirming the original finding, not Codex's refutation.**
+The discrepancy traces to invocation context, not the sed binary
+itself: `/c/msys64/usr/bin/sed.exe` (absolute path) and `/usr/bin/sed`
+(this project's own interactive Git-Bash session's own resolution) are
+BYTE-IDENTICAL (`md5sum` confirmed, same hash) yet gave different
+results for the identical command depending on which path string
+invoked them and which shell/environment was live at the time - the
+same "PATH, not the pattern, first" shape this whole family of bugs
+has now shown three times over, one level deeper than expected (not
+just "which binary", but "which invocation context for the SAME
+binary"). Per `AGENTS.md`'s own fix-or-justify policy, this is the
+written justification for NOT reverting the fix Codex's own finding
+asked for: the counter-test that finding relied on did not reproduce
+the real script's own actual invocation shape, and a test that does
+reproduce it - three times now, independently - shows the original
+bug is real. The `BASH_REMATCH` fix stays; it is also strictly
+correct regardless of which way this dispute resolves, since it drops
+the dependency on this ambiguity entirely rather than resting on it.
+
+**Codex review round 2 (final, per `AGENTS.md`'s two-round cap) found one
+more real, separate gap while reviewing this same block**: the
+post-rewrite `llvm-nm` scan that feeds the leak-check silenced its own
+stderr and never checked its exit status, unlike the earlier, already-
+hardened compile loop a few lines above it in the same script - a
+failing `nm` on one object could have silently dropped that object's
+symbols from the count, letting a real leak in that specific object go
+undetected while the script still reported `LEAKED=0`. Fixed to match
+the already-established, already-correct pattern used elsewhere in this
+same file: capture stdout/stderr separately, abort loudly on any
+nonzero exit, and reject an empty post-rewrite symbol set outright.
+
+See `docs/r3d/divergences.md` #97/#98's own resolution notes for the
+full account, including the real `0 duplicate, 0 undefined` link
+result this fix finally produced.
