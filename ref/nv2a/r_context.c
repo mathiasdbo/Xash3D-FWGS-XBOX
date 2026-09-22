@@ -463,6 +463,112 @@ static byte nv2a_visbytes[( NV2A_MAX_MAP_LEAFS + 7 ) / 8];
    (divergences.md #96). */
 static CVAR_DEFINE_AUTO( nv2a_r_nocullback, "1", 0, "ref_nv2a: disable backface culling (default ON - unverified live, see divergences.md #98)" );
 
+/* X9-I: native alpha test for masked ('{'-prefixed - fences, grates,
+   ladders, vents) world textures, now that XB's atlas actually carries
+   real per-pixel alpha (tools/asset-studio, PR #123) instead of
+   silently dropping it.
+
+   Reference fidelity, checked rather than assumed (divergences.md
+   #99): ref/gl and ref/soft disagree on the mechanism, and neither is
+   ported here verbatim. ref/gl applies NO alpha test to a masked
+   WORLD-brush surface outside ENGINE_QUAKE_COMPATIBLE
+   (gl_rsurf.c:1561's own gating, and gl_rmain.c:832's own "quake-
+   specific feature" comment on the deferred alpha pass that condition
+   guards) - retail HL masked world brushes only get real cutout in
+   ref/gl when tied to a separate entity with rendermode
+   kRenderTransAlpha (gl_rsurf.c:1739/1752, GL_GREATER 0.25), which is
+   how real GoldSrc maps actually use masked textures on worldspawn
+   geometry (a mapping convention, not this renderer's own invention).
+   ref/soft instead does unconditional per-texel masking with no
+   entity/rendermode gate at all: a hardcoded sentinel palette index
+   (TRANSPARENT_COLOR, r_local.h:588) baked in at decode time for any
+   '{'-prefixed texture and skipped during span rasterization
+   (r_scan.c, six call sites), independent of SURF_TRANSPARENT,
+   quake-compat, or which entity (if any) owns the surface. X9 has no
+   entity render list at all yet (only the static baked world model
+   draws) - porting ref/gl's mechanism would mean building that
+   machinery just for this, so this slice matches ref/soft's simpler,
+   unconditional mechanism instead, applied per-face via
+   SURF_TRANSPARENT (below), not glAlphaFunc's graded 0.25 threshold
+   (BC1 alpha is already binary by construction here, so "graded"
+   doesn't apply). A cheaper divergence than reference-porting the
+   whole entity/rendermode path for one feature - see divergences.md
+   #99 for the full account and what porting ref/gl's own mechanism
+   would require if X9 ever gains real entity rendering.
+
+   NV2A has a genuine fixed-function alpha-test
+   stage - NV097_SET_ALPHA_TEST_ENABLE/_FUNC/_REF (deps/nxdk/lib/pbkit/
+   nv_regs.h:223,245-254), the same registers D3D8's
+   D3DRS_ALPHATESTENABLE/_ALPHAFUNC/_ALPHAREF map to on this hardware -
+   not a shader instruction; fp20 on this GPU has no per-pixel
+   conditional discard (ps_lit.inl compiles to register-combiner STATE,
+   not an instruction stream). ps_lit.inl's own combiner setup routes
+   the diffuse atlas's own real, UNDOUBLED alpha into the final
+   fragment alpha the test stage compares against - ps_lit.ps.cg's own
+   comment has the full account of why this had to be split out from
+   color explicitly.
+
+   codex review, real finding, confirmed by reading the actual compiled
+   combiner output: the first version of this comment claimed alpha
+   was "strictly binary, so doubling never matters" - true of the raw
+   BC1-decoded texel values, but false of what the alpha-TEST stage
+   actually samples. NV097_SET_TEXTURE_FILTER (this function's own
+   texture-stage-0 setup, above) enables real bilinear filtering on the
+   diffuse atlas, and a texture unit filters every channel it samples,
+   alpha included - a fragment landing between a transparent and an
+   opaque texel at a masked cutout's own edge genuinely gets an
+   intermediate (non-binary) alpha, by design: that's what makes a
+   filtered alpha test antialias a cutout edge instead of aliasing it.
+   The bug the first version of this comment missed was not that
+   intermediate values exist, but what doubling did to them: comparing
+   a DOUBLED value against a reference meant to mean "50% opaque"
+   silently moves the real pass/fail line to 25%, not 50% - real, not
+   hypothetical, exactly codex's own finding. Fixed at the source
+   (ps_lit.ps.cg), not by picking a different NV097_SET_ALPHA_REF to
+   compensate for a scaling this path has no principled reason to keep:
+   alpha no longer goes through NV097_SET_COMBINER_ALPHA_OCW_OP_
+   SHIFTLEFTBY1 at all (confirmed in the real cgc/fp20compiler output,
+   not assumed - the compiled combiner now reads `out.a =
+   unsigned(tex0.a)`, no scale_by_two() on that channel), so
+   NV097_SET_ALPHA_REF=0x80 now means what it always claimed to: a
+   fragment passes when its real, correctly-filtered diffuse alpha is
+   at least 50% opaque, and a bilinear-blended cutout edge antialiases
+   around that boundary correctly instead of a silently shifted one.
+
+   This is a GLOBAL per-draw-call toggle (NV2A has no per-triangle alpha
+   test within one draw submission), not a per-face one, which would
+   normally mean carefully bucketing masked-vs-opaque faces into
+   contiguous index runs the way X9-F's frustum cull already does for
+   visibility. That bucketing turns out to be unnecessary here: the
+   atlas's own DXT1 encoder (tools/asset-studio's TextureOpt.cpp,
+   compressToDXT's blockNeedsTransparency gate, same PR) only ever lets
+   rgbcx assign a block's transparent selector when that SPECIFIC block
+   contains a real alpha<128 source texel - confirmed not just by
+   reading that code but by exhaustively decoding and comparing every
+   texel of every successfully-baked map in the full 125-map retail
+   corpus against its pre-compression source (121 of the 125 real
+   retail .bsp maps that exist to check - the other 4 fail to bake for
+   an unrelated, already-tracked reason, see fork-plan.md's XB section -
+   0 opaque-source-but-transparent-decoded mismatches on any of the 121,
+   tools/verify-atlas-alpha.py). That gate is a fix-or-no-op design, not
+   a structural proof: TextureOpt.cpp's own fixOpaqueTexelsPunchedThrough
+   explicitly ships a violation unfixed rather than guess if its own
+   retry can't verify itself correct (TextureOpt.cpp's own comment: "A
+   block that fails verification keeps whatever compressToDXT already
+   produced"). So "cannot punch a hole in ordinary opaque geometry" is
+   an empirical result over every retail map actually checked, not a
+   guarantee that holds for arbitrary future content this baker hasn't
+   seen - re-run tools/verify-atlas-alpha.py against anything new before
+   trusting this same reasoning for it.
+
+   Still shipped DISABLED by default, matching nv2a_r_nocullback's own
+   precedent immediately above: this session has no live-boot access to
+   actually watch a masked texture render correctly (or watch for any
+   regression) with this on. Flip the default once that A/B check
+   happens and cite it, the same way nv2a_r_nocullback's own comment
+   documents what verification is still owed. */
+static CVAR_DEFINE_AUTO( nv2a_r_noalphatest, "1", 0, "ref_nv2a: disable native alpha test for masked textures (default ON - unverified live)" );
+
 /* The real, live camera eye position, captured once per real frame by
    GL_RenderFrame alongside nv2a_map_viewproj/nv2a_frustum - needed here
    because nv2a_draw_map_geometry() (called later the same frame, from
@@ -854,6 +960,25 @@ static void nv2a_draw_test_triangle( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x04074000 );
 	pb_end( p );
 
+	/* X9-I: this path shares the GPU with nv2a_draw_map_geometry(), which
+	   conditionally enables NV097_SET_ALPHA_TEST_ENABLE (see
+	   nv2a_r_noalphatest's own declaration comment) - a per-draw-call
+	   GPU register, not per-function state, so R_EndFrame's fallback to
+	   THIS function on a not-yet-ready/mid-transition frame (its own
+	   comment names this a real, exercised case, not a hypothetical)
+	   would otherwise inherit whatever alpha-test state the previous
+	   frame's map draw left behind. Explicitly disabled here so this
+	   path never depends on the other one's state, the same "read fresh
+	   every call" discipline nv2a_draw_map_geometry() already applies to
+	   itself. Harmless today either way (this checkerboard's own two
+	   texel values, 0xFFFFFFFF and 0xFFFF8000, both line 846, are fully
+	   opaque - alpha=0xFF either way, passes any GEQUAL-128 test
+	   regardless), but correctness here shouldn't depend on that
+	   coincidence. */
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
+	pb_end( p );
+
 	/* Shader constants: the same fixed viewport transform every frame. */
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
@@ -1028,6 +1153,30 @@ static void nv2a_draw_map_geometry( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS + 0x40, 0x00030303 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0x4003ffc0 );
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER + 0x40, 0x04074000 );
+	pb_end( p );
+
+	/* X9-I: native alpha test (nv2a_r_noalphatest's own declaration
+	   comment above has the full account of why this is safe to apply
+	   globally, not just to masked faces, and why it still ships
+	   disabled pending a live A/B). Pushed every call, not just once,
+	   so toggling the convar mid-session actually takes effect instead
+	   of latching whatever state a previous frame left - same reason
+	   nv2a_r_novis/nv2a_r_nocullback are read fresh per face rather than
+	   applied once at init. GEQUAL against 0x80 matches TextureOpt.cpp's
+	   own compressToDXT encode-time boundary (`a < 128` forces the
+	   transparent selector), so a texel this test lets through is
+	   exactly one the baker itself decided was real content. */
+	p = pb_begin();
+	if( nv2a_r_noalphatest.value )
+	{
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
+	}
+	else
+	{
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GEQUAL );
+		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x80 );
+	}
 	pb_end( p );
 
 	p = pb_begin();
@@ -1307,6 +1456,7 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_novis );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lockpvs );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_nocullback );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_noalphatest );
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not

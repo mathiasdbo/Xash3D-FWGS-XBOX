@@ -4,6 +4,26 @@
  * surface doesn't clip. Same struct/sampler shape as tools/x4-triangle/
  * ps.ps.cg, extended with a second sampler and texcoord for the lightmap
  * stage.
+ *
+ * X9-I (codex review, real finding): color and alpha are no longer one
+ * uniform float4*float4*2.0f expression. That version doubled alpha the
+ * same as color, which the compiled combiner chain (ps_lit.inl's own
+ * NV097_SET_COMBINER_ALPHA_OCW_OP_SHIFTLEFTBY1) carried out literally -
+ * harmless for the fully-opaque case, but wrong once the diffuse atlas's
+ * own bilinear filtering (NV097_SET_TEXTURE_FILTER, r_context.c) is
+ * accounted for: a texel sampled right at a masked cutout's edge blends
+ * real, non-binary alpha from its neighbors, and X9-I's alpha test
+ * compares that value against a fixed reference meant to mean "50%
+ * opaque". Doubling before that compare silently moved the real
+ * pass/fail boundary to 25%, not 50% - output alpha is now the diffuse
+ * texture's own real (correctly filtered, never doubled) alpha alone,
+ * so a bilinear-blended edge antialiases around the CORRECT 50%
+ * boundary the alpha-test reference value actually names. Lightmap
+ * alpha is deliberately left out of this entirely, not multiplied in
+ * even though it's confirmed always 255 (see r_context.c's own
+ * nv2a_r_noalphatest comment) - masking is a diffuse-texture property,
+ * not something the lightmap should ever need to agree with to stay
+ * correct.
  */
 struct vOut {
 	float2 tex0 : TEXCOORD0;
@@ -16,5 +36,7 @@ float4 main(
 	uniform sampler2D lightMap
 	) : COLOR
 {
-	return tex2D(diffuseMap, I.tex0.xy) * tex2D(lightMap, I.tex1.xy) * 2.0f;
+	float4 diffuse = tex2D(diffuseMap, I.tex0.xy);
+	float4 light = tex2D(lightMap, I.tex1.xy);
+	return float4(diffuse.rgb * light.rgb * 2.0f, diffuse.a);
 }

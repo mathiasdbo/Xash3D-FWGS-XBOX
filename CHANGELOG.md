@@ -5,6 +5,30 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — native alpha test for masked textures in `ref/nv2a` (X9-I)
+
+`ref/nv2a` now enables NV2A's own fixed-function alpha-test stage
+(`NV097_SET_ALPHA_TEST_ENABLE`/`_FUNC`/`_REF`) when drawing map
+geometry, cutting out masked ('{'-prefixed - fences, grates, ladders,
+vents) world textures now that the baker's atlas carries real
+per-pixel alpha (see the atlas alpha fix above). Matches `ref/soft`'s
+unconditional per-texel masking rather than `ref/gl`'s entity+
+rendermode-gated mechanism, since X9 has no entity render list yet -
+a real, checked reference-fidelity decision, not an assumption. Two
+real review rounds found two real bugs, both fixed: a specialist pass
+found comment inaccuracies and a dangling GPU-state gap in a fallback
+draw path; `codex-review` then found that the pixel shader doubled
+alpha the same as color (for an unrelated lightmap-brightness
+convention), which combined with the diffuse atlas's own real bilinear
+filtering to silently shift the alpha-test cutoff from the intended
+50% opacity to 25% - fixed at the shader source, recompiled through
+the real `cgc`/`fp20compiler` toolchain, not by picking a compensating
+constant. See `docs/r3d/fork-plan.md`'s X9-I entry and `divergences.md`
+#99 for the full account. Statically verified clean end to end
+(compile, isolate, link, real hl server+client+freevgui module); ships
+disabled by default (`nv2a_r_noalphatest "1"`) pending a live-boot A/B,
+matching `nv2a_r_nocullback`'s own precedent.
+
 ### Fixed — the Xbox texture atlas never carried usable alpha for masked textures
 
 `tools/asset-studio`'s Xbox atlas compression call has always passed

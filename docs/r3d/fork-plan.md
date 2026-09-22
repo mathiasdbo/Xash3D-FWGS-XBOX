@@ -7860,14 +7860,73 @@ before this paragraph was written. Not yet live-boot confirmed - see
 recorded, still open in this environment. Full account in
 `divergences.md` #98.
 
-X9-I onward (skinning, dynamic lighting, native alpha test, the
-frame-time exit criterion itself) sketched in this section's own
-bullets below, not started.
+**X9-I, 2026-09-22 - native alpha test for masked world textures. NOT
+closed - statically verified only, ships disabled by default (same
+honest gap #97/#98 already carried, not yet a live-boot A/B).** XB's
+atlas alpha fix (PR #123) removed the blocker this bullet list named:
+masked ('{'-prefixed) textures now bake with real per-pixel alpha, so
+`nv2a_draw_map_geometry()` can finally enable NV2A's own fixed-function
+alpha-test stage (`NV097_SET_ALPHA_TEST_ENABLE`/`_FUNC`/`_REF`, a real
+D3D8-style hardware stage, not a shader trick - fp20 on this GPU has no
+per-pixel discard). A real reference-fidelity check (not assumed)
+found `ref/gl` and `ref/soft` disagree on the mechanism for masked
+WORLD-brush surfaces, and neither is ported verbatim: `ref/gl` only
+alpha-tests them via a separate entity+rendermode (`kRenderTransAlpha`)
+outside Quake-compat mode, machinery X9 doesn't have yet (no entity
+render list at all); `ref/soft` does unconditional per-texel masking
+with no entity gate, which is what this slice matches instead - the
+cheaper, correct-for-this-module's-actual-scope choice, not a
+shortcut taken without checking the alternative. Enabling the test
+GLOBALLY per draw call (NV2A has no per-triangle toggle) rather than
+bucketing masked/opaque faces into contiguous runs turned out to be
+safe without that extra machinery: PR #123's own encoder gate plus its
+exhaustive 121-map texel-level corpus verification already proves no
+ordinary opaque texel can reach the transparent BC1 selector on any
+real retail content this baker has produced.
+
+Two real review rounds, two real fixes, not a rubber stamp either
+time. `nv2a-xbox-specialist` found two comment overclaims (fixed - an
+unstated combiner-alpha doubling the first version of this comment
+never mentioned, and "verified atlas-wide" overstating what an
+empirical 121/125-map check actually proves) and one real dangling-
+state gap (fixed - the test-triangle fallback path never reset the
+new alpha-test registers, inert today only by coincidence). Then
+`tools/codex-review.sh` round 1 found a deeper, genuinely different
+bug in the SAME area the specialist had just touched: the diffuse
+atlas samples through real bilinear filtering (`NV097_SET_TEXTURE_
+FILTER`), so a fragment at a masked cutout's own edge gets a real,
+non-binary alpha - by design, that's what lets a filtered alpha test
+antialias a cutout edge - but the shader's own alpha-doubling (fixed,
+not removed, by the specialist round) meant that value got compared
+against `NV097_SET_ALPHA_REF=0x80` after being doubled, silently
+moving the real pass/fail boundary to 25% opacity instead of the
+intended 50%. Fixed at the actual source, `ps_lit.ps.cg`, not by
+picking a compensating reference constant: color and alpha are no
+longer one shared `float4*float4*2.0f` expression - RGB keeps its
+GoldSrc-convention `×2`, alpha passes through the diffuse texture's
+own real, filtered value untouched, recompiled through the real
+`cgc -profile fp20` / `fp20compiler` toolchain (X9-C's own precedent:
+compile, don't hand-derive) and confirmed in the actual compiled
+combiner output, not assumed (`out.a = unsigned(tex0.a)`, no
+`scale_by_two()` on that channel, where the pre-fix version read a
+doubled A×B product). Full static chain clean: `tools/xbox-cc.sh`, `tools/xbox-ref-isolate.sh`
+(5 objects, 99 symbols renamed, 0 leaked), `tools/xbox-link-check.sh`
+and `tools/xbox-game-link-check.sh hl --include-client
+--include-freevgui` (0 duplicate, 0 undefined, real valid XBE with the
+real hl server+client+freevgui modules). `nv2a_r_noalphatest` ships
+`"1"` (disabled), matching `nv2a_r_nocullback`'s own precedent - flip
+once a live A/B confirms masked textures actually cut out correctly
+with no regression elsewhere, and cite it. Full account in
+`divergences.md` #99.
+
+X9-J onward (skinning, dynamic lighting, the frame-time exit criterion
+itself) sketched in this section's own bullets below, not started.
 
 - Per-map atlas instead of texture arrays — the baker already produces it.
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised
   SHORT only.
-- Register combiners for `diffuse × lightmap × 2` and native alpha test.
+- ~~Register combiners for `diffuse × lightmap × 2` and native alpha test.~~
+  **Done, X9-C (combiner) and X9-I (alpha test) above.**
 - Matrix-palette skinning in VP20, within the 192-register palette, on meshes
   XB has already partitioned.
 - **Memoised bone setup.** The reference is eager every frame
