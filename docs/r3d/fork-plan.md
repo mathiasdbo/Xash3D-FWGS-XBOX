@@ -8047,10 +8047,151 @@ per-page V offset, not a scale; X4's swizzled-path defect is still open
 and was judged against this same wrong baseline. Full account in
 `divergences.md` #100, which also closes #94 and annotates #89-#93.
 
-X9-K onward (skinning, dynamic lighting, the frame-time exit criterion
+**X9-K, 2026-09-22 - the per-map diffuse atlas is gone: every texture draws
+with NV2A's own native hardware WRAP addressing (MPAK v9).** X9-B's atlas +
+per-vertex `rect[0]+frac(u)*rect[2]` remap (X9-J's own entry above) worked
+for a face whose UVs fit one texture repeat, but `frac()` collapses every
+repeat past the first onto the same fractional value - unacceptable on
+ordinary tiling floors/walls, and subdividing tiled faces at bake time to
+fix it overflows the u16 vertex-index limit on large outdoor maps
+(crossfire's worst face alone needed ~22,560 tiles). User-supplied
+architectural decision: drop the shared atlas, independently resample each
+source texture to a power-of-two per axis at bake time, and address it with
+NV2A's own native WRAP mode - no atlas, no remap, tiling handled by the GPU
+for free. `MpakHeader6`/`mpak_header_t` move to v9: `atlasWidth`/
+`atlasHeight`/`lenAtlas` are replaced by a texture directory
+(`MpakTextureInfo{width,height,log2Width,log2Height,dataLength}`, POT
+dimensions rounded UP - never down, so no source texture silently loses
+resolution - clamped to NV2A's real 4096px edge with a bake-time diagnostic
+rather than a silent clamp) and a batch table
+(`MpakTextureBatch{textureIndex,startFace,faceCount,startIndex,indexCount}`,
+one per texture at least one face actually uses - NOT one per directory
+entry: unreferenced miptexs still get baked, real measured waste 15-18% of
+both test maps' texture-data bytes, a real inefficiency left for a later
+pass, not a budget risk). `BspParser.cpp`'s face loop now `stable_sort`s
+every face by `(textureIndex, pvsCluster)` before emission, so a texture's
+faces land in one contiguous run; `outVert.u/v` (`rawU/rawV` divided by the
+source's NATIVE pre-resample width/height, unchanged since X9-B) already
+were the exact raw/repeating UV format WRAP addressing needs - normalizing
+by native size keeps the UV space resolution-independent of the later POT
+resample, the same separation ref/gl's own `GL_ResampleTexture` +
+normalized-UV combination relies on (reference-renderer-specialist review:
+specifically ref/gl's `GL_ARB_TEXTURE_NPOT_EXT`-unsupported fallback path,
+`gl_image.c:467` - ref/gl's default path never resamples world textures at
+all, since real GPUs support NPOT; NV2A has no NPOT support to fall back
+FROM, so this port hits that path unconditionally).
+
+The one genuinely hard correctness problem: X9-G's PVS visibility system
+(`nv2a_mark_leaves()`) computes its face index from `world->surfaces - surf`
+- a pointer-difference into the ENGINE's own classic model, built from the
+raw passthrough BSP lumps in ORIGINAL face order, completely independent of
+any mpak-side sort. Sorting faces by texture ID breaks the identity that
+index used to have with the archive's own face order. Fixed with a new
+`originalToSortedFaceIndex[]` lump (the sort's inverse permutation) and one
+new translation step in `nv2a_mark_leaves()` before it writes
+`nv2a_map_face_visible` - double bounds-checked (against the original count
+for the raw index, the sorted count for the translated one) and fails OPEN
+(all-visible, frustum-only) rather than mis-culling if the table is ever
+missing or malformed. The same original-vs-sorted gap existed one level
+down in the backface-cull test too (`nv2a_draw_map_geometry`'s own
+`world->surfaces[i]` read) - caught and fixed with a second, locally-derived
+inverse array, even though that path defaults off (`nv2a_r_nocullback`
+default `"1"`) and so wasn't live by default.
+
+Implemented via a Workflow (parallel baker + renderer implementers against
+one pinned v9 struct contract, five specialist reviewers, a fix round, a
+static gate) - and it earned its own adversarial review round: three of the
+five specialists independently found a real, live-by-default rendering bug
+neither implementer's own report mentioned - `nv2a_map_face_t::dword_begin/
+dword_end` (and the no-per-face-table batch fallback) round each face's own
+index range OUTWARD to a 3-dword/6-index boundary, a no-op when the whole
+map shared one texture (X9-B..X9-J) but a real, systemic mistextured seam
+once a DIFFERENT texture is bound per batch (X9-K) - almost no batch
+boundary naturally lands dword-aligned, so the first/last triangle of
+nearly every batch could draw under the WRONG (neighbouring) bound texture,
+and one direction of the mis-round doesn't self-correct (draws AFTER, and
+so permanently overwrites, the correct triangle). Fixed at the baker:
+`BspParser.cpp`'s pass 2 now pads each batch's own contributed index run to
+an exact multiple of 6 with one degenerate zero-area triangle, absorbed
+into the last real face's own `FaceDrawCmd.index_count` so the existing
+gapless-partition invariant still holds - since batches are contiguous by
+construction, padding every batch's end also aligns the next batch's start.
+A second, separate finding (console-performance-specialist): the per-batch
+loop rebound stage 0's full 7-register state UNCONDITIONALLY for every
+batch before checking whether any of that batch's own faces survive
+frustum+PVS culling - a guaranteed ~100-130 texture-stage reprograms a
+frame regardless of camera position, undercutting the X9-F/G/H culling work
+already merged. Fixed by binding lazily, only once a batch is known to have
+a real, visible draw range. A third, structural finding (three reviewers
+independently): `filesystem/mpak_layout.c` - the real, production C reader
+`mpak_layout.h`'s own comment says must move in lockstep with the header -
+was never updated, a hard build break in the actual engine target; fixed,
+with its unit test rewritten to build and check a real v9 archive.
+
+Live-confirmed under xemu on both real test maps, at the exact debug camera
+pose X9-J's own screenshots used: `c1a0` (Black Mesa Inbound's reception/
+corridor) mean 86.3/255, 247,900 px with channel spread > 8 (X9-J's fix:
+90.4/255 - the small delta is expected, real texture content shifting under
+POT resampling, not a regression); `crossfire` - the map that made the old
+atlas+subdivision approach mathematically impossible (u16 index overflow) -
+mean 114.9/255, 232,909 px with channel spread > 8, its large outdoor
+ground/fence textures now tiling correctly instead of stretching. Both
+re-baked clean at MPAKv9 with real, measured headroom against every
+fixed-capacity cap this slice added: `NV2A_MAP_MAX_TEXTURES`/
+`NV2A_MAP_MAX_BATCHES` (both 512) at 164/129 (c1a0) and 120/91 (crossfire) -
+32%/25% at most; `NV2A_MAP_BUDGET_BYTES` (24 MiB) at ~58-59%; total
+diffuse-texture GPU memory actually DROPPED versus the old fixed 2 MiB
+atlas (real per-texture totals ~535-537 KiB on both maps, a ~74% reduction,
+because a map's real diffuse footprint was always well under the atlas's
+own fixed worst-case size). Two bake-time safety nets the old atlas already
+had were missing for v9 and are added: a texture exceeding NV2A's 4096px
+edge now fails the bake loudly (`isNativeSizeRepresentable()`) instead of
+being silently clamped, and unique-texture/batch counts are checked against
+the renderer's own 512 caps at bake time (a duplicated, cross-referenced
+literal - no shared header exists between the C++ baker and the C engine
+for this constant) instead of only failing on the console at load time.
+
+Two more real issues surfaced only by a direct live comparison against
+`ref_soft` on `crossfire` (the outdoor map, where they actually show), after
+the Workflow itself had already reported a static gate pass - a reminder
+that structural verification (index alignment, byte-exact archives) does
+not substitute for actually looking at the rendered picture. First:
+`ref/nv2a` has never read `MpakFaceInfo::flags` (SURF_DRAWSKY), baked since
+v6 but unused by this renderer - sky faces always drew as ordinary geometry
+with the WAD's literal "sky" placeholder texture, invisible as a defect
+under the old atlas+remap (one flat stretched patch) but glaringly obvious
+under correct native WRAP tiling (a dense pattern filling the sky). Fixed:
+`nv2a_load_map_geometry()` now reads that lump and every sky-flagged face
+is excluded from every draw run, unconditionally. Second, found while
+investigating the first: `NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS` has been
+`1` (no mip chain) in this file's entire history, confirmed unchanged
+before this session - the old atlas+remap's flat-stretch behaviour
+accidentally hid the total absence of mipmapping; correct WRAP tiling of a
+small texture across a distant/oblique face (crossfire's outdoor
+scaffolding) now aliases into a busy moire pattern with nothing to filter
+between mip levels. Ruled out as a data or addressing bug first, not
+assumed: all 120 of crossfire's baked textures were independently decoded
+straight from the archive bytes and confirmed pixel-correct (every sign
+fully legible), and WRAP vs CLAMP was A/B tested live with no visible
+difference. A real mip chain is real, substantial, separate work - not
+bundled into this change; tracked as its own follow-up, user-confirmed
+scope decision (`divergences.md` #101, item (g)).
+
+Full account, evidence and every specialist finding (including the ones
+deliberately deferred - `nearestPowerOfTwo()`'s round-up-vs-nearest choice,
+now resolved to always-round-up; `tools/verify-atlas-alpha.py`'s new v9
+staleness; `UiPacker.cpp`'s unrelated menu-background archive silently
+inheriting `version=9`; the sky-skip and mip-aliasing findings above) in
+`divergences.md` #101.
+
+X9-L onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.
 
-- Per-map atlas instead of texture arrays — the baker already produces it.
+- ~~Per-map atlas instead of texture arrays — the baker already produces
+  it.~~ **Reversed, X9-K, 2026-09-22: the shared atlas + per-vertex remap
+  could not represent a tiling texture correctly (see that entry above) -
+  the Xbox target now bakes one independently POT-resampled DXT1 image per
+  texture and addresses it with native hardware WRAP, no atlas at all.**
 - Vertex format with no integer attributes: FLOAT1-4, D3DCOLOR and normalised
   SHORT only.
 - ~~Register combiners for `diffuse × lightmap × 2` and native alpha test.~~

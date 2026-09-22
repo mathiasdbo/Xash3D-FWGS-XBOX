@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <numeric>
 
 namespace formats {
 
@@ -665,8 +666,61 @@ namespace formats {
         const float kFallbackLv = (LM_RAMP_HEIGHT * 0.5f) / static_cast<float>(LM_PAGE_SIZE);
         uint32_t lmBaked = 0, lmSkipped = 0, lmRejected = 0;
 
+        // v9: per-texture Xbox draws sort faces by (textureIndex, PVS leaf)
+        // before anything is emitted - see MpakHeader.h's v8 -> v9 note. Pass
+        // 1 below computes every face's baked data (lightmap allocation
+        // included - allocation order affects only atlas packing layout, not
+        // correctness) into a temporary per-face record instead of emitting
+        // it immediately; pass 2, after sorting, emits MpakFaceInfo/indices/
+        // FaceDrawCmd in the new order and builds the MpakTextureBatch list
+        // and the originalToSortedFaceIndex[] remap. Vertices are still
+        // added to `pak` directly in pass 1 below (not deferred): the vertex
+        // buffer is globally deduplicated and shared across faces, so its
+        // own content is independent of face emission order - only the INDEX
+        // buffer's order needs to follow the sort, via polyIndices below.
+        struct FaceBuildRecord {
+            MpakFaceInfo faceInfo{};
+            std::vector<uint16_t> polyIndices;
+            std::vector<MpakExtraLightBlock> extraBlocks; // faceIndex filled in during pass 2
+            uint32_t textureIndex = 0;
+            uint32_t pvsCluster = 0xFFFFFFFFu; // no owning leaf found - sorts last within its texture group
+        };
+        std::vector<FaceBuildRecord> records(numFaces);
+
+        // face -> "owning" leaf, for the sort's secondary key only (spatial
+        // locality within one texture's batch, not real PVS - correctness of
+        // runtime PVS marking comes entirely from the originalToSortedFaceIndex[]
+        // remap built below, which is correct regardless of which leaf a
+        // straddling face happens to pick here). A face can appear in
+        // several leaves' marksurfaces lists (it straddles a BSP split); the
+        // FIRST leaf found while walking leaves in ascending index order
+        // wins, deterministically. Same leaf/marksurface relationship
+        // ref/nv2a's own nv2a_mark_leaves() walks at runtime (r_context.c) -
+        // see MpakHeader.h's v8 -> v9 note.
+        {
+            const auto& leavesData = getLumpData(LUMP_LEAVES);
+            const auto& marksurfacesData = getLumpData(LUMP_MARKSURFACES);
+            const dleaf_t* leaves = reinterpret_cast<const dleaf_t*>(leavesData.data());
+            size_t numLeaves = leavesData.size() / sizeof(dleaf_t);
+            const uint16_t* marksurfaces = reinterpret_cast<const uint16_t*>(marksurfacesData.data());
+            size_t numMarksurfaces = marksurfacesData.size() / sizeof(uint16_t);
+
+            for (size_t leafIdx = 0; leafIdx < numLeaves; ++leafIdx) {
+                const dleaf_t& leaf = leaves[leafIdx];
+                size_t first = leaf.firstmarksurface;
+                size_t count = leaf.nummarksurfaces;
+                for (size_t k = 0; k < count; ++k) {
+                    size_t msIdx = first + k;
+                    if (msIdx >= numMarksurfaces) break; // truncated/corrupt lump - stop this leaf's walk
+                    uint16_t faceIdx = marksurfaces[msIdx];
+                    if (faceIdx < numFaces && records[faceIdx].pvsCluster == 0xFFFFFFFFu)
+                        records[faceIdx].pvsCluster = static_cast<uint32_t>(leafIdx);
+                }
+            }
+        }
+
         for (size_t i = 0; i < numFaces; ++i) {
-            uint32_t startIndex = currentIndexCount;
+            FaceBuildRecord& rec = records[i];
             const dface_t& face = faces[i];
             const dtexinfo_t& texinfo = (face.texinfo >= 0 && static_cast<size_t>(face.texinfo) < numTexinfos) ? texinfos[face.texinfo] : dtexinfo_t{};
 
@@ -677,6 +731,7 @@ namespace formats {
                     loc = texLocations[mipIdx];
                 }
             }
+            rec.textureIndex = loc.textureIndex;
 
             // --- Lightmap extents pre-pass (GoldSrc BSP30 / xash3d-fwgs
             // Mod_CalcSurfaceExtents semantics) ---
@@ -772,14 +827,18 @@ namespace formats {
                     LightmapAllocation extraAlloc = lmPacker.allocate(smax, tmax);
                     lmPacker.writeBlock(extraAlloc, smax, tmax, &lightingData[extraOfs]);
 
+                    // faceIndex is filled in during pass 2, once this face's
+                    // SORTED position is known - MpakExtraLightBlock::faceIndex
+                    // must reference this archive's own (sorted) face order,
+                    // not the original BSP index `i` (see its own doc comment
+                    // in MpakHeader.h).
                     MpakExtraLightBlock extra{};
-                    extra.faceIndex = static_cast<uint32_t>(i);
                     extra.styleSlot = static_cast<uint8_t>(styleSlot);
                     extra.style = face.styles[styleSlot];
                     extra.page = extraAlloc.page;
                     extra.blockX = extraAlloc.blockX;
                     extra.blockY = extraAlloc.blockY;
-                    pak.addExtraLightBlock(extra);
+                    rec.extraBlocks.push_back(extra);
                 }
             }
 
@@ -787,7 +846,7 @@ namespace formats {
             // on msurface_t (see MpakHeader.h's MpakFaceInfo doc comment) -
             // this baker computed the equivalent transiently above and
             // discarded it every time until now.
-            MpakFaceInfo faceInfo{};
+            MpakFaceInfo& faceInfo = rec.faceInfo;
             faceInfo.planenum = face.planenum;
             faceInfo.texinfo = (face.texinfo >= 0 && static_cast<size_t>(face.texinfo) < numTexinfos) ? face.texinfo : -1;
             std::memcpy(faceInfo.styles, face.styles, 4);
@@ -806,7 +865,7 @@ namespace formats {
                 faceInfo.lightmapBlockY = lmAlloc.blockY;
             }
 
-            std::vector<uint16_t> polyIndices;
+            std::vector<uint16_t>& polyIndices = rec.polyIndices;
 
             for (int16_t j = 0; j < face.numedges; ++j) {
                 int32_t surfedge = surfedges[face.firstedge + j];
@@ -840,11 +899,6 @@ namespace formats {
                 outVert.u = rawU / static_cast<float>(loc.width > 0 ? loc.width : 64);
                 outVert.v = rawV / static_cast<float>(loc.height > 0 ? loc.height : 64);
 
-                outVert.rect[0] = loc.rect[0];
-                outVert.rect[1] = loc.rect[1];
-                outVert.rect[2] = loc.rect[2];
-                outVert.rect[3] = loc.rect[3];
-
                 if (hasLightmap) {
                     // (blockX, blockY) is the origin of the BORDERED (smax+2)x(tmax+2)
                     // block, so +1 lands on the first data luxel; the +0.5 centers the
@@ -867,19 +921,129 @@ namespace formats {
                 uint16_t idx = pak.addVertex(outVert);
                 polyIndices.push_back(idx);
             }
+        } // end pass 1
 
+        // Sort ALL faces by (textureIndex, pvsCluster) - stable, so faces
+        // sharing both keys (most commonly: faces with no owning leaf found,
+        // or every face of a texture used in only one leaf) keep their
+        // original relative order rather than an arbitrary one.
+        std::vector<uint32_t> order(numFaces);
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(), [&records](uint32_t a, uint32_t b) {
+            if (records[a].textureIndex != records[b].textureIndex) return records[a].textureIndex < records[b].textureIndex;
+            return records[a].pvsCluster < records[b].pvsCluster;
+        });
+
+        // originalToSortedFaceIndex[originalFaceIndex] = sortedPosition - the
+        // inverse permutation ref/nv2a's nv2a_mark_leaves() needs to
+        // translate a classic-lump-order face index into this archive's own
+        // sorted order (MpakHeader.h's v8 -> v9 note). Mandatory, not an
+        // optimization: without it, PVS visibility marks would land on
+        // whatever face happens to now sit at that original index, not the
+        // face that originally had it.
+        std::vector<uint32_t> faceRemap(numFaces);
+        for (uint32_t sortedPos = 0; sortedPos < static_cast<uint32_t>(order.size()); ++sortedPos) {
+            faceRemap[order[sortedPos]] = sortedPos;
+        }
+
+        // Pass 2: emit MpakFaceInfo/indices/FaceDrawCmd/extra-light-blocks in
+        // the SORTED order (vertices were already emitted, order-independently,
+        // in pass 1 above), and build the contiguous per-texture
+        // MpakTextureBatch list as we go - architecturally one run per used
+        // texture, since textureIndex is the sort's primary key.
+        //
+        // codex review, real finding (both the baker and renderer halves of
+        // this parallel implementation missed it): ref/nv2a's per-face AND
+        // whole-batch draw-call submission both snap a [start,end) LOGICAL
+        // index range OUTWARD to the nearest 6-index/3-dword boundary
+        // (r_context.c's own nv2a_map_face_t/nv2a_batch_dword_range
+        // declaration comments - 6 = lcm(2,3), since indices pack two per
+        // dword and triangles are 3 indices). That snap was harmless before
+        // X9-K, when one shared atlas covered the whole map and an
+        // over-snap just redrew a triangle of the SAME texture - but now
+        // every batch below binds its OWN independent texture, so a batch
+        // boundary that doesn't already land on a 6-index line lets the
+        // snap read 1-2 triangles across into the NEXT batch and draw them
+        // with the WRONG (that batch's) texture, a visible mistexturing
+        // seam at nearly every texture-batch boundary on a real
+        // multi-textured map. Faces always contribute a multiple of 3
+        // indices (one whole triangle at a time - the fan-triangulation
+        // loop below), so a batch's own running indexCount can only ever
+        // land 0 or 3 short of a multiple of 6; the fix is to top it up to
+        // the next multiple of 6 the MOMENT a batch is known to be
+        // complete (this face is the last one using this texture), with a
+        // real degenerate (zero-area) triangle - three copies of an index
+        // this SAME batch already used, so it repeats real geometry rather
+        // than reading unrelated vertex data - absorbed into the LAST real
+        // face's own FaceDrawCmd.index_count via padLastFaceDrawCmd()
+        // rather than a new fake face, so FaceDrawCmds stays an exact,
+        // gapless partition of the index buffer (the invariant
+        // ref/nv2a/r_context.c's own load-time tiling validation checks).
+        // Since batches are contiguous by construction, padding every
+        // batch's own end also aligns the very next batch's own start -
+        // one fix at the source closes the gap for every batch boundary in
+        // the archive, on both the per-face and whole-batch draw paths.
+        std::vector<MpakTextureBatch> batches;
+        uint16_t lastRealVertexIndex = 0; // padding fallback if a batch's own last face somehow emitted 0 real indices - see below
+        for (uint32_t sortedPos = 0; sortedPos < static_cast<uint32_t>(order.size()); ++sortedPos) {
+            FaceBuildRecord& rec = records[order[sortedPos]];
+
+            uint32_t startIndex = currentIndexCount;
             uint32_t addedIndices = 0;
-            for (size_t j = 2; j < polyIndices.size(); ++j) {
-                pak.addIndex(polyIndices[0]);
-                pak.addIndex(polyIndices[j - 1]);
-                pak.addIndex(polyIndices[j]);
+            for (size_t j = 2; j < rec.polyIndices.size(); ++j) {
+                pak.addIndex(rec.polyIndices[0]);
+                pak.addIndex(rec.polyIndices[j - 1]);
+                pak.addIndex(rec.polyIndices[j]);
                 addedIndices += 3;
+            }
+            if (!rec.polyIndices.empty()) {
+                lastRealVertexIndex = rec.polyIndices[0];
             }
 
             pak.addFaceDrawCmd(startIndex, addedIndices);
-            pak.addFaceInfo(faceInfo);
+            pak.addFaceInfo(rec.faceInfo);
             currentIndexCount += addedIndices;
+
+            for (MpakExtraLightBlock extra : rec.extraBlocks) {
+                extra.faceIndex = sortedPos;
+                pak.addExtraLightBlock(extra);
+            }
+
+            if (batches.empty() || batches.back().textureIndex != rec.textureIndex) {
+                MpakTextureBatch batch{};
+                batch.textureIndex = rec.textureIndex;
+                batch.startFace = sortedPos;
+                batch.faceCount = 1;
+                batch.startIndex = startIndex;
+                batch.indexCount = addedIndices;
+                batches.push_back(batch);
+            } else {
+                batches.back().faceCount += 1;
+                batches.back().indexCount += addedIndices;
+            }
+
+            // This batch is complete once the NEXT face (if any) uses a
+            // different texture, or this is the very last face overall -
+            // pad it now, before any later batch's own startIndex is
+            // computed from currentIndexCount.
+            bool isLastFaceOfBatch = (sortedPos + 1 == order.size())
+                || (records[order[sortedPos + 1]].textureIndex != rec.textureIndex);
+            if (isLastFaceOfBatch) {
+                uint32_t remainder = batches.back().indexCount % 6;
+                if (remainder != 0) {
+                    uint32_t pad = 6 - remainder;
+                    for (uint32_t p = 0; p < pad; ++p) {
+                        pak.addIndex(lastRealVertexIndex);
+                    }
+                    pak.padLastFaceDrawCmd(pad);
+                    batches.back().indexCount += pad;
+                    currentIndexCount += pad;
+                }
+            }
         }
+
+        pak.setTextureBatches(std::move(batches));
+        pak.setFaceRemap(std::move(faceRemap));
 
         std::cout << "Lightmap Atlas: " << lmBaked << " faces baked, " << lmSkipped
                   << " skipped (sky/liquid/fullbright), " << lmRejected << " rejected (anomalous), "

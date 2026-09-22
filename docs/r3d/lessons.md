@@ -1582,3 +1582,38 @@ and when a test image was designed to have structure (a checkerboard,
 a gradient, a grid) and comes back smooth, that is a failed test, not a
 passed one, no matter how plausible the colours look. See
 `docs/r3d/divergences.md` #100.
+
+### A structural pass (index alignment, byte-exact archives, gap/overlap checks) proves the NEW code is internally consistent - it says nothing about whether the picture is right. Only looking at the render does that
+
+X9-K's own Workflow was genuinely thorough - five specialist reviewers,
+one of whom independently re-baked both real test maps and verified the
+new index-buffer batching with a from-scratch Python model (0 misaligned
+boundaries, 0 gaps, `FaceDrawCmd` sums matching `iCount` exactly) - and
+still reported the static gate green. The map still looked visibly wrong
+on the very next live boot: `crossfire`'s sky rendered as a dense tiling
+pattern instead of flat sky colour, compared directly against `ref_soft`.
+The root cause (`ref/nv2a` has never read `MpakFaceInfo::flags` -
+`SURF_DRAWSKY` - so sky faces always drew as ordinary geometry) predates
+this session entirely; it was invisible as a defect only because the OLD,
+buggy atlas+remap design flattened any repeating texture into one
+stretched, non-repeating patch, which accidentally looked like "a flat
+sky-ish colour" by coincidence. Fixing the tiling bug removed that
+accidental camouflage and exposed a real, separate, pre-existing gap.
+Chasing that same live comparison further surfaced a second one the same
+way: no NV2A texture in this file has ever had a mip chain
+(`MIPMAP_LEVELS=1` since before this session), also hidden by the same
+flatten-to-one-patch behaviour, now visible as aliasing on any small
+texture tiling densely across a distant face.
+
+Generalizes: every kind of structural/statistical verification this
+project uses - index-buffer alignment, byte-exact re-bakes, pixel-mean/
+spread thresholds, even a Python model built independently from the
+implementation - checks that the new code is *consistent*, not that the
+*picture* is right. None of them would have caught either defect here;
+only a live screenshot next to a reference renderer did, and only because
+someone actually looked at it rather than trusting the gate. A correctness
+fix can also work exactly as intended and still make the RESULT look worse
+than before, when the bug it fixed was accidentally hiding an unrelated,
+older problem - that is a real finding to root-cause and document
+(`divergences.md` #101), not evidence the fix itself is wrong. See
+`docs/r3d/divergences.md` #101.

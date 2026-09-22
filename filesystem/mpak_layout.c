@@ -233,16 +233,36 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 	if( !Mpak_PlaceLump( "models", header->lenModels, sizeof( dmodel_t ), fileSize, &cursor, &out->models ))
 		return false;
 
-	// Textures: target-dependent (PakManager::save()'s mIsXboxTarget
-	// branch) - an Xbox-target archive has ONLY an atlas; a PC-target
-	// archive has ONLY the three DXT arrays. Both are compressed blobs
-	// with no fixed per-entry size to cross-check against.
+	// Textures: v9 replaces the single shared atlas (v6-v8) with a
+	// per-texture DXT1 directory + draw-batch table, Xbox target only - a
+	// PC-target archive still has ONLY the three DXT arrays. Write order
+	// matches PakManager.cpp save() and ref/nv2a/r_context.c's independent
+	// nv2a_compute_mpak_layout mirror exactly (MpakHeader.h's v8 -> v9
+	// note): texture directory, texture data, batches (Xbox only), then
+	// the face remap - which, unlike the first three, is written for BOTH
+	// targets, since BspParser's face sort runs in the shared nv2a face
+	// loop regardless of target (PakManager.cpp save()'s own comment).
+	// mpak_texture_info_t/mpak_texture_batch_t are fixed-size records, so
+	// - like faceInfo/planes/etc. above - a declared length that isn't an
+	// exact multiple of their real size is a truncated/corrupted archive,
+	// caught by Mpak_PlaceLump's own recordSize check rather than producing
+	// a fractional directory/batch count later.
 	if( header->flags & MPAK_TARGET_XBOX_FLAG )
 	{
-		if( !Mpak_PlaceLump( "atlas", header->lenAtlas, 0, fileSize, &cursor, &out->atlas ))
+		if( !Mpak_PlaceLump( "textureDir", header->lenTextureDir, sizeof( mpak_texture_info_t ),
+				fileSize, &cursor, &out->textureDir ))
+			return false;
+		if( !Mpak_PlaceLump( "textureData", header->lenTextureData, 0, fileSize, &cursor, &out->textureData ))
+			return false;
+		if( !Mpak_PlaceLump( "batches", header->lenBatches, sizeof( mpak_texture_batch_t ),
+				fileSize, &cursor, &out->batches ))
 			return false;
 	}
-	else
+
+	if( !Mpak_PlaceLump( "faceRemap", header->lenFaceRemap, sizeof( uint32_t ), fileSize, &cursor, &out->faceRemap ))
+		return false;
+
+	if( !( header->flags & MPAK_TARGET_XBOX_FLAG ))
 	{
 		if( !Mpak_PlaceLump( "array64", header->lenArray64, 0, fileSize, &cursor, &out->array64 ))
 			return false;

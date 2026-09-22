@@ -5,6 +5,66 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — `ref/nv2a` diffuse textures: per-map DXT1 atlas replaced with native NV2A hardware WRAP addressing (X9-K, MPAK v9)
+
+Every diffuse texture used to be shelf-packed into one shared 2048x2048
+DXT1 atlas per map, with a per-vertex remap (`rect[0] + frac(u)*rect[2]`)
+approximating texture repeats at load time. That remap is only exact when
+a face's UV range fits one texture repeat - `frac()` collapses every
+further repeat onto the same fractional value, so any face bigger than one
+tile (most floors and walls) sampled a flat, non-repeating patch instead
+of tiling. Subdividing tiled faces at bake time to fix that overflows the
+u16 vertex-index limit on large outdoor maps - `crossfire`'s worst face
+alone would need ~22,560 tiles.
+
+MPAK bumps to v9: the shared atlas is replaced by one independently
+power-of-two-resampled DXT1 image per unique texture, addressed with
+NV2A's own native hardware WRAP mode - no atlas, no remap, tiling handled
+by the GPU. Faces are now sorted by texture at bake time so the renderer
+can bind one texture and issue one draw call per batch (measured on the
+two staged retail maps: 129 batches / 164 textures for `c1a0`, 91 / 120
+for `crossfire`, both with real headroom against the new fixed-capacity
+caps this adds). Total diffuse-texture memory dropped versus the old
+fixed-size atlas (~535-537 KiB measured per map versus the atlas's fixed
+2 MiB, since a real map's footprint was always well under that atlas's own
+worst-case size). The map's PVS-visibility system required one careful,
+load-bearing fix to stay correct once faces stopped being stored in
+original BSP order: a new `originalToSortedFaceIndex[]` table and one
+translation step before `nv2a_mark_leaves()` writes its visibility array,
+double bounds-checked and failing open (never a wrong cull) rather than
+trusting it.
+
+Live-confirmed on both real staged maps under xemu: `c1a0`'s reception
+corridor textured and lit exactly as before (mean 86.3/255 versus X9-J's
+90.4/255 at the same debug pose - the small delta is real texture content
+shifting under POT resampling, not a regression); `crossfire`'s large
+outdoor ground and fence/scaffolding textures now genuinely tile instead
+of stretching into a flat patch - the map the old subdivision approach
+could never have supported at all (u16 index overflow).
+
+Two more real, pre-existing gaps surfaced only by comparing the live
+render directly against `ref_soft`, after every structural/static check
+had already passed clean - a reminder that index-buffer alignment and
+byte-exact archives prove the new code is internally consistent, not that
+the picture is right. First: `ref/nv2a` has never read
+`MpakFaceInfo::flags` (`SURF_DRAWSKY`, baked since MPAK v6), so sky faces
+drew as ordinary geometry with the WAD's literal "sky" placeholder
+texture - invisible under the old flatten-to-one-patch remap, glaringly
+obvious as a dense tiling pattern under correct WRAP. Fixed: sky faces are
+now excluded from every draw run. Second: this renderer has never had a
+mipmap chain (`MIPMAP_LEVELS=1`, confirmed unchanged since before this
+session) - also hidden by the old flatten behaviour, now visible as
+aliasing when a small texture tiles densely across a distant or oblique
+face. Ruled out as a data or addressing bug first, not assumed: every one
+of `crossfire`'s 120 baked textures was independently decoded straight
+from the archive bytes and confirmed pixel-correct, and WRAP vs CLAMP
+addressing was A/B tested live with no visible difference. A real mip
+chain is real, substantial, separate work, deliberately not bundled into
+this change - tracked as an explicit follow-up.
+
+See `docs/r3d/fork-plan.md`'s X9-K entry and `divergences.md` #101 for the
+full account.
+
 ### Fixed — `ref/nv2a` maps rendered near-black: two texture-setup bugs
 
 Every real map drawn by the NV2A renderer had come out near-black and

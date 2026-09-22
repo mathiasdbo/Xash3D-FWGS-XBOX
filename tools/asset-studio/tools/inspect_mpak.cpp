@@ -90,6 +90,9 @@ int main(int argc, char** argv) {
     }
     ok &= CheckDivisible("lenFaceInfo", h.lenFaceInfo, sizeof(MpakFaceInfo));
     ok &= CheckDivisible("lenExtraLightBlocks", h.lenExtraLightBlocks, sizeof(MpakExtraLightBlock));
+    ok &= CheckDivisible("lenTextureDir", h.lenTextureDir, sizeof(MpakTextureInfo));
+    ok &= CheckDivisible("lenBatches", h.lenBatches, sizeof(MpakTextureBatch));
+    ok &= CheckDivisible("lenFaceRemap", h.lenFaceRemap, sizeof(uint32_t));
 
     // Only walk sections once the header itself is trustworthy - a bad
     // version/headerSize means the field offsets above may not even be
@@ -112,9 +115,17 @@ int main(int argc, char** argv) {
         Place(cursor, h.lenPlanes);
         Place(cursor, h.lenClipnodes);
         Place(cursor, h.lenModels);
+        // v9: texture directory/data/batches (Xbox only), then the face
+        // remap (both targets), then the PC arrays (PC only) - PakManager.cpp
+        // save()'s own write order, which matches the header's field order
+        // (MpakHeader.h's v8 -> v9 note).
         if (xbox) {
-            Place(cursor, h.lenAtlas);
-        } else {
+            Place(cursor, h.lenTextureDir);
+            Place(cursor, h.lenTextureData);
+            Place(cursor, h.lenBatches);
+        }
+        Place(cursor, h.lenFaceRemap);
+        if (!xbox) {
             Place(cursor, h.lenArray64);
             Place(cursor, h.lenArray256);
             Place(cursor, h.lenArray512);
@@ -159,7 +170,10 @@ int main(int argc, char** argv) {
         h.lenVisibility, h.lenNodes, h.lenLeaves, h.lenMarksurfaces);
     std::printf("lenFaceDrawCmds: %u, lenPlanes: %u, lenClipnodes: %u, lenModels: %u\n",
         h.lenFaceDrawCmds, h.lenPlanes, h.lenClipnodes, h.lenModels);
-    std::printf("atlas: %ux%u, lenAtlas: %u\n", h.atlasWidth, h.atlasHeight, h.lenAtlas);
+    std::printf("textures: count %u, lenTextureDir %u, lenTextureData %u\n",
+        h.textureCount, h.lenTextureDir, h.lenTextureData);
+    std::printf("batches: count %u, lenBatches %u\n", h.batchCount, h.lenBatches);
+    std::printf("lenFaceRemap: %u (%zu original-order face(s))\n", h.lenFaceRemap, h.lenFaceRemap / sizeof(uint32_t));
     std::printf("array64: count %u len %u, array256: count %u len %u, array512: count %u len %u\n",
         h.count64, h.lenArray64, h.count256, h.lenArray256, h.count512, h.lenArray512);
     std::printf("lenAssetDict: %u, lenAssetData: %u (always 0 since the X2 scope narrowing)\n",

@@ -15,11 +15,15 @@ namespace formats {
         float u, v;
         float lu, lv;
         uint32_t lightmap_layer;
-        float rect[4]; // [atlas_x, atlas_y, atlas_w, atlas_h] normalized (Xbox)
+        // rect[4] (the old atlas-placement remap, normalized ATLAS-space
+        // [x,y,w,h]) is GONE as of MPAKv9 - see MpakHeader.h's v8 -> v9 note.
+        // The Xbox path now addresses each texture independently with
+        // hardware WRAP, selected per MpakTextureBatch rather than per
+        // vertex, so there is nothing left for a per-vertex remap to do.
         uint32_t texture_layer; // Texture2DArray index (PC)
         uint32_t array_index; // 0=64, 1=256, 2=512 (PC)
         uint32_t _pad;
-        uint32_t _pad2; // Pads 60 -> 64 bytes: two clean 32-byte NV2A DMA cache lines.
+        uint32_t _pad2; // Pads 40 -> 48 bytes: still a clean multiple of 16 for NV2A DMA.
 
         bool operator==(const Vertex& other) const {
             return std::memcmp(this, &other, sizeof(Vertex)) == 0;
@@ -38,12 +42,21 @@ namespace formats {
     };
 
     struct TextureLocation {
+        // NATIVE (pre-resample) pixel dimensions of the source texture - LOAD
+        // BEARING: BspParser.cpp normalizes its raw texture-space UVs by
+        // these, not by whatever POT size the Xbox path resamples to
+        // internally, so world-space UV resolution stays independent of any
+        // later resample (see PakManager::addTexture's own doc comment).
         uint32_t width = 64;
         uint32_t height = 64;
-        uint32_t binSize = 64;
-        uint32_t array_index; // 0=atlas/64, 1=256, 2=512
-        uint32_t layer;
-        float rect[4];
+        uint32_t binSize = 64; // PC path only: which fixed bin (64/256/512) this texture landed in
+        uint32_t array_index; // PC: 0=64, 1=256, 2=512. Unused (0) on the Xbox path.
+        uint32_t layer;       // PC: Texture2DArray layer. Unused (0) on the Xbox path.
+        // v9, Xbox path only: index into PakManager's own per-texture list -
+        // BspParser.cpp needs this to build MpakTextureBatch (see
+        // MpakHeader.h's v8 -> v9 note). Unused (0) on the PC path, which has
+        // no per-texture directory.
+        uint32_t textureIndex = 0;
     };
 
     struct FaceDrawCmd {
@@ -71,6 +84,19 @@ namespace formats {
         uint16_t addVertex(const Vertex& v);
         void addIndex(uint16_t idx);
         void addFaceDrawCmd(uint32_t start_index, uint32_t index_count);
+        // v9: grows the MOST RECENTLY added FaceDrawCmd's own index_count by
+        // extraIndexCount, with no matching new FaceDrawCmd entry - used only
+        // to absorb the degenerate-triangle padding BspParser.cpp appends at
+        // the end of each texture-draw batch so every batch's own index
+        // range lands on a dword-aligned boundary (ref/nv2a's per-face/
+        // per-batch draw-call snap needs this - see MpakTextureBatch's own
+        // doc comment and ref/nv2a/r_context.c's nv2a_batch_dword_range()
+        // declaration comment for the full "why" - a texture-batch-boundary
+        // mistexturing bug this padding fixes at the source). No-op if no
+        // FaceDrawCmd has been added yet (nothing to grow).
+        void padLastFaceDrawCmd(uint32_t extraIndexCount) {
+            if (!mFaceDrawCmds.empty()) mFaceDrawCmds.back().index_count += extraIndexCount;
+        }
         void addFaceInfo(const MpakFaceInfo& info) { mFaceInfos.push_back(info); }
         // v8: one call per face per extra (non-style-0) lightstyle it uses -
         // see MpakHeader.h's v7 -> v8 note. Most faces never call this.
@@ -132,8 +158,14 @@ namespace formats {
         void addArray64(const std::vector<uint8_t>& data) { mArray64.push_back(data); }
         void addArray256(const std::vector<uint8_t>& data) { mArray256.push_back(data); }
 
-        uint32_t getAtlasWidth() const { return mAtlasWidth; }
-        uint32_t getAtlasHeight() const { return mAtlasHeight; }
+        // v9: BspParser.cpp builds both of these once, after sorting all
+        // faces by (textureIndex, PVS leaf) - see MpakHeader.h's v8 -> v9
+        // note. Batches are meaningful only on the Xbox path (save() writes
+        // batchCount/lenBatches only when isXboxTarget()); the face remap is
+        // written whenever the nv2a profile is active, since the face sort
+        // itself is unconditional in BspParser's shared face loop.
+        void setTextureBatches(std::vector<MpakTextureBatch> batches) { mTextureBatches = std::move(batches); }
+        void setFaceRemap(std::vector<uint32_t> remap) { mFaceRemap = std::move(remap); }
 
     private:
         std::vector<Vertex> mVertices;
@@ -142,6 +174,11 @@ namespace formats {
         std::vector<FaceDrawCmd> mFaceDrawCmds;
         std::vector<MpakFaceInfo> mFaceInfos;
         std::vector<MpakExtraLightBlock> mExtraLightBlocks;
+        // v9: built by BspParser.cpp's sort, consumed by save() - see
+        // MpakHeader.h's v8 -> v9 note and setTextureBatches()/setFaceRemap()'s
+        // own doc comments above.
+        std::vector<MpakTextureBatch> mTextureBatches;
+        std::vector<uint32_t> mFaceRemap;
 
         std::vector<uint8_t> mVisibilityData;
         std::vector<uint8_t> mNodesData;
@@ -182,22 +219,24 @@ namespace formats {
         std::vector<std::vector<uint8_t>> mArray512;
         std::vector<bool> mArray512Masked;
 
-        // Xbox Target (Atlas)
-        uint32_t mAtlasCurrentX = 0;
-        uint32_t mAtlasCurrentY = 0;
-        uint32_t mAtlasMaxRowHeight = 0;
-        uint32_t mAtlasWidth = 2048;
-        uint32_t mAtlasHeight = 2048;
-        std::vector<uint8_t> mAtlasRgba;
-        // Set by addTexture() the moment a texture doesn't fit; save() checks
-        // this and fails the bake outright (codex-review finding: block-
-        // aligning every texture's footprint - see addTexture()'s own comment -
-        // grows atlas occupancy, so a map that used to just fit can now
-        // overflow, and addTexture() itself can only warn and hand back a
-        // zero-initialized TextureLocation, which the caller stores as if
-        // packing had succeeded). A bake that silently aliases overflowed
-        // faces onto atlas slot 0 is worse than one that fails loudly.
-        bool mAtlasOverflowed = false;
+        // Xbox Target (v9: independent per-texture list, no shared atlas -
+        // see MpakHeader.h's v8 -> v9 note). Each of the four vectors below
+        // is parallel, indexed by TextureLocation::textureIndex; mXboxTextures
+        // holds the already-POT-resampled RGBA8 source save() compresses to
+        // DXT1 per-entry.
+        std::vector<std::vector<uint8_t>> mXboxTextures;
+        std::vector<bool> mXboxTexturesMasked;
+        std::vector<uint32_t> mXboxTextureWidths;  // POT, post-resample
+        std::vector<uint32_t> mXboxTextureHeights; // POT, post-resample
+
+        // Set by addTexture() the moment a source texture's native
+        // width/height exceeds NV2A's 4096 real texture-edge maximum -
+        // same "warn now, save() refuses to write" discipline the old
+        // atlas's own mAtlasOverflowed flag used (removed with the atlas
+        // itself, v9). Without this, nearestPowerOfTwo()'s own 4096 ceiling
+        // would silently clamp an out-of-range texture instead of failing
+        // the bake loudly.
+        bool mXboxTextureOversized = false;
     };
 
 } // namespace formats

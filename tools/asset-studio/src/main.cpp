@@ -375,6 +375,33 @@ int main(int argc, char *argv[]) {
     std::cout << " - MPAK Output:   " << outputPath << "\n\n";
 
     if (packUi) {
+        // codex review, real finding: packMenuBackground's Xbox branch
+        // repurposes MpakHeader6::lenTextureData for its own single DXT
+        // blob (UiPacker.cpp's own comment there), written AFTER its meta
+        // block (lenArray64) - but the real MPAK v9 per-texture-map
+        // contract (tools/inspect_mpak.cpp's cursor walk, matching
+        // PakManager.cpp save()'s own write order) places lenTextureData
+        // BEFORE any array64 content and expects it to mean "the per-
+        // texture-directory map's own DXT blob", not an unrelated single-
+        // blob archive's. The two writers share one struct's field names
+        // but not one section-order contract, so a --pack-ui --target
+        // xbox archive's declared layout and its real byte layout
+        // disagree - inspect_mpak.exe (correctly, per the real map
+        // contract) refuses to parse it. Reject loudly here rather than
+        // emit an archive whose own format is internally inconsistent -
+        // matching --pack-menu --target xbox's own established rejection
+        // pattern immediately above. Real fix (a distinct, self-consistent
+        // menu-background archive shape, or aligning this writer with the
+        // real v9 contract) is tracked as an open follow-up,
+        // docs/r3d/divergences.md #101.
+        if (pak.isXboxTarget()) {
+            std::cerr << "--pack-ui --target xbox is not yet supported: its Xbox archive layout "
+                          "conflicts with MPAK v9's own per-texture-map field contract (lenTextureData "
+                          "means different things to the two writers, in a different section order) - "
+                          "tools/inspect_mpak.exe correctly refuses to parse the result. "
+                          "See docs/r3d/divergences.md #101.\n";
+            return 1;
+        }
         if (!formats::UiPacker::packMenuBackground(gameDir, outputPath, pak.isXboxTarget())) {
             return 1;
         }

@@ -73,12 +73,27 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	const uint32_t lenExtraLightBlocks = nv2a ? 2 * 20u : 0u; // 2 MpakExtraLightBlock records
 	const uint32_t lightmapW = 4, lightmapH = 4, lightmapLayers = nv2a ? 1u : 0u;
 	const uint32_t lenLightmap = nv2a ? lightmapW * lightmapH * 4 : 0u;
-	const uint32_t lenAtlas = ( nv2a && targetXbox ) ? 128u : 0u;   // arbitrary, only needs to be > 0
+	// v9: one real per-texture DXT1 directory entry + its matching 4x4 (8-byte)
+	// DXT1 blob + one texture-draw batch, Xbox target only - replaces the old
+	// shared-atlas lump (lenAtlas). faceCount/numOriginalFaces below is 2,
+	// matching lenFaces/sizeof(dface_t), so the batch's own faceCount and the
+	// faceRemap table's own element count both refer to the same real face set.
+	const uint32_t numOriginalFaces = 2u;
+	const qboolean texturedXbox = ( nv2a && targetXbox );
+	const uint32_t lenTextureDir = texturedXbox ? (uint32_t)sizeof( mpak_texture_info_t ) : 0u; // 1 entry
+	const uint32_t lenTextureData = texturedXbox ? 8u : 0u; // 4x4 DXT1 = width*height/2
+	const uint32_t lenBatches = texturedXbox ? (uint32_t)sizeof( mpak_texture_batch_t ) : 0u; // 1 batch
+	// v9: BspParser's face sort (and this table) runs in the shared nv2a face
+	// loop regardless of target - PakManager.cpp save()'s own comment - so
+	// this is written for BOTH targets whenever the nv2a profile is active,
+	// unlike the three fields above which are Xbox-only.
+	const uint32_t lenFaceRemap = nv2a ? numOriginalFaces * (uint32_t)sizeof( uint32_t ) : 0u;
 	const uint32_t lenArray256 = ( nv2a && !targetXbox ) ? 96u : 0u; // arbitrary; exercises a non-first PC array
 
 	first_sector_t sector;
 	fs_offset_t cursor;
-	fs_offset_t entitiesOffset, planesOffset, lightmapOffset, texinfoOffset, textureOffset;
+	fs_offset_t entitiesOffset, planesOffset, lightmapOffset, texinfoOffset;
+	fs_offset_t textureDirOffset, textureDataOffset, batchesOffset, faceRemapOffset, arrayOffset;
 	fs_offset_t vertexesOffset, edgesOffset, surfedgesOffset, facesOffset, lightingOffset, miptexOffset;
 	fs_offset_t extraLightBlocksOffset;
 	byte *buf;
@@ -96,7 +111,12 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	sector.desc.lightmapFormat = 0; // RGBA8
 	sector.desc.lenLightmapAtlas = lenLightmap;
 	sector.desc.lenTexinfo = lenTexinfo;
-	sector.desc.lenAtlas = lenAtlas;
+	sector.desc.textureCount = texturedXbox ? 1u : 0u;
+	sector.desc.lenTextureDir = lenTextureDir;
+	sector.desc.lenTextureData = lenTextureData;
+	sector.desc.batchCount = texturedXbox ? 1u : 0u;
+	sector.desc.lenBatches = lenBatches;
+	sector.desc.lenFaceRemap = lenFaceRemap;
 	sector.desc.lenArray256 = lenArray256;
 	sector.desc.lenVertexes = lenVertexes;
 	sector.desc.lenEdges = lenEdges;
@@ -122,14 +142,26 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	cursor += RoundUpSector( lenPlanes );
 	cursor += RoundUpSector( 0 ); // clipnodes
 	cursor += RoundUpSector( 0 ); // models
-	textureOffset = cursor;
+	// v9: texture directory/data/batches (Xbox only), then the face remap
+	// (both targets) - matches mpak_layout.c's own write-order walk, which
+	// in turn matches PakManager.cpp save()'s real write order.
+	textureDirOffset = textureDataOffset = batchesOffset = 0;
 	if( targetXbox )
 	{
-		cursor += RoundUpSector( lenAtlas );
+		textureDirOffset = cursor;
+		cursor += RoundUpSector( lenTextureDir );
+		textureDataOffset = cursor;
+		cursor += RoundUpSector( lenTextureData );
+		batchesOffset = cursor;
+		cursor += RoundUpSector( lenBatches );
 	}
-	else
+	faceRemapOffset = cursor;
+	cursor += RoundUpSector( lenFaceRemap );
+	arrayOffset = 0;
+	if( !targetXbox )
 	{
 		cursor += RoundUpSector( 0 ); // array64
+		arrayOffset = cursor;
 		cursor += RoundUpSector( lenArray256 );
 		cursor += RoundUpSector( 0 ); // array512
 	}
@@ -188,9 +220,40 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	{
 		memset( buf + lightmapOffset, 0xAA, lenLightmap );
 		if( targetXbox )
-			memset( buf + textureOffset, 0x22, lenAtlas );
+		{
+			// v9: one real 4x4 DXT1 texture directory entry + its matching
+			// 8-byte blob + one texture-draw batch covering both real faces.
+			mpak_texture_info_t texInfo;
+			mpak_texture_batch_t batch;
+
+			texInfo.width = 4;
+			texInfo.height = 4;
+			texInfo.log2Width = 2;
+			texInfo.log2Height = 2;
+			texInfo.dataLength = lenTextureData;
+			memcpy( buf + textureDirOffset, &texInfo, sizeof( texInfo ));
+			memset( buf + textureDataOffset, 0x22, lenTextureData );
+
+			batch.textureIndex = 0;
+			batch.startFace = 0;
+			batch.faceCount = numOriginalFaces;
+			batch.startIndex = 0;
+			batch.indexCount = 6;
+			memcpy( buf + batchesOffset, &batch, sizeof( batch ));
+		}
 		else
-			memset( buf + textureOffset + RoundUpSector( 0 ), 0x33, lenArray256 ); // skip the empty array64 slot
+		{
+			memset( buf + arrayOffset, 0x33, lenArray256 );
+		}
+		if( lenFaceRemap > 0 )
+		{
+			// v9: a real bijection over the two faces (the inverse permutation
+			// a texture-ID sort would produce), not just nonzero filler -
+			// written for BOTH targets, matching PakManager.cpp save()'s own
+			// "the face sort is unconditional" comment.
+			uint32_t remap[2] = { 1, 0 };
+			memcpy( buf + faceRemapOffset, remap, sizeof( remap ));
+		}
 		memset( buf + extraLightBlocksOffset, 0x99, lenExtraLightBlocks );
 	}
 
@@ -275,17 +338,58 @@ static qboolean TestValidArchive( qboolean targetXbox, qboolean nv2a )
 	{
 		if( targetXbox )
 		{
-			if( layout.atlas.length != header.lenAtlas || layout.array64.length != 0 ||
-				layout.array256.length != 0 || layout.array512.length != 0 )
+			if( layout.textureDir.length != header.lenTextureDir ||
+				layout.textureData.length != header.lenTextureData ||
+				layout.batches.length != header.lenBatches ||
+				layout.array64.length != 0 || layout.array256.length != 0 || layout.array512.length != 0 )
 			{
 				printf( "TestValidArchive(xbox/nv2a): texture branch populated the wrong fields\n" );
 				ok = false;
 			}
+			else
+			{
+				// v9: resolve the real directory entry/batch this test wrote,
+				// not just their lengths.
+				mpak_texture_info_t readInfo;
+				mpak_texture_batch_t readBatch;
+
+				memcpy( &readInfo, buf + layout.textureDir.offset, sizeof( readInfo ));
+				memcpy( &readBatch, buf + layout.batches.offset, sizeof( readBatch ));
+				if( readInfo.width != 4 || readInfo.height != 4 ||
+					readInfo.log2Width != 2 || readInfo.log2Height != 2 ||
+					readInfo.dataLength != header.lenTextureData ||
+					buf[layout.textureData.offset] != 0x22 ||
+					readBatch.faceCount != 2 || readBatch.textureIndex != 0 )
+				{
+					printf( "TestValidArchive(xbox/nv2a): texture directory/batch resolved to the wrong bytes\n" );
+					ok = false;
+				}
+			}
 		}
-		else if( layout.array256.length != header.lenArray256 || layout.atlas.length != 0 )
+		else if( layout.array256.length != header.lenArray256 ||
+			layout.textureDir.length != 0 || layout.textureData.length != 0 || layout.batches.length != 0 )
 		{
 			printf( "TestValidArchive(pc/nv2a): texture branch populated the wrong fields\n" );
 			ok = false;
+		}
+
+		// v9: the face remap is written for BOTH targets in the nv2a profile
+		// (PakManager.cpp save()'s own "the face sort is unconditional"
+		// comment) - a real bijection, not just a nonzero length.
+		if( layout.faceRemap.length != header.lenFaceRemap )
+		{
+			printf( "TestValidArchive(%s): faceRemap lump length mismatch\n", Label( targetXbox, nv2a ));
+			ok = false;
+		}
+		else
+		{
+			uint32_t remap[2];
+			memcpy( remap, buf + layout.faceRemap.offset, sizeof( remap ));
+			if( remap[0] != 1 || remap[1] != 0 )
+			{
+				printf( "TestValidArchive(%s): faceRemap lump resolved to the wrong bytes\n", Label( targetXbox, nv2a ));
+				ok = false;
+			}
 		}
 
 		if( layout.extraLightBlocks.length != header.lenExtraLightBlocks ||
@@ -295,7 +399,8 @@ static qboolean TestValidArchive( qboolean targetXbox, qboolean nv2a )
 			ok = false;
 		}
 	}
-	else if( layout.atlas.length != 0 || layout.array256.length != 0 || layout.lightmapAtlas.length != 0 ||
+	else if( layout.textureDir.length != 0 || layout.textureData.length != 0 || layout.batches.length != 0 ||
+		layout.faceRemap.length != 0 || layout.array256.length != 0 || layout.lightmapAtlas.length != 0 ||
 		layout.extraLightBlocks.length != 0 )
 	{
 		printf( "TestValidArchive(%s): core profile must carry no baked block\n", Label( targetXbox, nv2a ));

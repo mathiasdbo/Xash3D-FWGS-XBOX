@@ -491,9 +491,17 @@ bool UiPacker::packMenuBackground(const std::string& inputDir, const std::string
     if (isXbox) {
         header.count64 = 1;
         header.lenArray64 = static_cast<uint32_t>(meta.size());
-        header.atlasWidth = totalW;
-        header.atlasHeight = totalH;
-        header.lenAtlas = static_cast<uint32_t>(dxt.size());
+        // MpakHeader.h's v8 -> v9 bump removed atlasWidth/atlasHeight/lenAtlas
+        // (the map-baking atlas this archive type never used anyway - it
+        // always carried its own totalW/totalH inside `meta` above, written
+        // a few lines up). `lenTextureData` is repurposed here for this
+        // archive's own single DXT blob byte length, a reasonable fit for a
+        // v9 field defined as "total bytes of all per-texture DXT1 blobs" -
+        // this background has exactly one. Nothing in tools/asset-studio
+        // reads it back out; if an engine-side menu-background loader reads
+        // this field directly, it needs a matching update outside this
+        // tool's scope.
+        header.lenTextureData = static_cast<uint32_t>(dxt.size());
     } else {
         header.count64 = 1;
         header.lenArray64 = static_cast<uint32_t>(meta.size());

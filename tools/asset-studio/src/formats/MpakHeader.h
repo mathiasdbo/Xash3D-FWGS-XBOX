@@ -81,6 +81,42 @@ namespace formats {
     // IMPORTANT below) rather than removed, since removing a field is a
     // version bump this scope change does not otherwise need.
     //
+    // v8 -> v9: the Xbox diffuse-texture pipeline stops sharing one 2048x2048
+    // DXT1 atlas per map. The atlas's own per-vertex placement remap
+    // (`Vertex::rect`, normalized ATLAS-space [x,y,w,h]) could only represent
+    // ONE texture repeat per face - `rect[0] + frac(u)*rect[2]` collapses
+    // every repeat past the first back onto the same fractional value, which
+    // is wrong on any tiling floor/wall, and subdividing tiled faces at tile
+    // boundaries to work around it blows the u16 vertex-index limit on large
+    // outdoor maps (crossfire's worst face alone needs ~22,560 tiles).
+    // Replaced with NV2A's native hardware WRAP texture addressing (needs no
+    // atlas and no remap - the GPU tiles for free), which means each source
+    // texture must stand alone as its OWN independently-sized, independently
+    // POT-resampled image (hardware WRAP + BASE_SIZE_U/V sizing both require
+    // this - X9-J's own bring-up already established BASE_SIZE_U/V as
+    // independent per-axis log2 fields, divergences.md #100).
+    // `atlasWidth`/`atlasHeight`/`lenAtlas` are GONE; in their place,
+    // `textureCount`/`lenTextureDir`/`lenTextureData` describe a directory of
+    // per-texture `MpakTextureInfo` records plus their concatenated DXT1
+    // blobs (still linear/unswizzled, same as the atlas always shipped -
+    // swizzling stays UiPacker's menu-background-only trick,
+    // `TextureOpt::swizzleNV2A`'s one real call site), and
+    // `batchCount`/`lenBatches` describe the `MpakTextureBatch` list a
+    // per-texture draw path needs to group faces by texture. `Vertex::rect[4]`
+    // (the now-dead atlas remap) is removed too - 64 bytes -> 48.
+    // Since texture is now the PRIMARY sort key for draw batching,
+    // BspParser.cpp reorders MpakFaceInfo/vertices/indices/FaceDrawCmd by
+    // (textureIndex, PVS leaf) instead of leaving them in raw LUMP_FACES
+    // order - `lenFaceRemap` is the resulting originalToSortedFaceIndex[]
+    // inverse permutation, one uint32_t per ORIGINAL-order face. This table is
+    // REQUIRED reading for anyone indexing this archive's faces with an index
+    // that came from the classic BSP lumps (LUMP_LEAFS/LUMP_MARKSURFACES, or
+    // the engine's own runtime msurface_t array) rather than from this
+    // archive's own sorted order - ref/nv2a's nv2a_mark_leaves() is exactly
+    // this case (it derives a face index from `surf - world->surfaces`, a
+    // classic-lump-order index) and must translate every such index through
+    // this table before touching anything sized by the sorted face count.
+    //
     // v7 -> v8: multi-lightstyle NV2A atlas blocks (docs/r3d/fork-plan.md's
     // XB section, "Lightstyles" census). BspParser.cpp's own baked atlas
     // has only ever held ONE lightmap block per face (`dface_t::styles[0]`),
@@ -163,7 +199,7 @@ namespace formats {
     // are a second line of defense.
     struct MpakHeader6 {
         char magic[4] = {'M', 'P', 'A', 'K'};
-        uint32_t version = 8;
+        uint32_t version = 9;
         uint32_t headerSize = 0;      // sizeof(MpakHeader6); set in PakManager::save just before writing
         uint32_t bakerBuildId = MPAK_BAKER_BUILD_ID;
         uint32_t flags = 0; // 1 = Xbox, 0 = PC
@@ -180,9 +216,15 @@ namespace formats {
         uint32_t lenClipnodes = 0;
         uint32_t lenModels = 0;
 
-        uint32_t atlasWidth = 0;
-        uint32_t atlasHeight = 0;
-        uint32_t lenAtlas = 0;
+        // --- MPAKv9 additions: per-texture Xbox draws (see the v8 -> v9 note
+        // above) replace the old shared-atlas fields (atlasWidth/atlasHeight/
+        // lenAtlas, removed) in this exact position. ---
+        uint32_t textureCount = 0;   // unique per-texture DXT1 images this map actually uses
+        uint32_t lenTextureDir = 0;  // textureCount * sizeof(MpakTextureInfo)
+        uint32_t lenTextureData = 0; // total bytes of all per-texture DXT1 blobs, concatenated back-to-back in directory order
+        uint32_t batchCount = 0;     // texture-draw batches; == textureCount architecturally (see MpakTextureBatch's own doc comment), kept explicit for robustness/clarity
+        uint32_t lenBatches = 0;     // batchCount * sizeof(MpakTextureBatch)
+        uint32_t lenFaceRemap = 0;   // (original BSP face count) * sizeof(uint32_t) - originalToSortedFaceIndex[]; the original face count is lenFaceRemap / sizeof(uint32_t)
 
         uint32_t count64 = 0;
         uint32_t lenArray64 = 0;
@@ -220,6 +262,56 @@ namespace formats {
         // --- MPAKv8 addition (see the v7 -> v8 note above; nv2a profile only) ---
         uint32_t lenExtraLightBlocks = 0; // MpakExtraLightBlock[], one per face per extra (non-style-0) lightstyle
     };
+
+    // v9: one entry per unique texture this map actually uses - the Xbox
+    // per-texture-WRAP replacement for the old shared atlas (see MpakHeader6's
+    // v8 -> v9 note above). Directory order IS the write order of the
+    // `lenTextureData` blob: this entry's own byte offset into that blob is
+    // the running sum of `dataLength` over every PRIOR directory entry - no
+    // stored offset field, matching every other section-length-only lump this
+    // format already uses (see the "no offset table" note above).
+#pragma pack(push, 1)
+    struct MpakTextureInfo {
+        uint32_t width;      // POT, rounded UP (never down - see
+                              // nearestPowerOfTwo's own comment,
+                              // PakManager.cpp) INDEPENDENTLY per axis from
+                              // the source's native size (NV2A's
+                              // BASE_SIZE_U/BASE_SIZE_V are independent log2
+                              // fields - textures need not be square; X9-J's
+                              // own bring-up already established this,
+                              // divergences.md #100)
+        uint32_t height;     // POT, rounded up independently per axis
+        uint32_t log2Width;  // log2(width) - the BASE_SIZE_U value
+        uint32_t log2Height; // log2(height) - the BASE_SIZE_V value
+        uint32_t dataLength; // this texture's own DXT1 (4 bits/texel) byte length, == width*height/2
+    };
+#pragma pack(pop)
+    static_assert(sizeof(MpakTextureInfo) == 20, "MpakTextureInfo must stay a stable, tightly packed 20 bytes - the C reader computes textureCount from lenTextureDir / 20");
+
+    // v9: one entry per contiguous run of same-texture faces in the SORTED
+    // face order (see MpakHeader6's v8 -> v9 note above) - a per-texture
+    // hardware-WRAP draw path needs exactly this to bind one texture and
+    // issue one draw call per batch. `batchCount` <= `textureCount`, NOT
+    // ==: texture ID is the sort's PRIMARY key, so every texture that IS
+    // used by at least one face lands in exactly one contiguous run - but
+    // `textureDir` (built from every miptex the map references at all,
+    // BspParser.cpp) can contain entries no face's texinfo ever actually
+    // uses, and those get no batch (real, measured: c1a0 164 textures / 129
+    // batches, crossfire 120/91 - 15-18% of baked texture-data bytes on
+    // both are for entries with zero draw calls, codex-review finding).
+    // `batchCount` is still its own explicit field, matching this format's
+    // general preference for explicit lengths over inferred ones - just
+    // don't assume it equals `textureCount`.
+#pragma pack(push, 1)
+    struct MpakTextureBatch {
+        uint32_t textureIndex; // index into the texture directory (MpakTextureInfo[])
+        uint32_t startFace;    // first face, in SORTED/archive order, belonging to this batch
+        uint32_t faceCount;    // number of faces (sorted order) in this batch - contiguous by construction
+        uint32_t startIndex;   // first index in the shared index buffer for this batch (== FaceDrawCmd[startFace].start_index)
+        uint32_t indexCount;   // total indices for this batch (== sum of FaceDrawCmd[startFace..startFace+faceCount).index_count, contiguous by construction)
+    };
+#pragma pack(pop)
+    static_assert(sizeof(MpakTextureBatch) == 20, "MpakTextureBatch must stay a stable, tightly packed 20 bytes - the C reader computes batchCount from lenBatches / 20");
 
     // GoldSrc BSP30 SURF_* flags (common/bspfile.h in the canonical Xash3D-FWGS
     // clone) - the subset that is STATIC per-face (decidable at bake time from

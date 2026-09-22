@@ -12,8 +12,10 @@ boundary (PakManager.cpp's writePadded lambda), the vertex/index geometry
 block sits between the header and the first BSP lump with no length field
 of its own (its size is vCount/iCount times a fixed per-record size the
 header never states), and the texture block is target-dependent (Xbox
-writes one DXT atlas; PC writes three separate DXT arrays) - none of
-which "walk the header's fields in order" would get right.
+writes a per-texture DXT1 directory + data blob + draw-batch table, one
+entry per unique texture the map actually uses; PC writes three separate
+DXT texture arrays) - none of which "walk the header's fields in order"
+would get right.
 
 This file is the single place that layout math lives, verified against a
 real baked archive (filesystem/tests/mpak_layout.c) rather than derived
@@ -49,7 +51,7 @@ extern "C" {
 #endif
 
 #define MPAK_LAYOUT_MAGIC   "MPAK"
-#define MPAK_LAYOUT_VERSION 8u
+#define MPAK_LAYOUT_VERSION 9u
 #define MPAK_SECTOR_SIZE    2048u
 #define MPAK_TARGET_XBOX_FLAG 1u  // MpakHeader6::flags bit 0 - 1 = Xbox, 0 = PC
 #define MPAK_FLAG_NV2A_BLOCK  2u  // flags bit 1 - the baked v6 block is populated (X9 profile)
@@ -91,9 +93,34 @@ typedef struct
 	uint32_t lenClipnodes;
 	uint32_t lenModels;
 
-	uint32_t atlasWidth;
-	uint32_t atlasHeight;
-	uint32_t lenAtlas;
+	// --- v9: per-texture DXT1 directory + texture-draw batches, replacing
+	// the single shared atlas (atlasWidth/atlasHeight/lenAtlas, v6-v8) -
+	// see filesystem/mpak_layout.h's own file header / ref/nv2a/r_context.c's
+	// nv2a_draw_map_geometry() for why: a shared atlas needs a per-vertex
+	// atlas-rect remap that breaks on any face tiling more than one texture
+	// repeat, and subdividing tiled faces to fix it overflows the u16 vertex
+	// index on large outdoor maps. Replaced by independent, natively
+	// hardware-WRAP-addressed per-texture DXT1 images. Xbox target only -
+	// PC keeps array64/lenArray64/etc. below, completely unaffected (its
+	// own Texture2DArray path never used the atlas or its rect[] remap to
+	// begin with).
+	uint32_t textureCount;   // unique per-texture DXT1 images actually used by this map
+	uint32_t lenTextureDir;  // textureCount * sizeof(mpak_texture_info_t)
+	uint32_t lenTextureData; // total bytes of all per-texture DXT1 blobs, concatenated back-to-back in directory order
+	uint32_t batchCount;     // texture-draw batches. Architecturally == textureCount (texture ID is the
+	                         // PRIMARY sort key, so every used texture's faces land in exactly one
+	                         // contiguous run) - kept as an explicit field for robustness/clarity rather
+	                         // than inferred, matching this format's general preference for explicit lengths.
+	uint32_t lenBatches;     // batchCount * sizeof(mpak_texture_batch_t)
+	uint32_t lenFaceRemap;   // (original BSP face count) * sizeof(uint32_t) - the
+	                         // originalToSortedFaceIndex[] table (baker sorts faces by texture ID for
+	                         // batching; this is its inverse permutation, indexed by the ORIGINAL
+	                         // LUMP_FACES position). The original face count is self-describing from
+	                         // this length (lenFaceRemap / sizeof(uint32_t)) - no separate header field.
+	                         // Mandatory: ref/nv2a's own PVS marking (nv2a_mark_leaves) computes a face
+	                         // index from the engine's OWN classic-lump-derived msurface_t array (ORIGINAL
+	                         // order, independent of this sort) and must translate it through this table
+	                         // before indexing anything built from the now-SORTED mpak face order.
 
 	uint32_t count64;
 	uint32_t lenArray64;
@@ -137,18 +164,85 @@ typedef struct
 // geometry block correctly), not its fields; mirrored in full anyway,
 // matching MpakHeader.h's own MpakFaceInfo precedent, so whatever reads
 // vertex data later doesn't have to duplicate this struct a second time.
+//
+// v9: `rect[4]` (the atlas-placement remap) is REMOVED - dead even on the
+// PC path, which always wrote it as the constant identity {0,0,1,1}, and
+// meaningless now that Xbox no longer shares one atlas either (see
+// mpak_header_t's own v9 note above). 48 bytes, was 64.
 typedef struct
 {
 	float    x, y, z;
 	float    u, v;
 	float    lu, lv;
 	uint32_t lightmap_layer;
-	float    rect[4];
 	uint32_t texture_layer;
 	uint32_t array_index;
 	uint32_t _pad;
 	uint32_t _pad2;
 } mpak_vertex_t;
+
+// Mirrors formats::MpakFaceInfo (tools/asset-studio/src/formats/MpakHeader.h)
+// byte-for-byte, 44 bytes - all members already fall on a 4-byte boundary
+// (styles[4] is exactly 4 bytes), so this needs no packing pragma either.
+// One entry per baked face, in the archive's own (X9-K: SORTED, not
+// original BSP) face order - the same order FaceDrawCmds/nv2a_map_faces
+// use. X9-K: ref/nv2a's own nv2a_load_map_geometry() reads only `flags`
+// (specifically MPAK_SURF_DRAWSKY) from this lump - the rest of this
+// mirror exists so a later reader doesn't have to re-derive the layout.
+typedef struct
+{
+	uint32_t flags;
+	int32_t  planenum;
+	int32_t  texinfo;
+	uint8_t  styles[4];
+	int32_t  lightmapmins[2];
+	int32_t  extents[2];
+	uint32_t lightmapPage;
+	uint32_t lightmapBlockX;
+	uint32_t lightmapBlockY;
+} mpak_face_info_t;
+
+// GoldSrc BSP30 SURF_* flags this format bakes into MpakFaceInfo::flags -
+// mirrors formats::SURF_DRAWSKY (MpakHeader.h). Only the one bit ref/nv2a
+// actually consumes is mirrored here; add more as real consumers need them.
+#define MPAK_SURF_DRAWSKY 0x0004u // texture name starts with "sky" - never has real geometry to show
+
+// v9: mirrors formats::MpakTextureInfo (tools/asset-studio/src/formats/
+// MpakHeader.h) byte-for-byte - one directory entry per unique per-texture
+// DXT1 image this map actually uses (Xbox target only). No stored byte
+// offset field: this entry's own physical offset into the texture-data
+// blob (mpak_layout_t::textureData) is the running sum of dataLength over
+// every PRIOR directory entry - matching this format's own "byte layout
+// order IS the format" convention (this file's own header comment) one
+// level down, inside a single lump instead of across the whole archive.
+// All-uint32_t, so - like mpak_header_t/mpak_vertex_t above - this needs
+// no packing pragma to match the C++ struct's own natural layout.
+typedef struct
+{
+	uint32_t width;      // POT, rounded UP (never down) independently per axis from the source's native size
+	uint32_t height;     // POT, rounded up (never down) independently per axis
+	uint32_t log2Width;  // log2(width) - NV097_SET_TEXTURE_FORMAT's BASE_SIZE_U field
+	uint32_t log2Height; // log2(height) - BASE_SIZE_V field
+	uint32_t dataLength; // this texture's own DXT1 byte length (width*height/2, DXT1 = 4 bits/texel)
+} mpak_texture_info_t;
+
+// v9: mirrors formats::MpakTextureBatch byte-for-byte - one texture-draw
+// batch per texture that at least one face actually uses, naming the
+// CONTIGUOUS run of SORTED-order faces (and the matching contiguous
+// shared-index-buffer range) that use it. Texture ID is the archive's own
+// primary sort key for faces, so every batch's own face/index range is
+// contiguous by construction - never interleaved with another batch's -
+// but batchCount is NOT guaranteed == textureCount: the texture directory
+// can contain entries (unreferenced miptexs) no face ever uses, which get
+// no batch at all.
+typedef struct
+{
+	uint32_t textureIndex; // index into the texture directory (mpak_layout_t::textureDir)
+	uint32_t startFace;    // first face, in SORTED/mpak order, belonging to this batch
+	uint32_t faceCount;    // number of faces (sorted order) in this batch
+	uint32_t startIndex;   // first index in the shared index buffer for this batch
+	uint32_t indexCount;   // total indices for this batch
+} mpak_texture_batch_t;
 
 // One lump's real (unpadded) extent within the archive. offset is
 // meaningless when length is 0 (an empty lump contributes no bytes at
@@ -172,7 +266,10 @@ typedef struct
 	mpak_lump_t planes;
 	mpak_lump_t clipnodes;
 	mpak_lump_t models;
-	mpak_lump_t atlas;        // Xbox target only
+	mpak_lump_t textureDir;   // v9, Xbox target only - mpak_texture_info_t[header.textureCount]
+	mpak_lump_t textureData;  // v9, Xbox target only - per-texture DXT1 blobs, back-to-back in directory order
+	mpak_lump_t batches;      // v9, Xbox target only - mpak_texture_batch_t[header.batchCount]
+	mpak_lump_t faceRemap;    // v9, Xbox target only - uint32_t[original BSP face count], originalToSortedFaceIndex[]
 	mpak_lump_t array64;      // PC target only
 	mpak_lump_t array256;     // PC target only
 	mpak_lump_t array512;     // PC target only

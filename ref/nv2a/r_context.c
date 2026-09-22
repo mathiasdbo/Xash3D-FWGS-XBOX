@@ -188,17 +188,108 @@ static uint32_t *nv2a_map_index_dwords;             /* Ordinary engine-pooled CP
                                                         sized to the real map's own iCount, not a fixed
                                                         bring-up cap. */
 static uint32_t  nv2a_map_dword_count;
-static void     *nv2a_map_atlas;
-static uint32_t  nv2a_map_atlas_width, nv2a_map_atlas_height, nv2a_map_atlas_pitch;
-/* log2 of the atlas dimensions, validated power-of-two at load
-   (nv2a_load_map_geometry) - the FORMAT word's BASE_SIZE_U/V fields
-   (deps/nxdk/lib/pbkit/nv_regs.h:581-582) are the ONLY size a compressed
-   (DXT1) texture has on NV2A; IMAGE_RECT/CONTROL1 size linear textures
-   only. Computed once here rather than per draw call: a property of the
-   loaded map, not of the frame. No reset in nv2a_free_map_resources() -
-   like nv2a_map_atlas_width/height these are gated by nv2a_map_ready and
-   rewritten on every successful load. */
-static uint32_t  nv2a_map_atlas_log2w, nv2a_map_atlas_log2h;
+
+/* X9-K: real per-texture NV2A hardware-WRAP addressing, replacing the
+   shared 2048x2048 DXT1 atlas (X9-B through X9-J) and its per-vertex
+   atlas-rect remap - see this function's own MPAK v9 citation below and
+   docs/r3d/fork-plan.md's X9-K entry for the full "architecture reversal"
+   account. One contiguous GPU-visible buffer holds every texture's own
+   DXT1 bytes back-to-back, directory order (mpak_texture_info_t::dataLength
+   summed) - MmAllocateContiguousMemoryEx, same allocation discipline the
+   old atlas used. */
+static void     *nv2a_map_texture_data;
+/* Directory entry for one per-texture DXT1 image: byte offset into
+   nv2a_map_texture_data (the running sum this module computes while
+   parsing - mpak_texture_info_t itself stores no offset, matching the
+   archive's own "byte layout order IS the format" convention one level
+   down) plus the BASE_SIZE_U/V log2 fields NV097_SET_TEXTURE_FORMAT needs
+   (a compressed texture's ONLY size on NV2A - see nv2a_draw_map_geometry's
+   own stage-0 comment, unchanged reasoning from the atlas era). */
+typedef struct
+{
+	fs_offset_t physOffset;
+	uint32_t    log2Width;
+	uint32_t    log2Height;
+} nv2a_map_texture_t;
+/* Fixed-capacity static arrays, not a heap allocation sized off the
+   header's own (validated) textureCount/batchCount the way nv2a_map_faces
+   is sized off face_count - deliberately, matching this file's own
+   established discipline for a bound this function cannot yet size
+   exactly (the atlasWidth > 4096 check has the same shape: a hard cap,
+   checked, not derived). 512 is a first, reasoned guess (retail HL1 maps
+   commonly cite low hundreds of unique textures at most, and
+   batchCount == textureCount architecturally - MpakHeader.h's own v9
+   note), not a measured bound: the Gate phase re-bakes the real 125-map
+   retail corpus and reports the true maximum, at which point this cap
+   should be revisited with a cited number, the same way every other
+   "reasonable guess pending real data" bound in this file already is. */
+#define NV2A_MAP_MAX_TEXTURES 512
+static nv2a_map_texture_t nv2a_map_textures[NV2A_MAP_MAX_TEXTURES];
+static uint32_t  nv2a_map_texture_count;
+
+/* One texture-draw batch: a contiguous run of SORTED-order faces (and the
+   matching contiguous shared-index-buffer range) that all use the same
+   texture - mirrors mpak_texture_batch_t (filesystem/mpak_layout.h)
+   field-for-field. See nv2a_draw_map_geometry() for how this replaces the
+   old single "draw the whole map, one texture" state setup with one
+   texture bind per batch. */
+typedef struct
+{
+	uint32_t textureIndex;
+	uint32_t startFace;
+	uint32_t faceCount;
+	uint32_t startIndex;
+	uint32_t indexCount;
+} nv2a_map_batch_t;
+#define NV2A_MAP_MAX_BATCHES 512 /* same "reasoned guess pending the Gate phase's real numbers" as
+                                     NV2A_MAP_MAX_TEXTURES above - batchCount == textureCount
+                                     architecturally, so this shares that cap's own reasoning. */
+static nv2a_map_batch_t nv2a_map_batches[NV2A_MAP_MAX_BATCHES];
+static uint32_t  nv2a_map_batch_count;
+
+/* X9-K, the CRITICAL correctness bridge the whole batching change hinges
+   on: ref/nv2a's own PVS marking (nv2a_mark_leaves) computes a face index
+   from the ENGINE's own classic-lump-derived msurface_t array - ORIGINAL
+   BSP face order, completely independent of and unaffected by this
+   archive's own per-texture sort. Before X9-K that index doubled as a
+   valid position into nv2a_map_faces/the vertex-remap output too, because
+   BspParser's face loop was unsorted; now that mpak-side data is in
+   SORTED order (grouped into the batches above), the two orders are two
+   different numbers for the same face, and every place that bridges
+   between them must translate explicitly instead of assuming "same face,
+   same index" the way X9-G/X9-H's own comments (nv2a_mark_leaves,
+   nv2a_draw_map_geometry's backface test) still literally say.
+   nv2a_map_face_remap is parsed directly from the archive's new faceRemap
+   lump (originalToSortedFaceIndex[], filesystem/mpak_layout.h's own v9
+   note) - ORIGINAL face index -> SORTED position, exactly what
+   nv2a_mark_leaves needs to translate world->surfaces' own index before
+   writing nv2a_map_face_visible. nv2a_map_face_remap_count is that
+   array's own length, i.e. the ORIGINAL BSP face count (self-describing
+   from lenFaceRemap/4, per the same header note) - kept as its own
+   variable rather than reusing nv2a_map_face_count (the SORTED/total
+   count) because indexing INTO this array needs the array's own real
+   bound, not a numerically-equal-by-construction different count, the
+   same "bounds-check against the thing you're actually indexing"
+   discipline this file applies everywhere else. */
+static uint32_t *nv2a_map_face_remap;
+static uint32_t  nv2a_map_face_remap_count;
+/* The INVERSE of nv2a_map_face_remap - SORTED position -> ORIGINAL BSP
+   face index - derived LOCALLY at load time (nv2a_load_map_geometry), by
+   inverting the archive's own table; NOT a separate on-disk lump (the
+   format only ships one direction - filesystem/mpak_layout.h's own v9
+   note). Needed because nv2a_draw_map_geometry's own backface test reads
+   world->surfaces[i] with `i` walking nv2a_map_faces in SORTED order -
+   the exact same order-mismatch nv2a_mark_leaves' own remap exists to
+   fix, just on the read side instead of the write side (see that
+   function's own X9-H comment, "nv2a_map_faces[i] and world->surfaces[i]
+   are the SAME face at the SAME index" - true before X9-K, false after,
+   for this call site too). NULL = remap unavailable, or the archive's own
+   table failed to invert as a clean bijection (nv2a_load_map_geometry
+   validates this, not trusted blindly) - the backface test then degrades
+   to "no backface test this batch", exactly like world == NULL already
+   does, never a wrong-surface read. */
+static uint32_t *nv2a_map_face_orig;
+
 static void     *nv2a_map_lightmap;     /* GPU-visible, RGBA8, no format conversion needed -
                                             bound on texture stage 1 as LU_IMAGE_A8B8G8R8 (the
                                             baker's [R,G,B,A] byte order read as a little-endian
@@ -276,6 +367,24 @@ typedef struct
 {
 	vec3_t   mins, maxs;
 	uint32_t dword_begin, dword_end;
+	qboolean sky; /* X9-K: MpakFaceInfo::flags & MPAK_SURF_DRAWSKY for this
+	                 face, read once at load (see the face-table build loop
+	                 below) - ref/nv2a has never implemented a real skybox,
+	                 and previously drew sky faces as ordinary textured
+	                 geometry with the WAD's literal "sky" placeholder
+	                 miptex; under the old shared-atlas remap that showed as
+	                 one flat stretched patch (unremarkable), but under
+	                 native WRAP addressing (X9-K) the same small texture
+	                 tiles at high frequency across a typically-huge sky
+	                 face - a real, visually obvious defect a live
+	                 comparison against ref_soft caught (crossfire's sky
+	                 rendered as a dense fence-like pattern instead of flat
+	                 sky colour). A sky face is excluded from every draw run
+	                 regardless of frustum/PVS visibility (see this file's
+	                 own per-face cull check) - matching the reference's own
+	                 minimum behaviour (never draw the sky's literal
+	                 placeholder texture as normal geometry), short of
+	                 implementing a real skybox, which stays future work. */
 } nv2a_map_face_t;
 
 static nv2a_map_face_t *nv2a_map_faces;      /* NULL = no per-face table this
@@ -624,6 +733,27 @@ static CVAR_DEFINE_AUTO( nv2a_r_nocullback, "1", 0, "ref_nv2a: disable backface 
    documents what verification is still owed. */
 static CVAR_DEFINE_AUTO( nv2a_r_noalphatest, "1", 0, "ref_nv2a: disable native alpha test for masked textures (default ON - unverified live)" );
 
+/* X9-K: retro/point-filtered diffuse, independent of the lightmap's own
+   filtering - mirrors ref/gl's own real, checked precedent: gl_texture_nearest
+   (ref/gl/gl_opengl.c:11) and gl_lightmap_nearest (ref/gl/gl_image.c:83) are
+   TWO SEPARATE cvars there, i.e. GoldSrc's own convention keeps the lightmap
+   smoothly interpolated even in a nearest/retro diffuse mode - not one convar
+   driving both stages. Named nv2a_r_ like every other module-local convar in
+   this file (nv2a_r_nocull/novis/lockpvs/nocullback/noalphatest above), not
+   ref/gl's own gl_texturemode: that name belongs to a differently-scoped,
+   differently-typed convar on the OTHER ref backend and would be misleading
+   reused here. Read fresh every nv2a_draw_map_geometry() call, same as
+   nv2a_r_noalphatest above, so toggling it mid-session takes effect on the
+   very next frame. NV097_SET_TEXTURE_FILTER's NEAREST value (0x01010000,
+   MIN=MAG=NEAREST) is the exact one X9-J already verified live this session
+   (tools/x4-triangle's own checkerboard, PR #126, merged 59cab2e7) - reused
+   here unchanged, not re-derived. Default "0" (off, unchanged - bilinear -
+   behaviour): this is a cosmetic dev/retro-look toggle, not a correctness
+   fix pending verification like nv2a_r_nocullback/nv2a_r_noalphatest above,
+   so it needs no "ship disabled until A/B'd" caution - the filter value
+   itself is already proven, only which stage it's applied to is new here. */
+static CVAR_DEFINE_AUTO( nv2a_r_texturenearest, "0", 0, "ref_nv2a: point-filter the diffuse stage only (lightmap always stays bilinear)" );
+
 /* The real, live camera eye position, captured once per real frame by
    GL_RenderFrame alongside nv2a_map_viewproj/nv2a_frustum - needed here
    because nv2a_draw_map_geometry() (called later the same frame, from
@@ -777,12 +907,17 @@ nothing to reuse since they carry no linkage.
 This mirror walks every section in the SAME order for the SAME reason the
 real one does (no offset table - byte order IS the format), but only
 CAPTURES the ones this slice actually reads (vertices, indices,
-faceDrawCmds, atlas, lightmapAtlas); every other section still has to be
-stepped over correctly to reach the ones that matter. X9-F adds
-faceDrawCmds to the capture list - X9-D's own comment here used to say it
-was unneeded (the whole shared index buffer draws with no per-face lookup
-at all), which was true until frustum culling needed exactly that lookup
-to skip ranges. Verified independently against a real baked archive
+faceDrawCmds, the v9 per-texture directory/data/batches/faceRemap
+quartet, lightmapAtlas); every other section still has to be stepped over
+correctly to reach the ones that matter. X9-F adds faceDrawCmds to the
+capture list - X9-D's own comment here used to say it was unneeded (the
+whole shared index buffer draws with no per-face lookup at all), which
+was true until frustum culling needed exactly that lookup to skip ranges.
+X9-K replaces the single shared atlas lump with four v9 lumps in the SAME
+relative position (filesystem/mpak_layout.h's own v9 note has the full
+format account) - textureDir/textureData/batches/faceRemap, still Xbox-
+target only, still walked in the same order the header declares their
+length fields. Verified independently against a real baked archive
 (crossfire.mpak, nv2a profile) by hand in Python before writing this - the
 final cursor landed exactly on the real file size and the computed
 offsets read back real, sane vertex/index data - see
@@ -799,8 +934,15 @@ typedef struct
 	mpak_lump_t indices;
 	mpak_lump_t faceDrawCmds; /* X9-F: captured for frustum culling - see
 	                              nv2a_map_face_t's own declaration comment. */
-	mpak_lump_t atlas;
+	mpak_lump_t textureDir;   /* X9-K: mpak_texture_info_t[header->textureCount] */
+	mpak_lump_t textureData;  /* X9-K: per-texture DXT1 blobs, back-to-back, directory order */
+	mpak_lump_t batches;      /* X9-K: mpak_texture_batch_t[header->batchCount] */
+	mpak_lump_t faceRemap;    /* X9-K: uint32_t[original BSP face count], originalToSortedFaceIndex[] */
 	mpak_lump_t lightmapAtlas;
+	mpak_lump_t faceInfo;     /* X9-K: mpak_face_info_t[nv2a_map_face_count], SORTED order - only
+	                              ::flags (MPAK_SURF_DRAWSKY) is read; this lump exists in every archive
+	                              back to v6 but was never captured by this simplified layout mirror
+	                              until the sky-skip fix needed it. */
 } nv2a_mpak_geometry_t;
 
 static qboolean nv2a_mpak_place( fs_offset_t fileSize, fs_offset_t *cursor, uint64_t length, mpak_lump_t *out )
@@ -841,9 +983,17 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenModels, &skip )) return false;
 
 	if( !( header->flags & MPAK_TARGET_XBOX_FLAG ))
-		return false; /* PC-target archive - no atlas lump at all, nothing this slice can draw */
+		return false; /* PC-target archive - no per-texture/batch lumps at all, nothing this slice can draw */
 
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenAtlas, &out->atlas )) return false;
+	/* X9-K: the per-texture DXT1 directory, its concatenated data blob, the
+	   texture-draw batch table, and the original->sorted face-remap table -
+	   in this exact order, the same order their length fields appear in
+	   the header (filesystem/mpak_layout.h's own v9 note), replacing the
+	   single lenAtlas placement this function used through X9-J. */
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenTextureDir, &out->textureDir )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenTextureData, &out->textureData )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenBatches, &out->batches )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceRemap, &out->faceRemap )) return false;
 
 	/* X9-C: continue the walk far enough to reach lightmapAtlas - assetDict
 	   and assetData are always empty under X2's own narrowed scope
@@ -853,6 +1003,12 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenAssetData, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenEntities, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLightmapAtlas, &out->lightmapAtlas )) return false;
+
+	/* X9-K sky-skip fix: lenFaceInfo is the very next header field after
+	   lenLightmapAtlas (mpak_layout.h's own field order) - one more step is
+	   all that's needed to reach it; nothing after it (lenTexinfo onward)
+	   is read by this module, so the walk still stops here. */
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceInfo, &out->faceInfo )) return false;
 
 	return true;
 }
@@ -1141,26 +1297,143 @@ static void nv2a_draw_index_range( uint32_t begin, uint32_t end )
 	}
 }
 
+/* X9-K: snaps a whole BATCH's own [startIndex, startIndex+indexCount)
+   LOGICAL index range outward to a dword-aligned, whole-triangle-aligned
+   range, for direct submission through nv2a_draw_index_range() - the
+   exact same 6-logical-index/3-dword snap nv2a_map_face_t's own
+   declaration comment already establishes for a SINGLE face (6 = lcm(2,3):
+   simultaneously a dword boundary, since each dword packs two indices,
+   AND a whole-triangle boundary), applied here to a whole batch's own
+   combined range instead. Used only when no per-face culling table exists
+   for this map (or it doesn't cover this batch), or nv2a_r_nocull is set -
+   the per-face path in nv2a_draw_map_geometry() uses nv2a_map_faces' own
+   already-snapped dword_begin/dword_end per face instead.
+
+   Codex review, real finding, now fixed at the source: through the first
+   X9-K cut, neither this function's own outward snap NOR the per-face
+   path's snap actually stayed inside this batch's own range - each
+   batch's [startIndex, startIndex+indexCount) came straight from
+   BspParser.cpp's face-sort/emit pass with no alignment guarantee at
+   all, so an unaligned boundary let either snap round 1-2 triangles into
+   the NEXT batch and draw them with the wrong (that batch's) bound
+   texture, a visible seam at nearly every texture-batch boundary on a
+   multi-textured map. The comment that used to stand here claimed the
+   per-face path was "exact rather than merely an upper bound" - true of
+   the snap arithmetic in isolation, false of what it actually stayed
+   inside once each batch bound its own texture (X9-K). Fixed on the
+   BAKER side, not here: tools/asset-studio/src/formats/BspParser.cpp now
+   pads every batch's own contributed index run to an exact multiple of 6
+   the moment that batch is known to be complete (absorbed into its own
+   last real face's FaceDrawCmd.index_count, so the FaceDrawCmds table
+   stays an exact, gapless partition of the index buffer - see that
+   file's own comment at the padding site). Batches are contiguous by
+   construction, so padding every batch's own end also aligns the very
+   next batch's own start - which is what makes BOTH this function's
+   outward snap and the per-face path's per-face snap exact again,
+   never spilling past a batch boundary, for the same underlying reason
+   this comment used to (incorrectly) assume for free. */
+static void nv2a_batch_dword_range( uint32_t start_index, uint32_t index_count, uint32_t dword_count, uint32_t *out_begin, uint32_t *out_end )
+{
+	*out_begin = ( start_index / 6 ) * 3;
+	*out_end   = (( start_index + index_count + 5 ) / 6 ) * 3;
+	if( *out_end > dword_count )
+		*out_end = dword_count;
+}
+
+/* X9-K codex review, real finding: this used to be inlined at the top of
+   nv2a_draw_map_geometry()'s per-batch loop and pushed unconditionally,
+   once per batch, BEFORE either draw branch below had checked whether
+   that batch has anything surviving frustum+PVS culling to draw - on
+   c1a0.mpak/crossfire.mpak (129/91 batches respectively) that is a
+   guaranteed ~100+ texture-stage reprogram every frame regardless of
+   camera position, independent of what X9-F/G/H's own culling work
+   already established was actually visible. Split out here so both draw
+   branches can call it lazily, exactly once, only once they know a real
+   draw call is about to happen - see their own call sites below.
+
+   Texture stage 0: this batch's OWN per-texture DXT1 image, natively
+   hardware-WRAP-addressed - see this file's own header comment and
+   nv2a_load_map_geometry's own top-of-function comment for the full "why
+   per-texture instead of one shared atlas" account. Same COLOR/CONTROL0
+   shape the old shared atlas used (X9-B through X9-J, that block's own
+   citations for where each register value came from still apply) -
+   OFFSET/BASE_SIZE_U/V are per-batch instead of per-map, and ADDRESS is
+   WRAP (0x00010101) instead of CLAMP (0x00030303): the whole point of
+   going per-texture is hardware tiling in silicon, no shader-side wrap
+   and no atlas-rect remap needed. Stage 1 (the lightmap, bound once per
+   frame, outside the batch loop) stays CLAMP - completely unaffected,
+   out of scope for this change. CONTROL1 pitch / IMAGE_RECT are kept for
+   the SAME reason the old shared-atlas path always kept them (ignored
+   for a compressed format on the sources checked so far, but
+   abaire/nxdk_pgraph_tests pushes them for every format including DXT1
+   and its goldens are hardware captures, so this stays the
+   tested/expected-harmless shape - divergences.md #100). FILTER is the
+   one register nv2a_r_texturenearest actually changes - see that
+   convar's own declaration comment for why this is stage-0-only,
+   matching ref/gl's own gl_texture_nearest vs gl_lightmap_nearest
+   precedent. */
+static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
+{
+	uint32_t *p;
+	uint32_t tex_phys;
+	uint32_t tex_width = 1u << tex->log2Width;
+	uint32_t tex_pitch = tex_width * 2; /* DXT1: ceil(width/4)*8 == width*2 for a POT width >= 4 (nv2a_load_map_geometry's own texture-directory validation already guarantees this) */
+
+	p = pb_begin();
+	tex_phys = ( (uint32_t)nv2a_map_texture_data + (uint32_t)tex->physOffset ) & 0x03ffffff;
+	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, tex_phys );
+	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
+		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_U, tex->log2Width )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_V, tex->log2Height ));
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, tex_pitch << 16 );
+	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( tex_width << 16 ) | ( 1u << tex->log2Height ));
+	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00010101 );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_r_texturenearest.value ? 0x01010000 : 0x04074000 );
+	pb_end( p );
+}
+
 /* X9-B: the real geometry path - same VP20 transform shader and the same
-   single-texture-stage fp20 combiner X9-A already proved (no shader or
-   combiner changes this slice), a real DXT1 atlas instead of the 8x8
-   linear checkerboard, and an indexed draw over real baked vertices
-   instead of X4's own plain sequential NV097_DRAW_ARRAYS. Batches indices
-   in groups of <=120 (deps/nxdk/samples/mesh/main.c's own
-   NV20_TCL_PRIMITIVE_3D_INDEX_DATA limit) - written as the real, general
-   batching loop from the start rather than a one-batch shortcut, which is
-   what let X9-D scale this same function to a whole map's own dword count
-   with no changes here at all. X9-F adds frustum culling ahead of the
-   batching loop itself: nv2a_map_faces (built once at load) is walked in
-   bake order, contiguous VISIBLE faces are merged into a single run, and
-   each run is handed to nv2a_draw_index_range() above unchanged - state
-   setup (below) does not change at all, only which dword ranges reach the
-   batching loop. */
+   two-texture-stage fp20 combiner X9-C already proved (no shader or
+   combiner changes this slice), real per-map baked geometry, and an
+   indexed draw over real baked vertices instead of X4's own plain
+   sequential NV097_DRAW_ARRAYS. Batches indices in groups of <=120
+   (deps/nxdk/samples/mesh/main.c's own NV20_TCL_PRIMITIVE_3D_INDEX_DATA
+   limit) - written as the real, general batching loop from the start
+   rather than a one-batch shortcut, which is what let X9-D scale this
+   same function to a whole map's own dword count with no changes here at
+   all. X9-F adds frustum culling ahead of the batching loop itself:
+   nv2a_map_faces (built once at load) is walked in bake order, contiguous
+   VISIBLE faces are merged into a single run, and each run is handed to
+   nv2a_draw_index_range() above unchanged.
+
+   X9-K: through X9-J, texture stage 0 was bound ONCE per frame (the
+   single shared atlas every face used) and the cull/run-merge pass below
+   walked the WHOLE map in one sweep. There is no more shared atlas - each
+   texture-draw batch (nv2a_map_batches, built at load from the archive's
+   own MpakTextureBatch table) uses its OWN independent per-texture DXT1
+   image, so stage 0 must now be (re)bound once PER BATCH (via
+   nv2a_bind_map_texture_stage0(), only once that batch is known to have
+   at least one surviving draw call - see this function's own two draw
+   branches below for the codex-review fix that made the bind
+   conditional instead of unconditional per batch), and the
+   cull/run-merge pass runs once per batch too, scoped to that batch's own
+   [startFace, startFace+faceCount) sorted-order range - same algorithm,
+   same nv2a_map_faces table, just bounded per-batch instead of over the
+   whole map. Texture stage 1 (the lightmap) is completely unaffected -
+   still bound exactly ONCE per frame, before this loop, exactly as it
+   always was: the lightmap atlas is explicitly out of scope for this
+   whole change (see this file's header comment and
+   docs/r3d/fork-plan.md's X9-K entry). */
 static void nv2a_draw_map_geometry( void )
 {
 	uint32_t *p;
 	uint32_t tex_phys;
-	uint32_t i;
+	uint32_t i, b;
 	/* X9-H: the engine's own already-loaded world model, read directly
 	   for its real per-surface plane/flags (backface test below) - the
 	   SAME model_t X9-G's nv2a_mark_leaves() already trusts, guarded the
@@ -1178,65 +1451,15 @@ static void nv2a_draw_map_geometry( void )
 	   re-uploads its own - see that function's own comment. */
 	nv2a_init_lit_shader();
 
-	/* Texture stage 0: the real DXT1 diffuse atlas. DXT1 (L_DXT1_A1R5G5B5,
-	   deps/nxdk/lib/pbkit/nv_regs.h:547) is a compressed, power-of-two
-	   format, and NV2A sizes compressed textures from the FORMAT word's
-	   own BASE_SIZE_U/V log2 fields (nv_regs.h:581-583) - IMAGE_RECT/
-	   CONTROL1 size LINEAR (LU_IMAGE_*) textures only (xemu hw/xbox/nv2a/
-	   pgraph/texture.c pgraph_get_texture_shape(): `if (f.linear) width =
-	   rect_width; else width = 1 << log_width, pitch = 0`; the XDK's
-	   D3DFORMAT USIZE/VSIZE/PSIZE fields are these same bits and are
-	   documented "only set for swizzled or compressed" - Cxbx-Reloaded
-	   src/core/hle/D3D8/XbD3D8Types.h:565-570, which preserves the XDK
-	   header's own comments). The same sources say swizzled (SZ_*)
-	   textures are sized the same way, but that half is NOT established
-	   here: X4's SZ_A8R8G8B8 + BASE_SIZE path still renders a flat
-	   texel-(0,0) fill (file header), so only the compressed case is
-	   relied on. X9-B
-	   through X9-I copied tools/x4-triangle/main.c's LINEAR stage setup
-	   (which never sets BASE_SIZE, main.c:194-202) onto this compressed
-	   format, so the atlas was a 2^0 x 2^0 = 1x1 texture: every fragment
-	   sampled its first BC1 block's texel (0,0), (239,255,214) pale
-	   green-white - exactly the flat frame seen live (mean 228/255, R/G/B
-	   218/240/226) once the lightmap bug (nv2a_load_map_geometry's remap
-	   loop) was fixed alone, and the {0,1,2} near-black frames before that
-	   ((239,255,214)/255 x {0,1}/255 x ps_lit.ps.cg's x2). With BASE_SIZE
-	   set (log2 validated at load, nv2a_load_map_geometry) real map
-	   textures render: mean 1.8 -> 90.4/255, 251K px with channel spread
-	   > 8. docs/r3d/divergences.md #100. */
-	p = pb_begin();
-	tex_phys = (uint32_t)nv2a_map_atlas & 0x03ffffff;
-	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, tex_phys );
-	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
-		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_U, nv2a_map_atlas_log2w )
-		| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_V, nv2a_map_atlas_log2h ));
-	/* CONTROL1 pitch / IMAGE_RECT are ignored for a compressed format (xemu
-	   texture.c forces pitch = 0 for non-linear shapes; the XDK zeroes the
-	   Size dword for compressed textures) but are kept on purpose: this is
-	   the exact register sequence the live fix was measured with
-	   (.sweep/c1a0_both_fixes.png), the values are self-consistent
-	   (blocksW*8 == width*2 is the pitch BASE_SIZE implies), and
-	   abaire/nxdk_pgraph_tests' TextureStage pushes pitch + IMAGE_RECT
-	   alongside BASE_SIZE for every format including DXT1, so they are
-	   expected harmless on hardware too (that suite's goldens are hardware
-	   captures) - not measured here, see the file header's caveat.
-	   Dropping them to match the XDK-exact path would change the tested
-	   pushbuffer for no functional gain and needs its own gated sweep. */
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, nv2a_map_atlas_pitch << 16 );
-	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( nv2a_map_atlas_width << 16 ) | nv2a_map_atlas_height );
-	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x04074000 );
-	pb_end( p );
-
-	/* X9-C: texture stage 1, the real RGBA8 lightmap - the SAME
-	   uncompressed-linear path X9-A's own checkerboard used on stage 0
-	   (not "proven" by it - see nv2a_map_lightmap's declaration comment),
-	   just at stage 1's own register offset (+0x40 per stage, tools/
+	/* X9-C: texture stage 1, the real RGBA8 lightmap - bound ONCE per
+	   frame, here, before the per-batch loop below: unaffected by X9-K's
+	   own per-texture-batch change (the lightmap atlas is explicitly out
+	   of scope for that whole change - this file's header comment), so it
+	   keeps its original "set up once, draw everything" shape while stage
+	   0 (below) moves inside the loop. The SAME uncompressed-linear path
+	   X9-A's own checkerboard used on stage 0 (not "proven" by it - see
+	   nv2a_map_lightmap's declaration comment), just at stage 1's own
+	   register offset (+0x40 per stage, tools/
 	   x4-triangle/main.c's own documented per-stage addressing), and a
 	   DIFFERENT color format (codex review, TWO rounds, real finding both
 	   times - the first fix was itself wrong): the baker writes each
@@ -1318,102 +1541,184 @@ static void nv2a_draw_map_geometry( void )
 	nv2a_cull_dwords = 0;
 	nv2a_cull_faces_backface_only = 0;
 
-	if( nv2a_map_faces == NULL || nv2a_r_nocull.value )
+	/* X9-K: one texture bind + one cull/run-merge pass PER BATCH, in
+	   directory order - see this function's own top-of-function comment
+	   for why a per-texture batch makes this restructuring necessary
+	   (there is no more single shared atlas to bind once and cull over in
+	   one sweep). The diagnostics above are frame-level totals,
+	   accumulated ACROSS every batch, matching how they already summed
+	   across the whole map before X9-K. */
+	for( b = 0; b < nv2a_map_batch_count; b++ )
 	{
-		/* No validated per-face table for this map, or culling disabled
-		   by nv2a_r_nocull - submit the whole buffer as one run, exactly
-		   what this function did before X9-F. */
-		nv2a_draw_index_range( 0, nv2a_map_dword_count );
-		nv2a_cull_faces_visible = nv2a_cull_faces_total;
-		nv2a_cull_runs = nv2a_map_dword_count ? 1 : 0;
-		nv2a_cull_dwords = nv2a_map_dword_count;
-	}
-	else
-	{
-		/* Single streaming pass over faces in bake order: accumulate a
-		   run of contiguous visible faces' own dword ranges, flush it
-		   through nv2a_draw_index_range() the moment a culled face (or
-		   the end of the list) breaks the run. No run array - the run is
-		   just two locals. BSP face order is already spatially coherent
-		   (real crossfire.mpak measurement: 19-62 runs at every camera
-		   tried, never anything approaching one run per face), so plain
-		   contiguous merging is enough - no gap-tolerance heuristic. */
-		uint32_t run_begin = 0, run_end = 0;
-		qboolean have_run = false;
+		const nv2a_map_batch_t *batch = &nv2a_map_batches[b];
+		const nv2a_map_texture_t *tex = &nv2a_map_textures[batch->textureIndex]; /* textureIndex validated < nv2a_map_texture_count at load */
 
-		for( i = 0; i < nv2a_map_face_count; i++ )
+		if( nv2a_map_faces == NULL || nv2a_r_nocull.value
+			|| (uint64_t)batch->startFace + batch->faceCount > (uint64_t)nv2a_map_face_count )
 		{
-			const nv2a_map_face_t *face = &nv2a_map_faces[i];
-			/* X9-G: a face is drawn only if it survives BOTH cull tests -
-			   frustum (X9-F, unchanged) and PVS (nv2a_map_face_visible,
-			   this slice). nv2a_map_face_visible == NULL (no table for
-			   this map) and nv2a_r_novis.value (the A/B toggle) both fall
-			   through to "not PVS-culled", matching nv2a_r_nocull's own
-			   already-established meaning for the frustum test. */
-			qboolean pvs_culled = nv2a_map_face_visible != NULL
-				&& !nv2a_r_novis.value
-				&& !nv2a_map_face_visible[i];
+			/* No validated per-face table for this map, culling disabled
+			   by nv2a_r_nocull, or (defensive - nv2a_load_map_geometry
+			   deliberately does NOT cross-check startFace/faceCount
+			   against a real face-count total at load time, see its own
+			   batch-parsing comment) this batch's own range does not fit
+			   inside the per-face table - submit this WHOLE BATCH as one
+			   run via its own startIndex/indexCount, exactly what this
+			   function did for the WHOLE MAP before X9-F/X9-K. No real
+			   culling happens on this path, so `end > begin` is expected
+			   to hold for every real batch - the check exists only so a
+			   degenerate (zero-length) batch, which nv2a_load_map_geometry
+			   does not forbid outright, costs no texture bind either,
+			   matching this function's own "bind only once a real draw
+			   call is about to happen" discipline (codex review, real
+			   finding: this bind used to be unconditional, once per
+			   batch, regardless of whether anything in it was visible -
+			   129/91 guaranteed texture-stage reprograms per frame on
+			   c1a0.mpak/crossfire.mpak, independent of camera position). */
+			uint32_t begin, end;
 
-			/* X9-H, nv2a-xbox-specialist review, real finding: the
-			   backface test (below) is the most expensive of the three -
-			   the only one with a pointer chase off this map's own
-			   arrays, into a separate, deduplicated plane pool - so it
-			   must not run on a face the cheaper frustum/PVS tests
-			   already reject. Short-circuit here, before paying for the
-			   plane fetch at all. */
-			if( nv2a_frustum_cull_box( face->mins, face->maxs ) || pvs_culled )
-				continue;
-
-			/* X9-H: same "same face, same index" bridge X9-G already
-			   established and bounds-checks the same way (never trust a
-			   raw index past the engine's own real numsurfaces, even
-			   though nv2a_map_face_count SHOULD equal it - a mismatch
-			   here means only this cull test degrades, not a crash). */
-			if( world != NULL && !nv2a_r_nocullback.value && i < (uint32_t)world->numsurfaces )
+			nv2a_batch_dword_range( batch->startIndex, batch->indexCount, nv2a_map_dword_count, &begin, &end );
+			if( end > begin )
 			{
-				const msurface_t *surf = &world->surfaces[i];
+				nv2a_bind_map_texture_stage0( tex );
+				nv2a_draw_index_range( begin, end );
+			}
+			nv2a_cull_faces_visible += batch->faceCount;
+			if( end > begin )
+				nv2a_cull_runs++;
+			nv2a_cull_dwords += end - begin;
+		}
+		else
+		{
+			/* X9-F/X9-G/X9-H's own single streaming run-merging pass,
+			   UNCHANGED algorithm: accumulate a run of contiguous visible
+			   faces' own dword ranges, flush it through
+			   nv2a_draw_index_range() the moment a culled face (or the
+			   end of this BATCH's own range) breaks the run - just
+			   bounded to [batch->startFace, batch->startFace +
+			   batch->faceCount) instead of the whole map (see this
+			   function's own top-of-function comment for why a per-batch
+			   texture bind makes this restructuring necessary). No run
+			   array - the run is just two locals, same as before.
+			   `stage0_bound` is new (codex review, real finding - see the
+			   other draw branch's own comment above for the measured
+			   cost): the texture bind now happens lazily, the first time
+			   a run actually opens for this batch, so a batch with zero
+			   surviving faces costs no texture-stage reprogram at all -
+			   never per-run (only the bind is per-batch-at-most-once; the
+			   run-merge/flush logic itself is completely unchanged). */
+			uint32_t run_begin = 0, run_end = 0;
+			qboolean have_run = false;
+			qboolean stage0_bound = false;
+			uint32_t end_face = batch->startFace + batch->faceCount;
 
-				if( !VectorIsNull( surf->plane->normal ))
+			for( i = batch->startFace; i < end_face; i++ )
+			{
+				const nv2a_map_face_t *face = &nv2a_map_faces[i];
+				/* X9-G: a face is drawn only if it survives BOTH cull tests -
+				   frustum (X9-F, unchanged) and PVS (nv2a_map_face_visible,
+				   this slice). nv2a_map_face_visible == NULL (no table for
+				   this map) and nv2a_r_novis.value (the A/B toggle) both fall
+				   through to "not PVS-culled", matching nv2a_r_nocull's own
+				   already-established meaning for the frustum test. */
+				qboolean pvs_culled = nv2a_map_face_visible != NULL
+					&& !nv2a_r_novis.value
+					&& !nv2a_map_face_visible[i];
+
+				/* X9-K: a sky face is never drawn, regardless of frustum/PVS
+				   visibility - see nv2a_map_face_t::sky's own declaration
+				   comment for why (no real skybox exists in this file; this
+				   is the minimum "don't draw it wrong" fix, not a skybox
+				   implementation). Checked first - it's a single struct
+				   field, cheaper than the frustum box test. */
+				if( face->sky )
+					continue;
+
+				/* X9-H, nv2a-xbox-specialist review, real finding: the
+				   backface test (below) is the most expensive of the three -
+				   the only one with a pointer chase off this map's own
+				   arrays, into a separate, deduplicated plane pool - so it
+				   must not run on a face the cheaper frustum/PVS tests
+				   already reject. Short-circuit here, before paying for the
+				   plane fetch at all. */
+				if( nv2a_frustum_cull_box( face->mins, face->maxs ) || pvs_culled )
+					continue;
+
+				/* X9-K: `i` here is a SORTED-order position (this batch's own
+				   index into nv2a_map_faces), NOT the ORIGINAL BSP face index
+				   world->surfaces itself is ordered by - the exact same
+				   order-mismatch nv2a_mark_leaves() translates through
+				   nv2a_map_face_remap, on the read side instead of the write
+				   side (see nv2a_map_face_orig's own declaration comment for
+				   the full account). nv2a_map_face_orig == NULL (no table for
+				   this map) fails open to "no backface test", same as
+				   world == NULL already does - never a wrong-surface read.
+				   The translated origIdx is bounds-checked against
+				   world->numsurfaces exactly like the untranslated index
+				   always was (X9-H's own "never trust a raw index past the
+				   engine's own real numsurfaces" discipline, unchanged). */
+				if( world != NULL && !nv2a_r_nocullback.value && nv2a_map_face_orig != NULL )
 				{
-					float dist = PlaneDiff( nv2a_eye_origin, surf->plane );
+					uint32_t origIdx = nv2a_map_face_orig[i];
 
-					if( FBitSet( surf->flags, NV2A_SURF_PLANEBACK ))
-						dist = -dist;
-
-					if( dist <= BACKFACE_EPSILON )
+					if( origIdx < (uint32_t)world->numsurfaces )
 					{
-						nv2a_cull_faces_backface_only++;
-						continue;
+						const msurface_t *surf = &world->surfaces[origIdx];
+
+						if( !VectorIsNull( surf->plane->normal ))
+						{
+							float dist = PlaneDiff( nv2a_eye_origin, surf->plane );
+
+							if( FBitSet( surf->flags, NV2A_SURF_PLANEBACK ))
+								dist = -dist;
+
+							if( dist <= BACKFACE_EPSILON )
+							{
+								nv2a_cull_faces_backface_only++;
+								continue;
+							}
+						}
 					}
 				}
-			}
 
-			nv2a_cull_faces_visible++;
+				nv2a_cull_faces_visible++;
 
-			if( have_run && face->dword_begin <= run_end )
-			{
-				if( face->dword_end > run_end )
-					run_end = face->dword_end;
-			}
-			else
-			{
-				if( have_run )
+				if( have_run && face->dword_begin <= run_end )
 				{
-					nv2a_draw_index_range( run_begin, run_end );
-					nv2a_cull_runs++;
-					nv2a_cull_dwords += run_end - run_begin;
+					if( face->dword_end > run_end )
+						run_end = face->dword_end;
 				}
-				run_begin = face->dword_begin;
-				run_end = face->dword_end;
-				have_run = true;
+				else
+				{
+					if( have_run )
+					{
+						nv2a_draw_index_range( run_begin, run_end );
+						nv2a_cull_runs++;
+						nv2a_cull_dwords += run_end - run_begin;
+					}
+					if( !stage0_bound )
+					{
+						/* First surviving face of this batch (or the very
+						   first face, if have_run was never true before) -
+						   bind exactly once, strictly before the FIRST
+						   nv2a_draw_index_range() call this batch will
+						   ever make (that call only happens later, once
+						   this run - or a later one - gets flushed), never
+						   per-run. */
+						nv2a_bind_map_texture_stage0( tex );
+						stage0_bound = true;
+					}
+					run_begin = face->dword_begin;
+					run_end = face->dword_end;
+					have_run = true;
+				}
 			}
-		}
 
-		if( have_run )
-		{
-			nv2a_draw_index_range( run_begin, run_end );
-			nv2a_cull_runs++;
-			nv2a_cull_dwords += run_end - run_begin;
+			if( have_run )
+			{
+				nv2a_draw_index_range( run_begin, run_end );
+				nv2a_cull_runs++;
+				nv2a_cull_dwords += run_end - run_begin;
+			}
 		}
 	}
 
@@ -1530,11 +1835,16 @@ static void nv2a_free_map_resources( void )
 	nv2a_map_vert_count = 0;
 	nv2a_map_dword_count = 0;
 	nv2a_map_face_count = 0;
+	nv2a_map_texture_count = 0;
+	nv2a_map_batch_count = 0;
+	nv2a_map_face_remap_count = 0;
 	if( nv2a_map_vb )            { MmFreeContiguousMemory( nv2a_map_vb );            nv2a_map_vb            = NULL; }
 	if( nv2a_map_index_dwords )  { Mem_Free( nv2a_map_index_dwords );                nv2a_map_index_dwords  = NULL; }
 	if( nv2a_map_faces )         { Mem_Free( nv2a_map_faces );                       nv2a_map_faces         = NULL; }
 	if( nv2a_map_face_visible )  { Mem_Free( nv2a_map_face_visible );                nv2a_map_face_visible  = NULL; }
-	if( nv2a_map_atlas )         { MmFreeContiguousMemory( nv2a_map_atlas );         nv2a_map_atlas         = NULL; }
+	if( nv2a_map_texture_data )  { MmFreeContiguousMemory( nv2a_map_texture_data );  nv2a_map_texture_data  = NULL; }
+	if( nv2a_map_face_remap )    { Mem_Free( nv2a_map_face_remap );                  nv2a_map_face_remap    = NULL; }
+	if( nv2a_map_face_orig )     { Mem_Free( nv2a_map_face_orig );                   nv2a_map_face_orig     = NULL; }
 	if( nv2a_map_lightmap )      { MmFreeContiguousMemory( nv2a_map_lightmap );      nv2a_map_lightmap      = NULL; }
 
 	/* X9-G: both point into the outgoing world model's own leafs[] array
@@ -1571,6 +1881,7 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lockpvs );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_nocullback );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_noalphatest );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_texturenearest );
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not
@@ -1809,31 +2120,51 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
 }
 
 /* Reads the WHOLE map's real geometry (every baked vertex, the whole
-   shared index buffer, the whole DXT1 atlas, the whole lightmap atlas)
-   out of a real, nv2a-profile-baked .mpak buffer and prepares it to be
-   drawn in place of the X9-A test triangle: a real, per-map-sized
-   remapped vertex buffer (position + atlas-space UV + lightmap UV), a
-   real per-map-sized packed index-dword buffer, the real DXT1 atlas
-   copied verbatim (already in the right hardware layout - no un-swizzle
-   needed, see this file's own header comment and
-   docs/r3d/divergences.md's X9-B entry), and the real lightmap atlas
-   copied verbatim. The camera is NOT set up here as of X9-E - see
-   GL_RenderFrame's own real, live, per-frame camera and
-   nv2a_view_valid's own declaration comment for why. Caller (Mod_ProcessRenderData) has already
-   confirmed the header itself is a real nv2a-profile archive via
-   nv2a_mpak_header_valid() - this function only has to validate
-   everything PAST the header.
+   shared index buffer, every unique per-texture DXT1 image, the whole
+   lightmap atlas) out of a real, nv2a-profile-baked .mpak buffer and
+   prepares it to be drawn in place of the X9-A test triangle: a real,
+   per-map-sized remapped vertex buffer (position + native diffuse UV +
+   lightmap UV), a real per-map-sized packed index-dword buffer, every
+   texture's own DXT1 bytes copied verbatim into ONE contiguous buffer
+   (already in the right hardware layout - no un-swizzle needed, see this
+   file's own header comment and docs/r3d/divergences.md's X9-B entry),
+   the real lightmap atlas copied verbatim, and the texture-directory/
+   batch tables that tell nv2a_draw_map_geometry() which contiguous face/
+   index range uses which texture. The camera is NOT set up here as of
+   X9-E - see GL_RenderFrame's own real, live, per-frame camera and
+   nv2a_view_valid's own declaration comment for why. Caller
+   (Mod_ProcessRenderData) has already confirmed the header itself is a
+   real nv2a-profile archive via nv2a_mpak_header_valid() - this function
+   only has to validate everything PAST the header.
 
-   UV remap is `atlas_uv = rect.xy + frac(raw_uv) * rect.zw` - a per-VERTEX
-   remap, not per-pixel. This is exact for a face whose raw UV range fits
-   in one texture repeat, and a known, accepted, documented approximation
-   for a tiling face (the interpolated UV between two vertices that wrap
-   to the SAME fractional value is flat, not repeating, across that edge) -
-   fixing that for real needs a pixel-shader-side wrap, out of scope for
-   this bring-up slice. Returns false (leaving the caller to keep drawing
-   the X9-A triangle) for anything past the header that doesn't parse as
-   expected, or that would exceed NV2A_MAP_BUDGET_BYTES - never crashes on
-   a truncated, malformed, or just very large archive. */
+   X9-K: there is no more per-vertex atlas-rect remap. Through X9-J every
+   texture shared one 2048x2048 atlas and `atlas_uv = rect.xy +
+   frac(raw_uv) * rect.zw` was a real, disclosed approximation for a
+   tiling face (frac() collapses every repeat to the same fractional
+   value, so a face using more than one texture repeat sampled a flat,
+   non-repeating patch instead of tiling) - unacceptable on ordinary
+   tiling floors/walls, and subdividing tiled faces at bake time to fix it
+   overflows the u16 vertex-index limit on large outdoor maps. Each source
+   texture is now independently resampled to power-of-two and addressed
+   with NV2A's own native hardware WRAP mode (nv2a_draw_map_geometry's own
+   per-batch ADDRESS push), which tiles for free at the pixel level, no
+   shader-side wrap and no per-vertex remap needed - v.u/v.v are used
+   AS-IS below. This is exact, not an approximation: BspParser.cpp's own
+   UV computation (`rawU/rawV / loc.width/height`, loc.width/height being
+   the texture's NATIVE pre-resample pixel size, PakManager.cpp:20-21)
+   already normalizes by the texture's real native size, independent of
+   any later resample - the identical reasoning ref/gl's own
+   GL_ResampleTexture + normalized-UV combination already relies on
+   (reference-renderer-specialist review: specifically ref/gl's
+   GL_ARB_TEXTURE_NPOT_EXT-unsupported fallback path, gl_image.c:467 -
+   ref/gl's default/common path never resamples world textures at all,
+   since real hardware supports NPOT; this NV2A port hits the fallback
+   case unconditionally because NV2A itself has no NPOT support to fall
+   back FROM).
+   Returns false (leaving the caller to keep drawing the X9-A triangle)
+   for anything past the header that doesn't parse as expected, or that
+   would exceed NV2A_MAP_BUDGET_BYTES - never crashes on a truncated,
+   malformed, or just very large archive. */
 /* A coarse guard against a malformed or just implausibly large archive
    attempting a doomed giant allocation - NOT a real accounting of the
    Xbox's own 64MiB total budget (codex review, real finding: the
@@ -1868,38 +2199,19 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
    pass validation and still sample with the wrong divisor). */
 #define NV2A_LM_PAGE_SIZE 1024u
 
-/* Stores log2(v) in *out and returns true only when v is a non-zero power
-   of two. A compressed (DXT1) texture's ONLY size on NV2A is the FORMAT
-   word's BASE_SIZE_U/V log2 fields (deps/nxdk/lib/pbkit/nv_regs.h:581-583),
-   so a non-power-of-two atlas cannot be described to the hardware at all -
-   an exact test, not a round-up, so nv2a_load_map_geometry fails closed
-   instead of programming a size the GPU would read with a wrong implied
-   pitch. */
-static qboolean nv2a_log2_pow2( uint32_t v, uint32_t *out )
-{
-	uint32_t l = 0;
-
-	if( v == 0 || ( v & ( v - 1 )) != 0 )
-		return false;
-	while(( 1u << l ) < v )
-		l++;
-	*out = l;
-	return true;
-}
-
 static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte *buffer, size_t buffersize )
 {
 	nv2a_mpak_geometry_t geo;
 	uint32_t vert_count, index_count, dword_count;
 	uint32_t i;
 	uint64_t vb_bytes, idx_bytes, total_bytes;
-	uint64_t blocksW, blocksH;
-	uint32_t atlas_log2w, atlas_log2h;
+	uint32_t texture_count, batch_count;
 
 	if( !nv2a_compute_mpak_layout( header, (fs_offset_t)buffersize, &geo ))
 		return false;
 
-	if( geo.atlas.length == 0 || geo.lightmapAtlas.length == 0 )
+	if( geo.textureDir.length == 0 || geo.textureData.length == 0 || geo.batches.length == 0
+		|| geo.faceRemap.length == 0 || geo.lightmapAtlas.length == 0 )
 		return false;
 
 	vert_count = header->vCount;
@@ -1928,9 +2240,19 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   passing through this check, the one inconsistency this file's own
 	   "real memory this function CAN and should account for" rule was
 	   supposed to rule out. */
+	/* X9-K: geo.atlas.length -> geo.textureData.length (the atlas is gone -
+	   one contiguous buffer now holds every texture's own DXT1 bytes
+	   instead), plus geo.faceRemap.length * 2 for nv2a_map_face_remap[]
+	   and its locally-derived inverse nv2a_map_face_orig[] (both real,
+	   per-map heap allocations this function should account for, same
+	   reasoning as the per-face culling table two lines above). The fixed
+	   nv2a_map_textures[]/nv2a_map_batches[] arrays are static BSS, not a
+	   per-map allocation, so - like nv2a_visbytes above them - they do not
+	   belong in this per-map ledger. */
 	total_bytes = vb_bytes + idx_bytes + (uint64_t)geo.faceDrawCmds.length * 4
 		+ (uint64_t)geo.faceDrawCmds.length / 8
-		+ (uint64_t)geo.atlas.length + (uint64_t)geo.lightmapAtlas.length + (uint64_t)buffersize;
+		+ (uint64_t)geo.faceRemap.length * 2
+		+ (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length + (uint64_t)buffersize;
 	if( total_bytes > NV2A_MAP_BUDGET_BYTES )
 	{
 		gEngfuncs.Con_Printf( "ref_nv2a: map exceeds NV2A_MAP_BUDGET_BYTES (%u > %u bytes) - not drawing its real geometry\n",
@@ -1969,42 +2291,154 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			return false;
 	}
 
-	/* codex review, real finding: atlasWidth/Height came straight from the
-	   header with nothing checking them against the atlas lump's own real
-	   (bounds-checked) length - a malformed archive could declare a huge
-	   width/height over a tiny actual allocation, and the draw path would
-	   then program the GPU's own pitch/image-rect registers from those
-	   unchecked dimensions, reading past nv2a_map_atlas into whatever
-	   memory follows it. DXT1 is 8 bytes per 4x4 block - computed in
-	   uint64_t (header fields are only uint32_t, so blocksW*blocksH*8
-	   cannot overflow 64 bits) and required to match the atlas lump's own
-	   already-bounds-checked length exactly, not just be "small enough". */
-	blocksW = ( (uint64_t)header->atlasWidth + 3 ) / 4;
-	blocksH = ( (uint64_t)header->atlasHeight + 3 ) / 4;
-	if( header->atlasWidth == 0 || header->atlasHeight == 0 || blocksW * blocksH * 8 != (uint64_t)geo.atlas.length )
+	/* X9-K: the per-texture DXT1 directory and its matching texture-draw
+	   batch table replace the single shared atlas this function validated
+	   here through X9-J - see filesystem/mpak_layout.h's own v9 note and
+	   nv2a_map_texture_t/nv2a_map_batch_t's own declaration comments
+	   (above) for the full format account. Unlike the old atlas (one pair
+	   of dimensions, one power-of-two check), there are now up to
+	   header->textureCount independent images and header->batchCount
+	   independent draw ranges to validate - the SAME "never trust a
+	   dimension independent of the lump's own real, bounds-checked
+	   length" discipline the atlas check always used (codex review, real
+	   finding, X9-B round 2), just applied once per directory/batch entry
+	   instead of once for the whole map. Both counts are checked against
+	   this build's fixed-capacity arrays FIRST (NV2A_MAP_MAX_TEXTURES/
+	   NV2A_MAP_MAX_BATCHES's own declaration comments have the full
+	   "reasoned guess pending the Gate phase's real numbers" account),
+	   fail closed exactly like every other header field here, before a
+	   single entry is parsed. */
+	if( header->textureCount == 0 || header->textureCount > NV2A_MAP_MAX_TEXTURES )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: map has %u unique textures, this build's fixed directory holds at most %u - not drawing its real geometry\n",
+			(unsigned int)header->textureCount, (unsigned int)NV2A_MAP_MAX_TEXTURES );
+		return false;
+	}
+	if( header->batchCount == 0 || header->batchCount > NV2A_MAP_MAX_BATCHES )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: map has %u texture batches, this build's fixed table holds at most %u - not drawing its real geometry\n",
+			(unsigned int)header->batchCount, (unsigned int)NV2A_MAP_MAX_BATCHES );
+		return false;
+	}
+	if( (uint64_t)header->textureCount * sizeof( mpak_texture_info_t ) != (uint64_t)geo.textureDir.length
+		|| (uint64_t)header->batchCount * sizeof( mpak_texture_batch_t ) != (uint64_t)geo.batches.length )
 		return false;
 
-	/* The DXT1 atlas is sized by the FORMAT word's BASE_SIZE_U/V/P 4-bit
-	   log2 fields alone (deps/nxdk/lib/pbkit/nv_regs.h:581-583 - see
-	   nv2a_draw_map_geometry's stage-0 comment for why IMAGE_RECT/pitch do
-	   not apply to a compressed format), so the dimensions must be exact
-	   powers of two, and no larger than NV2A's real 4096 texture edge even
-	   though the field itself could encode up to 2^15. With a power-of-two
-	   width the length check just above (blocksW*8 == width*2 bytes per
-	   block row) already equals the pitch BASE_SIZE implies, so no second
-	   pitch validation is needed. Fails closed here, in the same
-	   validation section as every other header field and before anything
-	   is allocated, so the early return needs no nv2a_free_map_resources()
-	   - the same discipline as the two checks around it. Refusing the
-	   archive beats sampling garbage: a wrong log2 would not crash, it
-	   would silently draw a scrambled or flat atlas again. */
-	if( header->atlasWidth > 4096 || header->atlasHeight > 4096
-		|| !nv2a_log2_pow2( header->atlasWidth, &atlas_log2w )
-		|| !nv2a_log2_pow2( header->atlasHeight, &atlas_log2h ))
+	texture_count = header->textureCount;
+	batch_count = header->batchCount;
+
+	/* Parse + validate the texture directory: a compressed texture's ONLY
+	   size on NV2A is the FORMAT word's BASE_SIZE_U/V log2 fields
+	   (deps/nxdk/lib/pbkit/nv_regs.h:581-583 - see nv2a_draw_map_geometry's
+	   own stage-0 comment, unchanged reasoning from the atlas era), so
+	   width/height must be exact powers of two matching their own paired
+	   log2 field, at least one real 4x4 DXT1 block (log2 >= 2), and no
+	   larger than NV2A's real 4096 texture edge (log2 <= 12 - the same
+	   cap the old atlas check used). dataLength must be the exact DXT1
+	   byte count for that size (4 bits/texel), and the running sum of
+	   every entry's own dataLength must land EXACTLY on the texture-data
+	   lump's own real, bounds-checked length after the last entry -
+	   refusing the archive beats sampling garbage: a wrong log2 or a
+	   short running sum would not crash, it would silently bind the wrong
+	   bytes as a texture, or read past nv2a_map_texture_data into
+	   whatever memory follows it. physOffset (this entry's own byte
+	   offset into nv2a_map_texture_data) is that running sum BEFORE this
+	   entry's own dataLength is added - mpak_texture_info_t itself stores
+	   no offset field, matching the archive's own "byte layout order IS
+	   the format" convention one level down (filesystem/mpak_layout.h's
+	   own v9 note). */
 	{
-		gEngfuncs.Con_Printf( "ref_nv2a: atlas %ux%u is not a power-of-two <= 4096 - DXT1 textures are sized only by BASE_SIZE_U/V (log2), not drawing its real geometry\n",
-			(unsigned int)header->atlasWidth, (unsigned int)header->atlasHeight );
-		return false;
+		uint64_t running = 0;
+
+		for( i = 0; i < texture_count; i++ )
+		{
+			uint64_t base = geo.textureDir.offset + (uint64_t)i * sizeof( mpak_texture_info_t );
+			uint32_t width, height, log2w, log2h, dataLength;
+
+			memcpy( &width,      buffer + base + 0,  sizeof( width ));
+			memcpy( &height,     buffer + base + 4,  sizeof( height ));
+			memcpy( &log2w,      buffer + base + 8,  sizeof( log2w ));
+			memcpy( &log2h,      buffer + base + 12, sizeof( log2h ));
+			memcpy( &dataLength, buffer + base + 16, sizeof( dataLength ));
+
+			if( log2w < 2 || log2w > 12 || log2h < 2 || log2h > 12
+				|| width != ( 1u << log2w ) || height != ( 1u << log2h )
+				|| (uint64_t)dataLength != ( (uint64_t)width * (uint64_t)height ) / 2 )
+			{
+				gEngfuncs.Con_Printf( "ref_nv2a: texture %u (%ux%u) failed validation - not drawing this map's real geometry\n",
+					(unsigned int)i, (unsigned int)width, (unsigned int)height );
+				return false;
+			}
+
+			nv2a_map_textures[i].physOffset = (uint32_t)running;
+			nv2a_map_textures[i].log2Width  = log2w;
+			nv2a_map_textures[i].log2Height = log2h;
+
+			running += dataLength;
+		}
+
+		if( running != (uint64_t)geo.textureData.length )
+		{
+			gEngfuncs.Con_Printf( "ref_nv2a: texture directory's own summed dataLength (%llu) does not match the texture-data lump's real length (%u) - not drawing this map's real geometry\n",
+				(unsigned long long)running, (unsigned int)geo.textureData.length );
+			return false;
+		}
+	}
+
+	/* Parse + validate the texture-draw batch table: batches are a strict
+	   partition of the shared index buffer, contiguous by construction
+	   (MpakTextureBatch's own doc comment, tools/asset-studio/src/
+	   formats/MpakHeader.h) - the SAME running-cursor validation the
+	   FaceDrawCmds tiling check further below already applies to
+	   individual faces, one level up, applied here to whole batches.
+	   textureIndex must name a real directory entry (there is no "no
+	   texture" fallback to degrade to - an out-of-range index would bind
+	   whatever memory happens to follow the directory, so this fails
+	   closed like every other structural check here). startFace/faceCount
+	   are deliberately NOT cross-checked against a real face-count total
+	   in this loop - the per-face culling table they index into
+	   (nv2a_map_faces) is still optional and does not exist yet at this
+	   point in the load (see its own declaration comment);
+	   nv2a_draw_map_geometry() bounds-checks startFace+faceCount against
+	   nv2a_map_face_count again, at the point it actually uses them,
+	   before ever indexing with them. */
+	{
+		uint64_t face_cursor = 0, index_cursor = 0;
+
+		for( i = 0; i < batch_count; i++ )
+		{
+			uint64_t base = geo.batches.offset + (uint64_t)i * sizeof( mpak_texture_batch_t );
+			uint32_t textureIndex, startFace, faceCount, startIndex, indexCount;
+
+			memcpy( &textureIndex, buffer + base + 0,  sizeof( textureIndex ));
+			memcpy( &startFace,    buffer + base + 4,  sizeof( startFace ));
+			memcpy( &faceCount,    buffer + base + 8,  sizeof( faceCount ));
+			memcpy( &startIndex,   buffer + base + 12, sizeof( startIndex ));
+			memcpy( &indexCount,   buffer + base + 16, sizeof( indexCount ));
+
+			if( textureIndex >= texture_count || (uint64_t)startFace != face_cursor || (uint64_t)startIndex != index_cursor
+				|| index_cursor + indexCount > (uint64_t)index_count )
+			{
+				gEngfuncs.Con_Printf( "ref_nv2a: texture batch %u failed validation - not drawing this map's real geometry\n", (unsigned int)i );
+				return false;
+			}
+
+			nv2a_map_batches[i].textureIndex = textureIndex;
+			nv2a_map_batches[i].startFace    = startFace;
+			nv2a_map_batches[i].faceCount    = faceCount;
+			nv2a_map_batches[i].startIndex   = startIndex;
+			nv2a_map_batches[i].indexCount   = indexCount;
+
+			face_cursor  += faceCount;
+			index_cursor += indexCount;
+		}
+
+		if( index_cursor != (uint64_t)index_count )
+		{
+			gEngfuncs.Con_Printf( "ref_nv2a: texture batches cover %llu of %u real indices - not drawing this map's real geometry\n",
+				(unsigned long long)index_cursor, (unsigned int)index_count );
+			return false;
+		}
 	}
 
 	/* Same "don't trust dimensions independent of the lump's own real,
@@ -2068,8 +2502,19 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			dst[i].pos[0] = v.x;
 			dst[i].pos[1] = v.y;
 			dst[i].pos[2] = v.z;
-			dst[i].uv0[0] = v.rect[0] + ( v.u - floorf( v.u )) * v.rect[2];
-			dst[i].uv0[1] = v.rect[1] + ( v.v - floorf( v.v )) * v.rect[3];
+			/* X9-K: no more atlas-rect remap - v.u/v.v are used AS-IS.
+			   They are already in the exact format NV2A's native WRAP
+			   addressing needs: BspParser.cpp normalizes them by the
+			   TEXTURE's own native (pre-resample) pixel size
+			   (PakManager.cpp:20-21), so they carry real, unclamped repeat
+			   counts for a tiling face (a face spanning 6 texture repeats
+			   reads u in [0,6), not folded into [0,1) the way the old
+			   atlas-rect frac() remap required) - hardware WRAP tiles
+			   exactly that range in silicon, no shader-side wrap needed.
+			   See this function's own top-of-function comment for the
+			   full before/after account. */
+			dst[i].uv0[0] = v.u;
+			dst[i].uv0[1] = v.v;
 			/* The lightmap is bound as a LINEAR texture (LU_IMAGE_A8B8G8R8 +
 			   CONTROL1 pitch + IMAGE_RECT, stage 1 in nv2a_draw_map_geometry),
 			   and NV2A addresses linear textures in UNNORMALIZED texel
@@ -2091,9 +2536,12 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			   lightmap-only debug shader produced exactly two values across
 			   the whole frame, 0 (254,979 px) and 1 (50,263 px), while the
 			   GPU-visible uv1 and the baked luxels at those texels were
-			   correct (mean 105/255). The DXT1 atlas (uv0 above) is a
-			   compressed, normalized-coordinate format and needs no scaling.
-			   Multi-page lightmaps (lightmap_layer != 0) stay rejected at
+			   correct (mean 105/255). uv0 (above) needs no equivalent
+			   descale: it is already normalized by the diffuse texture's
+			   own native pixel size at bake time (this function's own
+			   top-of-function comment), independent of the lightmap's
+			   separate LM_PAGE_SIZE convention. Multi-page lightmaps
+			   (lightmap_layer != 0) stay rejected at
 			   load (above); with texel coordinates a page > 0 would need a
 			   per-page V offset or a separate binding, not just a scale.
 			   docs/r3d/divergences.md #100. */
@@ -2103,19 +2551,24 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	}
 	nv2a_map_vert_count = vert_count;
 
-	nv2a_map_atlas = MmAllocateContiguousMemoryEx( geo.atlas.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
-	if( !nv2a_map_atlas )
+	/* X9-K: ONE contiguous buffer for every texture's own DXT1 bytes,
+	   back-to-back in directory order - replaces the single shared-atlas
+	   allocation this function used through X9-J. Copied verbatim, same
+	   "already in the right hardware layout, no un-swizzle needed"
+	   reasoning the old atlas copy cited (this file's own header
+	   comment). nv2a_map_textures[].physOffset (computed in the
+	   validation pass above) is each texture's own byte offset into THIS
+	   buffer. */
+	nv2a_map_texture_data = MmAllocateContiguousMemoryEx( geo.textureData.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+	if( !nv2a_map_texture_data )
 	{
-		gEngfuncs.Con_Printf( "ref_nv2a: map atlas allocation failed (%u bytes)\n", (unsigned int)geo.atlas.length );
+		gEngfuncs.Con_Printf( "ref_nv2a: map texture-data allocation failed (%u bytes)\n", (unsigned int)geo.textureData.length );
 		nv2a_free_map_resources();
 		return false;
 	}
-	memcpy( nv2a_map_atlas, buffer + geo.atlas.offset, geo.atlas.length );
-	nv2a_map_atlas_width  = header->atlasWidth;
-	nv2a_map_atlas_height = header->atlasHeight;
-	nv2a_map_atlas_pitch  = (uint32_t)( blocksW * 8 ); /* same ceil(width/4)*8 the length check above already validated */
-	nv2a_map_atlas_log2w  = atlas_log2w; /* validated power-of-two above; BASE_SIZE_U/V for the draw path */
-	nv2a_map_atlas_log2h  = atlas_log2h;
+	memcpy( nv2a_map_texture_data, buffer + geo.textureData.offset, geo.textureData.length );
+	nv2a_map_texture_count = texture_count;
+	nv2a_map_batch_count   = batch_count;
 
 	nv2a_map_lightmap = MmAllocateContiguousMemoryEx( geo.lightmapAtlas.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
 	if( !nv2a_map_lightmap )
@@ -2199,6 +2652,13 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			uint32_t expect_cursor = 0;
 			qboolean tiling_ok = true;
 			nv2a_lit_vertex_t *verts = (nv2a_lit_vertex_t *)nv2a_map_vb;
+			/* X9-K sky-skip fix: MpakFaceInfo is one record per face, in the
+			   SAME (sorted) order FaceDrawCmds already uses - fails open
+			   (every face's .sky left false, drawn same as before this fix)
+			   on a stale archive whose faceInfo lump doesn't have exactly
+			   face_count records, never blocking the load over an
+			   optional, cosmetic-only check. */
+			qboolean faceinfo_ok = geo.faceInfo.length == (uint64_t)face_count * sizeof( mpak_face_info_t );
 
 			for( i = 0; i < face_count; i++ )
 			{
@@ -2206,6 +2666,18 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 
 				memcpy( &start_index,  buffer + geo.faceDrawCmds.offset + (uint64_t)i * 8,     sizeof( start_index ));
 				memcpy( &face_indices, buffer + geo.faceDrawCmds.offset + (uint64_t)i * 8 + 4, sizeof( face_indices ));
+
+				if( faceinfo_ok )
+				{
+					mpak_face_info_t info;
+
+					memcpy( &info, buffer + geo.faceInfo.offset + (uint64_t)i * sizeof( mpak_face_info_t ), sizeof( info ));
+					faces[i].sky = ( info.flags & MPAK_SURF_DRAWSKY ) != 0;
+				}
+				else
+				{
+					faces[i].sky = false;
+				}
 
 				if( face_indices == 0 || ( face_indices % 3 ) != 0 || start_index != expect_cursor
 					|| (uint64_t)start_index + face_indices > index_count )
@@ -2256,6 +2728,81 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			{
 				nv2a_map_faces = faces;
 				nv2a_map_face_count = face_count;
+
+				/* X9-K: parse the archive's own originalToSortedFaceIndex[]
+				   table (nv2a_map_face_remap - ORIGINAL BSP face index ->
+				   SORTED position) and derive its LOCAL inverse
+				   (nv2a_map_face_orig - SORTED position -> ORIGINAL BSP
+				   face index), needed by nv2a_mark_leaves() and
+				   nv2a_draw_map_geometry()'s own backface test
+				   respectively - see both arrays' own declaration comments
+				   above for the full "same face, different index after
+				   sorting" account this bridges. Gated on tiling_ok/
+				   face_count (this branch) since the SORTED half of this
+				   table only makes sense as a position into nv2a_map_faces,
+				   which does not exist otherwise. Every entry is validated
+				   as part of a genuine bijection - in range, and no two
+				   original faces claiming the same sorted slot - before
+				   being trusted; a table that fails this (a stale archive,
+				   or a future baker bug) fails OPEN, same discipline as a
+				   FaceDrawCmds tiling failure: both remap arrays stay NULL,
+				   and nv2a_mark_leaves()/nv2a_draw_map_geometry() already
+				   treat that exactly like "no table for this map" -
+				   frustum(+backface)-only culling, never a wrong-surface
+				   read, never a black screen. */
+				if( geo.faceRemap.length > 0
+					&& ( (uint64_t)geo.faceRemap.length % sizeof( uint32_t )) == 0
+					&& ( (uint64_t)geo.faceRemap.length / sizeof( uint32_t )) == (uint64_t)face_count )
+				{
+					uint32_t remap_count = (uint32_t)( (uint64_t)geo.faceRemap.length / sizeof( uint32_t ));
+					uint32_t *remap = Mem_Malloc( r_temppool, (size_t)remap_count * sizeof( uint32_t ));
+					uint32_t *orig  = remap ? Mem_Malloc( r_temppool, (size_t)face_count * sizeof( uint32_t )) : NULL;
+
+					if( !remap || !orig )
+					{
+						gEngfuncs.Con_Printf( "ref_nv2a: face-remap table allocation failed - PVS culling disabled for this map\n" );
+						if( remap ) Mem_Free( remap );
+					}
+					else
+					{
+						qboolean remap_ok = true;
+						uint32_t j;
+
+						for( j = 0; j < face_count; j++ )
+							orig[j] = 0xFFFFFFFFu; /* sentinel: no original face has claimed this sorted slot yet */
+
+						for( j = 0; j < remap_count; j++ )
+						{
+							uint32_t sortedIdx;
+
+							memcpy( &sortedIdx, buffer + geo.faceRemap.offset + (uint64_t)j * sizeof( uint32_t ), sizeof( sortedIdx ));
+							if( sortedIdx >= face_count || orig[sortedIdx] != 0xFFFFFFFFu )
+							{
+								remap_ok = false;
+								break;
+							}
+							remap[j] = sortedIdx;
+							orig[sortedIdx] = j;
+						}
+
+						if( remap_ok )
+						{
+							nv2a_map_face_remap = remap;
+							nv2a_map_face_remap_count = remap_count;
+							nv2a_map_face_orig = orig;
+						}
+						else
+						{
+							gEngfuncs.Con_Printf( "ref_nv2a: face-remap table is not a valid bijection - PVS culling disabled for this map\n" );
+							Mem_Free( remap );
+							Mem_Free( orig );
+						}
+					}
+				}
+				else
+				{
+					gEngfuncs.Con_Printf( "ref_nv2a: face-remap table length does not match this map's own face count - PVS culling disabled for this map\n" );
+				}
 
 				/* X9-G: the per-face PVS visibility table, index-parallel
 				   with nv2a_map_faces (both walk the archive's one real
@@ -2517,8 +3064,25 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 	   (currently unreachable, since this port has no inline-brushmodel
 	   consumer of this path) case of a non-world model owning the last
 	   loaded geometry - either way, there is no world model whose
-	   leafs/marksurfaces this function could safely walk. */
-	if( !nv2a_map_face_visible || !world || world != nv2a_map_owner )
+	   leafs/marksurfaces this function could safely walk.
+
+	   X9-K, real finding while wiring up the face-remap fix below: this
+	   guard must ALSO bail on `!nv2a_map_face_remap` - NOT just fold that
+	   into the per-face translate-or-skip check further down the way it
+	   might look sufficient to. This function unconditionally memsets the
+	   WHOLE nv2a_map_face_visible array to 0 below, then relies ENTIRELY
+	   on the leaf/marksurface loop to mark anything visible again; with
+	   no remap table, every entry in that loop would translate to
+	   "nothing to mark" (see the loop's own comment), and the array would
+	   stay all-zero for the rest of the session - every face culled,
+	   exactly backwards from this file's own "no table for this map"
+	   fail-open discipline (nv2a_map_faces == NULL, nv2a_map_face_visible
+	   == NULL right above, and nv2a_r_novis all degrade to MORE geometry
+	   drawn, never less). Bailing out HERE instead leaves
+	   nv2a_map_face_visible exactly as nv2a_load_map_geometry()
+	   initialized it - all-visible - which is the correct degraded
+	   state. */
+	if( !nv2a_map_face_visible || !nv2a_map_face_remap || !world || world != nv2a_map_owner )
 		return;
 
 	/* X9-G, render-architecture-specialist review: nv2a_map_faces[i] and
@@ -2656,8 +3220,36 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 				continue;
 
 			idx = (uint32_t)( surf - world->surfaces );
-			if( idx < nv2a_map_face_count )
-				nv2a_map_face_visible[idx] = 1;
+
+			/* X9-K, the CRITICAL correctness fix this whole per-texture
+			   batching change hinges on - see nv2a_map_face_remap's own
+			   declaration comment for the full account. `idx` above is an
+			   ORIGINAL BSP face index (world->surfaces comes from the
+			   engine's own classic-lump-derived msurface_t array,
+			   completely independent of and unaffected by this archive's
+			   own per-texture sort) - it must be translated through the
+			   archive's own originalToSortedFaceIndex[] table BEFORE it
+			   can index nv2a_map_face_visible, which is now in SORTED
+			   order. nv2a_map_face_remap is guaranteed non-NULL here (this
+			   function's own top-of-function guard already returned
+			   otherwise - see that guard's own comment for why bailing
+			   THERE, before the memset below ever runs, is what keeps a
+			   missing table fail-OPEN rather than culling every face).
+			   Bounds-checked twice regardless, matching the reference
+			   fix's own two-step shape exactly and this file's "never
+			   trust an archive-sourced index blindly" discipline
+			   everywhere else: first against nv2a_map_face_remap_count
+			   (the ORIGINAL face count - the real bound for indexing INTO
+			   nv2a_map_face_remap itself), then the translated result
+			   against nv2a_map_face_count (the SORTED/total count - the
+			   real bound for nv2a_map_face_visible). */
+			if( idx < nv2a_map_face_remap_count )
+			{
+				uint32_t sortedIdx = nv2a_map_face_remap[idx];
+
+				if( sortedIdx < nv2a_map_face_count )
+					nv2a_map_face_visible[sortedIdx] = 1;
+			}
 		}
 	}
 }
