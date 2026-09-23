@@ -13,8 +13,8 @@ struct vIn {
 
 struct vOut {
 	float4 pos  : POSITION;
-	float2 tex0 : TEXCOORD0;
-	float2 tex1 : TEXCOORD1;
+	float4 tex0 : TEXCOORD0;
+	float4 tex1 : TEXCOORD1;
 };
 
 vOut main(
@@ -28,8 +28,13 @@ vOut main(
 	position = mul(float4(I.position.xyz, 1.0f), m_viewport);
 	position.xyz = position.xyz / position.w;
 
-	result.tex0 = I.texcoord0.xy;
-	result.tex1 = I.texcoord1.xy;
+	/* Write the whole texcoord: ps_lit's texture stages are 2D_PROJECTIVE
+	   and sample (s/q, t/q), so q must be a defined 1. With only .xy
+	   written, q is whatever the output register holds - xemu defaults it
+	   to 1. Defensive: not isolated on hardware (it landed together with
+	   the BORDER_SOURCE fix, divergences.md #102). */
+	result.tex0 = float4(I.texcoord0.xy, 0.0f, 1.0f);
+	result.tex1 = float4(I.texcoord1.xy, 0.0f, 1.0f);
 	result.pos = position;
 	return result;
 }

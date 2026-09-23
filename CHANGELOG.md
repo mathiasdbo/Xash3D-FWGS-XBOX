@@ -5,6 +5,26 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `ref/nv2a` textures on a real Original Xbox (X9-L)
+
+The first run of `ref/nv2a` on a real Original Xbox halted with a GPU
+"invalid data" error. Once that was fixed, it showed the same texture
+corruption that X9-K had in xemu: smeared ground, misplaced wall patches,
+and half a sign stretched over the whole board. The fixes:
+
+- Every texture format now sets `BORDER_SOURCE_COLOR`. Without it the GPU
+  sampled every texture at half its coordinates. This was the corruption,
+  on xemu and hardware alike.
+- Texture filter values the hardware accepts: `0x01012000` for nearest (a
+  zero convolution-kernel field halts the GPU) and `0x02022000` for
+  bilinear (the old `0x04074000` is a convolution filter that smears).
+- The map vertex shader writes each texture coordinate's q component, and
+  the map path restates pbkit's own `CONTROL0` value. Both are defensive;
+  neither changed what the hardware drew.
+
+The crossfire spawn now renders with readable signs and correctly tiled
+concrete and asphalt, both in xemu and on real hardware.
+
 ### Changed — `ref/nv2a` diffuse textures: per-map DXT1 atlas replaced with native NV2A hardware WRAP addressing (X9-K, MPAK v9)
 
 Every diffuse texture used to be shelf-packed into one shared 2048x2048

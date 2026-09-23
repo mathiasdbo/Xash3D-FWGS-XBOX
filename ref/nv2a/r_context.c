@@ -744,10 +744,11 @@ static CVAR_DEFINE_AUTO( nv2a_r_noalphatest, "1", 0, "ref_nv2a: disable native a
    differently-typed convar on the OTHER ref backend and would be misleading
    reused here. Read fresh every nv2a_draw_map_geometry() call, same as
    nv2a_r_noalphatest above, so toggling it mid-session takes effect on the
-   very next frame. NV097_SET_TEXTURE_FILTER's NEAREST value (0x01010000,
-   MIN=MAG=NEAREST) is the exact one X9-J already verified live this session
-   (tools/x4-triangle's own checkerboard, PR #126, merged 59cab2e7) - reused
-   here unchanged, not re-derived. Default "0" (off, unchanged - bilinear -
+   very next frame. NV097_SET_TEXTURE_FILTER's NEAREST value is 0x01012000
+   (MIN=MAG=NEAREST, kernel field 1 as in Perfect Dark X's gfx_nv2a.cpp):
+   X9-J's 0x01010000 passed in xemu but halted real hardware with an
+   invalid-data error on method 0x1b14 - the kernel field (bits 13-15)
+   must be non-zero. Default "0" (off, unchanged - bilinear -
    behaviour): this is a cosmetic dev/retro-look toggle, not a correctness
    fix pending verification like nv2a_r_nocullback/nv2a_r_noalphatest above,
    so it needs no "ship disabled until A/B'd" caution - the filter value
@@ -1164,6 +1165,7 @@ static void nv2a_draw_test_triangle( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, tex_phys );
 	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
 		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR ) /* see nv2a_bind_map_texture_stage0 */
 		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8R8G8B8 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
@@ -1172,9 +1174,9 @@ static void nv2a_draw_test_triangle( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
 	/* MIN=NEAREST(1)/MAG=NEAREST(1), point-sampled, deliberately NOT the
-	   mesh sample's 0x04074000 (used unchanged by nv2a_draw_map_geometry's
-	   real atlas/lightmap stages, docs/r3d/divergences.md #100 (b) - this
-	   filter choice is local to the bring-up canary only). With
+	   mesh sample's 0x04074000 (a convolution filter; the map stages
+	   use plain bilinear 0x02022000 since X9-L, divergences.md #102 -
+	   this filter choice is local to the bring-up canary only). With
 	   texel-unit UVs (above) and EITHER the convolution-kernel enum or a
 	   plain-bilinear one (0x02020000), this triangle rendered as a smooth
 	   orange/white blend, not a checkerboard - live-tested both ways.
@@ -1187,7 +1189,9 @@ static void nv2a_draw_test_triangle( void )
 	   indicator for the texel-unit-addressing convention than a blended
 	   one - any squares merging or a return to a two-texel gradient means
 	   this convention broke again. */
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x01010000 );
+	/* Real NV2A rejects a zero convolution-kernel field (bits 13-15)
+	   with an invalid-data halt; xemu does not. */
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x01012000 );
 	pb_end( p );
 
 	/* X9-I: this path shares the GPU with nv2a_draw_map_geometry(), which
@@ -1379,11 +1383,20 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 	uint32_t tex_width = 1u << tex->log2Width;
 	uint32_t tex_pitch = tex_width * 2; /* DXT1: ceil(width/4)*8 == width*2 for a POT width >= 4 (nv2a_load_map_geometry's own texture-directory validation already guarantees this) */
 
+	/* BORDER_SOURCE must be COLOR on every texture stage: left at 0
+	   (BORDER_SOURCE_TEXTURE) every texture sampled at (u/2, v/2), on
+	   xemu and real hardware alike - consistent with the GPU addressing
+	   a surface with room for a texture border (the mechanism is
+	   inferred; the halving itself was measured).
+	   Measured by poking constant UVs into the live vertex buffer: a
+	   (u, v) always came back as frac(u/2), frac(v/2). Perfect Dark X's
+	   gfx_nv2a.cpp format word (0x0001122a) sets the same bit. */
 	p = pb_begin();
 	tex_phys = ( (uint32_t)nv2a_map_texture_data + (uint32_t)tex->physOffset ) & 0x03ffffff;
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, tex_phys );
 	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
 		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
 		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 )
@@ -1393,7 +1406,11 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( tex_width << 16 ) | ( 1u << tex->log2Height ));
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00010101 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_r_texturenearest.value ? 0x01010000 : 0x04074000 );
+	/* 0x02022000 = MIN=MAG=LINEAR. The nxdk mesh sample's 0x04074000 is
+	   MIN/MAG=CONVOLUTION_2D_LOD0 - xemu samples it as bilinear, real
+	   hardware filters with the convolution kernel and smears (Perfect Dark X's
+	   gfx_nv2a.cpp documents the same). */
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_r_texturenearest.value ? 0x01012000 : 0x02022000 );
 	pb_end( p );
 }
 
@@ -1482,6 +1499,7 @@ static void nv2a_draw_map_geometry( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET + 0x40, tex_phys );
 	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT + 0x40,
 		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR ) /* see nv2a_bind_map_texture_stage0 */
 		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
@@ -1489,7 +1507,16 @@ static void nv2a_draw_map_geometry( void )
 	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT + 0x40, ( nv2a_map_lightmap_width << 16 ) | nv2a_map_lightmap_height );
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS + 0x40, 0x00030303 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0x4003ffc0 );
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER + 0x40, 0x04074000 );
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER + 0x40, 0x02022000 );
+	/* Defensive, not a behaviour change: pbkit's set_draw_buffer()
+	   (pbkit.c, via pb_target_back_buffer every frame) already pushes
+	   0x00110001 here - W-buffering, perspective-correct texture
+	   interpolation and stencil write. Restating the exact same value
+	   keeps the map path correct even if that pbkit call moves, the way
+	   Perfect Dark X's gfx_nv2a.cpp nv2a_control0() does. */
+	p = pb_push1( p, NV097_SET_CONTROL0,
+		NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE | NV097_SET_CONTROL0_TEXTURE_PERSPECTIVE_ENABLE
+		| NV097_SET_CONTROL0_STENCIL_WRITE_ENABLE );
 	pb_end( p );
 
 	/* X9-I: native alpha test (nv2a_r_noalphatest's own declaration
@@ -1518,9 +1545,16 @@ static void nv2a_draw_map_geometry( void )
 
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
-	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 16 );
+	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
 	memcpy( p, nv2a_map_viewproj, 16 * 4 );
 	p += 16;
+	{
+		/* c[4] = (0, 1, 0, 0): vs_lit.inl's own `#const c[4] = 0 1`,
+		   the literal it writes into each texcoord's .zw (q = 1). */
+		static const float vs_lit_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+		memcpy( p, vs_lit_c4, sizeof( vs_lit_c4 ));
+		p += 4;
+	}
 	pb_end( p );
 
 	p = pb_begin();
