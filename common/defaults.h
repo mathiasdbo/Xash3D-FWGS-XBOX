@@ -165,6 +165,15 @@ Default build-depended cvar and constant values
 	#define DEFAULT_M_IGNORE "0"
 #endif // DEFAULT_M_IGNORE
 
+#if XASH_XBOX && !defined( DEFAULT_JOY_DEADZONE )
+	// Original Xbox pads (and adapters) rest well off centre: one measured
+	// on real hardware read -5888..-7424 on the right stick's X axis at rest,
+	// past the 4096 default, which made the view turn by itself. 8689 is
+	// XInput's own XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE (left is 7849), used
+	// for all four axes since this engine has one default for all of them.
+	#define DEFAULT_JOY_DEADZONE "8689"
+#endif // XASH_XBOX
+
 #ifndef DEFAULT_JOY_DEADZONE
 	#define DEFAULT_JOY_DEADZONE "4096"
 #endif // DEFAULT_JOY_DEADZONE

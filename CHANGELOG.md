@@ -5,6 +5,16 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — Xbox gamepad sticks turning the view by themselves
+
+Original Xbox controllers rest well off centre. One measured on real
+hardware read -5,888 to -7,424 on the right stick's X axis at rest, with
+8-bit precision (every value a multiple of 256). The engine's 4,096 dead
+zone let that through as a steady push, so the view turned left on its
+own; three different controllers drifted. Xbox builds now default every
+stick axis's dead zone to 8,689, XInput's own right-stick dead zone. Other
+platforms keep 4,096. Pending a retest with all three controllers.
+
 ### Added — `ref/nv2a` draws brush entities (X9-M)
 
 Doors, ladders, fences, rails, chargers, buttons and mounted guns are
