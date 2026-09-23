@@ -49,6 +49,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include <string.h>
 #include "xash3d_types.h"
 #include "const.h"
+#include "entity_types.h" /* X9-M: ET_BEAM, for R_AddEntity */
 #include "cvardef.h"
 #include "ref_common.h"
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
@@ -367,6 +368,19 @@ typedef struct
 {
 	vec3_t   mins, maxs;
 	uint32_t dword_begin, dword_end;
+	uint32_t index_begin, index_end; /* X9-M: this face's EXACT logical
+	                                    index range [begin, end) - the
+	                                    dword range above is snapped out to
+	                                    6-index boundaries and can take in
+	                                    a neighbouring face's triangles,
+	                                    which is harmless between two world
+	                                    faces of one texture but wrong
+	                                    across a world/brush-entity
+	                                    boundary (see nv2a_draw_exact_indices). */
+	uint32_t texture;                /* X9-M: textureIndex of the batch
+	                                    this sorted face belongs to, for
+	                                    the brush-entity pass, which draws
+	                                    one entity's faces across batches. */
 	qboolean sky; /* X9-K: MpakFaceInfo::flags & MPAK_SURF_DRAWSKY for this
 	                 face, read once at load (see the face-table build loop
 	                 below) - ref/nv2a has never implemented a real skybox,
@@ -1301,6 +1315,55 @@ static void nv2a_draw_index_range( uint32_t begin, uint32_t end )
 	}
 }
 
+/* X9-M: draw the EXACT logical index range [begin, end) - no 6-index
+   outward snap. Pairs of 16-bit indices go through the same packed
+   NV097_ARRAY_ELEMENT16 path nv2a_draw_index_range() uses (it is
+   NV20_TCL_PRIMITIVE_3D_INDEX_DATA, 0x1800); an odd leading or trailing
+   index goes alone through NV097_ARRAY_ELEMENT32 (0x1808, nv_regs.h:518),
+   which takes one full 32-bit index. `begin` and `end` must be
+   whole-triangle boundaries (every face's own range is), and each
+   BEGIN/END block carries a multiple of 3 indices so no triangle is split
+   across blocks. Used by the brush-entity pass, where a snapped range could
+   pull a world triangle along with a moving entity (or leave a static copy
+   of an entity triangle in the world pass). */
+static void nv2a_draw_exact_indices( uint32_t begin, uint32_t end )
+{
+	const uint16_t *idx16 = (const uint16_t *)nv2a_map_index_dwords;
+
+	while( begin < end )
+	{
+		uint32_t *p;
+		uint32_t n = end - begin, k, pairs;
+
+		if( n > 234 ) /* 234 = 3 * 78: whole triangles; worst case (odd begin, odd end) is
+		                 2 + 2 + 1 + 116 + 2 + 2 = 125 dwords, under pbkit's 128-dword block */
+			n = 234;
+
+		p = pb_begin();
+		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLES );
+		k = begin;
+		if( k & 1 )
+		{
+			p = pb_push1( p, NV097_ARRAY_ELEMENT32, idx16[k] );
+			k++;
+		}
+		pairs = ( begin + n - k ) / 2;
+		if( pairs > 0 )
+		{
+			pb_push( p++, 0x40000000 | NV097_ARRAY_ELEMENT16, pairs );
+			memcpy( p, &nv2a_map_index_dwords[k / 2], pairs * sizeof( uint32_t ));
+			p += pairs;
+			k += pairs * 2;
+		}
+		if( k < begin + n )
+			p = pb_push1( p, NV097_ARRAY_ELEMENT32, idx16[k] );
+		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
+		pb_end( p );
+
+		begin += n;
+	}
+}
+
 /* X9-K: snaps a whole BATCH's own [startIndex, startIndex+indexCount)
    LOGICAL index range outward to a dword-aligned, whole-triangle-aligned
    range, for direct submission through nv2a_draw_index_range() - the
@@ -1411,6 +1474,600 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 	   hardware filters with the convolution kernel and smears (Perfect Dark X's
 	   gfx_nv2a.cpp documents the same). */
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_r_texturenearest.value ? 0x01012000 : 0x02022000 );
+	pb_end( p );
+}
+
+/*
+========================================================================
+X9-M: brush entities (func_door, func_wall, func_illusionary, ladders...)
+
+Every face the baker writes comes from LUMP_FACES, which holds the world
+model's faces AND every submodel's (the `*N` brush entities). Before X9-M
+this renderer drew all of them as static world geometry: with PVS on,
+submodel faces were never marked visible (no world leaf lists them - the
+PVS walk is not where they come from), so doors, ladders, fences and
+chargers vanished; with PVS off they drew frozen at their compile-time
+position, triggers included. This is the entity half ref/gl has and this
+file did not: R_AddEntity/R_ClearScene keep the frame's brush-entity list
+(gl_rmain.c:217,234), and nv2a_draw_brush_entities() walks it after the
+world, solid list first, then the translucent list sorted like
+R_TransEntityCompare (gl_rmain.c:86) - R_DrawEntitiesOnList's order
+(gl_rmain.c). Each entity draws with its own transform
+(R_RotateForEntity/R_TranslateForEntity, gl_rmain.c:448,474) and render
+mode (R_SetRenderMode, gl_rsurf.c:1717). Studio models, sprites and beams
+are accepted by R_AddEntity but not drawn yet - this renderer has no
+studio or sprite path.
+========================================================================
+*/
+#define NV2A_MAX_BRUSH_ENTITIES 512 /* per list, per frame; a HL map sends far fewer brush entities */
+#define NV2A_SURF_DRAWTURB BIT( 4 ) /* common/bspfile.h:55's SURF_DRAWTURB - same "mirror the one engine
+                                       msurface flag this file reads" pattern as NV2A_SURF_PLANEBACK */
+
+#define NV2A_UNLIT_PAGE_SIZE 16 /* texels per side; pitch 64 bytes, LU_IMAGE's own alignment */
+
+static cl_entity_t *nv2a_solid_brush_entities[NV2A_MAX_BRUSH_ENTITIES];
+static cl_entity_t *nv2a_trans_brush_entities[NV2A_MAX_BRUSH_ENTITIES];
+static int          nv2a_num_solid_brush_entities;
+static int          nv2a_num_trans_brush_entities;
+static vec3_t       nv2a_eye_forward; /* GL_RenderFrame's own AngleVectors forward, for CL_FxBlend's hologram fade */
+static uint32_t    *nv2a_unlit_page;  /* 16x16 texels of 0x80 grey: ps_lit's lightmap x 2 then
+                                         multiplies by 1.0, i.e. an unlit draw. Allocated once,
+                                         never freed - 1 KiB, reused across maps. */
+
+/* ref/gl's R_HasLightmap (gl_rsurf.c:1086) for one entity. */
+static qboolean nv2a_entity_has_lightmap( const model_t *world, const cl_entity_t *e )
+{
+	if( r_fullbright->value || !world->lightdata )
+		return false;
+
+	if( e->curstate.effects & EF_FULLBRIGHT )
+		return false;	// disabled by user
+
+	// check for rendermode
+	switch( e->curstate.rendermode )
+	{
+	case kRenderTransTexture:
+		return FBitSet( e->model->flags, MODEL_LIQUID ) ? true : false;
+
+	case kRenderTransColor:
+	case kRenderTransAdd:
+	case kRenderGlow:
+		return false; // no lightmaps
+	}
+
+	return true;
+}
+
+/* Point texture stage 1 at the real lightmap page, or at the neutral page
+   for an unlit entity. Only the offset/pitch/rect change; format, address
+   mode and filter stay as nv2a_draw_map_geometry() set them. Returns false
+   (nothing pushed) if the neutral page cannot be allocated. */
+static qboolean nv2a_bind_lightmap_stage1( qboolean lit )
+{
+	uint32_t *p;
+	uint32_t phys, pitch, w, h;
+
+	if( lit )
+	{
+		phys  = (uint32_t)nv2a_map_lightmap & 0x03ffffff;
+		pitch = nv2a_map_lightmap_pitch;
+		w     = nv2a_map_lightmap_width;
+		h     = nv2a_map_lightmap_height;
+	}
+	else
+	{
+		if( !nv2a_unlit_page )
+		{
+			int k;
+			nv2a_unlit_page = MmAllocateContiguousMemoryEx( NV2A_UNLIT_PAGE_SIZE * NV2A_UNLIT_PAGE_SIZE * 4, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+			if( !nv2a_unlit_page )
+				return false;
+			for( k = 0; k < NV2A_UNLIT_PAGE_SIZE * NV2A_UNLIT_PAGE_SIZE; k++ )
+				nv2a_unlit_page[k] = 0x80808080u;
+		}
+		phys  = (uint32_t)nv2a_unlit_page & 0x03ffffff;
+		pitch = NV2A_UNLIT_PAGE_SIZE * 4;
+		w = h = NV2A_UNLIT_PAGE_SIZE;
+	}
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET + 0x40, phys );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1 + 0x40, pitch << 16 );
+	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT + 0x40, ( w << 16 ) | h );
+	pb_end( p );
+	return true;
+}
+
+/* True when sorted face `sorted` belongs to the WORLD model rather than a
+   brush entity: its original BSP index falls inside the world model's
+   own [firstmodelsurface, +nummodelsurfaces) range (mod_bmodel.c:2138,
+   Mod_SetupSubmodels). No remap table (or no world) - fail open: treat it
+   as world, so the world pass keeps drawing it, as it did before X9-M. */
+static qboolean nv2a_map_face_is_world( const model_t *world, uint32_t sorted )
+{
+	uint32_t orig;
+
+	if( !world || !nv2a_map_face_orig || sorted >= nv2a_map_face_count )
+		return true;
+
+	orig = nv2a_map_face_orig[sorted];
+	return orig >= (uint32_t)world->firstmodelsurface
+		&& orig < (uint32_t)world->firstmodelsurface + (uint32_t)world->nummodelsurfaces;
+}
+
+/* ref/gl's R_GetEntityRenderMode (gl_studio.c:2384), brush-model branch
+   only - the only model type this list ever holds. A normal-rendermode
+   brush model with '{' textures (MODEL_TRANSPARENT) sorts as TransAlpha. */
+static int nv2a_brush_entity_render_mode( const cl_entity_t *ent )
+{
+	if( ent->curstate.rendermode == kRenderNormal && ent->model && FBitSet( ent->model->flags, MODEL_TRANSPARENT ))
+		return kRenderTransAlpha;
+	return ent->curstate.rendermode;
+}
+
+/* ref/gl's R_OpaqueEntity (gl_rmain.c:63). */
+static qboolean nv2a_opaque_entity( const cl_entity_t *ent )
+{
+	if( nv2a_brush_entity_render_mode( ent ) == kRenderNormal )
+	{
+		switch( ent->curstate.renderfx )
+		{
+		case kRenderFxNone:
+		case kRenderFxDeadPlayer:
+		case kRenderFxLightMultiplier:
+		case kRenderFxExplode:
+			return true;
+		}
+	}
+	return false;
+}
+
+/* ref/gl's CL_FxBlend (gl_rmain.c:1161), whole function. This renderer
+   never draws cubemaps, so the RF_DRAW_CUBEMAP guards are always open. */
+static int nv2a_fx_blend( cl_entity_t *e )
+{
+	int blend = 0;
+	float offset = ((int)e->index ) * 363.0f; // Use ent index to de-sync these fx
+
+	switch( e->curstate.renderfx )
+	{
+	case kRenderFxPulseSlowWide:
+		blend = e->curstate.renderamt + 0x40 * sin( gp_cl->time * 2 + offset );
+		break;
+	case kRenderFxPulseFastWide:
+		blend = e->curstate.renderamt + 0x40 * sin( gp_cl->time * 8 + offset );
+		break;
+	case kRenderFxPulseSlow:
+		blend = e->curstate.renderamt + 0x10 * sin( gp_cl->time * 2 + offset );
+		break;
+	case kRenderFxPulseFast:
+		blend = e->curstate.renderamt + 0x10 * sin( gp_cl->time * 8 + offset );
+		break;
+	case kRenderFxFadeSlow:
+		if( e->curstate.renderamt > 0 )
+			e->curstate.renderamt -= 1;
+		else e->curstate.renderamt = 0;
+		blend = e->curstate.renderamt;
+		break;
+	case kRenderFxFadeFast:
+		if( e->curstate.renderamt > 3 )
+			e->curstate.renderamt -= 4;
+		else e->curstate.renderamt = 0;
+		blend = e->curstate.renderamt;
+		break;
+	case kRenderFxSolidSlow:
+		if( e->curstate.renderamt < 255 )
+			e->curstate.renderamt += 1;
+		else e->curstate.renderamt = 255;
+		blend = e->curstate.renderamt;
+		break;
+	case kRenderFxSolidFast:
+		if( e->curstate.renderamt < 252 )
+			e->curstate.renderamt += 4;
+		else e->curstate.renderamt = 255;
+		blend = e->curstate.renderamt;
+		break;
+	case kRenderFxStrobeSlow:
+		blend = 20 * sin( gp_cl->time * 4 + offset );
+		if( blend < 0 ) blend = 0;
+		else blend = e->curstate.renderamt;
+		break;
+	case kRenderFxStrobeFast:
+		blend = 20 * sin( gp_cl->time * 16 + offset );
+		if( blend < 0 ) blend = 0;
+		else blend = e->curstate.renderamt;
+		break;
+	case kRenderFxStrobeFaster:
+		blend = 20 * sin( gp_cl->time * 36 + offset );
+		if( blend < 0 ) blend = 0;
+		else blend = e->curstate.renderamt;
+		break;
+	case kRenderFxFlickerSlow:
+		blend = 20 * (sin( gp_cl->time * 2 ) + sin( gp_cl->time * 17 + offset ));
+		if( blend < 0 ) blend = 0;
+		else blend = e->curstate.renderamt;
+		break;
+	case kRenderFxFlickerFast:
+		blend = 20 * (sin( gp_cl->time * 16 ) + sin( gp_cl->time * 23 + offset ));
+		if( blend < 0 ) blend = 0;
+		else blend = e->curstate.renderamt;
+		break;
+	case kRenderFxHologram:
+	case kRenderFxDistort:
+	{
+		vec3_t tmp;
+		float dist;
+
+		VectorSubtract( e->origin, nv2a_eye_origin, tmp );
+		dist = DotProduct( tmp, nv2a_eye_forward );
+
+		// turn off distance fade
+		if( e->curstate.renderfx == kRenderFxDistort )
+			dist = 1;
+
+		if( dist <= 0 )
+		{
+			blend = 0;
+		}
+		else
+		{
+			e->curstate.renderamt = 180;
+			if( dist <= 100 ) blend = e->curstate.renderamt;
+			else blend = (int) ((1.0f - ( dist - 100 ) * ( 1.0f / 400.0f )) * e->curstate.renderamt );
+			blend += gEngfuncs.COM_RandomLong( -32, 31 );
+		}
+		break;
+	}
+	default:
+		blend = e->curstate.renderamt;
+		break;
+	}
+
+	blend = bound( 0, blend, 255 );
+
+	return blend;
+}
+
+/* ref/gl's R_RankForRenderMode (gl_rmain.c:28). */
+static int nv2a_rank_for_render_mode( int rendermode )
+{
+	switch( rendermode )
+	{
+	case kRenderTransTexture:
+		return 1;	// draw second
+	case kRenderTransAdd:
+		return 2;	// draw third
+	case kRenderGlow:
+		return 3;	// must be last!
+	}
+	return 0;
+}
+
+/* ref/gl's R_TransEntityCompare (gl_rmain.c:86), brush entities only. */
+static int nv2a_trans_entity_compare( const void *a, const void *b )
+{
+	cl_entity_t *ent1 = *(cl_entity_t **)a;
+	cl_entity_t *ent2 = *(cl_entity_t **)b;
+	int rendermode1 = nv2a_brush_entity_render_mode( ent1 );
+	int rendermode2 = nv2a_brush_entity_render_mode( ent2 );
+	vec3_t vecLen, org;
+	float dist1, dist2;
+
+	// sort by distance
+	if( rendermode1 != kRenderTransAlpha )
+	{
+		VectorAverage( ent1->model->mins, ent1->model->maxs, org );
+		VectorAdd( ent1->origin, org, org );
+		VectorSubtract( nv2a_eye_origin, org, vecLen );
+		dist1 = DotProduct( vecLen, vecLen );
+	}
+	else dist1 = 1000000000;
+
+	if( rendermode2 != kRenderTransAlpha )
+	{
+		VectorAverage( ent2->model->mins, ent2->model->maxs, org );
+		VectorAdd( ent2->origin, org, org );
+		VectorSubtract( nv2a_eye_origin, org, vecLen );
+		dist2 = DotProduct( vecLen, vecLen );
+	}
+	else dist2 = 1000000000;
+
+	if( dist1 > dist2 )
+		return -1;
+	if( dist1 < dist2 )
+		return 1;
+
+	// then sort by rendermode
+	if( nv2a_rank_for_render_mode( rendermode1 ) > nv2a_rank_for_render_mode( rendermode2 ))
+		return 1;
+	if( nv2a_rank_for_render_mode( rendermode1 ) < nv2a_rank_for_render_mode( rendermode2 ))
+		return -1;
+
+	return 0;
+}
+
+/* ref/gl's R_SetRenderMode (gl_rsurf.c:1717) on NV2A state. ref/gl
+   modulates the texture by a vertex colour whose alpha is tr.blend; this
+   combiner (ps_lit) has no colour input, so the blend amount goes in as
+   NV097_SET_BLEND_COLOR's alpha and the blend factors use CONSTANT_ALPHA
+   in place of SRC_ALPHA. That is exact for opaque texels; for a
+   '{'-masked texture drawn in a translucent mode it ignores the texel's
+   own alpha, which ref/gl would multiply in. Returns false for
+   kRenderTransColor: ref/gl draws that as a flat colour with texturing
+   off, and ps_lit has no untextured path - not drawn (divergences.md
+   #103). A future port: its alpha is curstate.renderamt, not tr.blend
+   (gl_rsurf.c:1724-1730). */
+static qboolean nv2a_set_render_mode( int rendermode, float blend )
+{
+	uint32_t *p = pb_begin();
+	uint32_t alpha = (uint32_t)( bound( 0.0f, blend, 1.0f ) * 255.0f + 0.5f );
+
+	switch( rendermode )
+	{
+	case kRenderNormal:
+		p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 ); /* R_DrawWorld/R_DrawBrushModel leave it off (gl_rsurf.c:3691,1931) */
+		break;
+	case kRenderTransColor:
+		pb_end( p );
+		return false;
+	case kRenderTransAdd:
+		p = pb_push1( p, NV097_SET_BLEND_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, NV097_SET_BLEND_FUNC_SFACTOR_V_CONSTANT_ALPHA );
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE );
+		p = pb_push1( p, NV097_SET_BLEND_COLOR, alpha << 24 );
+		p = pb_push1( p, NV097_SET_DEPTH_MASK, 0 );
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
+		break;
+	case kRenderTransAlpha:
+		/* gl_rsurf.c:1742-1751, non-quake branch: alpha test, no blend,
+		   GL_GREATER 0.25. */
+		p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
+		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x3F ); /* GL_GREATER 0.25 passes a/255 > 0.25, i.e. a >= 64 */
+		break;
+	default: /* kRenderTransTexture, kRenderGlow */
+		p = pb_push1( p, NV097_SET_BLEND_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, NV097_SET_BLEND_FUNC_SFACTOR_V_CONSTANT_ALPHA );
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_CONSTANT_ALPHA );
+		p = pb_push1( p, NV097_SET_BLEND_COLOR, alpha << 24 );
+		p = pb_push1( p, NV097_SET_DEPTH_MASK, 0 );
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
+		break;
+	}
+
+	pb_end( p );
+	return true;
+}
+
+/* Undo nv2a_set_render_mode(), back to the world pass's own state -
+   ref/gl's own reset at the end of R_DrawBrushModel (gl_rsurf.c). */
+static void nv2a_reset_render_mode( void )
+{
+	uint32_t *p = pb_begin();
+
+	p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
+	p = pb_push1( p, NV097_SET_DEPTH_MASK, 1 );
+	if( nv2a_r_noalphatest.value )
+	{
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
+	}
+	else
+	{
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GEQUAL );
+		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x80 );
+	}
+	pb_end( p );
+}
+
+/* ref/gl's R_DrawBrushModel (gl_rsurf.c:1822) for one entity: bounds and
+   frustum cull, object transform, per-face backface cull in model space
+   (R_SortBrushModelSurfaces, gl_rsurf.c:1764), render mode, draw.
+   Not ported: dynamic-light pushes, decals, fullbrights, detail
+   textures, fog, polygon offset (gl_polyoffset_bmodels) and the
+   kRenderTransTexture back-to-front face sort - none of which this
+   renderer has for the world either yet. */
+static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float blend )
+{
+	const model_t *clmodel = e->model;
+	vec3_t mins, maxs, modelorg, delta;
+	vec3_t forward, right, up;
+	float object[4][4], mvp[4][4];
+	qboolean rotated;
+	uint32_t *p;
+	uint32_t bound_texture = 0xFFFFFFFFu;
+	qboolean lit;
+	int i;
+
+	/* Only this map's own submodels share its baked faces; anything else
+	   (a brush model from another BSP) has nothing to draw here. */
+	if( !clmodel || clmodel->type != mod_brush || clmodel == world || clmodel->surfaces != world->surfaces )
+		return;
+
+	if( !VectorIsNull( e->angles ))
+	{
+		for( i = 0; i < 3; i++ )
+		{
+			mins[i] = e->origin[i] - clmodel->radius;
+			maxs[i] = e->origin[i] + clmodel->radius;
+		}
+		rotated = true;
+	}
+	else
+	{
+		VectorAdd( e->origin, clmodel->mins, mins );
+		VectorAdd( e->origin, clmodel->maxs, maxs );
+		rotated = false;
+	}
+
+	if( nv2a_frustum_cull_box( mins, maxs ))
+		return;
+
+	/* Object matrix in this file's row-vector convention (position *
+	   object * viewproj): rows are the model's X/Y/Z axes in world space
+	   and its origin - the transpose of Matrix4x4_CreateFromEntity's
+	   columns, whose X/Y/Z axes are AngleVectors' forward, -right and up. */
+	memset( object, 0, sizeof( object ));
+	if( rotated )
+	{
+		AngleVectors( e->angles, forward, right, up );
+		for( i = 0; i < 3; i++ )
+		{
+			object[0][i] = forward[i];
+			object[1][i] = -right[i];
+			object[2][i] = up[i];
+		}
+	}
+	else
+	{
+		object[0][0] = object[1][1] = object[2][2] = 1.0f;
+	}
+	object[3][0] = e->origin[0];
+	object[3][1] = e->origin[1];
+	object[3][2] = e->origin[2];
+	object[3][3] = 1.0f;
+	nv2a_matrix_multiply( mvp, object, nv2a_map_viewproj );
+
+	/* tr.modelorg: the eye in model space (gl_rsurf.c R_DrawBrushModel -
+	   Matrix4x4_VectorITransform when rotated, a plain subtract when not). */
+	VectorSubtract( nv2a_eye_origin, e->origin, delta );
+	if( rotated )
+	{
+		modelorg[0] = DotProduct( delta, forward );
+		modelorg[1] = -DotProduct( delta, right );
+		modelorg[2] = DotProduct( delta, up );
+	}
+	else
+	{
+		VectorCopy( delta, modelorg );
+	}
+
+	/* R_HasLightmap: glass, additive and glow entities draw unlit
+	   (R_DrawVBO( R_HasLightmap(), ...) / R_BlendLightmaps, gl_rsurf.c). */
+	lit = nv2a_entity_has_lightmap( world, e );
+	if( !lit && !nv2a_bind_lightmap_stage1( false ))
+		lit = true; /* no neutral page: draw lit rather than not at all */
+
+	if( !nv2a_set_render_mode( e->curstate.rendermode, blend ))
+	{
+		if( !lit )
+			nv2a_bind_lightmap_stage1( true );
+		return;
+	}
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
+	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
+	memcpy( p, mvp, 16 * 4 );
+	p += 16;
+	{
+		static const float vs_lit_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f }; /* see nv2a_draw_map_geometry */
+		memcpy( p, vs_lit_c4, sizeof( vs_lit_c4 ));
+		p += 4;
+	}
+	pb_end( p );
+
+	for( i = 0; i < clmodel->nummodelsurfaces; i++ )
+	{
+		uint32_t orig = (uint32_t)( clmodel->firstmodelsurface + i );
+		const msurface_t *psurf;
+		const nv2a_map_face_t *face;
+		uint32_t sorted;
+
+		if( orig >= (uint32_t)world->numsurfaces || orig >= nv2a_map_face_remap_count )
+			continue;
+		sorted = nv2a_map_face_remap[orig];
+		if( sorted >= nv2a_map_face_count )
+			continue;
+
+		face = &nv2a_map_faces[sorted];
+		psurf = &world->surfaces[orig];
+
+		if( face->sky )
+			continue;
+
+		/* R_SortBrushModelSurfaces: water sides (non-quake branch). */
+		if( FBitSet( psurf->flags, NV2A_SURF_DRAWTURB ))
+		{
+			if( psurf->plane->type != PLANE_Z && !FBitSet( e->curstate.effects, EF_WATERSIDES ))
+				continue;
+			if( mins[2] + 1.0f >= psurf->plane->dist )
+				continue;
+		}
+
+		/* R_CullSurface's CULL_BACKSIDE, against the model-space eye.
+		   ref/gl keeps a back face only for decals on TransTexture
+		   entities; this renderer has no decals. */
+		if( !nv2a_r_nocullback.value && !VectorIsNull( psurf->plane->normal ))
+		{
+			float dist = PlaneDiff( modelorg, psurf->plane );
+
+			if( FBitSet( psurf->flags, NV2A_SURF_PLANEBACK ))
+				dist = -dist;
+			if( dist <= BACKFACE_EPSILON )
+				continue;
+		}
+
+		if( face->texture >= nv2a_map_texture_count )
+			continue;
+		if( face->texture != bound_texture )
+		{
+			nv2a_bind_map_texture_stage0( &nv2a_map_textures[face->texture] );
+			bound_texture = face->texture;
+		}
+		nv2a_draw_exact_indices( face->index_begin, face->index_end );
+	}
+
+	nv2a_reset_render_mode();
+	if( !lit )
+		nv2a_bind_lightmap_stage1( true );
+}
+
+/* ref/gl's R_DrawEntitiesOnList (gl_rmain.c), brush-model cases only:
+   solid entities after the world, then translucent ones sorted by
+   R_TransEntityCompare, each with tr.blend = CL_FxBlend/255 unless its
+   rendermode is kRenderNormal ("draw as solid but sorted by distance").
+   Restores the world view-projection afterwards. */
+static void nv2a_draw_brush_entities( const model_t *world )
+{
+	uint32_t *p;
+	int i;
+
+	if( !world || !nv2a_map_faces || !nv2a_map_face_remap || !nv2a_map_face_orig )
+		return;
+
+	if( nv2a_num_solid_brush_entities == 0 && nv2a_num_trans_brush_entities == 0 )
+		return;
+
+	for( i = 0; i < nv2a_num_solid_brush_entities; i++ )
+		nv2a_draw_brush_entity( world, nv2a_solid_brush_entities[i], 1.0f );
+
+	qsort( nv2a_trans_brush_entities, nv2a_num_trans_brush_entities, sizeof( cl_entity_t * ), nv2a_trans_entity_compare );
+
+	for( i = 0; i < nv2a_num_trans_brush_entities; i++ )
+	{
+		cl_entity_t *e = nv2a_trans_brush_entities[i];
+		float blend;
+
+		if( e->curstate.rendermode != kRenderNormal )
+			blend = nv2a_fx_blend( e ) / 255.0f;
+		else blend = 1.0f; // draw as solid but sorted by distance
+
+		if( blend <= 0.0f )
+			continue;
+
+		nv2a_draw_brush_entity( world, e, blend );
+	}
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
+	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 16 );
+	memcpy( p, nv2a_map_viewproj, 16 * 4 );
+	p += 16;
 	pb_end( p );
 }
 
@@ -1667,6 +2324,19 @@ static void nv2a_draw_map_geometry( void )
 				if( face->sky )
 					continue;
 
+				/* X9-M: brush-entity faces (func_door, func_wall, ladders,
+				   triggers...) belong to the entity pass, which draws them
+				   at the entity's own origin/angles and render mode - see
+				   nv2a_draw_brush_entities(). ref/gl never draws them from
+				   the world either: R_RecursiveWorldNode draws each world
+				   node's own surface range (gl_rsurf.c:3507-3527; leaves
+				   only mark visibility), and world nodes cover only the
+				   world model's faces. Without the remap table
+				   there is no way to tell, so the world pass keeps drawing
+				   everything (fail open, never missing geometry). */
+				if( !nv2a_map_face_is_world( world, i ))
+					continue;
+
 				/* X9-H, nv2a-xbox-specialist review, real finding: the
 				   backface test (below) is the most expensive of the three -
 				   the only one with a pointer chase off this map's own
@@ -1716,18 +2386,21 @@ static void nv2a_draw_map_geometry( void )
 
 				nv2a_cull_faces_visible++;
 
-				if( have_run && face->dword_begin <= run_end )
+				/* X9-M: runs are EXACT index ranges now (they were dword
+				   ranges snapped out to 6 indices) - a snapped range could
+				   reach a neighbouring brush-entity face's triangles, which
+				   must never be drawn from the world. */
+				if( have_run && face->index_begin == run_end )
 				{
-					if( face->dword_end > run_end )
-						run_end = face->dword_end;
+					run_end = face->index_end;
 				}
 				else
 				{
 					if( have_run )
 					{
-						nv2a_draw_index_range( run_begin, run_end );
+						nv2a_draw_exact_indices( run_begin, run_end );
 						nv2a_cull_runs++;
-						nv2a_cull_dwords += run_end - run_begin;
+						nv2a_cull_dwords += ( run_end - run_begin + 1 ) / 2;
 					}
 					if( !stage0_bound )
 					{
@@ -1741,20 +2414,22 @@ static void nv2a_draw_map_geometry( void )
 						nv2a_bind_map_texture_stage0( tex );
 						stage0_bound = true;
 					}
-					run_begin = face->dword_begin;
-					run_end = face->dword_end;
+					run_begin = face->index_begin;
+					run_end = face->index_end;
 					have_run = true;
 				}
 			}
 
 			if( have_run )
 			{
-				nv2a_draw_index_range( run_begin, run_end );
+				nv2a_draw_exact_indices( run_begin, run_end );
 				nv2a_cull_runs++;
-				nv2a_cull_dwords += run_end - run_begin;
+				nv2a_cull_dwords += ( run_end - run_begin + 1 ) / 2;
 			}
 		}
 	}
+
+	nv2a_draw_brush_entities( world );
 
 	pb_print( "ref_nv2a: real baked geometry\n" );
 	pb_draw_text_screen();
@@ -1864,6 +2539,12 @@ static void nv2a_free_resources( void )
    loaded when the renderer itself is torn down. */
 static void nv2a_free_map_resources( void )
 {
+	/* X9-M: the entity lists point into the client's edict array, which a
+	   map change frees (CL_FreeEdicts) while loading-plaque frames can
+	   still reach R_EndFrame - never carry them past the map they came
+	   from. */
+	nv2a_num_solid_brush_entities = 0;
+	nv2a_num_trans_brush_entities = 0;
 	nv2a_map_ready = false;
 	nv2a_map_owner = NULL;
 	nv2a_map_vert_count = 0;
@@ -2039,14 +2720,62 @@ static void GL_SetupAttributes( int safegl )
 	;
 }
 
+/* X9-M: ref/gl's R_AddEntity (gl_rmain.c:234). Only brush models are
+   kept - this renderer draws nothing else yet - but the accept/reject
+   rules (r_drawentities, EF_NODRAW, fully faded translucents) and the
+   solid/translucent split are the reference's, so the lists hold exactly
+   what ref/gl's would for brush entities. */
 static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 {
+	if( !r_drawentities->value )
+		return false; // not allow to drawing
+
+	if( FBitSet( clent->curstate.effects, EF_NODRAW ))
+		return false; // done
+
+	if( clent->curstate.rendermode != kRenderNormal && nv2a_fx_blend( clent ) <= 0 )
+		return true; // invisible
+
+	if( type == ET_BEAM || !clent->model || clent->model->type != mod_brush )
+		return true; // accepted, but this renderer has no path for it yet
+
+	if( nv2a_opaque_entity( clent ))
+	{
+		if( nv2a_num_solid_brush_entities >= NV2A_MAX_BRUSH_ENTITIES )
+			return false;
+		nv2a_solid_brush_entities[nv2a_num_solid_brush_entities++] = clent;
+	}
+	else
+	{
+		if( nv2a_num_trans_brush_entities >= NV2A_MAX_BRUSH_ENTITIES )
+			return false;
+		nv2a_trans_brush_entities[nv2a_num_trans_brush_entities++] = clent;
+	}
+
 	return true;
+}
+
+/* X9-M: ref/gl's R_ClearScene (gl_rmain.c:217). */
+static void R_ClearScene( void )
+{
+	nv2a_num_solid_brush_entities = 0;
+	nv2a_num_trans_brush_entities = 0;
+
+	// clear the scene befor start new frame
+	if( gEngfuncs.drawFuncs->R_ClearScene != NULL )
+		gEngfuncs.drawFuncs->R_ClearScene();
 }
 
 static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned int max_entities )
 {
-	;
+	/* X9-M: CL_FreeEdicts (cl_game.c) calls this with allocate = false
+	   right before freeing the edict array the entity lists point into;
+	   R_ClearScene does not run again until the next active frame. */
+	if( !allocate )
+	{
+		nv2a_num_solid_brush_entities = 0;
+		nv2a_num_trans_brush_entities = 0;
+	}
 }
 
 static const byte *R_GetTextureOriginalBuffer( unsigned int idx )
@@ -2751,6 +3480,9 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 				   exact right end position for whichever face is
 				   actually last. */
 				faces[i].dword_begin = ( start_index / 6 ) * 3;
+				faces[i].index_begin = start_index;
+				faces[i].index_end   = start_index + face_indices;
+				faces[i].texture     = 0xFFFFFFFFu; /* filled from the batch table below; stays invalid if no valid batch covers it */
 				faces[i].dword_end   = (( start_index + face_indices + 5 ) / 6 ) * 3;
 				if( faces[i].dword_end > dword_count )
 					faces[i].dword_end = dword_count;
@@ -2762,6 +3494,23 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			{
 				nv2a_map_faces = faces;
 				nv2a_map_face_count = face_count;
+
+				/* X9-M: each sorted face's own texture, from the batch
+				   that covers it. Batches the draw loop would reject
+				   (range past face_count) are skipped here too; their
+				   faces keep 0xFFFFFFFF and the entity pass skips them,
+				   as the world pass skips the batch. */
+				{
+					uint32_t b2, f2;
+					for( b2 = 0; b2 < nv2a_map_batch_count; b2++ )
+					{
+						const nv2a_map_batch_t *bt = &nv2a_map_batches[b2];
+						if( (uint64_t)bt->startFace + bt->faceCount > (uint64_t)face_count )
+							continue;
+						for( f2 = bt->startFace; f2 < bt->startFace + bt->faceCount; f2++ )
+							faces[f2].texture = bt->textureIndex;
+					}
+				}
 
 				/* X9-K: parse the archive's own originalToSortedFaceIndex[]
 				   table (nv2a_map_face_remap - ORIGINAL BSP face index ->
@@ -3344,6 +4093,7 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	VectorCopy( rvp->vieworigin, nv2a_eye_origin );
 
 	AngleVectors( (float *)rvp->viewangles, forward, right, up );
+	VectorCopy( forward, nv2a_eye_forward );
 	f.x = forward[0]; f.y = forward[1]; f.z = forward[2];
 	r.x = right[0];   r.y = right[1];   r.z = right[2];
 	u.x = up[0];      u.y = up[1];      u.z = up[2];
@@ -3631,7 +4381,7 @@ const ref_interface_t gReffuncs =
 	.R_SpeedsMessage   = R_SpeedsMessage,
 	.Mod_GetCurrentVis = Mod_GetCurrentVis,
 	.R_NewMap          = R_SimpleStub,
-	.R_ClearScene      = R_SimpleStub,
+	.R_ClearScene      = R_ClearScene,
 
 	.TriRenderMode = R_SimpleStubInt,
 	.Begin         = R_SimpleStubInt,

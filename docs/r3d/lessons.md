@@ -1617,3 +1617,50 @@ than before, when the bug it fixed was accidentally hiding an unrelated,
 older problem - that is a real finding to root-cause and document
 (`divergences.md` #101), not evidence the fix itself is wrong. See
 `docs/r3d/divergences.md` #101.
+
+### xemu is not validation for NV2A register values - and "it's an xemu bug" needs the hardware to disagree first
+
+X9-K's textures looked wrong in xemu: smeared ground, misplaced patches,
+half a sign stretched across a whole board. An offline audit proved the
+baked textures, UVs, face remap, and the GPU's texture offset and format
+registers were all correct. A pixel fit then showed the sampler reading the
+wrong bytes, and that result was reported as "probably an xemu bug". It was
+not. The first real-hardware boot halted instead, on
+`NV097_SET_TEXTURE_FILTER = 0x01010000`: real NV2A rejects a zero
+convolution-kernel field (bits 13-15), and xemu accepts it. Once that was
+fixed, the hardware showed exactly the same corruption as xemu. The cause
+was ours: no texture FORMAT word set `BORDER_SOURCE_COLOR`, so every
+texture sampled at (u/2, v/2) on both.
+
+What finally settled it was a controlled experiment, not more fitting.
+Every diffuse texture was replaced with a coordinate texture (swizzled
+A8R8G8B8, R = x, G = y) and the lightmap with flat grey. Constant UVs were
+then written straight into the live vertex buffer through the xemu GDB
+stub (`M` packet), with one screenshot per value. UV 0.3 read back as 0.15,
+1.3 as 0.65, and 5.7 as 0.85, every time - an unambiguous frac(uv/2). The
+earlier statistical fit had been muddled by a guessed brightness factor
+and by u and the lightmap coordinate moving together within each face;
+the controlled pokes had neither problem.
+
+Rules:
+- **Verify on hardware before calling anything an emulator bug.** xemu and
+  the hardware agreeing is the strong signal; only a disagreement points at
+  the emulator. The Xbox here runs PrometheOS FTP (no XBDM), so deploy
+  `default.xbe` over FTP, and get real screenshots by having the XBE
+  `WriteFile` `pb_back_buffer()` to `D:\` after N frames, then pulling the
+  raw BGRX file back over FTP. FTP is unavailable while the game runs.
+- **xemu accepts register values real hardware rejects or renders
+  differently.** Take register values from a hardware-proven codebase, not
+  from nxdk samples: Perfect Dark X's `port/fast3d/gfx_nv2a.cpp` is one.
+  The nxdk mesh sample's `0x04074000` is a convolution filter that smears
+  on hardware, and its filter words were the root of the halt.
+- **When a fit is ambiguous, control the input.** Poking known values into
+  live GPU-visible memory and reading back a coordinate texture isolates one
+  stage of the pipeline in a handful of screenshots, with no rebuild. A
+  runtime flag (`volatile int`, poked through the stub) lets one build serve
+  both the probe and normal rendering, which saves a 15-minute rebuild per
+  hypothesis.
+- **Diff every format word against a known-good one bit by bit.** The
+  missing bit was visible in PD-X's `0x0001122a` all along; comparing the
+  whole word rather than the fields believed to matter would have found it
+  on day one. See `divergences.md` #102.

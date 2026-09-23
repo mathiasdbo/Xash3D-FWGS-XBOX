@@ -8184,7 +8184,51 @@ staleness; `UiPacker.cpp`'s unrelated menu-background archive silently
 inheriting `version=9`; the sky-skip and mip-aliasing findings above) in
 `divergences.md` #101.
 
-X9-L onward (skinning, dynamic lighting, the frame-time exit criterion
+**X9-L, 2026-09-23 - first run on a real Original Xbox; texture state
+fixed.** The first hardware run halted on a texture filter value xemu
+accepts (`0x01010000`, zero convolution-kernel field). Once that was fixed,
+the hardware showed X9-K's exact xemu corruption, which proved the
+corruption was ours, not an xemu bug. Root cause: no texture FORMAT word set
+`BORDER_SOURCE_COLOR`, so every texture sampled at (u/2, v/2). Also fixed:
+the nxdk sample's convolution filter (`0x04074000`) was replaced with plain
+bilinear. The crossfire spawn now matches `ref_soft`'s look in xemu and on
+hardware. The bring-up test triangle had the same half-coordinate sampling
+and is fixed by the same bit: it now renders correctly on hardware too.
+Full account in `divergences.md` #102; the method is in `lessons.md`.
+
+Open items that X9-L surfaced or carried forward, in suggested order:
+
+1. ~~**`nv2a_mark_leaves()` hides visible world faces.**~~ **Done,
+   X9-M (`divergences.md` #103): the PVS code was right.** The hidden
+   faces belonged to brush entities (doors, ladders, fences), and
+   `ref/nv2a` had no entity pass. It now draws brush entities the way
+   ref/gl does. Left from that work: `kRenderTransColor` entities, and
+   studio models, sprites and beams, which still have no path.
+2. **Mipmaps.** `MIPMAP_LEVELS=1` for every texture since X9-A; distant
+   tiled faces alias into moire (`divergences.md` #101 (g)). The baker needs
+   to emit a DXT1 mip chain per texture, and stage 0 needs the level count
+   plus a MIN filter that selects between levels.
+3. **`nv2a_r_nocull 1` loses the xemu Vulkan device**
+   (`VK_ERROR_DEVICE_LOST`). This is the whole-batch draw path
+   (`nv2a_batch_dword_range`). Check it on real hardware before blaming
+   xemu - X9-L's lesson.
+4. **Bring-up test triangle's `vs.inl` writes only `.xy`** for a
+   `2D_PROJECTIVE` stage (q undefined). It renders correctly on real
+   hardware as of X9-L, so this is hygiene only: make it match `vs_lit`
+   (write q = 1, upload `c[4]`), or retire the triangle once the map path is
+   the only one that draws.
+5. **Stage 1 stays enabled when only stage 0 is used.** PD-X writes
+   `TEXTURE_CONTROL0 = 0` on unused stages; `ref/nv2a` leaves stage 1's
+   `0x4003ffc0` set after a map frame when the test triangle draws. Not a
+   known rejection, just hygiene.
+6. Carried from X9-K: `tools/verify-atlas-alpha.py` is stale for v9, and
+   `UiPacker.cpp`'s menu archive inherits `version=9`.
+7. **Real-hardware check, by default.** Every `ref/nv2a` phase ends with a
+   hardware boot (the FTP deploy plus back-buffer dump recipe in
+   `lessons.md`). xemu accepted two register values real hardware rejects or
+   renders differently.
+
+X9-M onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.
 
 - ~~Per-map atlas instead of texture arrays — the baker already produces

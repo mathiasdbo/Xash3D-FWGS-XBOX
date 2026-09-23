@@ -5,6 +5,27 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — `ref/nv2a` draws brush entities (X9-M)
+
+Doors, ladders, fences, rails, chargers, buttons and mounted guns are
+brush entities: their faces belong to the map's submodels, not the world.
+`ref/nv2a` had no entity pass, so it drew every baked face as static world
+geometry. The visibility culling then hid those faces permanently, since
+no world leaf lists them. Turning culling off drew them frozen in place,
+invisible triggers included. This was the "missing caution stripes" item
+on the roadmap. On `crossfire` that is 647 faces across 71 entities.
+
+`ref/nv2a` now keeps ref/gl's per-frame entity lists (`R_AddEntity`,
+`R_ClearScene`) and draws each brush entity after the world:
+- at its own position and rotation;
+- with off-screen and back-face culling;
+- in ref/gl's render modes: normal, alpha-tested, blended and additive,
+  including pulse and fade effects.
+
+The world pass no longer draws entity faces, and it draws exact triangle
+ranges, so entity and world triangles never mix. Checked in xemu and on a
+real Original Xbox.
+
 ### Fixed — `ref/nv2a` textures on a real Original Xbox (X9-L)
 
 The first run of `ref/nv2a` on a real Original Xbox halted with a GPU
