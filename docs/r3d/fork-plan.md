@@ -8226,7 +8226,13 @@ Open items that X9-L surfaced or carried forward, in suggested order:
      measure the 125-map corpus against it;
    - if distant fences or grates vanish too early, use coverage-preserving
      alpha scaling for masked mips;
-   - revive `tools/verify-atlas-alpha.py` as a per-texture, per-level check.
+   - ~~revive `tools/verify-atlas-alpha.py` as a per-texture, per-level
+     check.~~ **Done, X9-Q (`divergences.md` #101 (b), #99's dated
+     follow-up):** rewritten for v10's texture directory and per-level
+     mip chains, paired with a new `R3D_DUMP_TEXTURE_RGBA` baker hook.
+     0 mismatches across 121 of the 125 retail maps (the other 4 fail to
+     bake for the same unrelated, already-tracked u16 vertex-index limit;
+     `CHANGELOG.md`, `divergences.md` #99).
 3. ~~**`nv2a_r_nocull 1` loses the xemu Vulkan device.**~~ **Done, X9-O
    (`divergences.md` #107):** the setting now matches ref/gl's `r_nocull`
    instead of switching to the whole-batch fallback, which drew triggers
@@ -8237,8 +8243,12 @@ Open items that X9-L surfaced or carried forward, in suggested order:
    `vs.inl` byte for byte) now writes q = 1, with `c[4]` uploaded.
 5. ~~**Stage 1 stays enabled when only stage 0 is used.**~~ **Done, X9-P:**
    the test triangle sets stage 1's `TEXTURE_CONTROL0` to 0.
-6. Carried from X9-K: `tools/verify-atlas-alpha.py` is stale for v9, and
-   `UiPacker.cpp`'s menu archive inherits `version=9`.
+6. ~~Carried from X9-K: `tools/verify-atlas-alpha.py` is stale for v9, and
+   `UiPacker.cpp`'s menu archive inherits `version=9`.~~ **Done, X9-Q
+   (`divergences.md` #101 (b),(c)):** the tool is fixed above (item 2);
+   `UiPacker::packMenuBackground` now writes its own
+   `MPAK_UI_BACKGROUND_VERSION` instead of inheriting whatever the map
+   format's `version` default happens to be.
 7. **Real-hardware check, by default.** Every `ref/nv2a` phase ends with a
    hardware boot (the FTP deploy plus back-buffer dump recipe in
    `lessons.md`). xemu accepted two register values real hardware rejects or

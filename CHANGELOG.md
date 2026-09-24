@@ -26,6 +26,69 @@ dxt1_mip_chain_test.cpp`, can call it directly and cross-check its output
 size against the shared rule for a square, a 16:1 wide and a 16:1 tall case
 (4x4, 16x16, 64x4, 4x64, 256x16).
 
+### Fixed — `tools/verify-atlas-alpha.py` revived for MPAK v10; `menu_bg.mpak` gets its own version number (X9-Q)
+
+`tools/verify-atlas-alpha.py` had been stale since v9 (its field list and
+single shared-atlas addressing were both from the v6-v8 format) and had no
+v10 counterpart at all, so the per-texture mip chains X9-N added (MPAK v10)
+were never checked against the punch-through-alpha invariant
+`divergences.md` #99 relies on. Rewritten against the current 43-field
+`MpakHeader6` and v10's `align128`-addressed texture directory, paired with
+a new `R3D_DUMP_TEXTURE_RGBA` bake-time hook (successor to the pre-v9
+`R3D_DUMP_ATLAS_RGBA` hook) that dumps the exact pre-compression buffer for
+every mip level. Threshold moved from source alpha `== 255` to the
+encoder's own `>= 128`, since mip levels (unlike the old base-level-only
+atlas) have real intermediate alphas. Off by default; byte-identical
+archives with the env var unset. Re-ran the full retail `valve/maps`
+corpus: 121 of 125 maps bake (the other 4 fail for the same unrelated,
+already-tracked u16 vertex-index limit) - 0 opaque-source-but-transparent-
+decoded mismatches across 11,801 textures, 86,063 mip levels and
+164,092,624 texels (see `divergences.md` #99's own dated follow-up).
+
+QA round 1 found two gaps in the first pass: a dump record carried only
+texture/level/dimensions, so a stale dump from an earlier or different bake
+with matching texture sizes could be paired with today's archive and a real
+encoder regression could read as a pass; and every mismatched texel kept its
+own object even though only the first 20 are ever printed, risking an
+out-of-memory failure on a widely-broken encoder over a corpus this size
+instead of the promised summary and exit code. Fixed: dump format bumped to
+v2, each record now carries a CRC-32 (ISO 3309/IEEE 802.3, the same
+algorithm `zlib.crc32` implements) of the exact compressed bytes it was
+measured against, which the script recomputes from the archive and requires
+to match before decoding; and the script now tracks an exact mismatch
+counter, retaining only the first 20 `Mismatch` objects for the detail
+report. Re-verified byte-identity and the punch-through-alpha result on a
+real `c1a0` bake with the new dump format, and added a real-data negative
+control (a hand-corrupted compressed byte against the original dump now
+correctly fails closed with a digest mismatch, exit 2) plus two new unit
+tests (a cross-archive digest mismatch, and a mismatch count of 2,048 texels
+staying exact while only 20 objects are retained).
+
+QA round 2 found one more gap and one doc inconsistency. `_parse_dump`
+checked only the 4-byte magic before unpacking the 4-byte version field, so
+a dump truncated to 4-7 bytes raised an uncaught `struct.error` - Python's
+default exit code 1, which this tool reserves for "a real mismatch was
+found" - instead of the documented exit-2 structural-error path. Fixed with
+an explicit length check ahead of that unpack, plus two failure-path unit
+tests (a magic-only 4-byte dump, and a dump with a partial version field);
+confirmed both would have raised the uncaught `struct.error` before this
+fix by running the unguarded code path directly. Separately, `fork-plan.md`
+had drifted to claim "0 mismatches across the full 125-map retail corpus"
+for this same slice, while this entry and `divergences.md` #99 both
+correctly say 121 of 125 (4 maps fail to bake for the pre-existing,
+unrelated u16 vertex-index limit: `contamination`, `disposal`,
+`pool_party`, `rocket_frenzy`); corrected to match.
+
+`UiPacker::packMenuBackground` (`menu_bg.mpak`) built its header without
+ever setting `version`, so it silently inherited the BSP map format's
+`version` field - deployed as 6, then drifting to 10 with no decision
+behind either number, even though this archive isn't map-shaped at all (no
+`dheader_t`, descriptor at offset 0). It now writes its own
+`MPAK_UI_BACKGROUND_VERSION` (1), independent of the map format version.
+No reader change: the archive kind is still identified by descriptor
+position, not by this number, and nothing in the engine parses an offset-0
+archive today.
+
 ### Changed — `ref/nv2a` bring-up triangle state tidy-up (X9-P)
 
 The test triangle shown before a map loads now writes a complete texture

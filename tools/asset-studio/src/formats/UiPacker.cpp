@@ -13,6 +13,7 @@
 #include <utility>
 #include <tuple>
 #include <cmath>
+#include <cstddef>
 
 namespace formats {
 
@@ -477,9 +478,32 @@ bool UiPacker::packMenuBackground(const std::string& inputDir, const std::string
         dxt = TextureOpt::swizzleNV2A(dxt, totalW / 4, totalH / 4, 8);
     }
 
+    // Pinned offsets: this archive has no dheader_t and its descriptor sits
+    // at offset 0, sections shaped as a 24-byte meta block then one DXT blob
+    // (NOT the map format's dheader_t + sector-padded section walk) - so a
+    // map-format field-list change can silently move a field this function
+    // writes without this function's own layout changing at all. If one of
+    // these fires: the number below is wrong for what MpakHeader6 actually
+    // looks like now - fix the OFFSET, and bump MPAK_UI_BACKGROUND_VERSION
+    // (MpakHeader.h) since this archive's on-disk layout just changed.
+    static_assert(offsetof(MpakHeader6, version) == 4, "MpakHeader6::version moved - bump MPAK_UI_BACKGROUND_VERSION and update this offset");
+    static_assert(offsetof(MpakHeader6, headerSize) == 8, "MpakHeader6::headerSize moved - bump MPAK_UI_BACKGROUND_VERSION and update this offset");
+    static_assert(offsetof(MpakHeader6, flags) == 16, "MpakHeader6::flags moved - bump MPAK_UI_BACKGROUND_VERSION and update this offset");
+    static_assert(offsetof(MpakHeader6, lenTextureData) == 68, "MpakHeader6::lenTextureData moved - bump MPAK_UI_BACKGROUND_VERSION and update this offset");
+    static_assert(offsetof(MpakHeader6, count64) == 84, "MpakHeader6::count64 moved - bump MPAK_UI_BACKGROUND_VERSION and update this offset");
+    static_assert(offsetof(MpakHeader6, lenArray64) == 88, "MpakHeader6::lenArray64 moved - bump MPAK_UI_BACKGROUND_VERSION and update this offset");
+    static_assert(offsetof(MpakHeader6, count256) == 92, "MpakHeader6::count256 moved - bump MPAK_UI_BACKGROUND_VERSION and update this offset");
+    static_assert(offsetof(MpakHeader6, lenArray256) == 96, "MpakHeader6::lenArray256 moved - bump MPAK_UI_BACKGROUND_VERSION and update this offset");
+    // Not sizeof == 176: appended fields only grow headerSize and move no
+    // section, since every archive's sections start at sector 2048 regardless
+    // of headerSize. Only the pad below actually depends on the struct
+    // fitting inside one sector.
+    static_assert(sizeof(MpakHeader6) <= 2048, "MpakHeader6 no longer fits in the first sector - the pad below assumes it does");
+
     MpakHeader6 header{};
+    header.version = MPAK_UI_BACKGROUND_VERSION;
     header.headerSize = static_cast<uint32_t>(sizeof(MpakHeader6));
-    header.flags = isXbox ? 1 : 0;
+    header.flags = isXbox ? MPAK_FLAG_XBOX : 0;
 
     std::vector<uint8_t> meta(24, 0);
     *reinterpret_cast<uint32_t*>(&meta[0]) = totalW;
@@ -527,7 +551,11 @@ bool UiPacker::packMenuBackground(const std::string& inputDir, const std::string
     writePadded(meta.data(), meta.size());
     writePadded(dxt.data(), dxt.size());
 
-    std::cout << "Successfully serialized MPAKv6 archive to " << outputPath << "\n";
+    // header.version, not a literal "v6" - same fix PakManager::save() already
+    // made to its own success message (found stale there for the same reason:
+    // a hardcoded string can't track a struct field it doesn't read back).
+    std::cout << "Successfully serialized UI background archive (format v" << header.version
+              << ") to " << outputPath << "\n";
     return true;
 }
 

@@ -14,6 +14,34 @@ namespace formats {
     // when the on-disk *format* hasn't changed.
     constexpr uint32_t MPAK_BAKER_BUILD_ID = 2;
 
+    // Numbers ONLY UiPacker::packMenuBackground's own archive (menu_bg.mpak):
+    // descriptor at offset 0, no dheader_t, sections are a 24-byte meta block
+    // then one DXT blob - a completely different, older, simpler layout than
+    // the map format below, not a map archive that happens to be small.
+    // Independent of MpakHeader6::version (the map format version, kept in
+    // lockstep with filesystem/mpak_layout.h's MPAK_LAYOUT_VERSION): before
+    // this constant existed, packMenuBackground left `version` at its
+    // MpakHeader6 default and so silently inherited every map-format bump
+    // (X9-V10 found it shipping a deployed archive stamped 6 when the struct
+    // it actually wrote had already moved past that shape entirely). Bump
+    // this when packMenuBackground's OWN layout changes, or when a map-format
+    // change moves any MpakHeader6 field that function writes (see its own
+    // static_asserts in UiPacker.cpp, which pin those offsets and say the
+    // same thing).
+    //
+    // The archive KIND is identified by the descriptor's position (offset 0,
+    // no BSP30 dheader_t) - not by this number. Value 1 numerically matches
+    // the historic pre-v7 map format (back when map descriptors also sat at
+    // offset 0), and that overlap is harmless: every map reader requires a
+    // real dheader_t plus `version == MPAK_LAYOUT_VERSION` at offset 128
+    // (filesystem/mpak.c:136-160, mpak_layout.c:70), so nothing that reads a
+    // map archive can mistake this for one, regardless of the number.
+    //
+    // MPAK_BAKER_BUILD_ID above stays the shared, baker-wide build stamp
+    // (any rebake with unchanged `version` but different bytes) - it is not
+    // a layout version and this constant doesn't replace it.
+    constexpr uint32_t MPAK_UI_BACKGROUND_VERSION = 1;
+
     // MpakHeader6::flags bits.
     constexpr uint32_t MPAK_FLAG_XBOX = 1;        // Xbox target: DXT atlas instead of PC texture arrays
     constexpr uint32_t MPAK_FLAG_NV2A_BLOCK = 2;  // v7: the baked Vertex/index/FaceDrawCmd/FaceInfo/
@@ -53,12 +81,17 @@ namespace formats {
 
     // MPAKv6 fixed-size header (the "descriptor"), written verbatim inside the
     // first 2048-byte sector of every .mpak archive - for map archives at
-    // MPAK_DESCRIPTOR_OFFSET (see the v7 first-sector note above), for
-    // UiPacker's menu archives still at offset 0 (they are not maps and no
-    // engine path reads them yet). PakManager (BSP maps) and UiPacker (menu
-    // backgrounds) serialize this same struct so the engine-side C reader
-    // (filesystem/mpak.c, X2 - see docs/r3d/fork-plan.md) only has to know
-    // one layout.
+    // MPAK_DESCRIPTOR_OFFSET (see the v7 first-sector note above; this is
+    // PakManager::save(), and also UiPacker::packMenuAssets/menu.mpak, which
+    // goes through PakManager::save() and so IS a map-shaped archive, dheader_t
+    // and all). UiPacker::packMenuBackground/menu_bg.mpak is the one archive
+    // that still writes this same struct at offset 0, with no dheader_t in
+    // front of it - it is not a map and no engine path reads it yet, and it
+    // has its own version number (MPAK_UI_BACKGROUND_VERSION above), not this
+    // struct's `version` default. Corrected 2026-09 (X9-V10): earlier text
+    // here said packMenuBackground was the general case for "UiPacker's menu
+    // archives" - wrong, packMenuAssets is map-shaped and packMenuBackground
+    // is the one exception, not the other way round.
     //
     // Corrected 2026-09: earlier comments here said "the Rust reader" -
     // stale, left over from this repo's own pre-rename bootstrap (this
@@ -210,6 +243,14 @@ namespace formats {
     // are a second line of defense.
     struct MpakHeader6 {
         char magic[4] = {'M', 'P', 'A', 'K'};
+        // Default is the MAP format version, kept in lockstep with
+        // filesystem/mpak_layout.h's MPAK_LAYOUT_VERSION. PakManager::save()
+        // (map archives, and UiPacker::packMenuAssets/menu.mpak, which
+        // writes through it) both use this default unmodified.
+        // UiPacker::packMenuBackground/menu_bg.mpak is the one writer that
+        // overrides this field with MPAK_UI_BACKGROUND_VERSION instead - see
+        // that constant's own doc comment above for why it needs a number
+        // that isn't this one.
         uint32_t version = 10;
         uint32_t headerSize = 0;      // sizeof(MpakHeader6); set in PakManager::save just before writing
         uint32_t bakerBuildId = MPAK_BAKER_BUILD_ID;
@@ -278,9 +319,13 @@ namespace formats {
     // per-texture-WRAP replacement for the old shared atlas (see MpakHeader6's
     // v8 -> v9 note above). Directory order IS the write order of the
     // `lenTextureData` blob: this entry's own byte offset into that blob is
-    // the running sum of `dataLength` over every PRIOR directory entry - no
-    // stored offset field, matching every other section-length-only lump this
-    // format already uses (see the "no offset table" note above).
+    // the running sum of `align128(dataLength)` over every PRIOR directory
+    // entry (v10: each entry is zero-padded to the next 128 bytes, Xbox D3D's
+    // own texture base alignment - PakManager.cpp's save()/buildDxt1MipChain;
+    // corrected 2026-09, this used to say plain `dataLength`, true only before
+    // v10's mip chains made per-entry padding necessary) - no stored offset
+    // field, matching every other section-length-only lump this format
+    // already uses (see the "no offset table" note above).
 #pragma pack(push, 1)
     struct MpakTextureInfo {
         uint32_t width;      // POT, rounded UP (never down - see

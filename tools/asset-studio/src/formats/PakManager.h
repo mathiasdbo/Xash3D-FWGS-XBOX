@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <iosfwd>
 
 #include <unordered_map>
 #include <cstring>
@@ -77,7 +78,10 @@ namespace formats {
     // tests/dxt1_mip_chain_test.cpp can call it directly without linking a
     // copy of its own - the same reasoning downsampleRgba/resampleRgba
     // don't need (nothing outside this .cpp calls them).
-    std::vector<uint8_t> buildDxt1MipChain(const std::vector<uint8_t>& baseRgba, uint32_t w, uint32_t h, bool masked);
+    // dumpStream/dumpTextureIndex: optional per-level RGBA dump for
+    // tools/verify-atlas-alpha.py (see the definition in PakManager.cpp).
+    std::vector<uint8_t> buildDxt1MipChain(const std::vector<uint8_t>& baseRgba, uint32_t w, uint32_t h, bool masked,
+                                           std::ofstream* dumpStream = nullptr, uint32_t dumpTextureIndex = 0);
 
     class PakManager {
     public:

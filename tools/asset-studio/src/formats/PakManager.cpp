@@ -157,6 +157,26 @@ namespace {
         }
     }
 
+    // CRC-32 (ISO 3309 / IEEE 802.3, poly 0xEDB88320 reflected, init/final
+    // 0xFFFFFFFF) - the same algorithm zlib::crc32 and Python's stdlib
+    // zlib.crc32/binascii.crc32 implement, a standard rather than an
+    // invented-here hash (checked against the standard "123456789" ->
+    // 0xCBF43926 test vector). Used only to bind one dump record to the
+    // EXACT compressed bytes it was measured against - see buildDxt1MipChain's
+    // dumpStream doc comment below - not for any integrity/storage purpose,
+    // so the simple bit-by-bit form is fine: it runs once per mip level at
+    // bake time, not a per-texel hot path.
+    uint32_t crc32Ieee(const uint8_t* data, size_t len) {
+        uint32_t crc = 0xFFFFFFFFu;
+        for (size_t i = 0; i < len; ++i) {
+            crc ^= data[i];
+            for (int bit = 0; bit < 8; ++bit) {
+                uint32_t mask = 0u - (crc & 1u);
+                crc = (crc >> 1) ^ (0xEDB88320u & mask);
+            }
+        }
+        return ~crc;
+    }
 } // namespace
 
 namespace formats {
@@ -174,10 +194,30 @@ namespace formats {
     // output size against Mpak_Dxt1ChainLength (filesystem/
     // mpak_texture_dir.h) - no behaviour change, downsampleRgba stays
     // internal since nothing outside this file needs it directly.
-    std::vector<uint8_t> buildDxt1MipChain(const std::vector<uint8_t>& base, uint32_t w, uint32_t h, bool masked) {
+    //
+    // dumpStream/dumpTextureIndex (both optional, default off - the
+    // defaults live on the declaration in PakManager.h): when set,
+    // this writes one record per level - the EXACT buffer about to be
+    // compressed (*toCompress`, i.e. already edge-replicated/padded when the
+    // level is under 4 texels), plus a CRC-32 of the compressed bytes this
+    // same call produces - to a side channel tools/verify-atlas-alpha.py
+    // decodes and compares against the archive's own compressed bytes.
+    // fixOpaqueTexelsPunchedThrough (TextureOpt.cpp) can leave a block's
+    // encode unfixed if its retry fails verification, so whether the punch-
+    // through invariant (divergences.md #99) actually holds is an empirical
+    // property of the compressed bytes, not something derivable from the
+    // archive alone - this is the only place that still has the real,
+    // pre-compression source to check it against. The digest exists so the
+    // verifier can tell a dump taken from THIS bake apart from a stale one
+    // left over from an earlier bake with matching texture dimensions
+    // (codex-review finding, X9-V10-tooling QA round 1: dimension-only
+    // matching let a stale dump silently pass against a different archive).
+    std::vector<uint8_t> buildDxt1MipChain(const std::vector<uint8_t>& base, uint32_t w, uint32_t h, bool masked,
+                                            std::ofstream* dumpStream, uint32_t dumpTextureIndex) {
         std::vector<uint8_t> chain;
         std::vector<uint8_t> level = base, next, padded;
         uint32_t lw = w, lh = h;
+        uint32_t dumpLevel = 0;
         for (;;) {
             const uint32_t pw = std::max<uint32_t>(lw, 4), ph = std::max<uint32_t>(lh, 4);
             const std::vector<uint8_t>* toCompress = &level;
@@ -190,6 +230,12 @@ namespace formats {
                 toCompress = &padded;
             }
             auto dxt = TextureOpt::compressToDXT(toCompress->data(), static_cast<int>(pw), static_cast<int>(ph), masked);
+            if (dumpStream != nullptr) {
+                uint32_t digest = crc32Ieee(dxt.data(), dxt.size());
+                uint32_t rec[5] = {dumpTextureIndex, dumpLevel, pw, ph, digest};
+                dumpStream->write(reinterpret_cast<const char*>(rec), sizeof(rec));
+                dumpStream->write(reinterpret_cast<const char*>(toCompress->data()), static_cast<std::streamsize>(toCompress->size()));
+            }
             chain.insert(chain.end(), dxt.begin(), dxt.end());
             if (lw == 1 && lh == 1)
                 break;
@@ -198,6 +244,7 @@ namespace formats {
             level.swap(next);
             lw = nw;
             lh = nh;
+            ++dumpLevel;
         }
         return chain;
     }
@@ -463,6 +510,34 @@ namespace formats {
                 return false;
             }
 
+            // Pre-compression RGBA source dump, successor to the R3D_DUMP_ATLAS_RGBA
+            // hook removed in 1604d2e7 (#127) when the shared atlas went away in v9.
+            // Gated on this exact branch (nv2a && mIsXboxTarget): only here does
+            // buildDxt1MipChain ever run, so only here is there anything to dump.
+            // See buildDxt1MipChain's own doc comment for why this needs to be the
+            // real pre-compression buffer rather than anything reconstructible from
+            // the archive alone.
+            std::ofstream dumpFile;
+            std::ofstream* dumpStream = nullptr;
+            if (const char* dumpPath = std::getenv("R3D_DUMP_TEXTURE_RGBA")) {
+                dumpFile.open(dumpPath, std::ios::binary | std::ios::trunc);
+                if (!dumpFile.is_open()) {
+                    std::cerr << "ERROR: R3D_DUMP_TEXTURE_RGBA is set to " << dumpPath
+                              << " but that file could not be opened for writing - failing the bake "
+                                 "rather than silently skipping the dump.\n";
+                    return false;
+                }
+                const char magic[4] = {'R', 'T', 'X', 'D'};
+                // v2: each record also carries a CRC-32 of the compressed bytes
+                // it was measured against (buildDxt1MipChain's dumpStream doc
+                // comment) - v1 had dimensions only, which let a stale dump from
+                // a different bake pair silently with today's archive.
+                const uint32_t dumpVersion = 2;
+                dumpFile.write(magic, sizeof(magic));
+                dumpFile.write(reinterpret_cast<const char*>(&dumpVersion), sizeof(dumpVersion));
+                dumpStream = &dumpFile;
+            }
+
             textureDir.reserve(mXboxTextures.size());
             for (size_t j = 0; j < mXboxTextures.size(); ++j) {
                 // v10: the whole mip chain (buildDxt1MipChain), then zero
@@ -473,7 +548,8 @@ namespace formats {
                 auto dxt = buildDxt1MipChain(mXboxTextures[j],
                                              mXboxTextureWidths[j],
                                              mXboxTextureHeights[j],
-                                             mXboxTexturesMasked[j]);
+                                             mXboxTexturesMasked[j],
+                                             dumpStream, static_cast<uint32_t>(j));
                 MpakTextureInfo info{};
                 info.width = mXboxTextureWidths[j];
                 info.height = mXboxTextureHeights[j];
@@ -484,12 +560,31 @@ namespace formats {
                 textureDataBlob.insert(textureDataBlob.end(), dxt.begin(), dxt.end());
                 textureDataBlob.resize((textureDataBlob.size() + 127) & ~static_cast<size_t>(127), 0);
             }
+
+            if (dumpStream != nullptr) {
+                dumpStream->flush();
+                if (!dumpStream->good()) {
+                    std::cerr << "ERROR: writing the R3D_DUMP_TEXTURE_RGBA dump failed partway through - "
+                                 "failing the bake rather than leaving a truncated dump a verifier would "
+                                 "misread as complete.\n";
+                    return false;
+                }
+            }
+
             header.textureCount = static_cast<uint32_t>(textureDir.size());
             header.lenTextureDir = static_cast<uint32_t>(textureDir.size() * sizeof(MpakTextureInfo));
             header.lenTextureData = static_cast<uint32_t>(textureDataBlob.size());
 
             header.batchCount = static_cast<uint32_t>(mTextureBatches.size());
             header.lenBatches = static_cast<uint32_t>(mTextureBatches.size() * sizeof(MpakTextureBatch));
+        } else if (std::getenv("R3D_DUMP_TEXTURE_RGBA") != nullptr) {
+            // Nothing calls buildDxt1MipChain outside the nv2a+Xbox branch above,
+            // so there is nothing to dump for this target/profile - say so once,
+            // and write no file at all, so tools/verify-atlas-alpha.py fails on a
+            // missing file (loud) rather than an empty-but-well-formed one (quiet).
+            std::cerr << "WARNING: R3D_DUMP_TEXTURE_RGBA is set but this bake is not "
+                         "--target xbox --profile nv2a - no texture chains are baked for "
+                         "this target/profile, so no dump is written.\n";
         }
 
         std::vector<uint8_t> flat64, flat256, flat512;
@@ -823,7 +918,13 @@ namespace formats {
             // WITH the padding-content check on, unlike ref/nv2a's own
             // load-time call) against the texture-data lump's real bytes,
             // and each entry's width/height is compared to the retained,
-            // already-POT-resampled bake sources below.
+            // already-POT-resampled bake sources below. What neither can see
+            // is whether the DXT encoder kept every opaque texel opaque (the
+            // punch-through-alpha invariant TextureOpt.cpp's encoder guard can
+            // leave unfixed on a block): tools/verify-atlas-alpha.py checks
+            // that, per texture and per mip level, against an
+            // R3D_DUMP_TEXTURE_RGBA dump, because this in-memory verify has no
+            // access to the pre-compression source once save() returns.
             auto checkBaked = [&](const char* name, uint64_t ofs, const void* src, uint64_t size) {
                 if (size == 0) return;
                 if (ofs + size > static_cast<uint64_t>(fileSize)) {
