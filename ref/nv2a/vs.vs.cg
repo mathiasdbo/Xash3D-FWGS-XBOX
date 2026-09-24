@@ -1,0 +1,33 @@
+/*
+ * Bring-up test triangle vertex shader (nv2a_draw_test_triangle).
+ * tools/x4-triangle/vs.vs.cg, whose compiled output vs.inl was until
+ * X9-P, with one change: the texcoord is written whole, q = 1, for
+ * ps.inl's 2D_PROJECTIVE stage 0 - the same fix vs_lit.vs.cg got in
+ * X9-L. Compiled with cgc -profile vp20 + vp20compiler; the unchanged
+ * X4 source reproduced the old vs.inl byte for byte first.
+ */
+struct vIn {
+	float4 texcoord : TEXCOORD;
+	float4 position : POSITION;
+};
+
+struct vOut {
+	float4 pos  : POSITION;
+	float4 tex0 : TEXCOORD0;
+};
+
+vOut main(
+	vIn              I,
+	uniform float4x4 m_viewport
+	)
+{
+	vOut   result;
+	float4 position;
+
+	position = mul(float4(I.position.xyz, 1.0f), m_viewport);
+	position.xyz = position.xyz / position.w;
+
+	result.tex0 = float4(I.texcoord.xy, 0.0f, 1.0f);
+	result.pos = position;
+	return result;
+}

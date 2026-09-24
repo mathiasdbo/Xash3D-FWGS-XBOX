@@ -5,6 +5,14 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — `ref/nv2a` bring-up triangle state tidy-up (X9-P)
+
+The test triangle shown before a map loads now writes a complete texture
+coordinate (q = 1), as the map shader has since X9-L, and switches off the
+second texture stage it does not use. Its shader source now lives in
+`ref/nv2a/vs.vs.cg` instead of only as a compiled copy from the X4 tool.
+No visible change: the checkerboard and the map view render as before.
+
 ### Fixed — `nv2a_r_nocull` drew trigger volumes and frozen doors (X9-O)
 
 The `ref/nv2a` debug setting `nv2a_r_nocull 1` fell back to drawing every

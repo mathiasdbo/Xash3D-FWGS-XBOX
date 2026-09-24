@@ -8220,15 +8220,11 @@ Open items that X9-L surfaced or carried forward, in suggested order:
    instead of switching to the whole-batch fallback, which drew triggers
    and frozen doors. The device loss did not reproduce. A zero clip-space
    w in the vertex shader's divide is still a possible inf/NaN source.
-4. **Bring-up test triangle's `vs.inl` writes only `.xy`** for a
-   `2D_PROJECTIVE` stage (q undefined). It renders correctly on real
-   hardware as of X9-L, so this is hygiene only: make it match `vs_lit`
-   (write q = 1, upload `c[4]`), or retire the triangle once the map path is
-   the only one that draws.
-5. **Stage 1 stays enabled when only stage 0 is used.** PD-X writes
-   `TEXTURE_CONTROL0 = 0` on unused stages; `ref/nv2a` leaves stage 1's
-   `0x4003ffc0` set after a map frame when the test triangle draws. Not a
-   known rejection, just hygiene.
+4. ~~**Bring-up test triangle's `vs.inl` writes only `.xy`.**~~ **Done,
+   X9-P:** `ref/nv2a/vs.vs.cg` (the X4 source, which reproduced the old
+   `vs.inl` byte for byte) now writes q = 1, with `c[4]` uploaded.
+5. ~~**Stage 1 stays enabled when only stage 0 is used.**~~ **Done, X9-P:**
+   the test triangle sets stage 1's `TEXTURE_CONTROL0` to 0.
 6. Carried from X9-K: `tools/verify-atlas-alpha.py` is stale for v9, and
    `UiPacker.cpp`'s menu archive inherits `version=9`.
 7. **Real-hardware check, by default.** Every `ref/nv2a` phase ends with a

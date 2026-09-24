@@ -1242,6 +1242,11 @@ static void nv2a_draw_test_triangle( void )
 	/* Real NV2A rejects a zero convolution-kernel field (bits 13-15)
 	   with an invalid-data halt; xemu does not. */
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x01012000 );
+	/* X9-P: this path samples stage 0 only (ps.inl: stage 1 PROGRAM_NONE),
+	   but a map frame leaves stage 1 enabled on the lightmap. Disable it,
+	   as Perfect Dark X's gfx_nv2a.cpp does for every unused stage
+	   (TEXTURE_CONTROL0 = 0); nv2a_draw_map_geometry re-enables it. */
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
 	pb_end( p );
 
 	/* X9-I: this path shares the GPU with nv2a_draw_map_geometry(), which
@@ -1266,9 +1271,16 @@ static void nv2a_draw_test_triangle( void )
 	/* Shader constants: the same fixed viewport transform every frame. */
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
-	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 16 );
+	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
 	memcpy( p, nv2a_viewport, 16 * 4 );
 	p += 16;
+	{
+		/* X9-P: c[4] = (0, 1, 0, 0), vs.inl's own `#const c[4] = 0 1` -
+		   the q = 1 it writes for ps.inl's 2D_PROJECTIVE stage 0. */
+		static const float vs_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+		memcpy( p, vs_c4, sizeof( vs_c4 ));
+		p += 4;
+	}
 	pb_end( p );
 
 	p = pb_begin();
