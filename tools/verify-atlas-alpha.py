@@ -88,7 +88,7 @@ MPAK_BSP_VERSION = 30          # HLBSP_VERSION, common/bspfile.h; MpakHeader.h:3
 MPAK_DESCRIPTOR_OFFSET = 128   # MpakHeader.h:37 MPAK_DESCRIPTOR_OFFSET
 # MpakHeader6::version's default is the MAP format version, kept in lockstep
 # with filesystem/mpak_layout.h:54's MPAK_LAYOUT_VERSION - MpakHeader.h:213.
-MPAK_LAYOUT_VERSION = 10
+MPAK_LAYOUT_VERSION = 11
 MPAK_FLAG_XBOX = 1        # MpakHeader.h:18
 MPAK_FLAG_NV2A_BLOCK = 2  # MpakHeader.h:19
 SECTOR = 2048
@@ -106,7 +106,7 @@ MAX_RETAINED_MISMATCHES = 20  # only this many Mismatch objects are ever kept; s
 
 # MpakHeader6's own field order (MpakHeader.h:211-275) - every field after
 # the 4-byte magic is a uint32_t, byte order IS the format (no offset
-# table), so this list must track that struct exactly. 43 fields.
+# table), so this list must track that struct exactly. 44 fields (v11).
 _HEADER_FIELDS = [
     "version", "headerSize", "bakerBuildId", "flags",
     "vCount", "iCount",
@@ -120,8 +120,9 @@ _HEADER_FIELDS = [
     "lenFaceInfo", "lenTexinfo",
     "lenVertexes", "lenEdges", "lenSurfedges", "lenFaces", "lenLighting", "lenMiptex",
     "lenExtraLightBlocks",
+    "lenFaceVertexBase",  # v11: per-face vertex-chunk bases, multi-chunk maps only
 ]
-assert len(_HEADER_FIELDS) == 43
+assert len(_HEADER_FIELDS) == 44
 
 
 class VerifyError(Exception):
@@ -259,6 +260,7 @@ def _walk_sections(h, file_size):
     place("lighting", h["lenLighting"])
     place("miptex", h["lenMiptex"])
     place("extraLightBlocks", h["lenExtraLightBlocks"])
+    place("faceVertexBase", h["lenFaceVertexBase"])
 
     if cursor != file_size:
         raise VerifyError(

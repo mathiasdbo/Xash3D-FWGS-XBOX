@@ -58,11 +58,15 @@ namespace formats {
     // never approaches that range for a GoldSrc map. Noted, not "fixed" -
     // matching the ref's own uint32 dword_count would just reintroduce the
     // overflow risk this baker has no reason to have.
+    // ref/nv2a's nv2a_map_face_t, one per face (on-disk FaceDrawCmd is 8
+    // bytes); r_context.c STATIC_ASSERTs the same 52 so the two cannot drift.
+    constexpr uint64_t kNv2aMapFaceBytes = 52;
+
     inline uint64_t nv2aMapLedgerBytes(const MpakHeader6& h, uint64_t fileSize) {
         const uint64_t vbBytes = static_cast<uint64_t>(h.vCount) * kNv2aLitVertexBytes;
         const uint64_t idxBytes = ((static_cast<uint64_t>(h.iCount) + 1) / 2) * 4;
         return vbBytes + idxBytes
-            + static_cast<uint64_t>(h.lenFaceDrawCmds) * 4
+            + static_cast<uint64_t>(h.lenFaceDrawCmds / 8) * kNv2aMapFaceBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds) / 8
             + static_cast<uint64_t>(h.lenFaceRemap) * 2
             + static_cast<uint64_t>(h.lenTextureData)

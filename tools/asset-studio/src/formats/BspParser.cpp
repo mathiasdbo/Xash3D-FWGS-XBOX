@@ -513,7 +513,8 @@ namespace formats {
         // buffer's order needs to follow the sort, via polyIndices below.
         struct FaceBuildRecord {
             MpakFaceInfo faceInfo{};
-            std::vector<uint16_t> polyIndices;
+            std::vector<uint16_t> polyIndices; // v11: relative to vertexBase
+            uint32_t vertexBase = 0;           // v11: this face's vertex-chunk base (PakManager::beginFaceVertices)
             std::vector<MpakExtraLightBlock> extraBlocks; // faceIndex filled in during pass 2
             uint32_t textureIndex = 0;
             uint32_t pvsCluster = 0xFFFFFFFFu; // no owning leaf found - sorts last within its texture group
@@ -760,6 +761,7 @@ namespace formats {
             }
 
             std::vector<uint16_t>& polyIndices = rec.polyIndices;
+            rec.vertexBase = pak.beginFaceVertices(face.numedges > 0 ? static_cast<uint32_t>(face.numedges) : 0u);
 
             for (int16_t j = 0; j < face.numedges; ++j) {
                 int32_t surfedge = surfedges[face.firstedge + j];
@@ -825,6 +827,9 @@ namespace formats {
         std::iota(order.begin(), order.end(), 0);
         std::stable_sort(order.begin(), order.end(), [&records](uint32_t a, uint32_t b) {
             if (records[a].textureIndex != records[b].textureIndex) return records[a].textureIndex < records[b].textureIndex;
+            // v11: then by vertex chunk, so one texture's faces form at most
+            // one run per chunk - a batch below never spans two chunks.
+            if (records[a].vertexBase != records[b].vertexBase) return records[a].vertexBase < records[b].vertexBase;
             return records[a].pvsCluster < records[b].pvsCluster;
         });
 
@@ -895,6 +900,7 @@ namespace formats {
             }
 
             pak.addFaceDrawCmd(startIndex, addedIndices);
+            pak.addFaceVertexBase(rec.vertexBase); // v11
             pak.addFaceInfo(rec.faceInfo);
             currentIndexCount += addedIndices;
 
@@ -903,7 +909,15 @@ namespace formats {
                 pak.addExtraLightBlock(extra);
             }
 
-            if (batches.empty() || batches.back().textureIndex != rec.textureIndex) {
+            // v11: a batch is a run of one texture WITHIN one vertex chunk,
+            // so a batch drawn as a whole (ref/nv2a's per-batch fallback)
+            // needs a single base vertex.
+            const bool newBatch = batches.empty() || batches.back().textureIndex != rec.textureIndex
+                || (sortedPos > 0 && records[order[sortedPos - 1]].vertexBase != rec.vertexBase);
+            if (newBatch) {
+                // v11: the padding fallback index must belong to this batch's
+                // own chunk; 0 is always a real vertex of it.
+                lastRealVertexIndex = 0;
                 MpakTextureBatch batch{};
                 batch.textureIndex = rec.textureIndex;
                 batch.startFace = sortedPos;
@@ -921,7 +935,8 @@ namespace formats {
             // pad it now, before any later batch's own startIndex is
             // computed from currentIndexCount.
             bool isLastFaceOfBatch = (sortedPos + 1 == order.size())
-                || (records[order[sortedPos + 1]].textureIndex != rec.textureIndex);
+                || (records[order[sortedPos + 1]].textureIndex != rec.textureIndex)
+                || (records[order[sortedPos + 1]].vertexBase != rec.vertexBase); // v11
             if (isLastFaceOfBatch) {
                 uint32_t remainder = batches.back().indexCount % 6;
                 if (remainder != 0) {
@@ -939,6 +954,7 @@ namespace formats {
         pak.setTextureBatches(std::move(batches));
         pak.setFaceRemap(std::move(faceRemap));
 
+        std::cout << "Vertex chunks: " << pak.vertexChunkCount() << "\n"; // v11 - 1 unless the map outgrows u16 indices
         std::cout << "Lightmap Atlas: " << lmBaked << " faces baked, " << lmSkipped
                   << " skipped (sky/liquid/fullbright), " << lmRejected << " rejected (anomalous), "
                   << lmPacker.pageCount() << " page(s)\n";

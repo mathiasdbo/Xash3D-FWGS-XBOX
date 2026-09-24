@@ -235,8 +235,10 @@ typedef struct
    exactly (the atlasWidth > 4096 check has the same shape: a hard cap,
    checked, not derived). 512 is a first, reasoned guess (retail HL1 maps
    commonly cite low hundreds of unique textures at most, and
-   batchCount == textureCount architecturally - MpakHeader.h's own v9
-   note), not a measured bound: the Gate phase re-bakes the real 125-map
+   batchCount was == textureCount architecturally - MpakHeader.h's own
+   v9 note - until X9-S split batches at vertex-chunk boundaries too, so
+   a multi-chunk map can have a few more batches than textures), not a
+   measured bound: the Gate phase re-bakes the real 125-map
    retail corpus and reports the true maximum, at which point this cap
    should be revisited with a cited number, the same way every other
    "reasonable guess pending real data" bound in this file already is. */
@@ -259,8 +261,9 @@ typedef struct
 	uint32_t indexCount;
 } nv2a_map_batch_t;
 #define NV2A_MAP_MAX_BATCHES 512 /* same "reasoned guess pending the Gate phase's real numbers" as
-                                     NV2A_MAP_MAX_TEXTURES above - batchCount == textureCount
-                                     architecturally, so this shares that cap's own reasoning. */
+                                     NV2A_MAP_MAX_TEXTURES above - batchCount ~= textureCount
+                                     (a few more on a multi-chunk map, X9-S), so this shares
+                                     that cap's own reasoning; the baker enforces it. */
 static nv2a_map_batch_t nv2a_map_batches[NV2A_MAP_MAX_BATCHES];
 static uint32_t  nv2a_map_batch_count;
 
@@ -384,6 +387,10 @@ typedef struct
 {
 	vec3_t   mins, maxs;
 	uint32_t dword_begin, dword_end;
+	uint32_t vertex_base;            /* X9-S, MPAK v11: this face's vertex-chunk base -
+	                                    its u16 indices are relative to it, so the vertex
+	                                    attribute arrays must point at vertex_base before
+	                                    it draws (nv2a_bind_vertex_base). */
 	uint32_t index_begin, index_end; /* X9-M: this face's EXACT logical
 	                                    index range [begin, end) - the
 	                                    dword range above is snapped out to
@@ -416,6 +423,10 @@ typedef struct
 	                 placeholder texture as normal geometry), short of
 	                 implementing a real skybox, which stays future work. */
 } nv2a_map_face_t;
+
+/* Nv2aMapBudget.h's kNv2aMapFaceBytes mirrors this size for the bake-time
+   budget; change both together. */
+STATIC_ASSERT( sizeof( nv2a_map_face_t ) == 52, "nv2a_map_face_t size changed - update kNv2aMapFaceBytes in tools/asset-studio/src/formats/Nv2aMapBudget.h" );
 
 static nv2a_map_face_t *nv2a_map_faces;      /* NULL = no per-face table this
                                                  map (never built, or the
@@ -988,6 +999,8 @@ typedef struct
 	                              ::flags (MPAK_SURF_DRAWSKY) is read; this lump exists in every archive
 	                              back to v6 but was never captured by this simplified layout mirror
 	                              until the sky-skip fix needed it. */
+	mpak_lump_t faceVertexBase; /* X9-S, MPAK v11: uint32_t per sorted face, its vertex-chunk
+	                               base; length 0 on a single-chunk map (every base 0) */
 } nv2a_mpak_geometry_t;
 
 static qboolean nv2a_mpak_place( fs_offset_t fileSize, fs_offset_t *cursor, uint64_t length, mpak_lump_t *out )
@@ -1054,6 +1067,18 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 	   all that's needed to reach it; nothing after it (lenTexinfo onward)
 	   is read by this module, so the walk still stops here. */
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceInfo, &out->faceInfo )) return false;
+	/* X9-S (MPAK v11): the per-face vertex-chunk bases are the archive's
+	   LAST lump, so the walk now continues through the raw classic lumps
+	   that follow faceInfo, in filesystem/mpak_layout.c's order. */
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenTexinfo, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenVertexes, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenEdges, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenSurfedges, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaces, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLighting, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenMiptex, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenExtraLightBlocks, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceVertexBase, &out->faceVertexBase )) return false;
 
 	return true;
 }
@@ -1361,6 +1386,36 @@ static void nv2a_draw_index_range( uint32_t begin, uint32_t end )
 
 		i += batch;
 	}
+}
+
+/* X9-S (MPAK v11): the vertex chunk the attribute arrays currently point
+   at. A map whose vertices outgrow 16-bit indices is split into chunks of
+   at most 65,536; each face's indices are relative to its chunk's base
+   (nv2a_map_face_t::vertex_base). Pointing position/uv0/uv1 at the base
+   is the base-vertex draw Xbox D3D implements for SetIndices'
+   BaseVertexIndex - three register writes, done only when a draw moves
+   to a different chunk. */
+static uint32_t nv2a_bound_vertex_base;
+
+static void nv2a_bind_vertex_base( uint32_t base )
+{
+	const uint32_t *v = nv2a_map_vb + (size_t)base * ( sizeof( nv2a_lit_vertex_t ) / sizeof( uint32_t ));
+
+	nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_lit_vertex_t ), &v[0] );
+	nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &v[3] );
+	nv2a_set_attrib_pointer( 10, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &v[5] );
+	{
+		/* Defensive, pending a real-hardware run on a multi-chunk map:
+		   invalidate the vertex fetch cache after moving the arrays, as
+		   Perfect Dark X's gfx_nv2a.cpp does before drawing from a
+		   different vertex range. Moving array offsets mid-frame is new
+		   in X9-S, and xemu cannot tell us whether the cache is keyed by
+		   address. */
+		uint32_t *p = pb_begin();
+		p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
+		pb_end( p );
+	}
+	nv2a_bound_vertex_base = base;
 }
 
 /* X9-M: draw the EXACT logical index range [begin, end) - no 6-index
@@ -2088,6 +2143,8 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 			nv2a_bind_map_texture_stage0( &nv2a_map_textures[face->texture] );
 			bound_texture = face->texture;
 		}
+		if( face->vertex_base != nv2a_bound_vertex_base ) /* X9-S: entity faces may sit in any chunk */
+			nv2a_bind_vertex_base( face->vertex_base );
 		nv2a_draw_exact_indices( face->index_begin, face->index_end );
 	}
 
@@ -2289,11 +2346,11 @@ static void nv2a_draw_map_geometry( void )
 		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
 	pb_end( p );
 
-	nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_lit_vertex_t ), &nv2a_map_vb[0] );
-	nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &nv2a_map_vb[3] );
-	/* Lightmap UV, attribute slot 10 - vs_lit.vs.cg's own TEXCOORD1,
-	   confirmed by a real vp20compiler run (not assumed) to map there. */
-	nv2a_set_attrib_pointer( 10, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &nv2a_map_vb[5] );
+	/* Position (slot 0), diffuse UV (slot 9) and lightmap UV (slot 10 -
+	   vs_lit.vs.cg's own TEXCOORD1, confirmed by a real vp20compiler run,
+	   not assumed, to map there), pointed at vertex chunk 0; draws of
+	   faces in another chunk re-point them (X9-S). */
+	nv2a_bind_vertex_base( 0 );
 
 	nv2a_cull_faces_total = nv2a_map_face_count;
 	nv2a_cull_faces_visible = 0;
@@ -2347,6 +2404,13 @@ static void nv2a_draw_map_geometry( void )
 			nv2a_batch_dword_range( batch->startIndex, batch->indexCount, nv2a_map_dword_count, &begin, &end );
 			if( end > begin )
 			{
+				/* X9-S: a batch lies inside one vertex chunk; without a
+				   usable per-face table only single-chunk maps load at all,
+				   so base 0 is then correct. */
+				uint32_t base = ( nv2a_map_faces && batch->startFace < nv2a_map_face_count )
+					? nv2a_map_faces[batch->startFace].vertex_base : 0;
+				if( base != nv2a_bound_vertex_base )
+					nv2a_bind_vertex_base( base );
 				nv2a_bind_map_texture_stage0( tex );
 				nv2a_draw_index_range( begin, end );
 			}
@@ -2489,6 +2553,10 @@ static void nv2a_draw_map_geometry( void )
 						   this run - or a later one - gets flushed), never
 						   per-run. */
 						nv2a_bind_map_texture_stage0( tex );
+						/* X9-S: the baker never lets a batch span two vertex
+						   chunks, so one base bind per batch covers every run. */
+						if( face->vertex_base != nv2a_bound_vertex_base )
+							nv2a_bind_vertex_base( face->vertex_base );
 						stage0_bound = true;
 					}
 					run_begin = face->index_begin;
@@ -3073,8 +3141,10 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   Mod_ProcessRenderData's own contract) is real, known cost this
 	   function CAN account for - see NV2A_MAP_BUDGET_BYTES's own comment
 	   for what this check does and does not cover. */
-	/* X9-F: the per-face table is 4x its own on-disk FaceDrawCmds size
-	   (nv2a_map_face_t is 32 bytes; each on-disk FaceDrawCmd is 8) - real
+	/* X9-F: the per-face table is one nv2a_map_face_t per on-disk
+	   FaceDrawCmd (8 bytes each). X9-S: counted as face_count * sizeof,
+	   not the old "4x the lump" - the struct grew from 32 to 52 bytes
+	   (X9-K/M/S) while that multiplier stood still. Real
 	   memory this function can and should account for, same as every
 	   other buffer below. X9-G, nv2a-xbox-specialist review: the new
 	   per-face PVS visibility table (nv2a_map_face_visible, 1 byte/face =
@@ -3092,7 +3162,7 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   nv2a_map_textures[]/nv2a_map_batches[] arrays are static BSS, not a
 	   per-map allocation, so - like nv2a_visbytes above them - they do not
 	   belong in this per-map ledger. */
-	total_bytes = vb_bytes + idx_bytes + (uint64_t)geo.faceDrawCmds.length * 4
+	total_bytes = vb_bytes + idx_bytes + (uint64_t)( geo.faceDrawCmds.length / 8 ) * sizeof( nv2a_map_face_t )
 		+ (uint64_t)geo.faceDrawCmds.length / 8
 		+ (uint64_t)geo.faceRemap.length * 2
 		+ (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length + (uint64_t)buffersize;
@@ -3509,6 +3579,15 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			   face_count records, never blocking the load over an
 			   optional, cosmetic-only check. */
 			qboolean faceinfo_ok = geo.faceInfo.length == (uint64_t)face_count * sizeof( mpak_face_info_t );
+			/* X9-S: a multi-chunk map ships one base per face; a single-
+			   chunk map ships none (every base 0). Any other length breaks
+			   the per-face table, and a multi-chunk map cannot fall back to
+			   the unculled whole-buffer draw (it has no single base), so
+			   that case refuses the map below. */
+			qboolean bases_ok = geo.faceVertexBase.length == 0
+				|| geo.faceVertexBase.length == (uint64_t)face_count * sizeof( uint32_t );
+			if( !bases_ok )
+				tiling_ok = false;
 
 			for( i = 0; i < face_count; i++ )
 			{
@@ -3536,14 +3615,27 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 					break;
 				}
 
+				faces[i].vertex_base = 0;
+				if( geo.faceVertexBase.length != 0 )
+					memcpy( &faces[i].vertex_base, buffer + geo.faceVertexBase.offset + (uint64_t)i * sizeof( uint32_t ), sizeof( uint32_t ));
+
 				ClearBounds( faces[i].mins, faces[i].maxs );
 				for( k = start_index; k < start_index + face_indices; k++ )
 				{
 					uint16_t vi;
 
 					memcpy( &vi, buffer + geo.indices.offset + (uint64_t)k * sizeof( uint16_t ), sizeof( vi ));
-					AddPointToBounds( verts[vi].pos, faces[i].mins, faces[i].maxs );
+					/* X9-S: indices are chunk-relative; the absolute vertex
+					   must still be inside the vertex array. */
+					if( (uint64_t)faces[i].vertex_base + vi >= vert_count )
+					{
+						tiling_ok = false;
+						break;
+					}
+					AddPointToBounds( verts[faces[i].vertex_base + vi].pos, faces[i].mins, faces[i].maxs );
 				}
+				if( !tiling_ok )
+					break;
 
 				/* Snap outward to a multiple of 6 logical indices (= 3
 				   dwords) - see nv2a_map_face_t's own declaration
@@ -3700,6 +3792,16 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 				Mem_Free( faces );
 			}
 		}
+	}
+
+	/* X9-S: a multi-chunk map (MPAK v11 faceVertexBase lump present) can
+	   only be drawn through the per-face table - the unculled whole-buffer
+	   fallback has no single base vertex to draw with. Without the table,
+	   refuse the map rather than draw every chunk against base 0. */
+	if( geo.faceVertexBase.length != 0 && !nv2a_map_faces )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: multi-chunk map has no usable per-face table - not drawing its real geometry\n" );
+		return false;
 	}
 
 	return true;

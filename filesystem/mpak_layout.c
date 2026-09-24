@@ -358,6 +358,12 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 			fileSize, &cursor, &out->extraLightBlocks ))
 		return false;
 
+	// v11 (MpakHeader.h's v10 -> v11 note), appended last: one uint32_t
+	// vertex-chunk base per sorted face, present only on multi-chunk maps.
+	if( !Mpak_PlaceLump( "faceVertexBase", header->lenFaceVertexBase, sizeof( uint32_t ),
+			fileSize, &cursor, &out->faceVertexBase ))
+		return false;
+
 	return true;
 }
 

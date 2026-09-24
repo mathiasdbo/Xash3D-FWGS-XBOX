@@ -55,7 +55,7 @@ extern "C" {
 #endif
 
 #define MPAK_LAYOUT_MAGIC   "MPAK"
-#define MPAK_LAYOUT_VERSION 10u
+#define MPAK_LAYOUT_VERSION 11u
 #define MPAK_SECTOR_SIZE    2048u
 #define MPAK_TARGET_XBOX_FLAG 1u  // MpakHeader6::flags bit 0 - 1 = Xbox, 0 = PC
 #define MPAK_FLAG_NV2A_BLOCK  2u  // flags bit 1 - the baked v6 block is populated (X9 profile)
@@ -161,6 +161,12 @@ typedef struct
 	// "Lightstyles" census). nv2a profile only; 0 in the core profile and
 	// whenever a real bake finds no face using a second lightstyle.
 	uint32_t lenExtraLightBlocks;
+
+	// v11 - see MpakHeader.h's v10 -> v11 note. uint32_t per SORTED face:
+	// that face's vertex-chunk base (absolute index into the vertex lump);
+	// its u16 indices are relative to it. 0 (absent) means every base is 0,
+	// which is what every single-chunk map ships.
+	uint32_t lenFaceVertexBase;
 } mpak_header_t;
 
 // Mirrors formats::Vertex (tools/asset-studio/src/formats/PakManager.h)
@@ -311,6 +317,9 @@ typedef struct
 	// records (this file's own header comment: content parsing is
 	// separate, later work).
 	mpak_lump_t extraLightBlocks;
+	// v11 - uint32_t per sorted face, each face's vertex-chunk base; length
+	// 0 when the map has a single chunk (every base 0).
+	mpak_lump_t faceVertexBase;
 } mpak_layout_t;
 
 // Validates magic/version and returns true if header looks like a real,

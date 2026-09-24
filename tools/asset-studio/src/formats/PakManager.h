@@ -94,7 +94,17 @@ namespace formats {
         // marks the slice for punch-through BC1 alpha at save() time.
         TextureLocation addTexture(uint32_t width, uint32_t height, const uint8_t* rgbaData, bool masked = false);
 
+        // v11: call once per face before its addVertex() calls, with the
+        // face's vertex count. If the face would not fit in the current
+        // 65,536-vertex chunk, a new chunk starts (and vertex dedup restarts
+        // with it). Returns the chunk's base - the absolute index of its
+        // first vertex - which the face's u16 indices are relative to.
+        uint32_t beginFaceVertices(uint32_t faceVertexCount);
+        // Returns the vertex's index RELATIVE to the current chunk (v11).
         uint16_t addVertex(const Vertex& v);
+        // v11: one per sorted face, in the same order as addFaceDrawCmd().
+        void addFaceVertexBase(uint32_t base) { mFaceVertexBase.push_back(base); }
+        uint32_t vertexChunkCount() const { return mVertexChunkCount; }
         void addIndex(uint16_t idx);
         void addFaceDrawCmd(uint32_t start_index, uint32_t index_count);
         // v9: grows the MOST RECENTLY added FaceDrawCmd's own index_count by
@@ -182,7 +192,10 @@ namespace formats {
 
     private:
         std::vector<Vertex> mVertices;
-        std::unordered_map<Vertex, uint16_t, VertexHasher> mVertexMap;
+        std::unordered_map<Vertex, uint16_t, VertexHasher> mVertexMap; // current chunk only, chunk-relative indices
+        uint32_t mVertexChunkBase = 0;   // v11: absolute index of the current chunk's first vertex
+        uint32_t mVertexChunkCount = 1;  // v11: chunks used so far (a map always has at least one)
+        std::vector<uint32_t> mFaceVertexBase; // v11: per sorted face, written only when mVertexChunkCount > 1
         std::vector<uint16_t> mIndices;
         std::vector<FaceDrawCmd> mFaceDrawCmds;
         std::vector<MpakFaceInfo> mFaceInfos;

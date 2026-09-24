@@ -71,6 +71,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	const uint32_t lenLighting = 48;
 	const uint32_t lenMiptex = 4 + 4 + 40; // dmiptexlump_t{1} + one header-only miptex entry
 	const uint32_t lenExtraLightBlocks = nv2a ? 2 * 20u : 0u; // 2 MpakExtraLightBlock records
+	const uint32_t lenFaceVertexBase = nv2a ? 2 * 4u : 0u; // v11: one base per face (both faces in chunk 0 here, as a multi-chunk map would ship)
 	const uint32_t lightmapW = 4, lightmapH = 4, lightmapLayers = nv2a ? 1u : 0u;
 	const uint32_t lenLightmap = nv2a ? lightmapW * lightmapH * 4 : 0u;
 	// v9: one real per-texture DXT1 directory entry + its matching 4x4 (8-byte)
@@ -97,6 +98,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	fs_offset_t textureDirOffset, textureDataOffset, batchesOffset, faceRemapOffset, arrayOffset;
 	fs_offset_t vertexesOffset, edgesOffset, surfedgesOffset, facesOffset, lightingOffset, miptexOffset;
 	fs_offset_t extraLightBlocksOffset;
+	fs_offset_t faceVertexBaseOffset;
 	byte *buf;
 
 	memset( &sector, 0, sizeof( sector ));
@@ -126,6 +128,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	sector.desc.lenLighting = lenLighting;
 	sector.desc.lenMiptex = lenMiptex;
 	sector.desc.lenExtraLightBlocks = lenExtraLightBlocks;
+	sector.desc.lenFaceVertexBase = lenFaceVertexBase;
 
 	// Independently walk the same section order mpak_layout.c documents
 	// (its own header comment, verified against PakManager.cpp's save()),
@@ -189,6 +192,8 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	cursor += RoundUpSector( lenMiptex );
 	extraLightBlocksOffset = cursor;
 	cursor += RoundUpSector( lenExtraLightBlocks );
+	faceVertexBaseOffset = cursor;
+	cursor += RoundUpSector( lenFaceVertexBase );
 
 	// The dheader_t: the same offsets, in bspfile.h's lump order.
 	sector.bsp.version = HLBSP_VERSION;
@@ -264,6 +269,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 			memcpy( buf + faceRemapOffset, remap, sizeof( remap ));
 		}
 		memset( buf + extraLightBlocksOffset, 0x99, lenExtraLightBlocks );
+		memset( buf + faceVertexBaseOffset, 0x77, lenFaceVertexBase );
 	}
 
 	*outSize = cursor;
@@ -405,6 +411,14 @@ static qboolean TestValidArchive( qboolean targetXbox, qboolean nv2a )
 			buf[layout.extraLightBlocks.offset] != 0x99 )
 		{
 			printf( "TestValidArchive(%s): extraLightBlocks lump resolved to the wrong bytes\n", Label( targetXbox, nv2a ));
+			ok = false;
+		}
+
+		// v11: the per-face vertex-chunk bases are the last lump.
+		if( layout.faceVertexBase.length != header.lenFaceVertexBase ||
+			buf[layout.faceVertexBase.offset] != 0x77 )
+		{
+			printf( "TestValidArchive(%s): faceVertexBase lump resolved to the wrong bytes\n", Label( targetXbox, nv2a ));
 			ok = false;
 		}
 	}

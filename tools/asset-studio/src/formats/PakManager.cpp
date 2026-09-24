@@ -323,25 +323,39 @@ namespace formats {
 
 
 
+    uint32_t PakManager::beginFaceVertices(uint32_t faceVertexCount) {
+        // v11: per-face lightmap UVs (lu/lv/lightmap_layer) mean vertices are
+        // barely shared across faces, so a large map's vertex count approaches
+        // its raw face-vertex sum and can outgrow u16 indices. Rather than
+        // wrap (corrupt geometry) or abort (four retail maps used to), start a
+        // new chunk when this face would not fit in the current one - worst
+        // case, assuming none of its vertices dedupe. A face never spans two
+        // chunks, so its u16 indices are always relative to one base.
+        const uint64_t used = static_cast<uint64_t>(mVertices.size()) - mVertexChunkBase;
+        if (used + faceVertexCount > 65536u) {
+            mVertexChunkBase = static_cast<uint32_t>(mVertices.size());
+            mVertexMap.clear(); // dedup never reaches back into an earlier chunk
+            ++mVertexChunkCount;
+        }
+        return mVertexChunkBase;
+    }
+
     uint16_t PakManager::addVertex(const Vertex& v) {
         auto it = mVertexMap.find(v);
         if (it != mVertexMap.end()) {
             return it->second;
         }
 
-        // Per-face lightmap UVs (lu/lv/lightmap_layer) mean vertices are no longer
-        // shared across faces the way they were with the old placeholder UVs, so
-        // vertex counts on large maps can approach the raw edge count. Indices are
-        // u16: silently wrapping past 65535 would corrupt geometry, so fail loudly
-        // instead - the fix is chunking draws with base_vertex (tracked for a later
-        // phase), not truncating data here.
-        if (mVertices.size() >= 65536) {
-            std::cerr << "FATAL: vertex count exceeded 65536 (u16 index limit). "
-                         "This map needs base_vertex-chunked draws, not yet implemented.\n";
+        // beginFaceVertices() already guaranteed room for this face; only a
+        // caller that skipped it (or a single face over 65,536 vertices, which
+        // BSP30 cannot express) could get here with the chunk full.
+        if (mVertices.size() - mVertexChunkBase >= 65536) {
+            std::cerr << "FATAL: vertex chunk overflow - addVertex called without a "
+                         "matching beginFaceVertices() for this face.\n";
             std::abort();
         }
 
-        uint16_t index = static_cast<uint16_t>(mVertices.size());
+        uint16_t index = static_cast<uint16_t>(mVertices.size() - mVertexChunkBase);
         mVertices.push_back(v);
         mVertexMap[v] = index;
         return index;
@@ -447,6 +461,8 @@ namespace formats {
             header.lenLightmapAtlas = static_cast<uint32_t>(mLightmapAtlasData.size());
             header.lenFaceInfo = static_cast<uint32_t>(mFaceInfos.size() * sizeof(MpakFaceInfo));
             header.lenExtraLightBlocks = static_cast<uint32_t>(mExtraLightBlocks.size() * sizeof(MpakExtraLightBlock));
+            // v11: only a multi-chunk map ships the per-face base table.
+            header.lenFaceVertexBase = mVertexChunkCount > 1 ? static_cast<uint32_t>(mFaceVertexBase.size() * sizeof(uint32_t)) : 0;
             // v9: BspParser's face sort is unconditional in the shared nv2a
             // face loop (both targets), so the remap is written for both -
             // see MpakHeader.h's v8 -> v9 note and setFaceRemap()'s own doc.
@@ -678,6 +694,7 @@ namespace formats {
         // MPAKv8 addition (MpakHeader.h's v7 -> v8 note) - not a classic BSP
         // lump, same shape as lenFaceInfo/lenLightmapAtlas above.
         if (header.lenExtraLightBlocks > 0) writePadded(mExtraLightBlocks.data(), mExtraLightBlocks.size() * sizeof(MpakExtraLightBlock));
+        if (header.lenFaceVertexBase > 0) writePadded(mFaceVertexBase.data(), mFaceVertexBase.size() * sizeof(uint32_t));
 
         // Now the first sector, with every offset known.
         file.seekp(0);
@@ -751,7 +768,7 @@ namespace formats {
 
             const uint64_t vbBytes = static_cast<uint64_t>(header.vCount) * kNv2aLitVertexBytes;
             const uint64_t idxBytes = ((static_cast<uint64_t>(header.iCount) + 1) / 2) * 4;
-            const uint64_t facesBytes = static_cast<uint64_t>(header.lenFaceDrawCmds) * 4;
+            const uint64_t facesBytes = static_cast<uint64_t>(header.lenFaceDrawCmds / 8) * kNv2aMapFaceBytes;
             const uint64_t visBytes = static_cast<uint64_t>(header.lenFaceDrawCmds) / 8;
             const uint64_t remapBytes = static_cast<uint64_t>(header.lenFaceRemap) * 2;
             const uint64_t texBytes = static_cast<uint64_t>(header.lenTextureData);
@@ -917,7 +934,7 @@ namespace formats {
         if (!nv2a) {
             if (desc.vCount || desc.iCount || desc.lenFaceDrawCmds || desc.lenFaceInfo || desc.lenLightmapAtlas ||
                 desc.lenArray64 || desc.lenArray256 || desc.lenArray512 ||
-                desc.lightmapWidth || desc.lightmapHeight || desc.lightmapLayers || desc.lenExtraLightBlocks ||
+                desc.lightmapWidth || desc.lightmapHeight || desc.lightmapLayers || desc.lenExtraLightBlocks || desc.lenFaceVertexBase ||
                 desc.textureCount || desc.lenTextureDir || desc.lenTextureData ||
                 desc.batchCount || desc.lenBatches || desc.lenFaceRemap)
                 fail("core profile archive carries baked-block lengths");
@@ -927,6 +944,7 @@ namespace formats {
             if (desc.lenFaceDrawCmds != mFaceDrawCmds.size() * sizeof(FaceDrawCmd)) fail("lenFaceDrawCmds != baked");
             if (desc.lenFaceInfo != mFaceInfos.size() * sizeof(MpakFaceInfo)) fail("lenFaceInfo != baked");
             if (desc.lenExtraLightBlocks != mExtraLightBlocks.size() * sizeof(MpakExtraLightBlock)) fail("lenExtraLightBlocks != baked");
+            if (desc.lenFaceVertexBase != (mVertexChunkCount > 1 ? mFaceVertexBase.size() * sizeof(uint32_t) : 0)) fail("lenFaceVertexBase != baked");
             if (desc.lenLightmapAtlas != mLightmapAtlasData.size() || desc.lightmapWidth != mLightmapWidth ||
                 desc.lightmapHeight != mLightmapHeight || desc.lightmapLayers != mLightmapLayers ||
                 desc.lightmapFormat != mLightmapFormat)
@@ -1001,6 +1019,7 @@ namespace formats {
             at[LUMP_LIGHTING] = place(desc.lenLighting);
             at[LUMP_TEXTURES] = place(desc.lenMiptex);
             const uint64_t extraLightBlocksAt = place(desc.lenExtraLightBlocks);
+            const uint64_t faceVertexBaseAt = place(desc.lenFaceVertexBase);
 
             if (cursor != static_cast<uint64_t>(fileSize))
                 fail("descriptor sections end at " + std::to_string(cursor) + " but the file is " + std::to_string(fileSize) + " bytes");
@@ -1052,6 +1071,7 @@ namespace formats {
                 checkBaked("lightmap atlas", lightmapAt, mLightmapAtlasData.data(), mLightmapAtlasData.size());
                 checkBaked("face info", faceInfoAt, mFaceInfos.data(), static_cast<uint64_t>(mFaceInfos.size()) * sizeof(MpakFaceInfo));
                 checkBaked("extra light blocks", extraLightBlocksAt, mExtraLightBlocks.data(), static_cast<uint64_t>(mExtraLightBlocks.size()) * sizeof(MpakExtraLightBlock));
+                checkBaked("face vertex bases", faceVertexBaseAt, mFaceVertexBase.data(), desc.lenFaceVertexBase);
                 // v9: retained (unlike the per-texture DXT directory/data,
                 // which - like the old atlas - are produced inside save()
                 // and not kept around) so these get the same full byte

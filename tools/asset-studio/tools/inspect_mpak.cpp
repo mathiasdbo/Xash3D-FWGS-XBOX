@@ -90,6 +90,7 @@ int main(int argc, char** argv) {
     }
     ok &= CheckDivisible("lenFaceInfo", h.lenFaceInfo, sizeof(MpakFaceInfo));
     ok &= CheckDivisible("lenExtraLightBlocks", h.lenExtraLightBlocks, sizeof(MpakExtraLightBlock));
+    ok &= CheckDivisible("lenFaceVertexBase", h.lenFaceVertexBase, sizeof(uint32_t));
     ok &= CheckDivisible("lenTextureDir", h.lenTextureDir, sizeof(MpakTextureInfo));
     ok &= CheckDivisible("lenBatches", h.lenBatches, sizeof(MpakTextureBatch));
     ok &= CheckDivisible("lenFaceRemap", h.lenFaceRemap, sizeof(uint32_t));
@@ -143,6 +144,7 @@ int main(int argc, char** argv) {
         Place(cursor, h.lenLighting);
         Place(cursor, h.lenMiptex);
         Place(cursor, h.lenExtraLightBlocks);
+        Place(cursor, h.lenFaceVertexBase);
 
         if (cursor != fileSize) {
             std::fprintf(stderr,

@@ -8592,6 +8592,152 @@ X9-Q measurement and stays as the before picture.
 
 125 rows.
 
+### X9-S — MPAK v11 vertex chunks: corpus re-measured
+
+Re-measured 2026-09-24 with the X9-S baker (MPAK v11, same flags). Two
+things changed against the X9-R table above: the four maps over 65,536
+vertices now get past the vertex limit, and the ledger's per-face term
+counts the real 52-byte `nv2a_map_face_t` (it assumed 32), which adds
+~0.5-1.5 points on the large maps.
+
+- **122 of 125 bake**, all within the 24 MiB ledger; worst
+  `pool_party` 95.9% (new), then `boot_camp`
+  65.0%. Median 34.5%.
+- **3 fail the bake-time budget:** `rocket_frenzy` 227.1%, `disposal` 160.5%, `contamination` 111.1%.
+- No map fails the vertex limit any more.
+- The ledger is not what is actually free: `pool_party` passes it yet runs
+  out of contiguous memory loading its lightmap in xemu (item 10).
+
+| Map | Status | Ledger bytes | % of 24 MiB | Lightmap pages |
+|---|---|---:|---:|---:|
+| rocket_frenzy | **OVER BUDGET** | 57160159 | 227.1% | 2 |
+| disposal | **OVER BUDGET** | 40387262 | 160.5% | 2 |
+| contamination | **OVER BUDGET** | 27957273 | 111.1% | 1 |
+| pool_party | OK | 24138983 | 95.9% | 1 |
+| boot_camp | OK | 16367610 | 65.0% | 1 |
+| t0a0b | OK | 15388563 | 61.1% | 1 |
+| rustmill | OK | 13644449 | 54.2% | 1 |
+| c2a5e | OK | 13641013 | 54.2% | 1 |
+| c2a2e | OK | 13279839 | 52.8% | 1 |
+| c2a4c | OK | 13031027 | 51.8% | 1 |
+| c2a4e | OK | 13014119 | 51.7% | 1 |
+| c5a1 | OK | 12994870 | 51.6% | 1 |
+| c2a5f | OK | 12660936 | 50.3% | 1 |
+| t0a0a | OK | 12386953 | 49.2% | 1 |
+| c1a1f | OK | 12017013 | 47.8% | 1 |
+| c2a2a | OK | 12002819 | 47.7% | 1 |
+| c2a1a | OK | 11998910 | 47.7% | 1 |
+| c3a2a | OK | 11970086 | 47.6% | 1 |
+| c2a4b | OK | 11887763 | 47.2% | 1 |
+| c3a1 | OK | 11822381 | 47.0% | 1 |
+| c2a2b1 | OK | 11558523 | 45.9% | 1 |
+| t0a0 | OK | 11544068 | 45.9% | 1 |
+| doublecross | OK | 11511504 | 45.7% | 1 |
+| c1a2 | OK | 11392801 | 45.3% | 1 |
+| c2a2d | OK | 11344370 | 45.1% | 1 |
+| c3a2c | OK | 11326824 | 45.0% | 1 |
+| c1a2b | OK | 11248585 | 44.7% | 1 |
+| c2a3b | OK | 11203525 | 44.5% | 1 |
+| hldemo2 | OK | 11188099 | 44.5% | 1 |
+| c1a4g | OK | 11080570 | 44.0% | 1 |
+| c1a4f | OK | 11002201 | 43.7% | 1 |
+| c1a1c | OK | 10959021 | 43.5% | 1 |
+| c0a0c | OK | 10896104 | 43.3% | 1 |
+| c3a1a | OK | 10876368 | 43.2% | 1 |
+| c4a3 | OK | 10771670 | 42.8% | 1 |
+| c0a0b | OK | 10593371 | 42.1% | 1 |
+| c1a1b | OK | 10567300 | 42.0% | 1 |
+| c1a2a | OK | 10463295 | 41.6% | 1 |
+| c1a3 | OK | 10419985 | 41.4% | 1 |
+| c1a4d | OK | 10391051 | 41.3% | 1 |
+| lambda_bunker | OK | 10372280 | 41.2% | 1 |
+| c2a4a | OK | 10356510 | 41.2% | 1 |
+| c1a4i | OK | 10355795 | 41.2% | 1 |
+| c2a2f | OK | 10235316 | 40.7% | 1 |
+| c2a2c | OK | 10047111 | 39.9% | 1 |
+| c2a1 | OK | 9963118 | 39.6% | 1 |
+| subtransit | OK | 9906298 | 39.4% | 1 |
+| c2a4f | OK | 9819482 | 39.0% | 1 |
+| t0a0b1 | OK | 9792088 | 38.9% | 1 |
+| c2a2g | OK | 9532680 | 37.9% | 1 |
+| c2a2b2 | OK | 9456612 | 37.6% | 1 |
+| c1a0e | OK | 9390824 | 37.3% | 1 |
+| c2a3a | OK | 9304513 | 37.0% | 1 |
+| c2a3 | OK | 9263962 | 36.8% | 1 |
+| c1a3a | OK | 9212803 | 36.6% | 1 |
+| c1a1 | OK | 9185961 | 36.5% | 1 |
+| c1a0c | OK | 9073562 | 36.1% | 1 |
+| c3a1b | OK | 9024440 | 35.9% | 1 |
+| c1a0b | OK | 8987287 | 35.7% | 1 |
+| crossfire | OK | 8893349 | 35.3% | 1 |
+| c2a3c | OK | 8849199 | 35.2% | 1 |
+| c2a2h | OK | 8834842 | 35.1% | 1 |
+| c2a5 | OK | 8726021 | 34.7% | 1 |
+| rapidcore | OK | 8692512 | 34.5% | 1 |
+| c1a0d | OK | 8664393 | 34.4% | 1 |
+| bounce | OK | 8661939 | 34.4% | 1 |
+| hldemo3 | OK | 8645123 | 34.4% | 1 |
+| c1a4 | OK | 8625055 | 34.3% | 1 |
+| c1a4b | OK | 8595454 | 34.2% | 1 |
+| c1a1a | OK | 8558996 | 34.0% | 1 |
+| c3a2d | OK | 8496127 | 33.8% | 1 |
+| c2a3d | OK | 8439426 | 33.5% | 1 |
+| c1a0 | OK | 8304303 | 33.0% | 1 |
+| datacore | OK | 8266366 | 32.8% | 1 |
+| t0a0c | OK | 8263932 | 32.8% | 1 |
+| hldemo1 | OK | 8231254 | 32.7% | 1 |
+| c1a0a | OK | 8199910 | 32.6% | 1 |
+| c0a0 | OK | 8182086 | 32.5% | 1 |
+| c2a5b | OK | 8121254 | 32.3% | 1 |
+| c0a0a | OK | 8089116 | 32.1% | 1 |
+| c0a0d | OK | 8060126 | 32.0% | 1 |
+| c4a1b | OK | 8038430 | 31.9% | 1 |
+| t0a0b2 | OK | 7796186 | 31.0% | 1 |
+| c2a5g | OK | 7709362 | 30.6% | 1 |
+| gasworks | OK | 7692501 | 30.6% | 1 |
+| c3a2e | OK | 7554909 | 30.0% | 1 |
+| undertow | OK | 7091973 | 28.2% | 1 |
+| c4a1d | OK | 6905752 | 27.4% | 1 |
+| c4a1a | OK | 6851865 | 27.2% | 1 |
+| c3a2b | OK | 6775847 | 26.9% | 1 |
+| c2a4d | OK | 6731647 | 26.7% | 1 |
+| c2a5x | OK | 6526951 | 25.9% | 1 |
+| c2a5w | OK | 6497361 | 25.8% | 1 |
+| c4a1 | OK | 6451523 | 25.6% | 1 |
+| c2a3e | OK | 6403680 | 25.4% | 1 |
+| c1a2c | OK | 6368368 | 25.3% | 1 |
+| c2a5c | OK | 6320676 | 25.1% | 1 |
+| c4a1e | OK | 6104474 | 24.3% | 1 |
+| c1a4k | OK | 6072356 | 24.1% | 1 |
+| c3a2 | OK | 5955097 | 23.7% | 1 |
+| c1a4e | OK | 5942612 | 23.6% | 1 |
+| c2a2 | OK | 5934751 | 23.6% | 1 |
+| c2a5d | OK | 5889993 | 23.4% | 1 |
+| snark_pit | OK | 5689179 | 22.6% | 1 |
+| t0a0d | OK | 5617195 | 22.3% | 1 |
+| c2a5a | OK | 5151736 | 20.5% | 1 |
+| c2a1b | OK | 5094405 | 20.2% | 1 |
+| stalkyard | OK | 5067379 | 20.1% | 1 |
+| c2a4 | OK | 5064618 | 20.1% | 1 |
+| c0a0e | OK | 5038685 | 20.0% | 1 |
+| c3a2f | OK | 4803137 | 19.1% | 1 |
+| c2a4g | OK | 4789282 | 19.0% | 1 |
+| c1a3d | OK | 4624834 | 18.4% | 1 |
+| frenzy | OK | 4334701 | 17.2% | 1 |
+| c4a2a | OK | 4270719 | 17.0% | 1 |
+| c4a2 | OK | 4264231 | 16.9% | 1 |
+| c4a1c | OK | 4094111 | 16.3% | 1 |
+| xen_dm | OK | 4079120 | 16.2% | 1 |
+| c1a3b | OK | 3952119 | 15.7% | 1 |
+| c1a2d | OK | 3700288 | 14.7% | 1 |
+| c4a2b | OK | 3337218 | 13.3% | 1 |
+| c1a1d | OK | 3306916 | 13.1% | 1 |
+| c1a3c | OK | 3269449 | 13.0% | 1 |
+| c1a4j | OK | 3021175 | 12.0% | 1 |
+| c4a1f | OK | 2488616 | 9.9% | 1 |
+
+125 rows.
+
 8. ~~**7 retail maps exceed the 24 MiB per-map budget and no longer bake.**~~
    **Done, X9-R (`divergences.md` #108):** the baker packs lightmap blocks
    tallest-first in a pre-pass and trims the atlas to the rows it uses, and
@@ -8604,44 +8750,48 @@ X9-Q measurement and stays as the before picture.
    Left for later: stop holding the whole archive while copying the atlas
    to GPU memory (the atlas still counts twice), RGB565 lightmaps.
 
-9. **NEXT TASK - bake the 4 retail maps that exceed 65,536 vertices
-   (base-vertex-chunked draws).** Added 2026-09-24. `contamination`,
-   `disposal`, `pool_party` and `rocket_frenzy` are the only retail maps
-   that still do not bake for the Xbox target: `PakManager::addVertex`
-   aborts with "vertex count exceeded 65536 (u16 index limit)". Per-face
-   lightmap UVs mean vertices are barely shared between faces, so large
-   maps outgrow 16-bit indices. Estimated demand (sum of each face's
-   vertices, an upper bound within ~5% of the real count on `boot_camp`):
-   `pool_party` ~69k (1.05x the limit), `disposal` ~74k (1.13x),
-   `contamination` ~78k (1.19x), `rocket_frenzy` ~185k (2.8x: ~93k world
-   plus ~92k brush-entity faces).
+9. ~~**Bake the 4 retail maps that exceed 65,536 vertices.**~~ **Done,
+   X9-S (`divergences.md` #109, MPAK v11):** vertices are split into
+   chunks of at most 65,536, each face inside one chunk with u16 indices
+   relative to it; a per-face base lump (multi-chunk maps only) tells
+   `ref/nv2a` where to point its vertex attribute arrays. All four now get
+   past the vertex limit (2, 2, 2 and 3 chunks). Single-chunk maps are
+   byte-identical to v10 apart from the version and header-size fields, and
+   crossfire renders pixel-identical in xemu. What still stops them:
+   - `pool_party` bakes (95.9% of the 24 MiB ledger) but does not load in
+     xemu: the lightmap's contiguous allocation fails - see item 10.
+   - `contamination` (111.1%), `disposal` (160.5%) and `rocket_frenzy`
+     (227.1%) fail the bake-time budget. `disposal` and `rocket_frenzy`
+     also need two lightmap pages even with X9-R's packing, which
+     `ref/nv2a` does not support.
 
-   Chosen approach: split the vertex buffer into chunks of at most 65,536
-   vertices and draw each chunk with its own base vertex - what the
-   `addVertex` comment already names, and how Xbox D3D implements
-   `SetIndices`' base vertex index.
-   - Baker: assign every face to exactly one chunk (a face never spans
-     two), dedupe vertices within a chunk, keep indices u16 and
-     chunk-relative, and group faces so batches and runs stay inside one
-     chunk.
-   - Format: MPAK v11 - record each face's (or batch's) chunk / base
-     vertex, and update `mpak_layout.h` / `MpakHeader.h` in lockstep with
-     the v10 texture rule's shared-header pattern.
-   - `ref/nv2a`: before drawing a chunk's faces, re-point the three vertex
-     attribute arrays (`NV097_SET_VERTEX_DATA_ARRAY_OFFSET` for position,
-     uv0, uv1) at that chunk's base, in both the world pass and the
-     brush-entity pass; keep the exact-index-range drawing.
-   - Rejected alternative: 32-bit indices. Simpler, but it doubles index
-     data and pushbuffer size, and Xbox D3D only ever used 16-bit index
-     buffers, so it would rely on hardware behaviour no retail game
-     exercised (X9-L's lesson: xemu is not validation).
-
-   Exit: all 4 maps bake, render correctly in xemu, and single-chunk maps
-   (the other 121) re-bake with unchanged rendering. Then re-run the
-   corpus against the 24 MiB budget: the three smaller maps should fit;
-   `rocket_frenzy` may not, which the bake-time budget check (X9-Q) will
-   report as a separate problem. Real-hardware check on at least one
-   multi-chunk map.
+10. **NEXT TASK - load-time memory: the 24 MiB ledger is not what is
+    actually free.** Found 2026-09-24 while testing item 9: `pool_party`
+    passes the ledger at 95.9% yet its 3 MB lightmap allocation
+    (`MmAllocateContiguousMemoryEx`) fails at load in xemu, after the
+    engine already holds the whole 16 MB archive plus the vertex buffer and
+    textures. `boot_camp` (64.2%) loads. So the ledger's cap is too
+    optimistic for today's engine footprint, and the single biggest term on
+    every large map is the whole archive held in memory while its GPU parts
+    are copied out. In order:
+    - Measure: free contiguous memory and heap at map-load time in xemu and
+      on hardware (engine baseline, pbkit buffers, audio), so the cap is a
+      measurement, not a guess (`memory-budget-specialist` review of #135).
+    - Stop holding the whole archive while copying: read the vertex,
+      texture and lightmap lumps straight into their contiguous buffers (or
+      free the archive buffer before the GPU copies), removing the double
+      count of those lumps.
+    - Split the ledger into its two real pools, contiguous GPU memory and
+      the zone heap, each with its own measured cap. (The ledger's stale
+      32-byte face term was fixed in X9-S: it now counts the real 52-byte
+      `nv2a_map_face_t`, pinned by a STATIC_ASSERT and mirrored in
+      `Nv2aMapBudget.h`.)
+    - Allocate the most fragmentation-sensitive buffer first, or reserve
+      one contiguous pool per map: the lightmap is allocated last, after
+      the vertex buffer and textures (`nv2a-xbox-specialist`, X9-S review).
+    - Then revisit: RGB565 lightmaps, multi-page lightmaps in `ref/nv2a`
+      for `disposal`/`rocket_frenzy`, and whether those two maps can fit at
+      all.
 
 X9-M onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.

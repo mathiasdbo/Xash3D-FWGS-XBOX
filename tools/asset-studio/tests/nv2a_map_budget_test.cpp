@@ -54,8 +54,8 @@ int main() {
     // --- faceDrawCmds/8 truncation (the per-face PVS visibility table) ---
     {
         MpakHeader6 h = zeroHeader();
-        h.lenFaceDrawCmds = 15; // 15*4 (faces term) + 15/8 (vis term, truncates to 1)
-        CHECK(nv2aMapLedgerBytes(h, 0) == 15 * 4 + 1, "lenFaceDrawCmds=15 must give vis=1 (integer truncation)");
+        h.lenFaceDrawCmds = 15; // 15/8 = 1 face: 1*52 (faces term) + 15/8 (vis term, truncates to 1)
+        CHECK(nv2aMapLedgerBytes(h, 0) == 1 * 52 + 1, "lenFaceDrawCmds=15 must give one 52-byte face and vis=1 (integer truncation)");
     }
 
     // --- the vertex term uses kNv2aLitVertexBytes (28), the RUNTIME nv2a_lit_vertex_t

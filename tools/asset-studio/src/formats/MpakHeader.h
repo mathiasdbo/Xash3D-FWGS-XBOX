@@ -114,6 +114,21 @@ namespace formats {
     // IMPORTANT below) rather than removed, since removing a field is a
     // version bump this scope change does not otherwise need.
     //
+    // v10 -> v11: maps whose per-face vertices outgrow 16-bit indices
+    // (more than 65,536 - four retail maps: contamination, disposal,
+    // pool_party, rocket_frenzy) are split into vertex chunks of at most
+    // 65,536. Every face lies inside one chunk and its indices stay u16,
+    // relative to that chunk's first vertex. The new, optional
+    // `lenFaceVertexBase` lump (appended last) is one uint32_t per SORTED
+    // face - that face's chunk base, an absolute index into the vertex
+    // lump - and is written only when a map has more than one chunk; when
+    // it is 0 every base is 0, so single-chunk maps (the other 121) keep
+    // exactly their v10 bytes apart from the version and the new header
+    // field. Faces sort by (texture, chunk, PVS leaf) and a texture batch
+    // never spans two chunks. ref/nv2a re-points its vertex attribute
+    // arrays at a chunk's base before drawing that chunk's faces - the
+    // base-vertex draws Xbox D3D implements for SetIndices' BaseVertexIndex.
+    //
     // v9 -> v10: every Xbox texture carries its full DXT1 mip chain, base
     // level down to 1x1 (max(log2Width, log2Height) + 1 levels), levels
     // back to back; a level under 4 texels on a side still takes whole 4x4
@@ -251,7 +266,7 @@ namespace formats {
         // overrides this field with MPAK_UI_BACKGROUND_VERSION instead - see
         // that constant's own doc comment above for why it needs a number
         // that isn't this one.
-        uint32_t version = 10;
+        uint32_t version = 11;
         uint32_t headerSize = 0;      // sizeof(MpakHeader6); set in PakManager::save just before writing
         uint32_t bakerBuildId = MPAK_BAKER_BUILD_ID;
         uint32_t flags = 0; // 1 = Xbox, 0 = PC
@@ -313,6 +328,9 @@ namespace formats {
 
         // --- MPAKv8 addition (see the v7 -> v8 note above; nv2a profile only) ---
         uint32_t lenExtraLightBlocks = 0; // MpakExtraLightBlock[], one per face per extra (non-style-0) lightstyle
+
+        // --- MPAKv11 addition (see the v10 -> v11 note above; nv2a profile, only when a map has >1 vertex chunk) ---
+        uint32_t lenFaceVertexBase = 0; // uint32_t[face count], SORTED order: each face's vertex-chunk base (absolute vertex index)
     };
 
     // v9: one entry per unique texture this map actually uses - the Xbox

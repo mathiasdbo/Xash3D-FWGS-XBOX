@@ -5,6 +5,24 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — MPAK v11: vertex chunks lift the 65,536-vertex bake limit (X9-S)
+
+Four retail maps (`contamination`, `disposal`, `pool_party`,
+`rocket_frenzy`) aborted the Xbox bake because they need more than 65,536
+vertices, and indices are 16-bit. The baker now splits vertices into
+chunks of at most 65,536. Each face stays inside one chunk, and `ref/nv2a`
+points its vertex arrays at the right chunk before drawing it. Maps that
+fit in one chunk are unchanged apart from the version number, and
+crossfire renders identically. MPAK moves to v11, so every map needs a
+rebake.
+
+The bake-time budget now counts the per-face table at its real 52 bytes a
+face (it assumed 32). All four maps now get past the vertex limit, but none
+draws yet:
+`pool_party` bakes but runs out of memory loading its lightmap in xemu, and
+the other three are over the 24 MiB budget. That makes load-time memory
+the next task (roadmap X9 item 10).
+
 ### Fixed — every retail map fits the Xbox lightmap atlas and memory budget (X9-R)
 
 11 retail maps needed a second 1024x1024 lightmap page. The Xbox renderer
