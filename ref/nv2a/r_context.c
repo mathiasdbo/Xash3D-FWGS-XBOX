@@ -1302,6 +1302,12 @@ static qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs )
 {
 	int i;
 
+	/* X9-O: ref/gl's GL_FrustumCullBox returns "not culled" under r_nocull
+	   (gl_frustum.c:106) - the world's per-face test and the brush-entity
+	   bounds test both come through here, as both do in ref/gl. */
+	if( nv2a_r_nocull.value )
+		return false;
+
 	for( i = 0; i < 5; i++ )
 	{
 		const mplane_t *p = &nv2a_frustum[i];
@@ -2059,7 +2065,7 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 		/* R_CullSurface's CULL_BACKSIDE, against the model-space eye.
 		   ref/gl keeps a back face only for decals on TransTexture
 		   entities; this renderer has no decals. */
-		if( !nv2a_r_nocullback.value && !VectorIsNull( psurf->plane->normal ))
+		if( !nv2a_r_nocullback.value && !nv2a_r_nocull.value && !VectorIsNull( psurf->plane->normal ))
 		{
 			float dist = PlaneDiff( modelorg, psurf->plane );
 
@@ -2301,7 +2307,15 @@ static void nv2a_draw_map_geometry( void )
 		const nv2a_map_batch_t *batch = &nv2a_map_batches[b];
 		const nv2a_map_texture_t *tex = &nv2a_map_textures[batch->textureIndex]; /* textureIndex validated < nv2a_map_texture_count at load */
 
-		if( nv2a_map_faces == NULL || nv2a_r_nocull.value
+		/* X9-O: nv2a_r_nocull no longer takes this path. It used to, and
+		   the whole-batch draw below ignores everything the per-face path
+		   applies - sky skipping, the world/brush-entity split, PVS - so
+		   "culling off" drew every trigger volume and every door frozen at
+		   its compile-time position. It now only disables the frustum and
+		   backface tests, like ref/gl's r_nocull (gl_frustum.c:106,
+		   gl_cull.c:76); this path is left for a map with no usable
+		   per-face table. */
+		if( nv2a_map_faces == NULL
 			|| (uint64_t)batch->startFace + batch->faceCount > (uint64_t)nv2a_map_face_count )
 		{
 			/* No validated per-face table for this map, culling disabled
@@ -2417,7 +2431,7 @@ static void nv2a_draw_map_geometry( void )
 				   world->numsurfaces exactly like the untranslated index
 				   always was (X9-H's own "never trust a raw index past the
 				   engine's own real numsurfaces" discipline, unchanged). */
-				if( world != NULL && !nv2a_r_nocullback.value && nv2a_map_face_orig != NULL )
+				if( world != NULL && !nv2a_r_nocullback.value && !nv2a_r_nocull.value && nv2a_map_face_orig != NULL ) /* gl_cull.c:76: r_nocull returns before the backface test */
 				{
 					uint32_t origIdx = nv2a_map_face_orig[i];
 

@@ -8215,10 +8215,11 @@ Open items that X9-L surfaced or carried forward, in suggested order:
    - if distant fences or grates vanish too early, use coverage-preserving
      alpha scaling for masked mips;
    - revive `tools/verify-atlas-alpha.py` as a per-texture, per-level check.
-3. **`nv2a_r_nocull 1` loses the xemu Vulkan device**
-   (`VK_ERROR_DEVICE_LOST`). This is the whole-batch draw path
-   (`nv2a_batch_dword_range`). Check it on real hardware before blaming
-   xemu - X9-L's lesson.
+3. ~~**`nv2a_r_nocull 1` loses the xemu Vulkan device.**~~ **Done, X9-O
+   (`divergences.md` #107):** the setting now matches ref/gl's `r_nocull`
+   instead of switching to the whole-batch fallback, which drew triggers
+   and frozen doors. The device loss did not reproduce. A zero clip-space
+   w in the vertex shader's divide is still a possible inf/NaN source.
 4. **Bring-up test triangle's `vs.inl` writes only `.xy`** for a
    `2D_PROJECTIVE` stage (q undefined). It renders correctly on real
    hardware as of X9-L, so this is hygiene only: make it match `vs_lit`

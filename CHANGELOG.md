@@ -5,6 +5,15 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — `nv2a_r_nocull` drew trigger volumes and frozen doors (X9-O)
+
+The `ref/nv2a` debug setting `nv2a_r_nocull 1` fell back to drawing every
+baked face at once, which skipped the sky, the world/brush-entity split and
+visibility culling. The view filled with orange trigger volumes, and doors
+were drawn at their closed positions. It now only turns off frustum and
+back-face culling, like ref/gl's `r_nocull`. At the crossfire spawn in xemu,
+the frame with culling off is pixel-identical to the frame with it on.
+
 ### Added — anisotropic filtering and LOD bias for `ref/nv2a` (X9-N2)
 
 With mipmaps on, a real Original Xbox showed a visible resolution change a
