@@ -1,9 +1,13 @@
 #include "PakManager.h"
 #include "BspParser.h" // BspLumpType - the dheader_t lump indices
+#include "Nv2aMapBudget.h"
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
+#include <system_error>
 #include "../utils/rgbcx.h"
 #include "../utils/TextureOpt.h"
 #include "mpak_texture_dir.h" // filesystem/mpak_texture_dir.h - the v10 texture-directory rule,
@@ -481,7 +485,7 @@ namespace formats {
             // codex-review finding: nothing checked mXboxTextures.size()/
             // mTextureBatches.size() against ref/nv2a/r_context.c's own
             // fixed-capacity load-time arrays (NV2A_MAP_MAX_TEXTURES/
-            // NV2A_MAP_MAX_BATCHES, both 512, r_context.c:226,244) before
+            // NV2A_MAP_MAX_BATCHES, both 512, r_context.c NV2A_MAP_MAX_TEXTURES) before
             // this v9 rewrite removed the old atlas's own overflow guard
             // (mAtlasOverflowed) - a map with more unique used textures than
             // that cap would bake "successfully", pass verifyFile(), and
@@ -495,8 +499,8 @@ namespace formats {
             // crossfire 120/512 (23%) - comfortable margin, not a case this
             // baker expects to hit, but failing the BAKE loudly beats
             // shipping an archive that only fails on the console.
-            constexpr uint32_t kNv2aMapMaxTextures = 512; // ref/nv2a/r_context.c:226 NV2A_MAP_MAX_TEXTURES
-            constexpr uint32_t kNv2aMapMaxBatches = 512;  // ref/nv2a/r_context.c:244 NV2A_MAP_MAX_BATCHES
+            constexpr uint32_t kNv2aMapMaxTextures = 512; // ref/nv2a/r_context.c NV2A_MAP_MAX_TEXTURES
+            constexpr uint32_t kNv2aMapMaxBatches = 512;  // ref/nv2a/r_context.c NV2A_MAP_MAX_BATCHES
             if (mXboxTextures.size() > kNv2aMapMaxTextures) {
                 std::cerr << "ERROR: " << mXboxTextures.size() << " unique textures exceeds "
                              "ref/nv2a/r_context.c's NV2A_MAP_MAX_TEXTURES (" << kNv2aMapMaxTextures
@@ -692,6 +696,109 @@ namespace formats {
         if (!verifyFile(outputPath)) {
             std::cerr << "Verification of the archive just written FAILED: " << outputPath << "\n";
             return false;
+        }
+
+        // Bake-time mirror of ref/nv2a's own per-map memory ledger
+        // (Nv2aMapBudget.h, ref/nv2a/r_context.c nv2a_load_map_geometry) - runs after
+        // verifyFile, not before: the check needs the archive's real
+        // on-disk size (the ref's own `buffersize` term is the literal
+        // FS_LoadFile length, engine/common/model.c:330,387), and a
+        // pre-write estimate would have to re-derive the 2048-byte sector
+        // padding this function's own writer already applies. Gated the
+        // same way as the two 512 caps above: a PC-target archive has no
+        // nv2a block at all (the ref itself returns before its ledger at
+        // r_context.c nv2a_load_map_geometry when textureDir/textureData/batches are
+        // empty), so there is nothing to check outside the Xbox nv2a
+        // profile.
+        //
+        // This mirrors the ref's own per-map ledger and nothing more - see
+        // Nv2aMapBudget.h's own comment for what it does NOT cover (the
+        // engine's static state, pbkit's buffers, every other subsystem,
+        // and fragmentation; NV2A_MAP_BUDGET_BYTES's own comment names the
+        // same limits).
+        //
+        // Post-write cleanup, not a transactional temp-path write: the
+        // check needs the real on-disk size (see above), and verifyFile -
+        // the other gate that would have to move into a temp-path scheme
+        // too - is owned by the concurrent x9-v10-texture-validation topic
+        // and out of scope to touch here. Every failure branch below that
+        // runs after the archive already exists on disk must therefore
+        // remove it itself, and must check that the removal actually
+        // succeeded (round-1 review finding: a failed stat or a failed
+        // remove() both silently left a full-size, unchecked .mpak behind,
+        // newer than its .bsp, which any later non-forced re-stage could
+        // then treat as current).
+        if (nv2a && mIsXboxTarget) {
+            std::error_code ec;
+            const uint64_t fileSize = std::filesystem::file_size(outputPath, ec);
+            if (ec) {
+                std::cerr << "ERROR: could not stat " << outputPath << " to compute its nv2a map budget: "
+                          << ec.message() << "\n";
+                // The archive is already fully written and verifyFile-passed
+                // at this point, so leaving it behind unchecked is exactly
+                // the stale-archive danger the over-budget branch's own
+                // remove() below exists to prevent - a stat failure earns
+                // the same cleanup, not a silent skip.
+                std::error_code removeEc;
+                const bool removed = std::filesystem::remove(outputPath, removeEc);
+                if (removeEc || !removed) {
+                    std::cerr << "ERROR: also failed to remove " << outputPath
+                              << " after the stat failure above: "
+                              << (removeEc ? removeEc.message() : "no such file") << "\n";
+                }
+                return false;
+            }
+
+            const uint64_t vbBytes = static_cast<uint64_t>(header.vCount) * kNv2aLitVertexBytes;
+            const uint64_t idxBytes = ((static_cast<uint64_t>(header.iCount) + 1) / 2) * 4;
+            const uint64_t facesBytes = static_cast<uint64_t>(header.lenFaceDrawCmds) * 4;
+            const uint64_t visBytes = static_cast<uint64_t>(header.lenFaceDrawCmds) / 8;
+            const uint64_t remapBytes = static_cast<uint64_t>(header.lenFaceRemap) * 2;
+            const uint64_t texBytes = static_cast<uint64_t>(header.lenTextureData);
+            const uint64_t lmBytes = static_cast<uint64_t>(header.lenLightmapAtlas);
+            const uint64_t total = nv2aMapLedgerBytes(header, fileSize);
+            const double pct = 100.0 * static_cast<double>(total) / static_cast<double>(kNv2aMapBudgetBytes);
+
+            if (!nv2aMapWithinBudget(total)) {
+                std::cerr << "ERROR: nv2a map ledger " << total
+                          << " bytes exceeds ref/nv2a/r_context.c's NV2A_MAP_BUDGET_BYTES ("
+                          << kNv2aMapBudgetBytes
+                          << ") - this archive would not draw on the Xbox target. Failing the bake.\n"
+                          << "  [vb=" << vbBytes << " idx=" << idxBytes << " faces=" << facesBytes
+                          << " vis=" << visBytes << " remap=" << remapBytes << " tex=" << texBytes
+                          << " lm=" << lmBytes << " file=" << fileSize << "]\n";
+                // The 512 caps above fail before any section is written, so
+                // they only ever leave a 2048-byte stub behind. This check
+                // runs after the full archive is written and verified, so
+                // without an explicit remove a left-over full-size .mpak
+                // would sit there newer than its source .bsp - main.cpp
+                // writes <map>.assets.txt BEFORE calling save() (main.cpp
+                // ~520 vs ~539), so a later non-forced re-stage could treat
+                // this failed bake as already current, and ship an archive
+                // that cannot draw
+                // its real geometry on the console.
+                //
+                // Check the removal itself rather than firing and
+                // forgetting: a real Windows file-lock/AV/permission
+                // failure here would leave the over-budget archive behind
+                // despite the ERROR above and the exit 1 in main.cpp,
+                // reproducing the exact same stale-archive danger with no
+                // trace in the log (round-1 review finding).
+                std::error_code removeEc;
+                const bool removed = std::filesystem::remove(outputPath, removeEc);
+                if (removeEc || !removed) {
+                    std::cerr << "ERROR: also failed to remove the over-budget archive " << outputPath
+                              << ": " << (removeEc ? removeEc.message() : "no such file") << "\n";
+                }
+                return false;
+            }
+
+            std::cout << std::fixed << std::setprecision(1)
+                      << "nv2a map budget: " << total << " / " << kNv2aMapBudgetBytes
+                      << " bytes (" << pct << "%) [vb=" << vbBytes << " idx=" << idxBytes
+                      << " faces=" << facesBytes << " vis=" << visBytes << " remap=" << remapBytes
+                      << " tex=" << texBytes << " lm=" << lmBytes << " file=" << fileSize << "]\n"
+                      << std::defaultfloat;
         }
 
         // header.version, not a literal "v7"/"v8": found while adding v8 -

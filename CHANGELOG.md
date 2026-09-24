@@ -40,7 +40,7 @@ every mip level. Threshold moved from source alpha `== 255` to the
 encoder's own `>= 128`, since mip levels (unlike the old base-level-only
 atlas) have real intermediate alphas. Off by default; byte-identical
 archives with the env var unset. Re-ran the full retail `valve/maps`
-corpus: 121 of 125 maps bake (the other 4 fail for the same unrelated,
+corpus: 121 of 125 maps bake before the bake-time budget gate below, 114 after it (the other 4 fail for the same unrelated,
 already-tracked u16 vertex-index limit) - 0 opaque-source-but-transparent-
 decoded mismatches across 11,801 textures, 86,063 mip levels and
 164,092,624 texels (see `divergences.md` #99's own dated follow-up).
@@ -88,6 +88,19 @@ behind either number, even though this archive isn't map-shaped at all (no
 No reader change: the archive kind is still identified by descriptor
 position, not by this number, and nothing in the engine parses an offset-0
 archive today.
+### Added — bake-time mirror of `ref/nv2a`'s 24 MiB per-map budget (X9-Q)
+
+`nv2a_load_map_geometry` only checked its own per-map memory ledger at
+load time, on the console: an over-budget map baked cleanly, passed
+`verifyFile`, and silently fell back to drawing the bring-up triangle
+instead of its real geometry. `tools/asset-studio` now computes the same
+ledger (`Nv2aMapBudget.h`) right after writing and verifying an Xbox nv2a
+archive, and fails the bake — deleting the archive it just wrote — if the
+map would not fit. Measured against the full 125-map retail corpus: 7
+maps genuinely exceed the cap (worst, `boot_camp`, at 110.2%), 4 hit an
+unrelated, already-tracked vertex-index limit first, and the median of
+the remaining 121 is 58.2% of budget. Full table in
+`docs/r3d/fork-plan.md`'s X9 section.
 
 ### Changed — `ref/nv2a` bring-up triangle state tidy-up (X9-P)
 

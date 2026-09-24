@@ -8222,8 +8222,16 @@ Open items that X9-L surfaced or carried forward, in suggested order:
    that possible. Left from the original X9-N work:
    - confirm the level layout on real hardware with a one-colour-per-level
      debug bake (xemu is not proof);
-   - add a bake-time mirror of the renderer's 24 MiB per-map budget, and
-     measure the 125-map corpus against it;
+   - ~~add a bake-time mirror of the renderer's 24 MiB per-map budget, and
+     measure the 125-map corpus against it~~ **Done, X9-Q (#135):**
+     `PakManager::save()` now fails the bake instead of shipping an archive
+     that would silently fall back to the bring-up triangle on the
+     console. 11 of 125 retail maps fail: 7 genuinely exceed the 24 MiB
+     ledger (worst, `boot_camp`, at 110.2%), and 4 hit the long-standing
+     u16 vertex-count limit (`PakManager::addVertex`'s "vertex count
+     exceeded 65536"), unchanged by v10, before ever reaching the ledger
+     check. Full corpus table below. The 7 over-budget maps are an open
+     item (see below).
    - if distant fences or grates vanish too early, use coverage-preserving
      alpha scaling for masked mips;
    - ~~revive `tools/verify-atlas-alpha.py` as a per-texture, per-level
@@ -8253,6 +8261,206 @@ Open items that X9-L surfaced or carried forward, in suggested order:
    hardware boot (the FTP deploy plus back-buffer dump recipe in
    `lessons.md`). xemu accepted two register values real hardware rejects or
    renders differently.
+
+### X9-Q — bake-time 24 MiB budget check, 125-map corpus
+
+`PakManager::save()` now mirrors `nv2a_load_map_geometry`'s own per-map
+memory ledger (`NV2A_MAP_BUDGET_BYTES` and the `total_bytes` sum with its
+strict `>` compare, `ref/nv2a/r_context.c`) at bake time, for the
+same reason the `NV2A_MAP_MAX_TEXTURES`/`NV2A_MAP_MAX_BATCHES` checks
+already exist there: a map that does not fit must break the build, not
+silently fail to draw its real geometry on the console. `Nv2aMapBudget.h`
+holds the duplicated constant and formula, cross-referenced back to
+`r_context.c` the same way the two 512 caps already are. On failure the
+baker prints the ERROR line and the byte breakdown, then deletes the
+rejected archive so no later stage or re-stage can pick up a failed bake
+as if it were current.
+
+Measured against the full 125-map retail corpus (`--target xbox --profile
+nv2a`, one `AssetStudio` invocation per map):
+
+- **121 of 125 maps produce a ledger figure**; the other 4
+  (`contamination`, `disposal`, `pool_party`, `rocket_frenzy`) hit the
+  unrelated, already-tracked u16 vertex-index limit (`PakManager::addVertex`)
+  before the code ever reaches the budget check. These are the same four
+  long-standing vertex-count failures recorded in the X9-K entry above;
+  the limit counts vertices, not bytes per vertex, so v10 did not change it.
+  After this gate, **114 of 125** retail maps bake for the Xbox target.
+- **7 of the 121 genuinely exceed the 24 MiB cap** and fail the bake:
+  `boot_camp` (110.2%), `rustmill` (104.1%), `t0a0b` (104.0%), `c2a4e`
+  (102.6%), `c2a2e` (101.9%), `c2a4c` (101.1%), `t0a0a` (100.2%). All
+  seven are large, multi-lightmap-page maps (2 lightmap layers, not 1) —
+  the lightmap atlas term alone is 8,388,608 bytes on each, over a third
+  of the whole 24 MiB cap before a single vertex or texture byte is
+  counted, and it counts twice (once in the loaded archive, once in its
+  contiguous GPU copy). Measured on `boot_camp`, `t0a0a` and `c1a0`
+  (2026-09-24): the atlas's fixed 1024x1024 RGBA8 pages hold only **5-7%**
+  real luxels (the BSP lighting lump's luxel count against the pages'
+  capacity). Fitting the atlas to its content is the fix - see open item 8
+  below.
+- **Median across the 121 computed ledgers: 14,646,382 bytes (58.2%
+  of budget).**
+- `c1a0` (58.2%) and `crossfire` (59.6%) land within a point of X9-K's own
+  v9 figure of ~58-59% (`fork-plan.md:8142`) — the mip-chain growth in
+  `textureData` this slice's own X9-N added is real but small next to the
+  archive's total on-disk size, which dominates the ledger for almost
+  every map (see "Largest term" below).
+- For all but a handful of maps the ledger's own single largest term is
+  `file` — the whole archive's on-disk size, which is also the last term
+  in the ref's own sum (`buffersize`, `r_context.c nv2a_load_map_geometry`). This is
+  expected, not a formula bug: `file` already includes the raw BSP lumps
+  (visibility, nodes, leaves, planes, clipnodes, lighting, miptex,
+  entities) that the other seven terms never touch, so it is the largest
+  single number in the sum for nearly every map in the corpus.
+
+Full 125-row table, sorted by ledger bytes descending (the real max row,
+not a truncated view — `lessons.md`'s "NEVER read a truncated view of
+sorted or ranked output" entry):
+
+| Map | Status | Ledger bytes | % of 24 MiB | Largest term |
+|---|---|---:|---:|---|
+| boot_camp | **OVER BUDGET** | 27725074 | 110.2% | file=16494592 |
+| rustmill | **OVER BUDGET** | 26197933 | 104.1% | file=15376384 |
+| t0a0b | **OVER BUDGET** | 26169415 | 104.0% | file=15435776 |
+| c2a4e | **OVER BUDGET** | 25814747 | 102.6% | file=15028224 |
+| c2a2e | **OVER BUDGET** | 25638675 | 101.9% | file=15022080 |
+| c2a4c | **OVER BUDGET** | 25443799 | 101.1% | file=14813184 |
+| t0a0a | **OVER BUDGET** | 25228101 | 100.2% | file=14612480 |
+| c5a1 | OK | 24796110 | 98.5% | file=14508032 |
+| c2a2a | OK | 24734343 | 98.3% | file=14346240 |
+| t0a0 | OK | 24515908 | 97.4% | file=14133248 |
+| c3a2a | OK | 24321134 | 96.6% | file=14032896 |
+| c2a5e | OK | 18244113 | 72.5% | file=11472896 |
+| c2a5f | OK | 17372888 | 69.0% | file=10887168 |
+| doublecross | OK | 17036080 | 67.7% | file=10582016 |
+| c2a1a | OK | 17024774 | 67.7% | file=10588160 |
+| c1a1f | OK | 16883729 | 67.1% | file=10543104 |
+| c3a1 | OK | 16690457 | 66.3% | file=10346496 |
+| c2a2b1 | OK | 16670463 | 66.2% | file=10352640 |
+| c3a1a | OK | 16607152 | 66.0% | file=10186752 |
+| hldemo2 | OK | 16520215 | 65.6% | file=10223616 |
+| c1a2b | OK | 16234821 | 64.5% | file=10037248 |
+| c2a2d | OK | 16231114 | 64.5% | file=10098688 |
+| c2a4b | OK | 16212311 | 64.4% | file=10082304 |
+| c3a2c | OK | 16154472 | 64.2% | file=9938944 |
+| c1a2 | OK | 16124733 | 64.1% | file=9984000 |
+| c1a1c | OK | 16016265 | 63.6% | file=9902080 |
+| lambda_bunker | OK | 15914136 | 63.2% | file=9709568 |
+| c0a0b | OK | 15806847 | 62.8% | file=9682944 |
+| c1a2a | OK | 15750483 | 62.6% | file=9662464 |
+| c1a3 | OK | 15723085 | 62.5% | file=9654272 |
+| c2a3b | OK | 15660577 | 62.2% | file=9617408 |
+| c2a4f | OK | 15634850 | 62.1% | file=9533440 |
+| c2a2g | OK | 15567736 | 61.9% | file=9512960 |
+| c1a1b | OK | 15491172 | 61.6% | file=9582592 |
+| c2a2c | OK | 15430555 | 61.3% | file=9441280 |
+| c2a4a | OK | 15418662 | 61.3% | file=9431040 |
+| c1a4d | OK | 15405727 | 61.2% | file=9449472 |
+| c1a4f | OK | 15365717 | 61.1% | file=9492480 |
+| c2a1 | OK | 15344582 | 61.0% | file=9414656 |
+| c1a0c | OK | 15274418 | 60.7% | file=9316352 |
+| c1a1 | OK | 15257045 | 60.6% | file=9242624 |
+| c2a2f | OK | 15256132 | 60.6% | file=9332736 |
+| c2a3a | OK | 15240525 | 60.6% | file=9236480 |
+| c2a2b2 | OK | 15198996 | 60.4% | file=9273344 |
+| c0a0c | OK | 15186856 | 60.3% | file=9390080 |
+| c1a0d | OK | 15167381 | 60.3% | file=9189376 |
+| subtransit | OK | 15166450 | 60.3% | file=9256960 |
+| c1a1a | OK | 15165268 | 60.3% | file=9177088 |
+| c1a0b | OK | 15136107 | 60.1% | file=9183232 |
+| c2a2h | OK | 15108434 | 60.0% | file=9164800 |
+| c4a3 | OK | 15089790 | 60.0% | file=9295872 |
+| c1a4g | OK | 15043170 | 59.8% | file=9279488 |
+| crossfire | OK | 14998801 | 59.6% | file=9070592 |
+| c2a3c | OK | 14849507 | 59.0% | file=8994816 |
+| c1a4i | OK | 14842375 | 59.0% | file=9136128 |
+| rapidcore | OK | 14698480 | 58.4% | file=8910848 |
+| c3a1b | OK | 14679640 | 58.3% | file=8876032 |
+| c2a3 | OK | 14665586 | 58.3% | file=8916992 |
+| c2a5b | OK | 14662030 | 58.3% | file=8781824 |
+| c1a0 | OK | 14652931 | 58.2% | file=8822784 |
+| c1a0a | OK | 14646382 | 58.2% | file=8757248 |
+| t0a0b1 | OK | 14608408 | 58.0% | file=8833024 |
+| c1a3a | OK | 14484535 | 57.6% | file=8724480 |
+| c1a4b | OK | 14463030 | 57.5% | file=8763392 |
+| c2a5 | OK | 14320513 | 56.9% | file=8650752 |
+| hldemo3 | OK | 14311351 | 56.9% | file=8613888 |
+| c1a0e | OK | 14302760 | 56.8% | file=8736768 |
+| c2a5g | OK | 14229930 | 56.5% | file=8523776 |
+| hldemo1 | OK | 14199694 | 56.4% | file=8548352 |
+| t0a0c | OK | 14178236 | 56.3% | file=8462336 |
+| c0a0d | OK | 14113942 | 56.1% | file=8462336 |
+| datacore | OK | 14102934 | 56.0% | file=8413184 |
+| gasworks | OK | 14099585 | 56.0% | file=8345600 |
+| c3a2d | OK | 14070803 | 55.9% | file=8448000 |
+| c1a4 | OK | 13944275 | 55.4% | file=8445952 |
+| bounce | OK | 13853447 | 55.0% | file=8241152 |
+| c2a3d | OK | 13852410 | 55.0% | file=8284160 |
+| c0a0a | OK | 13849660 | 55.0% | file=8278016 |
+| c4a1b | OK | 13812950 | 54.9% | file=8335360 |
+| c0a0 | OK | 13711774 | 54.5% | file=8183808 |
+| c3a2e | OK | 13708489 | 54.5% | file=8134656 |
+| c2a4d | OK | 13651411 | 54.2% | file=8032256 |
+| t0a0b2 | OK | 13395650 | 53.2% | file=7927808 |
+| c2a5c | OK | 13213172 | 52.5% | file=7770112 |
+| undertow | OK | 13122161 | 52.1% | file=7714816 |
+| c4a1a | OK | 13120357 | 52.1% | file=7759872 |
+| c3a2 | OK | 13026933 | 51.8% | file=7569408 |
+| c2a5w | OK | 12916845 | 51.3% | file=7561216 |
+| c3a2b | OK | 12883931 | 51.2% | file=7593984 |
+| c4a1d | OK | 12852344 | 51.1% | file=7557120 |
+| c1a2c | OK | 12780112 | 50.8% | file=7477248 |
+| c2a5d | OK | 12747781 | 50.7% | file=7436288 |
+| t0a0d | OK | 12715279 | 50.5% | file=7395328 |
+| c2a5x | OK | 12679131 | 50.4% | file=7421952 |
+| c2a3e | OK | 12606528 | 50.1% | file=7284736 |
+| c2a2 | OK | 12495987 | 49.7% | file=7264256 |
+| snark_pit | OK | 12447263 | 49.5% | file=7155712 |
+| c4a1 | OK | 12405015 | 49.3% | file=7286784 |
+| c1a4e | OK | 12307540 | 48.9% | file=7157760 |
+| c2a4g | OK | 12224666 | 48.6% | file=6930432 |
+| c4a1e | OK | 12161730 | 48.3% | file=7114752 |
+| c1a4k | OK | 12086036 | 48.0% | file=7049216 |
+| c2a1b | OK | 12072145 | 48.0% | file=6940672 |
+| c3a2f | OK | 12045933 | 47.9% | file=6881280 |
+| c2a5a | OK | 12037352 | 47.8% | file=6899712 |
+| c2a4 | OK | 12022530 | 47.8% | file=6887424 |
+| c0a0e | OK | 11979369 | 47.6% | file=6848512 |
+| stalkyard | OK | 11930407 | 47.4% | file=6828032 |
+| c1a3d | OK | 11787754 | 46.8% | file=6715392 |
+| c4a2a | OK | 11375763 | 45.2% | file=6432768 |
+| c4a1c | OK | 11297379 | 44.9% | file=6369280 |
+| frenzy | OK | 11239737 | 44.7% | file=6332416 |
+| c1a3b | OK | 11054363 | 43.9% | file=6146048 |
+| xen_dm | OK | 11015344 | 43.8% | file=6152192 |
+| c4a2 | OK | 11011147 | 43.8% | file=6219776 |
+| c1a2d | OK | 10996400 | 43.7% | file=6146048 |
+| c4a2b | OK | 10724826 | 42.6% | file=5941248 |
+| c1a3c | OK | 10716373 | 42.6% | file=5914624 |
+| c1a1d | OK | 10613188 | 42.2% | file=5865472 |
+| c1a4j | OK | 10425691 | 41.4% | file=5740544 |
+| c4a1f | OK | 10365144 | 41.2% | file=5615616 |
+| contamination | NON-BUDGET FAIL (u16 index/vertex overflow, `PakManager::addVertex`) | - | - | - |
+| disposal | NON-BUDGET FAIL (u16 index/vertex overflow, `PakManager::addVertex`) | - | - | - |
+| pool_party | NON-BUDGET FAIL (u16 index/vertex overflow, `PakManager::addVertex`) | - | - | - |
+| rocket_frenzy | NON-BUDGET FAIL (u16 index/vertex overflow, `PakManager::addVertex`) | - | - | - |
+
+125 rows. Raising the 24 MiB cap, or reducing the 7 over-budget maps' own
+footprint (fewer lightmap pages, a lower-resolution lightmap format), is a
+follow-up decision, not part of this slice — out of scope by this
+follow-up's own spec.
+
+8. **7 retail maps exceed the 24 MiB per-map budget and no longer bake**
+   (X9-Q, #135): `boot_camp` 110.2%, `rustmill`, `t0a0b`, `c2a4e`, `c2a2e`,
+   `c2a4c`, `t0a0a` 100.2%. The lightmap atlas is the cause: fixed
+   1024x1024 RGBA8 pages (4 MiB each, two on these maps) that are only
+   5-7% used, counted twice in the ledger. In order of payoff: fit the atlas
+   to its content (better packing, crop pages to the rows used, or smaller
+   pages) - on `boot_camp` roughly 26.4 MiB -> ~12 MiB; stop holding the
+   whole archive while copying the atlas to GPU memory (removes the second
+   count); RGB565 lightmaps (halves what remains). Check `ref/nv2a`'s
+   single-lightmap-page limit at the same time: two-page maps may be
+   drawing page-1 faces with the wrong lighting today.
 
 X9-M onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.
