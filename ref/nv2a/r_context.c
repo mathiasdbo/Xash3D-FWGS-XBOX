@@ -195,8 +195,8 @@ static uint32_t  nv2a_map_dword_count;
    atlas-rect remap - see this function's own MPAK v9 citation below and
    docs/r3d/fork-plan.md's X9-K entry for the full "architecture reversal"
    account. One contiguous GPU-visible buffer holds every texture's own
-   DXT1 bytes back-to-back, directory order (mpak_texture_info_t::dataLength
-   summed) - MmAllocateContiguousMemoryEx, same allocation discipline the
+   DXT1 mip chain in directory order, each padded to 128 bytes (MPAK v10 -
+   mpak_texture_info_t::dataLength rounded up to 128, summed) - MmAllocateContiguousMemoryEx, same allocation discipline the
    old atlas used. */
 static void     *nv2a_map_texture_data;
 /* Directory entry for one per-texture DXT1 image: byte offset into
@@ -211,7 +211,29 @@ typedef struct
 	fs_offset_t physOffset;
 	uint32_t    log2Width;
 	uint32_t    log2Height;
+	uint32_t    mipLevels;  /* X9-N, MPAK v10: max(log2Width, log2Height) + 1 - the full chain to 1x1 */
 } nv2a_map_texture_t;
+
+/* X9-N, MPAK v10: byte length of a full DXT1 mip chain for a POT texture,
+   base level down to 1x1 - every level takes whole 4x4 blocks, 8 bytes
+   each, so a level under 4 texels on a side still costs one block per
+   axis (the same size NV2A addresses for it). Mirrors the baker's
+   buildDxt1MipChain (tools/asset-studio/src/formats/PakManager.cpp). */
+static uint64_t nv2a_dxt1_chain_length( uint32_t log2w, uint32_t log2h, uint32_t *out_levels )
+{
+	uint32_t levels = ( log2w > log2h ? log2w : log2h ) + 1, l;
+	uint64_t total = 0;
+
+	for( l = 0; l < levels; l++ )
+	{
+		uint32_t w = ( l < log2w ) ? ( 1u << ( log2w - l )) : 1u;
+		uint32_t h = ( l < log2h ) ? ( 1u << ( log2h - l )) : 1u;
+		total += (uint64_t)(( w + 3 ) / 4 ) * (( h + 3 ) / 4 ) * 8;
+	}
+	if( out_levels )
+		*out_levels = levels;
+	return total;
+}
 /* Fixed-capacity static arrays, not a heap allocation sized off the
    header's own (validated) textureCount/batchCount the way nv2a_map_faces
    is sized off face_count - deliberately, matching this file's own
@@ -950,7 +972,7 @@ typedef struct
 	mpak_lump_t faceDrawCmds; /* X9-F: captured for frustum culling - see
 	                              nv2a_map_face_t's own declaration comment. */
 	mpak_lump_t textureDir;   /* X9-K: mpak_texture_info_t[header->textureCount] */
-	mpak_lump_t textureData;  /* X9-K: per-texture DXT1 blobs, back-to-back, directory order */
+	mpak_lump_t textureData;  /* X9-K: per-texture DXT1 blobs in directory order; v10: each a full mip chain, padded to 128 bytes */
 	mpak_lump_t batches;      /* X9-K: mpak_texture_batch_t[header->batchCount] */
 	mpak_lump_t faceRemap;    /* X9-K: uint32_t[original BSP face count], originalToSortedFaceIndex[] */
 	mpak_lump_t lightmapAtlas;
@@ -1462,18 +1484,23 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
 		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, tex->mipLevels )
 		| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_U, tex->log2Width )
 		| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_V, tex->log2Height ));
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, tex_pitch << 16 );
 	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( tex_width << 16 ) | ( 1u << tex->log2Height ));
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00010101 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
-	/* 0x02022000 = MIN=MAG=LINEAR. The nxdk mesh sample's 0x04074000 is
+	/* X9-N: MIN=6 (TENT_TENT_LOD: bilinear within the two nearest mip
+	   levels, blended - trilinear, GL_LINEAR_MIPMAP_LINEAR), MAG=2
+	   (TENT, bilinear): 0x02062000. The nearest option is MIN=3
+	   (BOX_NEARESTLOD, GL_NEAREST_MIPMAP_NEAREST), MAG=1: 0x01032000.
+	   Both keep the non-zero convolution-kernel field (bits 13-15) real
+	   hardware requires. The nxdk mesh sample's 0x04074000 is
 	   MIN/MAG=CONVOLUTION_2D_LOD0 - xemu samples it as bilinear, real
-	   hardware filters with the convolution kernel and smears (Perfect Dark X's
-	   gfx_nv2a.cpp documents the same). */
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_r_texturenearest.value ? 0x01012000 : 0x02022000 );
+	   hardware filters with the convolution kernel and smears (Perfect
+	   Dark X's gfx_nv2a.cpp documents the same). */
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_r_texturenearest.value ? 0x01032000 : 0x02062000 );
 	pb_end( p );
 }
 
@@ -3097,16 +3124,17 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   width/height must be exact powers of two matching their own paired
 	   log2 field, at least one real 4x4 DXT1 block (log2 >= 2), and no
 	   larger than NV2A's real 4096 texture edge (log2 <= 12 - the same
-	   cap the old atlas check used). dataLength must be the exact DXT1
-	   byte count for that size (4 bits/texel), and the running sum of
-	   every entry's own dataLength must land EXACTLY on the texture-data
+	   cap the old atlas check used). dataLength must be the exact byte
+	   count of that size's full DXT1 mip chain (MPAK v10,
+	   nv2a_dxt1_chain_length), and the running sum of every entry's own
+	   dataLength rounded up to 128 bytes must land EXACTLY on the texture-data
 	   lump's own real, bounds-checked length after the last entry -
 	   refusing the archive beats sampling garbage: a wrong log2 or a
 	   short running sum would not crash, it would silently bind the wrong
 	   bytes as a texture, or read past nv2a_map_texture_data into
 	   whatever memory follows it. physOffset (this entry's own byte
 	   offset into nv2a_map_texture_data) is that running sum BEFORE this
-	   entry's own dataLength is added - mpak_texture_info_t itself stores
+	   entry's own padded dataLength is added - mpak_texture_info_t itself stores
 	   no offset field, matching the archive's own "byte layout order IS
 	   the format" convention one level down (filesystem/mpak_layout.h's
 	   own v9 note). */
@@ -3126,7 +3154,7 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 
 			if( log2w < 2 || log2w > 12 || log2h < 2 || log2h > 12
 				|| width != ( 1u << log2w ) || height != ( 1u << log2h )
-				|| (uint64_t)dataLength != ( (uint64_t)width * (uint64_t)height ) / 2 )
+				|| (uint64_t)dataLength != nv2a_dxt1_chain_length( log2w, log2h, NULL ))
 			{
 				gEngfuncs.Con_Printf( "ref_nv2a: texture %u (%ux%u) failed validation - not drawing this map's real geometry\n",
 					(unsigned int)i, (unsigned int)width, (unsigned int)height );
@@ -3136,13 +3164,18 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			nv2a_map_textures[i].physOffset = (uint32_t)running;
 			nv2a_map_textures[i].log2Width  = log2w;
 			nv2a_map_textures[i].log2Height = log2h;
+			nv2a_dxt1_chain_length( log2w, log2h, &nv2a_map_textures[i].mipLevels );
 
-			running += dataLength;
+			/* v10: each texture's data is zero-padded to 128 bytes, Xbox
+			   D3D's own texture base alignment. v9's single levels were
+			   always 128-aligned by accident: GoldSrc miptex sizes are
+			   multiples of 16, so every POT texture was >= 16x16 = 128 bytes. */
+			running += ( (uint64_t)dataLength + 127 ) & ~(uint64_t)127;
 		}
 
 		if( running != (uint64_t)geo.textureData.length )
 		{
-			gEngfuncs.Con_Printf( "ref_nv2a: texture directory's own summed dataLength (%llu) does not match the texture-data lump's real length (%u) - not drawing this map's real geometry\n",
+			gEngfuncs.Con_Printf( "ref_nv2a: texture directory's own summed, 128-aligned dataLength (%llu) does not match the texture-data lump's real length (%u) - not drawing this map's real geometry\n",
 				(unsigned long long)running, (unsigned int)geo.textureData.length );
 			return false;
 		}

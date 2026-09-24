@@ -8204,10 +8204,17 @@ Open items that X9-L surfaced or carried forward, in suggested order:
    `ref/nv2a` had no entity pass. It now draws brush entities the way
    ref/gl does. Left from that work: `kRenderTransColor` entities, and
    studio models, sprites and beams, which still have no path.
-2. **Mipmaps.** `MIPMAP_LEVELS=1` for every texture since X9-A; distant
-   tiled faces alias into moire (`divergences.md` #101 (g)). The baker needs
-   to emit a DXT1 mip chain per texture, and stage 0 needs the level count
-   plus a MIN filter that selects between levels.
+2. ~~**Mipmaps.**~~ **Done, X9-N (`divergences.md` #105, MPAK v10):**
+   full DXT1 mip chains and trilinear filtering. Left from that work:
+   - confirm the level layout on real hardware with a one-colour-per-level
+     debug bake (xemu is not proof);
+   - check the v10 texture-directory rule (chain lengths, 128-byte padding)
+     in the baker's verify pass and the PC tests, not only in `ref/nv2a`;
+   - add a bake-time mirror of the renderer's 24 MiB per-map budget, and
+     measure the 125-map corpus against it;
+   - if distant fences or grates vanish too early, use coverage-preserving
+     alpha scaling for masked mips;
+   - revive `tools/verify-atlas-alpha.py` as a per-texture, per-level check.
 3. **`nv2a_r_nocull 1` loses the xemu Vulkan device**
    (`VK_ERROR_DEVICE_LOST`). This is the whole-batch draw path
    (`nv2a_batch_dword_range`). Check it on real hardware before blaming

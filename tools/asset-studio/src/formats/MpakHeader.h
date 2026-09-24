@@ -81,6 +81,17 @@ namespace formats {
     // IMPORTANT below) rather than removed, since removing a field is a
     // version bump this scope change does not otherwise need.
     //
+    // v9 -> v10: every Xbox texture carries its full DXT1 mip chain, base
+    // level down to 1x1 (max(log2Width, log2Height) + 1 levels), levels
+    // back to back; a level under 4 texels on a side still takes whole 4x4
+    // blocks. MpakTextureInfo keeps its layout - dataLength is now the
+    // chain's length - and each texture's data is zero-padded to the next
+    // 128 bytes inside the textureData lump, so a texture's offset is the
+    // running sum of align128(dataLength) over prior entries. Before v10
+    // every texture had one level, and distant tiled faces aliased into
+    // moire (divergences.md #101 (g)). A v9 reader would take the chain for
+    // a wrong-sized single level, hence the bump.
+    //
     // v8 -> v9: the Xbox diffuse-texture pipeline stops sharing one 2048x2048
     // DXT1 atlas per map. The atlas's own per-vertex placement remap
     // (`Vertex::rect`, normalized ATLAS-space [x,y,w,h]) could only represent
@@ -199,7 +210,7 @@ namespace formats {
     // are a second line of defense.
     struct MpakHeader6 {
         char magic[4] = {'M', 'P', 'A', 'K'};
-        uint32_t version = 9;
+        uint32_t version = 10;
         uint32_t headerSize = 0;      // sizeof(MpakHeader6); set in PakManager::save just before writing
         uint32_t bakerBuildId = MPAK_BAKER_BUILD_ID;
         uint32_t flags = 0; // 1 = Xbox, 0 = PC
@@ -221,7 +232,7 @@ namespace formats {
         // lenAtlas, removed) in this exact position. ---
         uint32_t textureCount = 0;   // unique per-texture DXT1 images this map actually uses
         uint32_t lenTextureDir = 0;  // textureCount * sizeof(MpakTextureInfo)
-        uint32_t lenTextureData = 0; // total bytes of all per-texture DXT1 blobs, concatenated back-to-back in directory order
+        uint32_t lenTextureData = 0; // total bytes of all per-texture DXT1 mip chains in directory order, each zero-padded to 128 bytes (v10)
         uint32_t batchCount = 0;     // texture-draw batches; == textureCount architecturally (see MpakTextureBatch's own doc comment), kept explicit for robustness/clarity
         uint32_t lenBatches = 0;     // batchCount * sizeof(MpakTextureBatch)
         uint32_t lenFaceRemap = 0;   // (original BSP face count) * sizeof(uint32_t) - originalToSortedFaceIndex[]; the original face count is lenFaceRemap / sizeof(uint32_t)
@@ -283,7 +294,7 @@ namespace formats {
         uint32_t height;     // POT, rounded up independently per axis
         uint32_t log2Width;  // log2(width) - the BASE_SIZE_U value
         uint32_t log2Height; // log2(height) - the BASE_SIZE_V value
-        uint32_t dataLength; // this texture's own DXT1 (4 bits/texel) byte length, == width*height/2
+        uint32_t dataLength; // v10: this texture's whole DXT1 mip chain, in bytes (padding to 128 not included)
     };
 #pragma pack(pop)
     static_assert(sizeof(MpakTextureInfo) == 20, "MpakTextureInfo must stay a stable, tightly packed 20 bytes - the C reader computes textureCount from lenTextureDir / 20");

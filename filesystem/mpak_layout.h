@@ -51,7 +51,7 @@ extern "C" {
 #endif
 
 #define MPAK_LAYOUT_MAGIC   "MPAK"
-#define MPAK_LAYOUT_VERSION 9u
+#define MPAK_LAYOUT_VERSION 10u
 #define MPAK_SECTOR_SIZE    2048u
 #define MPAK_TARGET_XBOX_FLAG 1u  // MpakHeader6::flags bit 0 - 1 = Xbox, 0 = PC
 #define MPAK_FLAG_NV2A_BLOCK  2u  // flags bit 1 - the baked v6 block is populated (X9 profile)
@@ -106,7 +106,7 @@ typedef struct
 	// begin with).
 	uint32_t textureCount;   // unique per-texture DXT1 images actually used by this map
 	uint32_t lenTextureDir;  // textureCount * sizeof(mpak_texture_info_t)
-	uint32_t lenTextureData; // total bytes of all per-texture DXT1 blobs, concatenated back-to-back in directory order
+	uint32_t lenTextureData; // total bytes of all per-texture DXT1 mip chains in directory order, each zero-padded to 128 bytes (v10)
 	uint32_t batchCount;     // texture-draw batches. Architecturally == textureCount (texture ID is the
 	                         // PRIMARY sort key, so every used texture's faces land in exactly one
 	                         // contiguous run) - kept as an explicit field for robustness/clarity rather
@@ -212,8 +212,9 @@ typedef struct
 // DXT1 image this map actually uses (Xbox target only). No stored byte
 // offset field: this entry's own physical offset into the texture-data
 // blob (mpak_layout_t::textureData) is the running sum of dataLength over
-// every PRIOR directory entry - matching this format's own "byte layout
-// order IS the format" convention (this file's own header comment) one
+// every PRIOR directory entry (v10: of dataLength rounded up to 128
+// bytes) - matching this format's own "byte layout order IS the format"
+// convention (this file's own header comment) one
 // level down, inside a single lump instead of across the whole archive.
 // All-uint32_t, so - like mpak_header_t/mpak_vertex_t above - this needs
 // no packing pragma to match the C++ struct's own natural layout.
@@ -223,7 +224,9 @@ typedef struct
 	uint32_t height;     // POT, rounded up (never down) independently per axis
 	uint32_t log2Width;  // log2(width) - NV097_SET_TEXTURE_FORMAT's BASE_SIZE_U field
 	uint32_t log2Height; // log2(height) - BASE_SIZE_V field
-	uint32_t dataLength; // this texture's own DXT1 byte length (width*height/2, DXT1 = 4 bits/texel)
+	uint32_t dataLength; // v10: this texture's whole DXT1 mip chain in bytes, base level down to 1x1
+	                     // (levels under 4 texels still take whole 4x4 blocks); its data is then
+	                     // zero-padded to 128 bytes, so offsets sum align128(dataLength)
 } mpak_texture_info_t;
 
 // v9: mirrors formats::MpakTextureBatch byte-for-byte - one texture-draw
@@ -267,7 +270,7 @@ typedef struct
 	mpak_lump_t clipnodes;
 	mpak_lump_t models;
 	mpak_lump_t textureDir;   // v9, Xbox target only - mpak_texture_info_t[header.textureCount]
-	mpak_lump_t textureData;  // v9, Xbox target only - per-texture DXT1 blobs, back-to-back in directory order
+	mpak_lump_t textureData;  // v9, Xbox target only - per-texture DXT1 data in directory order (v10: mip chains, each padded to 128)
 	mpak_lump_t batches;      // v9, Xbox target only - mpak_texture_batch_t[header.batchCount]
 	mpak_lump_t faceRemap;    // v9, Xbox target only - uint32_t[original BSP face count], originalToSortedFaceIndex[]
 	mpak_lump_t array64;      // PC target only

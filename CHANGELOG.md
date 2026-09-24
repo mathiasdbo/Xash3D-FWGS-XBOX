@@ -5,6 +5,23 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — mipmaps for `ref/nv2a` textures (X9-N, MPAK v10)
+
+Every Xbox texture had one level, so tiled textures on distant or oblique
+faces (gravel, fences, walls seen at a glancing angle) aliased into
+shimmering moire. The baker now stores each texture's full DXT1 mip chain,
+from full size down to 1x1. Textures with see-through parts average only
+their solid texels, so the transparent colour does not bleed into edges.
+`ref/nv2a` samples it with trilinear filtering; the nearest-neighbour
+option uses the mipmapped equivalent.
+
+In xemu, pixel-to-pixel noise on distant surfaces at the crossfire spawn
+dropped by more than half. The near walls are nearly unchanged.
+
+MPAK moves to v10, so every map needs a rebake. Texture memory grows by
+about 35% per map (crossfire: 682 KB to 918 KB), well inside the renderer's
+per-map budget.
+
 ### Fixed — Xbox gamepad sticks turning the view by themselves
 
 Original Xbox controllers rest well off centre. One measured on real

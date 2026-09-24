@@ -81,7 +81,8 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	const uint32_t numOriginalFaces = 2u;
 	const qboolean texturedXbox = ( nv2a && targetXbox );
 	const uint32_t lenTextureDir = texturedXbox ? (uint32_t)sizeof( mpak_texture_info_t ) : 0u; // 1 entry
-	const uint32_t lenTextureData = texturedXbox ? 8u : 0u; // 4x4 DXT1 = width*height/2
+	const uint32_t texDataLength = 24u; // v10: 4x4 DXT1 mip chain = 3 levels (4x4, 2x2, 1x1) x one 8-byte block
+	const uint32_t lenTextureData = texturedXbox ? 128u : 0u; // v10: the chain zero-padded to 128 bytes
 	const uint32_t lenBatches = texturedXbox ? (uint32_t)sizeof( mpak_texture_batch_t ) : 0u; // 1 batch
 	// v9: BspParser's face sort (and this table) runs in the shared nv2a face
 	// loop regardless of target - PakManager.cpp save()'s own comment - so
@@ -221,8 +222,9 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 		memset( buf + lightmapOffset, 0xAA, lenLightmap );
 		if( targetXbox )
 		{
-			// v9: one real 4x4 DXT1 texture directory entry + its matching
-			// 8-byte blob + one texture-draw batch covering both real faces.
+			// v10: one real 4x4 DXT1 texture directory entry + its 24-byte
+			// mip chain padded to 128 + one texture-draw batch covering both
+			// real faces.
 			mpak_texture_info_t texInfo;
 			mpak_texture_batch_t batch;
 
@@ -230,7 +232,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 			texInfo.height = 4;
 			texInfo.log2Width = 2;
 			texInfo.log2Height = 2;
-			texInfo.dataLength = lenTextureData;
+			texInfo.dataLength = texDataLength;
 			memcpy( buf + textureDirOffset, &texInfo, sizeof( texInfo ));
 			memset( buf + textureDataOffset, 0x22, lenTextureData );
 
@@ -357,7 +359,7 @@ static qboolean TestValidArchive( qboolean targetXbox, qboolean nv2a )
 				memcpy( &readBatch, buf + layout.batches.offset, sizeof( readBatch ));
 				if( readInfo.width != 4 || readInfo.height != 4 ||
 					readInfo.log2Width != 2 || readInfo.log2Height != 2 ||
-					readInfo.dataLength != header.lenTextureData ||
+					readInfo.dataLength != 24u || header.lenTextureData != 128u || // v10: 4x4 chain, padded
 					buf[layout.textureData.offset] != 0x22 ||
 					readBatch.faceCount != 2 || readBatch.textureIndex != 0 )
 				{

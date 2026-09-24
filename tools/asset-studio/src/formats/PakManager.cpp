@@ -112,6 +112,74 @@ namespace {
         return log2;
     }
 
+    // v10: one 2x2 box-filter step, POT in and out, either axis allowed to
+    // be 1 already (a 64x1 level halves to 32x1). For a masked texture the
+    // colour averages only the opaque (alpha >= 128) source texels, so the
+    // transparent key colour never bleeds into a cutout's edge at distance;
+    // alpha itself is the plain average, which compressToDXT then
+    // thresholds at 128 exactly as it does for level 0.
+    void downsampleRgba(const std::vector<uint8_t>& src, uint32_t srcW, uint32_t srcH,
+                        std::vector<uint8_t>& dst, uint32_t dstW, uint32_t dstH, bool masked) {
+        dst.assign(static_cast<size_t>(dstW) * dstH * 4, 0);
+        const uint32_t fx = srcW / dstW; // 1 or 2
+        const uint32_t fy = srcH / dstH;
+        for (uint32_t y = 0; y < dstH; ++y) {
+            for (uint32_t x = 0; x < dstW; ++x) {
+                uint32_t sum[4] = {0, 0, 0, 0}, opaque[3] = {0, 0, 0};
+                uint32_t n = 0, nOpaque = 0;
+                for (uint32_t oy = 0; oy < fy; ++oy) {
+                    for (uint32_t ox = 0; ox < fx; ++ox) {
+                        const uint8_t* t = &src[((static_cast<size_t>(y) * fy + oy) * srcW + (x * fx + ox)) * 4];
+                        for (int c = 0; c < 4; ++c) sum[c] += t[c];
+                        if (t[3] >= 128) {
+                            for (int c = 0; c < 3; ++c) opaque[c] += t[c];
+                            ++nOpaque;
+                        }
+                        ++n;
+                    }
+                }
+                uint8_t* d = &dst[(static_cast<size_t>(y) * dstW + x) * 4];
+                for (int c = 0; c < 3; ++c)
+                    d[c] = static_cast<uint8_t>((masked && nOpaque > 0) ? (opaque[c] + nOpaque / 2) / nOpaque : (sum[c] + n / 2) / n);
+                d[3] = static_cast<uint8_t>((sum[3] + n / 2) / n);
+            }
+        }
+    }
+
+    // v10: the full DXT1 mip chain for one POT texture, levels back to back
+    // from base size down to 1x1 (max(log2w, log2h) + 1 levels - NV2A's
+    // MIPMAP_LEVELS counts every level, and a chain ending early would
+    // leave the smallest LODs undefined). A level narrower than 4 texels
+    // still occupies whole 4x4 blocks (ceil(w/4) * ceil(h/4) * 8 bytes, the
+    // same size NV2A addresses for it): it is edge-replicated up to 4x4
+    // before compressToDXT, which only walks complete blocks.
+    std::vector<uint8_t> buildDxt1MipChain(const std::vector<uint8_t>& base, uint32_t w, uint32_t h, bool masked) {
+        std::vector<uint8_t> chain;
+        std::vector<uint8_t> level = base, next, padded;
+        uint32_t lw = w, lh = h;
+        for (;;) {
+            const uint32_t pw = std::max<uint32_t>(lw, 4), ph = std::max<uint32_t>(lh, 4);
+            const std::vector<uint8_t>* toCompress = &level;
+            if (pw != lw || ph != lh) {
+                padded.assign(static_cast<size_t>(pw) * ph * 4, 0);
+                for (uint32_t y = 0; y < ph; ++y)
+                    for (uint32_t x = 0; x < pw; ++x)
+                        std::memcpy(&padded[(static_cast<size_t>(y) * pw + x) * 4],
+                                    &level[(static_cast<size_t>(std::min(y, lh - 1)) * lw + std::min(x, lw - 1)) * 4], 4);
+                toCompress = &padded;
+            }
+            auto dxt = TextureOpt::compressToDXT(toCompress->data(), static_cast<int>(pw), static_cast<int>(ph), masked);
+            chain.insert(chain.end(), dxt.begin(), dxt.end());
+            if (lw == 1 && lh == 1)
+                break;
+            const uint32_t nw = std::max<uint32_t>(lw / 2, 1), nh = std::max<uint32_t>(lh / 2, 1);
+            downsampleRgba(level, lw, lh, next, nw, nh, masked);
+            level.swap(next);
+            lw = nw;
+            lh = nh;
+        }
+        return chain;
+    }
 } // namespace
 
 namespace formats {
@@ -379,10 +447,15 @@ namespace formats {
 
             textureDir.reserve(mXboxTextures.size());
             for (size_t j = 0; j < mXboxTextures.size(); ++j) {
-                auto dxt = TextureOpt::compressToDXT(mXboxTextures[j].data(),
-                                                      static_cast<int>(mXboxTextureWidths[j]),
-                                                      static_cast<int>(mXboxTextureHeights[j]),
-                                                      mXboxTexturesMasked[j]);
+                // v10: the whole mip chain (buildDxt1MipChain), then zero
+                // padding to the next 128 bytes, Xbox D3D's own texture
+                // base alignment. v9's single levels were always 128-aligned
+                // by accident: GoldSrc miptex sizes are multiples of 16, so
+                // every POT texture was at least 16x16 = 128 bytes of DXT1.
+                auto dxt = buildDxt1MipChain(mXboxTextures[j],
+                                             mXboxTextureWidths[j],
+                                             mXboxTextureHeights[j],
+                                             mXboxTexturesMasked[j]);
                 MpakTextureInfo info{};
                 info.width = mXboxTextureWidths[j];
                 info.height = mXboxTextureHeights[j];
@@ -391,6 +464,7 @@ namespace formats {
                 info.dataLength = static_cast<uint32_t>(dxt.size());
                 textureDir.push_back(info);
                 textureDataBlob.insert(textureDataBlob.end(), dxt.begin(), dxt.end());
+                textureDataBlob.resize((textureDataBlob.size() + 127) & ~static_cast<size_t>(127), 0);
             }
             header.textureCount = static_cast<uint32_t>(textureDir.size());
             header.lenTextureDir = static_cast<uint32_t>(textureDir.size() * sizeof(MpakTextureInfo));
