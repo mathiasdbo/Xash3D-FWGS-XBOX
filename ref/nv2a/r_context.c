@@ -3031,14 +3031,15 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
    the platform's whole memory picture. */
 #define NV2A_MAP_BUDGET_BYTES ( 24u * 1024u * 1024u )
 
-/* The baker's own fixed lightmap page edge, tools/asset-studio/src/
-   formats/BspParser.cpp:25 (`constexpr uint32_t LM_PAGE_SIZE = 1024`) -
-   every lu/lv the baker emits is divided by exactly THIS constant
-   (BspParser.cpp:853-854), never by the archive's own header fields, so
-   nv2a_load_map_geometry's validation below must compare
-   header->lightmapWidth/Height against this literal, not merely against
-   each other (codex review: a square-but-not-1024 page would otherwise
-   pass validation and still sample with the wrong divisor). */
+/* The baker's own fixed lightmap page width, tools/asset-studio/src/
+   formats/BspParser.cpp's LM_PAGE_SIZE (1024). Every lu the baker emits
+   is divided by exactly THIS constant, never by the archive's own header
+   field, so nv2a_load_map_geometry's validation below must compare
+   header->lightmapWidth against this literal (codex review: a page of
+   another width would otherwise pass validation and still sample with
+   the wrong divisor). lv is different since X9-R: it is divided by the
+   atlas's own trimmed height, which the header does carry, so the height
+   is only range-checked (4..this constant). */
 #define NV2A_LM_PAGE_SIZE 1024u
 
 static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte *buffer, size_t buffersize )
@@ -3305,24 +3306,22 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			|| expected_lm != (uint64_t)geo.lightmapAtlas.length )
 			return false;
 
-		/* The baker normalizes BOTH lu and lv by ONE fixed compile-time
-		   constant, LM_PAGE_SIZE = 1024 (tools/asset-studio/src/formats/
-		   BspParser.cpp:25,853-854) - not by whatever this archive's own
-		   header->lightmapWidth/Height happen to say. The remap loop below
-		   undoes that divisor using the header fields (matching what stage
-		   1 pushes to IMAGE_RECT), which is only the correct inverse when
-		   those fields actually equal 1024: a square-but-not-1024 page
-		   (e.g. 512x512, codex review) would pass a width==height check yet
-		   still be scaled by the wrong divisor, silently sampling every
-		   luxel from roughly the wrong quadrant of the page instead of
-		   failing closed. Comparing directly against the baker's own
-		   constant closes that gap; if a future baker ever emits a
-		   different page size this reads its own header->lightmapWidth/
-		   Height as the divisor, not a hardcoded 1024, so this check would
-		   need to move with it. */
-		if( header->lightmapWidth != NV2A_LM_PAGE_SIZE || header->lightmapHeight != NV2A_LM_PAGE_SIZE )
+		/* The baker normalizes lu by its fixed page width, LM_PAGE_SIZE =
+		   1024 (tools/asset-studio/src/formats/BspParser.cpp), and - since
+		   X9-R - lv by the atlas's own final height, which it trims to the
+		   rows it uses (LightmapAtlasPacker::atlasHeight, a multiple of 4 up
+		   to 1024). The remap loop below undoes both with the header
+		   fields (the same values stage 1 pushes to IMAGE_RECT), so the
+		   inverse is exact when the width is the baker's 1024 and the
+		   height is whatever the header says. Archives from before X9-R
+		   (height always 1024, lv / 1024) satisfy the same rule. A width
+		   other than 1024 still fails closed: lu's divisor is a baker
+		   constant, not a header field (codex review: a square-but-not-1024
+		   page would otherwise sample from the wrong place). */
+		if( header->lightmapWidth != NV2A_LM_PAGE_SIZE
+			|| header->lightmapHeight < 4 || header->lightmapHeight > NV2A_LM_PAGE_SIZE )
 		{
-			gEngfuncs.Con_Printf( "ref_nv2a: lightmap page %ux%u is not %ux%u - the baker's lu/lv are normalized by a fixed %u-luxel divisor, not drawing its real geometry\n",
+			gEngfuncs.Con_Printf( "ref_nv2a: lightmap page %ux%u is not %u wide by 4..%u high - the baker's lu is normalized by a fixed %u-luxel width, not drawing its real geometry\n",
 				(unsigned int)header->lightmapWidth, (unsigned int)header->lightmapHeight,
 				NV2A_LM_PAGE_SIZE, NV2A_LM_PAGE_SIZE, NV2A_LM_PAGE_SIZE );
 			return false;
@@ -3376,10 +3375,9 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			   stages only; deps/nxdk/samples/mesh/verts.h feeds integer texel
 			   UVs such as {44,143} to its 256x256 LU_IMAGE_A8R8G8B8 texture,
 			   main.c:145-150, and vs.vs.cg passes them through unscaled). The
-			   baker normalizes lu/lv by LM_PAGE_SIZE (tools/asset-studio/src/
-			   formats/BspParser.cpp:853-854) and its flatten() guarantees
-			   lightmapWidth == lightmapHeight == LM_PAGE_SIZE, never trimmed
-			   (BspParser.cpp:160-182, enforced at load above), so header->
+			   baker normalizes lu by LM_PAGE_SIZE and lv by the atlas's final
+			   (trimmed, X9-R) height, and the header carries exactly those two
+			   values (checked at load above), so header->
 			   lightmapWidth/Height - the same values stage 1 pushes to
 			   IMAGE_RECT (nv2a_map_lightmap_width/height are assigned from
 			   them further down, after this loop) - are the exact inverse of

@@ -1,5 +1,6 @@
 #include "BspParser.h"
 #include "WadParser.h"
+#include "LightmapAtlasPacker.h"
 #include <fstream>
 #include <iostream>
 #include <cmath>
@@ -23,176 +24,7 @@ namespace formats {
     constexpr uint32_t TEX_SPECIAL = 1u;
 
     namespace {
-        constexpr uint32_t LM_PAGE_SIZE = 1024;   // luxels per atlas page (matches BLOCK_SIZE_MAX)
-        constexpr uint32_t LM_SAMPLE_SIZE = 16;   // GoldSrc's fixed lightmap luxel granularity
-        constexpr uint32_t LM_MAX_LUXELS = 64;    // reject pathological face extents
-        // Faces with no real lightmap (sky/liquid/fullbright/anomalous) sample the
-        // white end of the ramp strip below instead of getting their own allocation.
-        // Width covers the 256-value gradient plus a small white guard band; height
-        // is a few rows so a sampled point can be centered away from row edges.
-        constexpr uint32_t LM_RAMP_GRADIENT_WIDTH = 256; // one luxel per 0..255 grayscale value
-        constexpr uint32_t LM_RAMP_WHITE_WIDTH = 4;       // pure-white guard band after the gradient
-        constexpr uint32_t LM_RESERVED_MARGIN = LM_RAMP_GRADIENT_WIDTH + LM_RAMP_WHITE_WIDTH; // 260
-        constexpr uint32_t LM_RAMP_HEIGHT = 4;
-
-        struct LightmapPage {
-            std::vector<uint8_t> rgba;
-            uint32_t cursorX = 0;
-            uint32_t cursorY = 0;
-            uint32_t rowHeight = 0;
-            uint32_t usedHeight = 0; // highest Y written to, for atlas height trimming
-
-            LightmapPage() : rgba(static_cast<size_t>(LM_PAGE_SIZE) * LM_PAGE_SIZE * 4, 255) {}
-        };
-
-        struct LightmapAllocation {
-            uint32_t page = 0;
-            uint32_t blockX = 0; // origin of the (smax+2) x (tmax+2) BORDERED block
-            uint32_t blockY = 0;
-        };
-
-        // Shelf-packs bordered lightmap blocks into 1024x1024-luxel RGBA8 pages,
-        // mirroring the row-cursor packing already used for Xbox texture atlases in
-        // PakManager::addTexture. Each block gets a 1-luxel replicated border so
-        // bilinear sampling never bleeds across faces (see B4's sampler notes).
-        class LightmapAtlasPacker {
-        public:
-            LightmapAtlasPacker() {
-                mPages.emplace_back();
-
-                // Bake a luminance ramp strip into page 0's top-left corner: a
-                // 0..255 grayscale gradient (one texel per value) followed by a
-                // white guard band. This does double duty:
-                //  - It replaces the old flat white reserved corner as the
-                //    no-lightmap-data fallback sample point (in the white band).
-                //  - Per-vertex studio-model lighting (later phases) can encode an
-                //    illumination value by sampling into the gradient instead of
-                //    needing a shader change - the existing x2 overbright multiply
-                //    stays correct because the gradient's own values already carry
-                //    the intended brightness (e.g. a flat-shaded model samples
-                //    x=96 for its ~192/510 GoldSrc ambient-only illumination).
-                // The page starts fully white (LightmapPage's ctor), so only the
-                // gradient portion (not the white band after it) needs writing.
-                for (uint32_t y = 0; y < LM_RAMP_HEIGHT; ++y) {
-                    for (uint32_t x = 0; x < LM_RAMP_GRADIENT_WIDTH; ++x) {
-                        uint8_t value = static_cast<uint8_t>(x);
-                        size_t off = (static_cast<size_t>(y) * LM_PAGE_SIZE + x) * 4;
-                        mPages[0].rgba[off + 0] = value;
-                        mPages[0].rgba[off + 1] = value;
-                        mPages[0].rgba[off + 2] = value;
-                        mPages[0].rgba[off + 3] = 255;
-                    }
-                }
-
-                // Reserve the ramp's full footprint (gradient + white band) so the
-                // shelf packer never allocates a real lightmap block over it.
-                mPages[0].cursorX = LM_RESERVED_MARGIN;
-                mPages[0].rowHeight = LM_RAMP_HEIGHT;
-                mPages[0].usedHeight = LM_RAMP_HEIGHT;
-            }
-
-            LightmapAllocation allocate(uint32_t smax, uint32_t tmax) {
-                uint32_t paddedW = smax + 2;
-                uint32_t paddedH = tmax + 2;
-
-                if (mPages.back().cursorX + paddedW > LM_PAGE_SIZE) {
-                    mPages.back().cursorY += mPages.back().rowHeight;
-                    mPages.back().cursorX = 0;
-                    mPages.back().rowHeight = 0;
-                }
-                if (mPages.back().cursorY + paddedH > LM_PAGE_SIZE) {
-                    mPages.emplace_back();
-                }
-
-                LightmapPage& page = mPages.back();
-                LightmapAllocation alloc{static_cast<uint32_t>(mPages.size() - 1), page.cursorX, page.cursorY};
-
-                page.cursorX += paddedW;
-                if (paddedH > page.rowHeight) page.rowHeight = paddedH;
-                uint32_t bottom = page.cursorY + page.rowHeight;
-                if (bottom > page.usedHeight) page.usedHeight = bottom;
-
-                return alloc;
-            }
-
-            // Writes an smax x tmax RGB24 block into the page at alloc's bordered
-            // origin, then replicates a 1-luxel border around it.
-            void writeBlock(const LightmapAllocation& alloc, uint32_t smax, uint32_t tmax, const uint8_t* rgb24) {
-                LightmapPage& page = mPages[alloc.page];
-                uint32_t destX = alloc.blockX + 1;
-                uint32_t destY = alloc.blockY + 1;
-
-                for (uint32_t y = 0; y < tmax; ++y) {
-                    for (uint32_t x = 0; x < smax; ++x) {
-                        size_t destOffset = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + (destX + x)) * 4;
-                        const uint8_t* src = &rgb24[(y * smax + x) * 3];
-                        page.rgba[destOffset + 0] = src[0];
-                        page.rgba[destOffset + 1] = src[1];
-                        page.rgba[destOffset + 2] = src[2];
-                        page.rgba[destOffset + 3] = 255;
-                    }
-                }
-
-                // Replicate left/right edges, then top/bottom (incl. corners).
-                for (uint32_t y = 0; y < tmax; ++y) {
-                    size_t rowLeft = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + (destX - 1)) * 4;
-                    size_t rowLeftSrc = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + destX) * 4;
-                    std::memcpy(&page.rgba[rowLeft], &page.rgba[rowLeftSrc], 4);
-
-                    size_t rowRight = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + (destX + smax)) * 4;
-                    size_t rowRightSrc = (static_cast<size_t>(destY + y) * LM_PAGE_SIZE + (destX + smax - 1)) * 4;
-                    std::memcpy(&page.rgba[rowRight], &page.rgba[rowRightSrc], 4);
-                }
-                for (uint32_t x = 0; x < smax + 2; ++x) {
-                    size_t top = (static_cast<size_t>(alloc.blockY) * LM_PAGE_SIZE + alloc.blockX + x) * 4;
-                    size_t topSrc = (static_cast<size_t>(destY) * LM_PAGE_SIZE + alloc.blockX + x) * 4;
-                    std::memcpy(&page.rgba[top], &page.rgba[topSrc], 4);
-
-                    size_t bottom = (static_cast<size_t>(destY + tmax) * LM_PAGE_SIZE + alloc.blockX + x) * 4;
-                    size_t bottomSrc = (static_cast<size_t>(destY + tmax - 1) * LM_PAGE_SIZE + alloc.blockX + x) * 4;
-                    std::memcpy(&page.rgba[bottom], &page.rgba[bottomSrc], 4);
-                }
-            }
-
-            uint32_t pageCount() const { return static_cast<uint32_t>(mPages.size()); }
-
-            // Flattens all pages into one layer-major RGBA8 buffer.
-            //
-            // outHeight is ALWAYS the full LM_PAGE_SIZE, never trimmed to a
-            // page's actually-used extent. Every per-vertex `lv` this class's
-            // caller bakes is `(... ) / LM_PAGE_SIZE` - a fixed divisor,
-            // computed per-face before any page's final used height is even
-            // known (allocate() only grows page.usedHeight, doesn't finalize
-            // it until baking is done). If this function ever hands back a
-            // shorter height, the caller uploads a texture of that shorter
-            // height, and the GPU's normalized-UV sampling rescales every
-            // `lv` by (thatHeight / LM_PAGE_SIZE) - a uniform per-face
-            // vertical compression that lands most faces on a WRONG row
-            // (typically a different face's data entirely, or the reserved
-            // margin), independent of anything about that specific face.
-            // This isn't a hypothetical: an earlier version of this function
-            // trimmed to `usedHeight` to save upload bandwidth, and it
-            // silently scrambled the lightmap on every map whose used height
-            // wasn't exactly 1024 (i.e. every real map) - confirmed by
-            // comparing against retail engine screenshots of the same room.
-            // Fixing the mismatch correctly (rescaling `lv` post-hoc, or a
-            // two-pass bake that defers `lv` until the true final height is
-            // known) is real future memory-bandwidth work, not a quick
-            // patch - tracked as a P14+ optimization, not attempted here.
-            std::vector<uint8_t> flatten(uint32_t& outHeight) const {
-                outHeight = LM_PAGE_SIZE;
-
-                std::vector<uint8_t> out;
-                out.reserve(static_cast<size_t>(mPages.size()) * outHeight * LM_PAGE_SIZE * 4);
-                for (const auto& p : mPages) {
-                    out.insert(out.end(), p.rgba.begin(), p.rgba.end());
-                }
-                return out;
-            }
-
-        private:
-            std::vector<LightmapPage> mPages;
-        };
+        using namespace lightmap_atlas; // X9-R: LightmapAtlasPacker.h
 
         // Mirrors the real per-face classification, Mod_LoadSurfaces
         // (mod_bmodel.c:3309-3378, canonical Xash3D-FWGS clone) - name-prefix
@@ -663,7 +495,8 @@ namespace formats {
         // gradient itself), so a face with no real lightmap data always samples
         // pure white regardless of any future change to the gradient's own values.
         const float kFallbackLu = (static_cast<float>(LM_RAMP_GRADIENT_WIDTH) + LM_RAMP_WHITE_WIDTH * 0.5f) / static_cast<float>(LM_PAGE_SIZE);
-        const float kFallbackLv = (LM_RAMP_HEIGHT * 0.5f) / static_cast<float>(LM_PAGE_SIZE);
+        float kFallbackLv = 0.0f;       // X9-R: set once the atlas height is known (pre-pass below)
+        float lmAtlasHeight = static_cast<float>(LM_PAGE_SIZE); // X9-R: lv's divisor, likewise
         uint32_t lmBaked = 0, lmSkipped = 0, lmRejected = 0;
 
         // v9: per-texture Xbox draws sort faces by (textureIndex, PVS leaf)
@@ -719,6 +552,110 @@ namespace formats {
             }
         }
 
+        // --- Lightmap extents (GoldSrc BSP30 / xash3d-fwgs
+        // Mod_CalcSurfaceExtents semantics) ---
+        // texturemins/extents are computed from the SAME rawU/rawV dot products
+        // the per-vertex loop below uses for diffuse UVs, over float mins/maxs.
+        //
+        // X9-R: lifted into a lambda so the allocation pre-pass and the main
+        // face loop compute exactly the same thing. `reject` reports why a
+        // face has no lightmap: 0 = it has one, 1 = skipped (sky, liquid, no
+        // styles), 2 = extents over LM_MAX_LUXELS, 3 = LUMP_LIGHTING too short.
+        struct LmExtents {
+            bool hasLightmap = false;
+            int32_t texturemins[2] = {0, 0};
+            uint32_t smax = 0, tmax = 0;
+            int reject = 1;
+        };
+        auto computeLmExtents = [&](const dface_t& face, const dtexinfo_t& texinfo) {
+            LmExtents e;
+            e.hasLightmap = face.numedges > 0
+                && face.lightofs >= 0
+                && face.styles[0] != 255
+                && (texinfo.flags & TEX_SPECIAL) == 0;
+            if (!e.hasLightmap)
+                return e;
+
+            float mins[2] = { 999999.0f, 999999.0f };
+            float maxs[2] = { -999999.0f, -999999.0f };
+            for (int16_t j = 0; j < face.numedges; ++j) {
+                int32_t surfedge = surfedges[face.firstedge + j];
+                uint16_t vertexIndex = (surfedge >= 0) ? edges[surfedge].v[0] : edges[-surfedge].v[1];
+                const dvertex_t& v = vertices[vertexIndex];
+
+                float s = v.point[0] * texinfo.vecs[0][0] + v.point[1] * texinfo.vecs[0][1] + v.point[2] * texinfo.vecs[0][2] + texinfo.vecs[0][3];
+                float t = v.point[0] * texinfo.vecs[1][0] + v.point[1] * texinfo.vecs[1][1] + v.point[2] * texinfo.vecs[1][2] + texinfo.vecs[1][3];
+                mins[0] = std::min(mins[0], s); maxs[0] = std::max(maxs[0], s);
+                mins[1] = std::min(mins[1], t); maxs[1] = std::max(maxs[1], t);
+            }
+
+            int32_t bmins[2], bmaxs[2];
+            for (int k = 0; k < 2; ++k) {
+                bmins[k] = static_cast<int32_t>(std::floor(mins[k] / LM_SAMPLE_SIZE));
+                bmaxs[k] = static_cast<int32_t>(std::ceil(maxs[k] / LM_SAMPLE_SIZE));
+                e.texturemins[k] = bmins[k] * static_cast<int32_t>(LM_SAMPLE_SIZE);
+            }
+            e.smax = static_cast<uint32_t>((bmaxs[0] - bmins[0])) + 1;
+            e.tmax = static_cast<uint32_t>((bmaxs[1] - bmins[1])) + 1;
+
+            if (e.smax > LM_MAX_LUXELS || e.tmax > LM_MAX_LUXELS) {
+                e.hasLightmap = false;
+                e.reject = 2;
+            } else {
+                size_t required = static_cast<size_t>(face.lightofs) + static_cast<size_t>(e.smax) * e.tmax * 3;
+                if (required > lightingData.size()) {
+                    e.hasLightmap = false;
+                    e.reject = 3;
+                } else {
+                    e.reject = 0;
+                }
+            }
+            return e;
+        };
+
+        // X9-R: allocation pre-pass. Every lightmap block this map will bake -
+        // each face's style 0 plus its extra style blocks, with the same
+        // bounds rules the main loop applies - is sized first and packed
+        // tallest-first (LightmapAtlasPacker::allocateSorted), so the atlas's
+        // final height is known before any vertex's lv is computed. The main
+        // loop below takes its blocks from lmFaceAllocs instead of calling
+        // allocate() itself.
+        std::vector<std::vector<LightmapAllocation>> lmFaceAllocs(numFaces);
+        std::vector<LmExtents> lmExtentsByFace(numFaces); // computed once here, reused by the main loop
+        {
+            std::vector<std::pair<uint32_t, uint32_t>> sizes;
+            std::vector<std::pair<size_t, size_t>> owner; // (face, slot) per request
+            for (size_t i = 0; i < numFaces; ++i) {
+                const dface_t& face = faces[i];
+                const dtexinfo_t& texinfo = (face.texinfo >= 0 && static_cast<size_t>(face.texinfo) < numTexinfos) ? texinfos[face.texinfo] : dtexinfo_t{};
+                lmExtentsByFace[i] = computeLmExtents(face, texinfo);
+                const LmExtents& e = lmExtentsByFace[i];
+                if (!e.hasLightmap)
+                    continue;
+                sizes.emplace_back(e.smax, e.tmax);
+                owner.emplace_back(i, 0);
+                const size_t blockBytes = static_cast<size_t>(e.smax) * e.tmax * 3;
+                for (int styleSlot = 1; styleSlot < 4; ++styleSlot) {
+                    if (face.styles[styleSlot] == 255)
+                        break;
+                    size_t extraOfs = static_cast<size_t>(face.lightofs) + static_cast<size_t>(styleSlot) * blockBytes;
+                    if (extraOfs + blockBytes > lightingData.size())
+                        break;
+                    sizes.emplace_back(e.smax, e.tmax);
+                    owner.emplace_back(i, static_cast<size_t>(styleSlot));
+                }
+            }
+            const std::vector<LightmapAllocation> allocs = lmPacker.allocateSorted(sizes);
+            for (size_t k = 0; k < allocs.size(); ++k) {
+                std::vector<LightmapAllocation>& list = lmFaceAllocs[owner[k].first];
+                if (list.size() <= owner[k].second)
+                    list.resize(owner[k].second + 1);
+                list[owner[k].second] = allocs[k];
+            }
+            lmAtlasHeight = static_cast<float>(lmPacker.atlasHeight());
+            kFallbackLv = (LM_RAMP_HEIGHT * 0.5f) / lmAtlasHeight;
+        }
+
         for (size_t i = 0; i < numFaces; ++i) {
             FaceBuildRecord& rec = records[i];
             const dface_t& face = faces[i];
@@ -733,72 +670,29 @@ namespace formats {
             }
             rec.textureIndex = loc.textureIndex;
 
-            // --- Lightmap extents pre-pass (GoldSrc BSP30 / xash3d-fwgs
-            // Mod_CalcSurfaceExtents semantics) ---
-            // texturemins/extents are computed from the SAME rawU/rawV dot products
-            // the per-vertex loop below uses for diffuse UVs, over float mins/maxs.
-            //
-            // NOTE: only lightstyle 0 (face.styles[0]) is baked. GoldSrc faces can
-            // carry up to 4 styles (styles[1..3]) for flickering/animated lights,
-            // each its own smax*tmax*3-byte block immediately following this one in
-            // LUMP_LIGHTING - this baker only reads the first and drops the rest, so
-            // animated lightstyle faces bake as their base (non-flickering) light
-            // level. Reasonable for a static baked atlas; revisit if per-style
-            // dynamic relighting is ever wanted.
-            bool hasLightmap = face.numedges > 0
-                && face.lightofs >= 0
-                && face.styles[0] != 255
-                && (texinfo.flags & TEX_SPECIAL) == 0;
-
-            float mins[2] = { 999999.0f, 999999.0f };
-            float maxs[2] = { -999999.0f, -999999.0f };
-            if (hasLightmap) {
-                for (int16_t j = 0; j < face.numedges; ++j) {
-                    int32_t surfedge = surfedges[face.firstedge + j];
-                    uint16_t vertexIndex = (surfedge >= 0) ? edges[surfedge].v[0] : edges[-surfedge].v[1];
-                    const dvertex_t& v = vertices[vertexIndex];
-
-                    float s = v.point[0] * texinfo.vecs[0][0] + v.point[1] * texinfo.vecs[0][1] + v.point[2] * texinfo.vecs[0][2] + texinfo.vecs[0][3];
-                    float t = v.point[0] * texinfo.vecs[1][0] + v.point[1] * texinfo.vecs[1][1] + v.point[2] * texinfo.vecs[1][2] + texinfo.vecs[1][3];
-                    mins[0] = std::min(mins[0], s); maxs[0] = std::max(maxs[0], s);
-                    mins[1] = std::min(mins[1], t); maxs[1] = std::max(maxs[1], t);
-                }
-            }
-
-            int32_t texturemins[2] = {0, 0};
-            uint32_t smax = 0, tmax = 0;
-            if (hasLightmap) {
-                int32_t bmins[2], bmaxs[2];
-                for (int k = 0; k < 2; ++k) {
-                    bmins[k] = static_cast<int32_t>(std::floor(mins[k] / LM_SAMPLE_SIZE));
-                    bmaxs[k] = static_cast<int32_t>(std::ceil(maxs[k] / LM_SAMPLE_SIZE));
-                    texturemins[k] = bmins[k] * static_cast<int32_t>(LM_SAMPLE_SIZE);
-                }
-                smax = static_cast<uint32_t>((bmaxs[0] - bmins[0])) + 1;
-                tmax = static_cast<uint32_t>((bmaxs[1] - bmins[1])) + 1;
-
-                if (smax > LM_MAX_LUXELS || tmax > LM_MAX_LUXELS) {
-                    std::cerr << "Lightmap: face " << i << " extents " << smax << "x" << tmax
-                              << " exceed " << LM_MAX_LUXELS << " luxels - using white fallback\n";
-                    hasLightmap = false;
-                    lmRejected++;
-                } else {
-                    size_t required = static_cast<size_t>(face.lightofs) + static_cast<size_t>(smax) * tmax * 3;
-                    if (required > lightingData.size()) {
-                        std::cerr << "Lightmap: face " << i << " lightofs " << face.lightofs
-                                  << " + " << (smax * tmax * 3) << " bytes exceeds LUMP_LIGHTING size "
-                                  << lightingData.size() << " - using white fallback\n";
-                        hasLightmap = false;
-                        lmRejected++;
-                    }
-                }
-            } else {
+            // Lightmap extents: computed once by the allocation pre-pass
+            // above and reused here, so the blocks this loop writes are by
+            // construction the ones the pre-pass sized and placed.
+            const LmExtents& lmExt = lmExtentsByFace[i];
+            bool hasLightmap = lmExt.hasLightmap;
+            int32_t texturemins[2] = { lmExt.texturemins[0], lmExt.texturemins[1] };
+            uint32_t smax = lmExt.smax, tmax = lmExt.tmax;
+            if (lmExt.reject == 2) {
+                std::cerr << "Lightmap: face " << i << " extents " << smax << "x" << tmax
+                          << " exceed " << LM_MAX_LUXELS << " luxels - using white fallback\n";
+                lmRejected++;
+            } else if (lmExt.reject == 3) {
+                std::cerr << "Lightmap: face " << i << " lightofs " << face.lightofs
+                          << " + " << (smax * tmax * 3) << " bytes exceeds LUMP_LIGHTING size "
+                          << lightingData.size() << " - using white fallback\n";
+                lmRejected++;
+            } else if (lmExt.reject == 1) {
                 lmSkipped++;
             }
 
             LightmapAllocation lmAlloc; // defaults to {page 0, 0, 0} - the reserved white corner
             if (hasLightmap) {
-                lmAlloc = lmPacker.allocate(smax, tmax);
+                lmAlloc = lmFaceAllocs[i][0]; // X9-R: allocated in the pre-pass
                 lmPacker.writeBlock(lmAlloc, smax, tmax, &lightingData[face.lightofs]);
                 lmBaked++;
 
@@ -824,7 +718,7 @@ namespace formats {
                                   << " - dropping this extra style block\n";
                         break; // a truncated table can't have later slots either
                     }
-                    LightmapAllocation extraAlloc = lmPacker.allocate(smax, tmax);
+                    LightmapAllocation extraAlloc = lmFaceAllocs[i][styleSlot]; // X9-R: pre-pass
                     lmPacker.writeBlock(extraAlloc, smax, tmax, &lightingData[extraOfs]);
 
                     // faceIndex is filled in during pass 2, once this face's
@@ -905,7 +799,7 @@ namespace formats {
                     // sample in that luxel. Bilinear then reaches at most 0.5 texel
                     // into the replicated border - never across into a neighboring face.
                     float lu = (static_cast<float>(lmAlloc.blockX) + 1.0f + (rawU - texturemins[0]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / static_cast<float>(LM_PAGE_SIZE);
-                    float lv = (static_cast<float>(lmAlloc.blockY) + 1.0f + (rawV - texturemins[1]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / static_cast<float>(LM_PAGE_SIZE);
+                    float lv = (static_cast<float>(lmAlloc.blockY) + 1.0f + (rawV - texturemins[1]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / lmAtlasHeight; // X9-R: final (trimmed) height
                     outVert.lu = lu;
                     outVert.lv = lv;
                     outVert.lightmap_layer = lmAlloc.page;

@@ -291,7 +291,7 @@ namespace formats {
         uint32_t lenEntities = 0;       // raw LUMP_ENTITIES ASCII text, NUL-terminated
 
         uint32_t lightmapWidth = 0;     // per-page luxel width (e.g. 1024)
-        uint32_t lightmapHeight = 0;    // per-page luxel height (e.g. 1024)
+        uint32_t lightmapHeight = 0;    // per-page luxel height: one page is trimmed to the rows it uses (4..1024, a multiple of 4, X9-R); several pages stay 1024. lv is normalized by this value, lu by lightmapWidth
         uint32_t lightmapLayers = 0;    // number of atlas pages
         uint32_t lightmapFormat = 0;    // 0 = RGBA8; reserved for RGB565/ARGB1555 (Xbox)
         uint32_t lenLightmapAtlas = 0;  // total byte length of the layer-major atlas

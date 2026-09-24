@@ -5,6 +5,18 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — every retail map fits the Xbox lightmap atlas and memory budget (X9-R)
+
+11 retail maps needed a second 1024x1024 lightmap page. The Xbox renderer
+cannot use a second page, so those maps did not draw on the Xbox at all,
+and 7 of them also failed the 24 MiB bake-time budget. The baker packed
+lightmap blocks in face order. It now packs them tallest-first and trims
+the atlas to the rows it actually uses. Every retail map that bakes now
+fits on one page and within budget: `boot_camp` went from 110.2% to 64.2%,
+and the median from 58.2% to 34.1%. The lighting looks the same: in xemu
+at the crossfire spawn, 45 pixels differ from the previous build, by at
+most 1/255. `boot_camp` now draws lit in xemu.
+
 ### Changed — the v10 texture-directory rule is now one shared header, checked everywhere (X9 follow-up)
 
 The MPAK v10 texture-directory rule (each texture's DXT1 mip-chain length,

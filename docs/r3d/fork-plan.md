@@ -8445,22 +8445,164 @@ sorted or ranked output" entry):
 | pool_party | NON-BUDGET FAIL (u16 index/vertex overflow, `PakManager::addVertex`) | - | - | - |
 | rocket_frenzy | NON-BUDGET FAIL (u16 index/vertex overflow, `PakManager::addVertex`) | - | - | - |
 
-125 rows. Raising the 24 MiB cap, or reducing the 7 over-budget maps' own
-footprint (fewer lightmap pages, a lower-resolution lightmap format), is a
-follow-up decision, not part of this slice — out of scope by this
-follow-up's own spec.
+125 rows. Fixed by X9-R (open item 8 below): see the re-measured table
+that follows.
 
-8. **7 retail maps exceed the 24 MiB per-map budget and no longer bake**
-   (X9-Q, #135): `boot_camp` 110.2%, `rustmill`, `t0a0b`, `c2a4e`, `c2a2e`,
-   `c2a4c`, `t0a0a` 100.2%. The lightmap atlas is the cause: fixed
-   1024x1024 RGBA8 pages (4 MiB each, two on these maps) that are only
-   5-7% used, counted twice in the ledger. In order of payoff: fit the atlas
-   to its content (better packing, crop pages to the rows used, or smaller
-   pages) - on `boot_camp` roughly 26.4 MiB -> ~12 MiB; stop holding the
-   whole archive while copying the atlas to GPU memory (removes the second
-   count); RGB565 lightmaps (halves what remains). Check `ref/nv2a`'s
-   single-lightmap-page limit at the same time: two-page maps may be
-   drawing page-1 faces with the wrong lighting today.
+### X9-R — lightmap atlas packed tallest-first and trimmed: corpus re-measured
+
+Re-measured 2026-09-24 with the X9-R baker (same flags, `--target xbox
+--profile nv2a`, one `AssetStudio` run per map). The table above is the
+X9-Q measurement and stays as the before picture.
+
+- **121 of 125 bake, all within budget; none over.** The 4 remaining
+  failures are the long-standing u16 vertex-count limit, unchanged.
+- **Every one of the 121 fits on one lightmap page.** 11 used two before,
+  and `ref/nv2a` rejects any vertex on page 1, so those 11 could not draw
+  on the Xbox at all until now.
+- **Worst: `boot_camp` 64.2%** (was 110.2%). **Median
+  34.1%** (was 58.2%).
+
+| Map | Status | Ledger bytes | % of 24 MiB | Lightmap pages |
+|---|---|---:|---:|---:|
+| boot_camp | OK | 16157970 | 64.2% | 1 |
+| t0a0b | OK | 15224903 | 60.5% | 1 |
+| c2a5e | OK | 13492753 | 53.6% | 1 |
+| rustmill | OK | 13483949 | 53.6% | 1 |
+| c2a2e | OK | 13121299 | 52.1% | 1 |
+| c2a4c | OK | 12860887 | 51.1% | 1 |
+| c2a4e | OK | 12838619 | 51.0% | 1 |
+| c5a1 | OK | 12835790 | 51.0% | 1 |
+| c2a5f | OK | 12490456 | 49.6% | 1 |
+| t0a0a | OK | 12251973 | 48.7% | 1 |
+| c1a1f | OK | 11902993 | 47.3% | 1 |
+| c2a2a | OK | 11856519 | 47.1% | 1 |
+| c2a1a | OK | 11847430 | 47.1% | 1 |
+| c3a2a | OK | 11836526 | 47.0% | 1 |
+| c2a4b | OK | 11755863 | 46.7% | 1 |
+| c3a1 | OK | 11709721 | 46.5% | 1 |
+| c2a2b1 | OK | 11427583 | 45.4% | 1 |
+| t0a0 | OK | 11408708 | 45.3% | 1 |
+| doublecross | OK | 11399984 | 45.3% | 1 |
+| c1a2 | OK | 11242301 | 44.7% | 1 |
+| c2a2d | OK | 11217610 | 44.6% | 1 |
+| c3a2c | OK | 11206504 | 44.5% | 1 |
+| c2a3b | OK | 11105825 | 44.1% | 1 |
+| c1a2b | OK | 11090245 | 44.1% | 1 |
+| hldemo2 | OK | 11047959 | 43.9% | 1 |
+| c1a4g | OK | 10947170 | 43.5% | 1 |
+| c1a4f | OK | 10876501 | 43.2% | 1 |
+| c1a1c | OK | 10838921 | 43.1% | 1 |
+| c0a0c | OK | 10795944 | 42.9% | 1 |
+| c3a1a | OK | 10774448 | 42.8% | 1 |
+| c4a3 | OK | 10666110 | 42.4% | 1 |
+| c0a0b | OK | 10498431 | 41.7% | 1 |
+| c1a1b | OK | 10444900 | 41.5% | 1 |
+| c1a3 | OK | 10316365 | 41.0% | 1 |
+| c1a2a | OK | 10310995 | 41.0% | 1 |
+| lambda_bunker | OK | 10278040 | 40.8% | 1 |
+| c1a4d | OK | 10261151 | 40.8% | 1 |
+| c1a4i | OK | 10254855 | 40.7% | 1 |
+| c2a4a | OK | 10208550 | 40.6% | 1 |
+| c2a2f | OK | 10111556 | 40.2% | 1 |
+| c2a2c | OK | 9925531 | 39.4% | 1 |
+| c2a1 | OK | 9839558 | 39.1% | 1 |
+| subtransit | OK | 9792498 | 38.9% | 1 |
+| c2a4f | OK | 9703842 | 38.6% | 1 |
+| t0a0b1 | OK | 9693208 | 38.5% | 1 |
+| c2a2g | OK | 9440120 | 37.5% | 1 |
+| c2a2b2 | OK | 9366292 | 37.2% | 1 |
+| c1a0e | OK | 9322024 | 37.0% | 1 |
+| c2a3a | OK | 9211213 | 36.6% | 1 |
+| c2a3 | OK | 9160562 | 36.4% | 1 |
+| c1a3a | OK | 9110583 | 36.2% | 1 |
+| c1a1 | OK | 9096661 | 36.1% | 1 |
+| c1a0c | OK | 8982962 | 35.7% | 1 |
+| c3a1b | OK | 8945240 | 35.5% | 1 |
+| c1a0b | OK | 8910187 | 35.4% | 1 |
+| crossfire | OK | 8805649 | 35.0% | 1 |
+| c2a3c | OK | 8754659 | 34.8% | 1 |
+| c2a2h | OK | 8751442 | 34.8% | 1 |
+| c2a5 | OK | 8618881 | 34.2% | 1 |
+| rapidcore | OK | 8603632 | 34.2% | 1 |
+| c1a0d | OK | 8581013 | 34.1% | 1 |
+| bounce | OK | 8577799 | 34.1% | 1 |
+| hldemo3 | OK | 8544183 | 34.0% | 1 |
+| c1a4 | OK | 8537555 | 33.9% | 1 |
+| c1a4b | OK | 8499254 | 33.8% | 1 |
+| c1a1a | OK | 8480596 | 33.7% | 1 |
+| c3a2d | OK | 8434707 | 33.5% | 1 |
+| c2a3d | OK | 8347386 | 33.2% | 1 |
+| c1a0 | OK | 8230403 | 32.7% | 1 |
+| t0a0c | OK | 8181692 | 32.5% | 1 |
+| datacore | OK | 8171926 | 32.5% | 1 |
+| hldemo1 | OK | 8137614 | 32.3% | 1 |
+| c1a0a | OK | 8125550 | 32.3% | 1 |
+| c0a0 | OK | 8108446 | 32.2% | 1 |
+| c2a5b | OK | 8042894 | 32.0% | 1 |
+| c0a0a | OK | 8016956 | 31.9% | 1 |
+| c0a0d | OK | 7986326 | 31.7% | 1 |
+| c4a1b | OK | 7914710 | 31.5% | 1 |
+| t0a0b2 | OK | 7726786 | 30.7% | 1 |
+| c2a5g | OK | 7643562 | 30.4% | 1 |
+| gasworks | OK | 7611521 | 30.2% | 1 |
+| c3a2e | OK | 7482569 | 29.7% | 1 |
+| undertow | OK | 7027313 | 27.9% | 1 |
+| c4a1d | OK | 6823032 | 27.1% | 1 |
+| c4a1a | OK | 6763365 | 26.9% | 1 |
+| c3a2b | OK | 6723547 | 26.7% | 1 |
+| c2a4d | OK | 6671827 | 26.5% | 1 |
+| c2a5x | OK | 6453211 | 25.6% | 1 |
+| c2a5w | OK | 6428781 | 25.5% | 1 |
+| c4a1 | OK | 6375703 | 25.3% | 1 |
+| c2a3e | OK | 6347840 | 25.2% | 1 |
+| c1a2c | OK | 6292048 | 25.0% | 1 |
+| c2a5c | OK | 6266356 | 24.9% | 1 |
+| c4a1e | OK | 6034114 | 24.0% | 1 |
+| c1a4k | OK | 6023956 | 23.9% | 1 |
+| c3a2 | OK | 5916277 | 23.5% | 1 |
+| c1a4e | OK | 5885012 | 23.4% | 1 |
+| c2a2 | OK | 5876851 | 23.4% | 1 |
+| c2a5d | OK | 5833733 | 23.2% | 1 |
+| snark_pit | OK | 5631519 | 22.4% | 1 |
+| t0a0d | OK | 5571855 | 22.1% | 1 |
+| c2a5a | OK | 5090536 | 20.2% | 1 |
+| c2a1b | OK | 5027025 | 20.0% | 1 |
+| stalkyard | OK | 5016359 | 19.9% | 1 |
+| c2a4 | OK | 5010178 | 19.9% | 1 |
+| c0a0e | OK | 4999785 | 19.9% | 1 |
+| c3a2f | OK | 4771437 | 19.0% | 1 |
+| c2a4g | OK | 4753562 | 18.9% | 1 |
+| c1a3d | OK | 4578794 | 18.2% | 1 |
+| frenzy | OK | 4292921 | 17.1% | 1 |
+| c4a2a | OK | 4232339 | 16.8% | 1 |
+| c4a2 | OK | 4228171 | 16.8% | 1 |
+| c4a1c | OK | 4055651 | 16.1% | 1 |
+| xen_dm | OK | 4035760 | 16.0% | 1 |
+| c1a3b | OK | 3910939 | 15.5% | 1 |
+| c1a2d | OK | 3656368 | 14.5% | 1 |
+| c4a2b | OK | 3319258 | 13.2% | 1 |
+| c1a1d | OK | 3273156 | 13.0% | 1 |
+| c1a3c | OK | 3245269 | 12.9% | 1 |
+| c1a4j | OK | 2987355 | 11.9% | 1 |
+| c4a1f | OK | 2468056 | 9.8% | 1 |
+| contamination | NON-BUDGET FAIL (u16 vertex count, `PakManager::addVertex`) | - | - | - |
+| disposal | NON-BUDGET FAIL (u16 vertex count, `PakManager::addVertex`) | - | - | - |
+| pool_party | NON-BUDGET FAIL (u16 vertex count, `PakManager::addVertex`) | - | - | - |
+| rocket_frenzy | NON-BUDGET FAIL (u16 vertex count, `PakManager::addVertex`) | - | - | - |
+
+125 rows.
+
+8. ~~**7 retail maps exceed the 24 MiB per-map budget and no longer bake.**~~
+   **Done, X9-R (`divergences.md` #108):** the baker packs lightmap blocks
+   tallest-first in a pre-pass and trims the atlas to the rows it uses, and
+   `lv` is divided by that final height. Every retail map now fits on one
+   page and within budget (worst `boot_camp` 64.2%, median 34.1%; table in
+   the X9-Q section). Correction to the diagnosis above: the pages were not
+   5-7% used - that counted raw luxels only. With each block's 1-luxel
+   border and the extra lightstyle blocks, the two-page maps needed 43-68%
+   of one page; the waste was the shelf packer taking blocks in face order.
+   Left for later: stop holding the whole archive while copying the atlas
+   to GPU memory (the atlas still counts twice), RGB565 lightmaps.
 
 X9-M onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.

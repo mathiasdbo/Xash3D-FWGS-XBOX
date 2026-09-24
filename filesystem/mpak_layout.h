@@ -139,7 +139,7 @@ typedef struct
 	uint32_t lenEntities;
 
 	uint32_t lightmapWidth;
-	uint32_t lightmapHeight;
+	uint32_t lightmapHeight;  // one page: trimmed to the rows used (4..1024, multiple of 4, X9-R); several pages: 1024. lv is normalized by it
 	uint32_t lightmapLayers;
 	uint32_t lightmapFormat; // 0 = RGBA8
 	uint32_t lenLightmapAtlas;
