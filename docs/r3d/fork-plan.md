@@ -8604,6 +8604,45 @@ X9-Q measurement and stays as the before picture.
    Left for later: stop holding the whole archive while copying the atlas
    to GPU memory (the atlas still counts twice), RGB565 lightmaps.
 
+9. **NEXT TASK - bake the 4 retail maps that exceed 65,536 vertices
+   (base-vertex-chunked draws).** Added 2026-09-24. `contamination`,
+   `disposal`, `pool_party` and `rocket_frenzy` are the only retail maps
+   that still do not bake for the Xbox target: `PakManager::addVertex`
+   aborts with "vertex count exceeded 65536 (u16 index limit)". Per-face
+   lightmap UVs mean vertices are barely shared between faces, so large
+   maps outgrow 16-bit indices. Estimated demand (sum of each face's
+   vertices, an upper bound within ~5% of the real count on `boot_camp`):
+   `pool_party` ~69k (1.05x the limit), `disposal` ~74k (1.13x),
+   `contamination` ~78k (1.19x), `rocket_frenzy` ~185k (2.8x: ~93k world
+   plus ~92k brush-entity faces).
+
+   Chosen approach: split the vertex buffer into chunks of at most 65,536
+   vertices and draw each chunk with its own base vertex - what the
+   `addVertex` comment already names, and how Xbox D3D implements
+   `SetIndices`' base vertex index.
+   - Baker: assign every face to exactly one chunk (a face never spans
+     two), dedupe vertices within a chunk, keep indices u16 and
+     chunk-relative, and group faces so batches and runs stay inside one
+     chunk.
+   - Format: MPAK v11 - record each face's (or batch's) chunk / base
+     vertex, and update `mpak_layout.h` / `MpakHeader.h` in lockstep with
+     the v10 texture rule's shared-header pattern.
+   - `ref/nv2a`: before drawing a chunk's faces, re-point the three vertex
+     attribute arrays (`NV097_SET_VERTEX_DATA_ARRAY_OFFSET` for position,
+     uv0, uv1) at that chunk's base, in both the world pass and the
+     brush-entity pass; keep the exact-index-range drawing.
+   - Rejected alternative: 32-bit indices. Simpler, but it doubles index
+     data and pushbuffer size, and Xbox D3D only ever used 16-bit index
+     buffers, so it would rely on hardware behaviour no retail game
+     exercised (X9-L's lesson: xemu is not validation).
+
+   Exit: all 4 maps bake, render correctly in xemu, and single-chunk maps
+   (the other 121) re-bake with unchanged rendering. Then re-run the
+   corpus against the 24 MiB budget: the three smaller maps should fit;
+   `rocket_frenzy` may not, which the bake-time budget check (X9-Q) will
+   report as a separate problem. Real-hardware check on at least one
+   multi-chunk map.
+
 X9-M onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.
 
