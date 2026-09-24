@@ -60,7 +60,15 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
                             nv2a_compute_mpak_layout()'s own comment for why the
                             offset-COMPUTING function body still needs its own
                             copy here rather than calling filesystem's real
-                            Mpak_ComputeLayout() directly. */
+                            Mpak_ComputeLayout() directly. Pulls in
+                            mpak_texture_dir.h too (the v10 texture-directory
+                            validation RULE, unlike the layout/offset math
+                            above, IS shared code - see that header's own
+                            comment for why it, unlike Mpak_ComputeLayout, is
+                            safe to actually call from here: it is header-only,
+                            never linked, so #include-ing it costs nothing this
+                            module's isolation (tools/xbox-ref-isolate.sh)
+                            would object to). */
 
 #include <hal/video.h>
 #include <hal/xbox.h>
@@ -214,26 +222,12 @@ typedef struct
 	uint32_t    mipLevels;  /* X9-N, MPAK v10: max(log2Width, log2Height) + 1 - the full chain to 1x1 */
 } nv2a_map_texture_t;
 
-/* X9-N, MPAK v10: byte length of a full DXT1 mip chain for a POT texture,
-   base level down to 1x1 - every level takes whole 4x4 blocks, 8 bytes
-   each, so a level under 4 texels on a side still costs one block per
-   axis (the same size NV2A addresses for it). Mirrors the baker's
-   buildDxt1MipChain (tools/asset-studio/src/formats/PakManager.cpp). */
-static uint64_t nv2a_dxt1_chain_length( uint32_t log2w, uint32_t log2h, uint32_t *out_levels )
-{
-	uint32_t levels = ( log2w > log2h ? log2w : log2h ) + 1, l;
-	uint64_t total = 0;
-
-	for( l = 0; l < levels; l++ )
-	{
-		uint32_t w = ( l < log2w ) ? ( 1u << ( log2w - l )) : 1u;
-		uint32_t h = ( l < log2h ) ? ( 1u << ( log2h - l )) : 1u;
-		total += (uint64_t)(( w + 3 ) / 4 ) * (( h + 3 ) / 4 ) * 8;
-	}
-	if( out_levels )
-		*out_levels = levels;
-	return total;
-}
+/* X9-N, MPAK v10: byte length of a full DXT1 mip chain for a POT texture -
+   Mpak_Dxt1ChainLength (filesystem/mpak_texture_dir.h), shared with the PC
+   tests and the baker's verify pass rather than this module's own copy
+   (fork-plan.md's X9 item 2 follow-up; see that header's own file comment
+   for why sharing it this way, not by linking filesystem/mpak_layout.c, is
+   what this module's ref/filesystem isolation allows). */
 /* Fixed-capacity static arrays, not a heap allocation sized off the
    header's own (validated) textureCount/batchCount the way nv2a_map_faces
    is sized off face_count - deliberately, matching this file's own
@@ -3181,61 +3175,65 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   own stage-0 comment, unchanged reasoning from the atlas era), so
 	   width/height must be exact powers of two matching their own paired
 	   log2 field, at least one real 4x4 DXT1 block (log2 >= 2), and no
-	   larger than NV2A's real 4096 texture edge (log2 <= 12 - the same
-	   cap the old atlas check used). dataLength must be the exact byte
-	   count of that size's full DXT1 mip chain (MPAK v10,
-	   nv2a_dxt1_chain_length), and the running sum of every entry's own
-	   dataLength rounded up to 128 bytes must land EXACTLY on the texture-data
-	   lump's own real, bounds-checked length after the last entry -
-	   refusing the archive beats sampling garbage: a wrong log2 or a
-	   short running sum would not crash, it would silently bind the wrong
-	   bytes as a texture, or read past nv2a_map_texture_data into
-	   whatever memory follows it. physOffset (this entry's own byte
-	   offset into nv2a_map_texture_data) is that running sum BEFORE this
-	   entry's own padded dataLength is added - mpak_texture_info_t itself stores
-	   no offset field, matching the archive's own "byte layout order IS
-	   the format" convention one level down (filesystem/mpak_layout.h's
-	   own v9 note). */
+	   larger than NV2A's real 4096 texture edge (log2 <= 12 - the same cap
+	   the old atlas check used). dataLength must be the exact byte count of
+	   that size's full DXT1 mip chain, and the running sum of every entry's
+	   own dataLength rounded up to 128 bytes must land EXACTLY on the
+	   texture-data lump's own real, bounds-checked length after the last
+	   entry - refusing the archive beats sampling garbage: a wrong log2 or
+	   a short running sum would not crash, it would silently bind the wrong
+	   bytes as a texture, or read past nv2a_map_texture_data into whatever
+	   memory follows it. This whole rule - the ONE this module used to keep
+	   its own private copy of - is now Mpak_ValidateTextureDirectory()
+	   (filesystem/mpak_texture_dir.h), shared byte-for-byte with the PC
+	   tests and the baker's verify pass (fork-plan.md's X9 item 2
+	   follow-up). `data` is passed NULL on purpose: this keeps the
+	   console's accept/reject set exactly what it was before this change
+	   (NV2A never samples padding bytes, so checking their CONTENT here
+	   would be a new, untested hardware-facing check for no behavioural
+	   gain - the padding-content check still runs, just in the PC tests and
+	   PakManager::verifyFile, which is what the follow-up actually asked
+	   for). */
+	{
+		uint32_t bad = 0;
+		mpak_texdir_status_t status = Mpak_ValidateTextureDirectory(
+			buffer + geo.textureDir.offset, (uint64_t)geo.textureDir.length, texture_count,
+			NULL, (uint64_t)geo.textureData.length, &bad );
+
+		if( status != MPAK_TEXDIR_OK )
+		{
+			gEngfuncs.Con_Printf( "ref_nv2a: texture directory entry %u failed validation (%s) - not drawing this map's real geometry\n",
+				(unsigned int)bad, Mpak_TextureDirStatusString( status ));
+			return false;
+		}
+	}
+
+	/* physOffset (this entry's own byte offset into nv2a_map_texture_data)
+	   is the running sum of Mpak_TextureAlignedLength(dataLength) over
+	   every PRIOR entry - mpak_texture_info_t itself stores no offset
+	   field, matching the archive's own "byte layout order IS the format"
+	   convention one level down (filesystem/mpak_layout.h's own v9 note).
+	   Safe to re-read every field here with no further bounds-checking:
+	   the validation pass above already confirmed geo.textureDir covers
+	   exactly texture_count entries of real, in-range data. */
 	{
 		uint64_t running = 0;
 
 		for( i = 0; i < texture_count; i++ )
 		{
-			uint64_t base = geo.textureDir.offset + (uint64_t)i * sizeof( mpak_texture_info_t );
-			uint32_t width, height, log2w, log2h, dataLength;
+			uint64_t base = geo.textureDir.offset + (uint64_t)i * MPAK_TEXTURE_INFO_SIZE;
+			uint32_t log2w, log2h, dataLength;
 
-			memcpy( &width,      buffer + base + 0,  sizeof( width ));
-			memcpy( &height,     buffer + base + 4,  sizeof( height ));
-			memcpy( &log2w,      buffer + base + 8,  sizeof( log2w ));
-			memcpy( &log2h,      buffer + base + 12, sizeof( log2h ));
-			memcpy( &dataLength, buffer + base + 16, sizeof( dataLength ));
-
-			if( log2w < 2 || log2w > 12 || log2h < 2 || log2h > 12
-				|| width != ( 1u << log2w ) || height != ( 1u << log2h )
-				|| (uint64_t)dataLength != nv2a_dxt1_chain_length( log2w, log2h, NULL ))
-			{
-				gEngfuncs.Con_Printf( "ref_nv2a: texture %u (%ux%u) failed validation - not drawing this map's real geometry\n",
-					(unsigned int)i, (unsigned int)width, (unsigned int)height );
-				return false;
-			}
+			memcpy( &log2w,      buffer + base + MPAK_TEXTURE_INFO_OFS_LOG2WIDTH,  sizeof( log2w ));
+			memcpy( &log2h,      buffer + base + MPAK_TEXTURE_INFO_OFS_LOG2HEIGHT, sizeof( log2h ));
+			memcpy( &dataLength, buffer + base + MPAK_TEXTURE_INFO_OFS_DATALENGTH, sizeof( dataLength ));
 
 			nv2a_map_textures[i].physOffset = (uint32_t)running;
 			nv2a_map_textures[i].log2Width  = log2w;
 			nv2a_map_textures[i].log2Height = log2h;
-			nv2a_dxt1_chain_length( log2w, log2h, &nv2a_map_textures[i].mipLevels );
+			Mpak_Dxt1ChainLength( log2w, log2h, &nv2a_map_textures[i].mipLevels );
 
-			/* v10: each texture's data is zero-padded to 128 bytes, Xbox
-			   D3D's own texture base alignment. v9's single levels were
-			   always 128-aligned by accident: GoldSrc miptex sizes are
-			   multiples of 16, so every POT texture was >= 16x16 = 128 bytes. */
-			running += ( (uint64_t)dataLength + 127 ) & ~(uint64_t)127;
-		}
-
-		if( running != (uint64_t)geo.textureData.length )
-		{
-			gEngfuncs.Con_Printf( "ref_nv2a: texture directory's own summed, 128-aligned dataLength (%llu) does not match the texture-data lump's real length (%u) - not drawing this map's real geometry\n",
-				(unsigned long long)running, (unsigned int)geo.textureData.length );
-			return false;
+			running += Mpak_TextureAlignedLength( dataLength );
 		}
 	}
 

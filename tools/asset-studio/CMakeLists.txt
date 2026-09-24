@@ -18,7 +18,13 @@ add_library(AssetStudioFormats STATIC
     src/utils/TextureOpt.cpp
     src/utils/rgbcx.cpp
 )
-target_include_directories(AssetStudioFormats PUBLIC src)
+# ../../filesystem: shares filesystem/mpak_texture_dir.h's v10 texture-
+# directory rule (chain length, 128-byte padding) with the C reader
+# (ref/nv2a) and the PC tests, rather than PakManager.cpp keeping its own
+# copy of it - see that header's own file comment. Header-only, so this
+# adds nothing to link; checked for name collisions against everything
+# already under src/, found none.
+target_include_directories(AssetStudioFormats PUBLIC src ${CMAKE_CURRENT_SOURCE_DIR}/../../filesystem)
 
 add_executable(AssetStudio src/main.cpp)
 target_link_libraries(AssetStudio PRIVATE AssetStudioFormats)
@@ -45,3 +51,7 @@ add_test(NAME miptex_lump_test COMMAND miptex_lump_test)
 add_executable(texture_opt_test tests/texture_opt_test.cpp)
 target_link_libraries(texture_opt_test PRIVATE AssetStudioFormats)
 add_test(NAME texture_opt_test COMMAND texture_opt_test)
+
+add_executable(dxt1_mip_chain_test tests/dxt1_mip_chain_test.cpp)
+target_link_libraries(dxt1_mip_chain_test PRIVATE AssetStudioFormats)
+add_test(NAME dxt1_mip_chain_test COMMAND dxt1_mip_chain_test)

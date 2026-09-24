@@ -234,7 +234,14 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 			texInfo.log2Height = 2;
 			texInfo.dataLength = texDataLength;
 			memcpy( buf + textureDirOffset, &texInfo, sizeof( texInfo ));
-			memset( buf + textureDataOffset, 0x22, lenTextureData );
+			// v10 texture-directory rule (Mpak_ValidateTextureDirectory,
+			// filesystem/mpak_texture_dir.h): padding bytes past a real
+			// texture's own dataLength must be zero. Fill only the REAL
+			// texDataLength (24) bytes with the sentinel 0x22 - the
+			// remaining 104 bytes to the 128-byte boundary stay whatever
+			// calloc() already zeroed them to, real zero padding, not
+			// filler this new check would reject.
+			memset( buf + textureDataOffset, 0x22, texDataLength );
 
 			batch.textureIndex = 0;
 			batch.startFace = 0;
@@ -704,6 +711,378 @@ static qboolean TestRejectsExtraHeaderProbeBytes( void )
 	return rejected;
 }
 
+// ------------------------------------------------------------------------
+// mpak_texture_dir.h: the v10 texture-directory rule (chain length,
+// 128-byte padding, per-entry/whole-lump acceptance) - shared with
+// ref/nv2a/r_context.c and tools/asset-studio's PakManager::verifyFile.
+// Every expected value below is a hand-computed literal (worked out
+// independently, the same discipline the rest of this file already
+// follows), never a value read back from the function under test.
+// ------------------------------------------------------------------------
+
+// Writes one raw mpak_texture_info_t entry at dst, from explicit fields -
+// never from Mpak_Dxt1ChainLength or any other function under test.
+static void WriteTexInfo( byte *dst, uint32_t width, uint32_t height, uint32_t log2w, uint32_t log2h, uint32_t dataLength )
+{
+	mpak_texture_info_t info;
+	info.width = width;
+	info.height = height;
+	info.log2Width = log2w;
+	info.log2Height = log2h;
+	info.dataLength = dataLength;
+	memcpy( dst, &info, sizeof( info ));
+}
+
+// (a) Mpak_Dxt1ChainLength: hand-computed length/levels for a spread of
+// square and non-square sizes, including the largest (4096x4096) and most
+// aspect-skewed (4096x4, 4x64) cases this format allows.
+static qboolean TestDxt1ChainLength( void )
+{
+	static const struct { uint32_t log2w, log2h; uint64_t length; uint32_t levels; } cases[] = {
+		{ 2, 2, 24,       3 },  // 4x4
+		{ 4, 4, 184,      5 },  // 16x16
+		{ 6, 2, 264,      7 },  // 64x4
+		{ 2, 6, 264,      7 },  // 4x64
+		{ 8, 4, 2824,     9 },  // 256x16
+		{ 12, 12, 11184824, 13 }, // 4096x4096
+		{ 12, 2, 16392,   13 }, // 4096x4
+	};
+	size_t i;
+	qboolean ok = true;
+
+	for( i = 0; i < sizeof( cases ) / sizeof( cases[0] ); i++ )
+	{
+		uint32_t levels = 0;
+		uint64_t length = Mpak_Dxt1ChainLength( cases[i].log2w, cases[i].log2h, &levels );
+
+		if( length != cases[i].length || levels != cases[i].levels )
+		{
+			printf( "TestDxt1ChainLength(log2 %u,%u): got length %llu levels %u, expected %llu %u\n",
+				(unsigned int)cases[i].log2w, (unsigned int)cases[i].log2h,
+				(unsigned long long)length, (unsigned int)levels,
+				(unsigned long long)cases[i].length, (unsigned int)cases[i].levels );
+			ok = false;
+		}
+	}
+	return ok;
+}
+
+// (b) A real BuildMinimalArchive(true, true) texture dir/data, at the real
+// offsets Mpak_ComputeLayout resolves - the same bytes TestValidArchive
+// already proved correct - must validate OK with the padding-content check
+// ON (unlike ref/nv2a, which always passes data = NULL).
+static qboolean TestValidatesRealArchiveTextureDirectory( void )
+{
+	fs_offset_t fileSize;
+	byte *buf = BuildMinimalArchive( true, true, &fileSize, NULL );
+	mpak_header_t header;
+	mpak_layout_t layout;
+	qboolean ok = true;
+	uint32_t bad = 0xDEADBEEFu;
+	mpak_texdir_status_t status;
+
+	memcpy( &header, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( header ));
+	if( !Mpak_ComputeLayout( &header, fileSize, &layout ))
+	{
+		printf( "TestValidatesRealArchiveTextureDirectory: ComputeLayout rejected a valid archive\n" );
+		ok = false;
+		goto done;
+	}
+
+	status = Mpak_ValidateTextureDirectory( buf + layout.textureDir.offset, (uint64_t)layout.textureDir.length,
+		header.textureCount, buf + layout.textureData.offset, (uint64_t)layout.textureData.length, &bad );
+	if( status != MPAK_TEXDIR_OK )
+	{
+		printf( "TestValidatesRealArchiveTextureDirectory: rejected a real archive (%s, entry %u)\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+
+done:
+	free( buf );
+	return ok;
+}
+
+// (c) Three real entries (4x4, 64x4, 256x16) laid out back to back, each
+// zero-padded to 128 bytes: 128 + 384 + 2944 = 3456. The whole buffer is
+// calloc'd (real zero), so the "real" data bytes double as valid zero
+// padding content too - only the boundary math matters here.
+static qboolean TestValidatesThreeTextureLump( void )
+{
+	byte dir[3 * MPAK_TEXTURE_INFO_SIZE];
+	byte *data;
+	const uint64_t dataLength = 128 + 384 + 2944;
+	mpak_texdir_status_t status;
+	uint32_t bad = 0;
+	qboolean ok;
+
+	WriteTexInfo( dir + 0 * MPAK_TEXTURE_INFO_SIZE, 4, 4, 2, 2, 24 );
+	WriteTexInfo( dir + 1 * MPAK_TEXTURE_INFO_SIZE, 64, 4, 6, 2, 264 );
+	WriteTexInfo( dir + 2 * MPAK_TEXTURE_INFO_SIZE, 256, 16, 8, 4, 2824 );
+
+	data = (byte *)calloc( 1, (size_t)dataLength );
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 3, data, dataLength, &bad );
+	ok = ( status == MPAK_TEXDIR_OK );
+	if( !ok )
+		printf( "TestValidatesThreeTextureLump: rejected (%s, entry %u)\n", Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+
+	free( data );
+	return ok;
+}
+
+// (d) textureCount 0, dirLength 0, dataLength 0 - rejecting a texture-less
+// map is the CALLER's policy (ref/nv2a's own NV2A_MAP_MAX_TEXTURES == 0
+// check), not this function's.
+static qboolean TestValidatesZeroTextureCount( void )
+{
+	mpak_texdir_status_t status = Mpak_ValidateTextureDirectory( NULL, 0, 0, NULL, 0, NULL );
+	qboolean ok = ( status == MPAK_TEXDIR_OK );
+	if( !ok )
+		printf( "TestValidatesZeroTextureCount: rejected (%s)\n", Mpak_TextureDirStatusString( status ));
+	return ok;
+}
+
+// (e) v9-style single-level sizes must be rejected now that dataLength has
+// to be the FULL chain length.
+static qboolean TestRejectsV9StyleChainLength( void )
+{
+	byte dir1[MPAK_TEXTURE_INFO_SIZE];
+	byte dir2[2 * MPAK_TEXTURE_INFO_SIZE];
+	mpak_texdir_status_t status;
+	uint32_t bad;
+	qboolean ok = true;
+
+	// 16x16, dataLength 128 (v9's single 4x4-block-wide level, not the
+	// real 184-byte 5-level chain).
+	WriteTexInfo( dir1, 16, 16, 4, 4, 128 );
+	bad = 0xFFFFFFFFu;
+	status = Mpak_ValidateTextureDirectory( dir1, sizeof( dir1 ), 1, NULL, 128, &bad );
+	if( status != MPAK_TEXDIR_BAD_CHAIN_LENGTH || bad != 0 )
+	{
+		printf( "TestRejectsV9StyleChainLength(single): got %s at %u, expected BAD_CHAIN_LENGTH at 0\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+
+	// A valid 4x4 (entry 0) followed by a 256x16 whose dataLength is the
+	// v9 single-level size (2048), not the real 2824-byte chain.
+	WriteTexInfo( dir2 + 0 * MPAK_TEXTURE_INFO_SIZE, 4, 4, 2, 2, 24 );
+	WriteTexInfo( dir2 + 1 * MPAK_TEXTURE_INFO_SIZE, 256, 16, 8, 4, 2048 );
+	bad = 0xFFFFFFFFu;
+	// Lump length is never reached (the chain-length check on entry 1
+	// fails first) - value is unused, filled in only to be a real,
+	// answerable parameter.
+	status = Mpak_ValidateTextureDirectory( dir2, sizeof( dir2 ), 2, NULL, 128 + 2944, &bad );
+	if( status != MPAK_TEXDIR_BAD_CHAIN_LENGTH || bad != 1 )
+	{
+		printf( "TestRejectsV9StyleChainLength(pair): got %s at %u, expected BAD_CHAIN_LENGTH at 1\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+
+	return ok;
+}
+
+// (f) v9-style unpadded sum: two valid 4x4 entries (24 + 24 = 48) over a
+// 48-byte lump - correct for v9 (no padding), wrong for v10 (each must be
+// aligned to 128 first).
+static qboolean TestRejectsUnpaddedSum( void )
+{
+	byte dir[2 * MPAK_TEXTURE_INFO_SIZE];
+	mpak_texdir_status_t status;
+	uint32_t bad = 0xFFFFFFFFu;
+	qboolean ok;
+
+	WriteTexInfo( dir + 0 * MPAK_TEXTURE_INFO_SIZE, 4, 4, 2, 2, 24 );
+	WriteTexInfo( dir + 1 * MPAK_TEXTURE_INFO_SIZE, 4, 4, 2, 2, 24 );
+
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 2, NULL, 48, &bad );
+	ok = ( status == MPAK_TEXDIR_DATA_LENGTH_MISMATCH );
+	if( !ok )
+		printf( "TestRejectsUnpaddedSum: got %s, expected DATA_LENGTH_MISMATCH\n", Mpak_TextureDirStatusString( status ));
+	return ok;
+}
+
+// (g) Non-zero padding content - the check ref/nv2a opts OUT of (it always
+// passes data = NULL) but the PC tests and the baker's verify pass don't.
+static qboolean TestRejectsNonzeroPadding( void )
+{
+	byte dir[MPAK_TEXTURE_INFO_SIZE];
+	byte data[128];
+	mpak_texdir_status_t status;
+	uint32_t bad;
+	qboolean ok = true;
+
+	WriteTexInfo( dir, 4, 4, 2, 2, 24 );
+
+	// First padding byte (offset 24, right after the real 24 bytes).
+	memset( data, 0, sizeof( data ));
+	data[24] = 1;
+	bad = 0xFFFFFFFFu;
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 1, data, sizeof( data ), &bad );
+	if( status != MPAK_TEXDIR_NONZERO_PADDING || bad != 0 )
+	{
+		printf( "TestRejectsNonzeroPadding(first): got %s at %u, expected NONZERO_PADDING at 0\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+	// The same buffer with data = NULL (ref/nv2a's own opt-out) must
+	// accept it - documents that the console's accept/reject set is
+	// unaffected by padding content.
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 1, NULL, sizeof( data ), NULL );
+	if( status != MPAK_TEXDIR_OK )
+	{
+		printf( "TestRejectsNonzeroPadding(first, data=NULL): got %s, expected OK\n", Mpak_TextureDirStatusString( status ));
+		ok = false;
+	}
+
+	// Last byte of the padded extent (offset 127).
+	memset( data, 0, sizeof( data ));
+	data[127] = 1;
+	bad = 0xFFFFFFFFu;
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 1, data, sizeof( data ), &bad );
+	if( status != MPAK_TEXDIR_NONZERO_PADDING || bad != 0 )
+	{
+		printf( "TestRejectsNonzeroPadding(last): got %s at %u, expected NONZERO_PADDING at 0\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 1, NULL, sizeof( data ), NULL );
+	if( status != MPAK_TEXDIR_OK )
+	{
+		printf( "TestRejectsNonzeroPadding(last, data=NULL): got %s, expected OK\n", Mpak_TextureDirStatusString( status ));
+		ok = false;
+	}
+
+	return ok;
+}
+
+// (h) log2 outside [2,12] - one texture each, otherwise real/self-consistent.
+static qboolean TestRejectsBadLog2Range( void )
+{
+	byte dir[MPAK_TEXTURE_INFO_SIZE];
+	mpak_texdir_status_t status;
+	uint32_t bad;
+	qboolean ok = true;
+
+	// log2Width 1 (below MPAK_TEXTURE_LOG2_MIN) - width itself matches (2 == 1<<1).
+	WriteTexInfo( dir, 2, 4, 1, 2, 0 );
+	bad = 0xFFFFFFFFu;
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 1, NULL, 0, &bad );
+	if( status != MPAK_TEXDIR_BAD_DIMENSIONS || bad != 0 )
+	{
+		printf( "TestRejectsBadLog2Range(low): got %s at %u, expected BAD_DIMENSIONS at 0\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+
+	// log2Width 13 (above MPAK_TEXTURE_LOG2_MAX) - width matches (8192 == 1<<13).
+	WriteTexInfo( dir, 8192, 4, 13, 2, 0 );
+	bad = 0xFFFFFFFFu;
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 1, NULL, 0, &bad );
+	if( status != MPAK_TEXDIR_BAD_DIMENSIONS || bad != 0 )
+	{
+		printf( "TestRejectsBadLog2Range(high): got %s at %u, expected BAD_DIMENSIONS at 0\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+
+	return ok;
+}
+
+// (i) width disagrees with its own paired log2 field (16 != 1<<5 == 32).
+static qboolean TestRejectsWidthLog2Mismatch( void )
+{
+	byte dir[MPAK_TEXTURE_INFO_SIZE];
+	mpak_texdir_status_t status;
+	uint32_t bad = 0xFFFFFFFFu;
+	qboolean ok;
+
+	WriteTexInfo( dir, 16, 16, 5, 4, 0 );
+	status = Mpak_ValidateTextureDirectory( dir, sizeof( dir ), 1, NULL, 0, &bad );
+	ok = ( status == MPAK_TEXDIR_BAD_DIMENSIONS && bad == 0 );
+	if( !ok )
+		printf( "TestRejectsWidthLog2Mismatch: got %s at %u, expected BAD_DIMENSIONS at 0\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+	return ok;
+}
+
+// (j) The whole-lump running-sum check, both directions, including a
+// buffer allocated at EXACTLY the (too-short) lump size so an overread
+// while validating the second entry would be a real out-of-bounds access
+// (catchable by ASan/valgrind), not just a wrong comparison.
+static qboolean TestRejectsLumpLengthMismatch( void )
+{
+	byte dir1[MPAK_TEXTURE_INFO_SIZE];
+	byte dir2[2 * MPAK_TEXTURE_INFO_SIZE];
+	byte *data;
+	mpak_texdir_status_t status;
+	uint32_t bad;
+	qboolean ok = true;
+
+	// One alignment unit (128) too long for a single real 4x4 texture.
+	WriteTexInfo( dir1, 4, 4, 2, 2, 24 );
+	bad = 0xFFFFFFFFu;
+	status = Mpak_ValidateTextureDirectory( dir1, sizeof( dir1 ), 1, NULL, 256, &bad );
+	if( status != MPAK_TEXDIR_DATA_LENGTH_MISMATCH || bad != 1 ) // bad index == textureCount
+	{
+		printf( "TestRejectsLumpLengthMismatch(long): got %s at %u, expected DATA_LENGTH_MISMATCH at 1\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+
+	// Two valid 4x4 entries (128 + 128 = 256 real bytes needed), but the
+	// lump is only 200 bytes - too short to hold the second entry's own
+	// padded extent. data is allocated at exactly 200 bytes: the early-out
+	// in Mpak_ValidateTextureDirectory must reject entry 1 BEFORE reading
+	// any of its bytes, since [128, 256) is past the end of this buffer.
+	WriteTexInfo( dir2 + 0 * MPAK_TEXTURE_INFO_SIZE, 4, 4, 2, 2, 24 );
+	WriteTexInfo( dir2 + 1 * MPAK_TEXTURE_INFO_SIZE, 4, 4, 2, 2, 24 );
+	data = (byte *)calloc( 1, 200 );
+	bad = 0xFFFFFFFFu;
+	status = Mpak_ValidateTextureDirectory( dir2, sizeof( dir2 ), 2, data, 200, &bad );
+	if( status != MPAK_TEXDIR_DATA_LENGTH_MISMATCH || bad != 1 )
+	{
+		printf( "TestRejectsLumpLengthMismatch(short): got %s at %u, expected DATA_LENGTH_MISMATCH at 1\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+	free( data );
+
+	return ok;
+}
+
+// (k) dirLength is not textureCount * MPAK_TEXTURE_INFO_SIZE.
+static qboolean TestRejectsBadDirectoryLength( void )
+{
+	byte dir[MPAK_TEXTURE_INFO_SIZE + 4]; // room for either mutation below
+	mpak_texdir_status_t status;
+	uint32_t bad;
+	qboolean ok = true;
+
+	WriteTexInfo( dir, 4, 4, 2, 2, 24 );
+
+	bad = 0;
+	status = Mpak_ValidateTextureDirectory( dir, MPAK_TEXTURE_INFO_SIZE - 1, 1, NULL, 0, &bad );
+	if( status != MPAK_TEXDIR_BAD_DIRECTORY_LENGTH || bad != 0xFFFFFFFFu )
+	{
+		printf( "TestRejectsBadDirectoryLength(19): got %s at %u, expected BAD_DIRECTORY_LENGTH at UINT32_MAX\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+
+	bad = 0;
+	status = Mpak_ValidateTextureDirectory( dir, MPAK_TEXTURE_INFO_SIZE + 1, 1, NULL, 0, &bad );
+	if( status != MPAK_TEXDIR_BAD_DIRECTORY_LENGTH || bad != 0xFFFFFFFFu )
+	{
+		printf( "TestRejectsBadDirectoryLength(21): got %s at %u, expected BAD_DIRECTORY_LENGTH at UINT32_MAX\n",
+			Mpak_TextureDirStatusString( status ), (unsigned int)bad );
+		ok = false;
+	}
+
+	return ok;
+}
+
 int main( void )
 {
 	int ok = 1;
@@ -727,6 +1106,19 @@ int main( void )
 	ok &= TestRejectsBspVersion();
 	ok &= TestRejectsDriftedLumpTable();
 	ok &= TestRejectsExtraHeaderProbeBytes();
+
+	// mpak_texture_dir.h - the v10 texture-directory rule.
+	ok &= TestDxt1ChainLength();
+	ok &= TestValidatesRealArchiveTextureDirectory();
+	ok &= TestValidatesThreeTextureLump();
+	ok &= TestValidatesZeroTextureCount();
+	ok &= TestRejectsV9StyleChainLength();
+	ok &= TestRejectsUnpaddedSum();
+	ok &= TestRejectsNonzeroPadding();
+	ok &= TestRejectsBadLog2Range();
+	ok &= TestRejectsWidthLog2Mismatch();
+	ok &= TestRejectsLumpLengthMismatch();
+	ok &= TestRejectsBadDirectoryLength();
 
 	if( !ok )
 		return EXIT_FAILURE;

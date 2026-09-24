@@ -70,6 +70,15 @@ namespace formats {
         uint32_t length;
     };
 
+    // v10: the full DXT1 mip chain for one POT RGBA8 texture, base level
+    // down to 1x1 - see PakManager.cpp's own definition comment for the
+    // level-count/block-size details. Declared here (not just defined in
+    // the .cpp's anonymous namespace, as it used to be) so
+    // tests/dxt1_mip_chain_test.cpp can call it directly without linking a
+    // copy of its own - the same reasoning downsampleRgba/resampleRgba
+    // don't need (nothing outside this .cpp calls them).
+    std::vector<uint8_t> buildDxt1MipChain(const std::vector<uint8_t>& baseRgba, uint32_t w, uint32_t h, bool masked);
+
     class PakManager {
     public:
         PakManager();

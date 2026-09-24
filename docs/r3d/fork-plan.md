@@ -8205,11 +8205,23 @@ Open items that X9-L surfaced or carried forward, in suggested order:
    ref/gl does. Left from that work: `kRenderTransColor` entities, and
    studio models, sprites and beams, which still have no path.
 2. ~~**Mipmaps.**~~ **Done, X9-N (`divergences.md` #105, MPAK v10):**
-   full DXT1 mip chains and trilinear filtering. Left from that work:
+   full DXT1 mip chains and trilinear filtering. ~~Check the v10
+   texture-directory rule (chain lengths, 128-byte padding) in the
+   baker's verify pass and the PC tests, not only in `ref/nv2a`~~ **Done:**
+   `filesystem/mpak_texture_dir.h` is now the one shared rule
+   (`Mpak_ValidateTextureDirectory`), header-only so `ref/nv2a` (which
+   cannot link `filesystem/mpak_layout.c`), `filesystem/tests/mpak_layout.c`
+   and `tools/asset-studio`'s `PakManager::verifyFile` all run the literal
+   same comparisons instead of `ref/nv2a` keeping its own private copy.
+   `ref/nv2a` still passes `data = NULL` (no padding-CONTENT check at Xbox
+   load time - NV2A never samples padding, so the console's accept/reject
+   set is unchanged); the PC tests and the baker's verify pass both check
+   it for real. `buildDxt1MipChain` also gained direct unit tests
+   (`tools/asset-studio/tests/dxt1_mip_chain_test.cpp`), moved out of
+   `PakManager.cpp`'s anonymous namespace with no behaviour change to make
+   that possible. Left from the original X9-N work:
    - confirm the level layout on real hardware with a one-colour-per-level
      debug bake (xemu is not proof);
-   - check the v10 texture-directory rule (chain lengths, 128-byte padding)
-     in the baker's verify pass and the PC tests, not only in `ref/nv2a`;
    - add a bake-time mirror of the renderer's 24 MiB per-map budget, and
      measure the 125-map corpus against it;
    - if distant fences or grates vanish too early, use coverage-preserving

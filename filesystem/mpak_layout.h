@@ -45,6 +45,10 @@ GNU General Public License for more details.
 #include "xash3d_types.h" // fs_offset_t, qboolean - common/xash3d_types.h, on the include
                           // path as "xash3d_types.h" (sdk_includes exports "../common" as
                           // a root, not a "common/" prefix - found while wiring this up)
+#include "mpak_texture_dir.h" // MPAK_TEXTURE_INFO_SIZE and the v10 texture-directory
+                              // validation rule itself - see that file's own header
+                              // comment for why this lives there, header-only, rather
+                              // than as a function in this file's own .c
 
 #ifdef __cplusplus
 extern "C" {
@@ -226,8 +230,18 @@ typedef struct
 	uint32_t log2Height; // log2(height) - BASE_SIZE_V field
 	uint32_t dataLength; // v10: this texture's whole DXT1 mip chain in bytes, base level down to 1x1
 	                     // (levels under 4 texels still take whole 4x4 blocks); its data is then
-	                     // zero-padded to 128 bytes, so offsets sum align128(dataLength)
+	                     // zero-padded to 128 bytes, so offsets sum align128(dataLength) - the whole
+	                     // rule (chain-length math, padding, per-entry/whole-lump acceptance) lives
+	                     // in mpak_texture_dir.h's Mpak_ValidateTextureDirectory(), not here
 } mpak_texture_info_t;
+
+// Ties this struct's byte layout to MPAK_TEXTURE_INFO_SIZE, the offset
+// table mpak_texture_dir.h's Mpak_ValidateTextureDirectory() reads by hand
+// (it cannot just take sizeof(mpak_texture_info_t) - it also has to agree
+// with formats::MpakTextureInfo, a separately-compiled C++ struct with no
+// shared header of its own) - a drift here would otherwise silently
+// misalign every field read past width/height.
+STATIC_ASSERT( sizeof( mpak_texture_info_t ) == MPAK_TEXTURE_INFO_SIZE, "mpak_texture_info_t must match MPAK_TEXTURE_INFO_SIZE (mpak_texture_dir.h)" );
 
 // v9: mirrors formats::MpakTextureBatch byte-for-byte - one texture-draw
 // batch per texture that at least one face actually uses, naming the

@@ -5,6 +5,27 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — the v10 texture-directory rule is now one shared header, checked everywhere (X9 follow-up)
+
+The MPAK v10 texture-directory rule (each texture's DXT1 mip-chain length,
+128-byte padding) used to exist only inside `ref/nv2a`'s own map loader, as
+a private copy `ref/nv2a` had already proven correct by other means (real-
+hardware verification, #105) - the PC tests and the baker's own verify pass
+never checked it at all. It is now `filesystem/mpak_texture_dir.h`, a
+header-only rule `ref/nv2a`, `filesystem/tests/mpak_layout.c` and
+`tools/asset-studio`'s `PakManager::verifyFile` all include and run
+identically - header-only because `ref/` cannot link `filesystem/
+mpak_layout.c`'s real functions (they are separate, isolated static-lib
+units), only include its headers for types and constants. `ref/nv2a` keeps
+its prior accept/reject set exactly (it does not check padding bytes'
+CONTENT, since NV2A never samples them); the PC tests and the baker's
+verify pass do check padding content, closing the gap. `buildDxt1MipChain`
+(the baker's own mip-chain writer) moved out of an anonymous namespace with
+no behaviour change so a new test, `tools/asset-studio/tests/
+dxt1_mip_chain_test.cpp`, can call it directly and cross-check its output
+size against the shared rule for a square, a 16:1 wide and a 16:1 tall case
+(4x4, 16x16, 64x4, 4x64, 256x16).
+
 ### Changed — `ref/nv2a` bring-up triangle state tidy-up (X9-P)
 
 The test triangle shown before a map loads now writes a complete texture

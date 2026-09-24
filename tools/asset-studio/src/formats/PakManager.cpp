@@ -6,6 +6,17 @@
 #include <cstdlib>
 #include "../utils/rgbcx.h"
 #include "../utils/TextureOpt.h"
+#include "mpak_texture_dir.h" // filesystem/mpak_texture_dir.h - the v10 texture-directory rule,
+                              // shared with ref/nv2a and the PC tests rather than duplicated
+                              // here (see that header's own file comment)
+
+// Ties MpakTextureInfo (this file's own on-disk directory-entry struct) to
+// mpak_texture_dir.h's byte-offset constants, the same way
+// filesystem/mpak_layout.h's own STATIC_ASSERT ties mpak_texture_info_t to
+// them - both structs must independently agree with the ONE set of
+// offsets Mpak_ValidateTextureDirectory() reads by hand.
+static_assert(sizeof(formats::MpakTextureInfo) == MPAK_TEXTURE_INFO_SIZE,
+              "MpakTextureInfo must match MPAK_TEXTURE_INFO_SIZE (filesystem/mpak_texture_dir.h)");
 
 namespace {
 
@@ -146,6 +157,10 @@ namespace {
         }
     }
 
+} // namespace
+
+namespace formats {
+
     // v10: the full DXT1 mip chain for one POT texture, levels back to back
     // from base size down to 1x1 (max(log2w, log2h) + 1 levels - NV2A's
     // MIPMAP_LEVELS counts every level, and a chain ending early would
@@ -153,6 +168,12 @@ namespace {
     // still occupies whole 4x4 blocks (ceil(w/4) * ceil(h/4) * 8 bytes, the
     // same size NV2A addresses for it): it is edge-replicated up to 4x4
     // before compressToDXT, which only walks complete blocks.
+    //
+    // Moved out of this file's own anonymous namespace (X9 v10 follow-up)
+    // so tests/dxt1_mip_chain_test.cpp can call it and cross-check its
+    // output size against Mpak_Dxt1ChainLength (filesystem/
+    // mpak_texture_dir.h) - no behaviour change, downsampleRgba stays
+    // internal since nothing outside this file needs it directly.
     std::vector<uint8_t> buildDxt1MipChain(const std::vector<uint8_t>& base, uint32_t w, uint32_t h, bool masked) {
         std::vector<uint8_t> chain;
         std::vector<uint8_t> level = base, next, padded;
@@ -180,9 +201,6 @@ namespace {
         }
         return chain;
     }
-} // namespace
-
-namespace formats {
 
     PakManager::PakManager() {
         rgbcx::init(rgbcx::bc1_approx_mode::cBC1Ideal);
@@ -756,9 +774,10 @@ namespace formats {
             // save()'s own write order, which matches the header's field
             // order (MpakHeader.h's v8 -> v9 note).
             uint64_t batchesAt = 0;
+            uint64_t textureDirAt = 0, textureDataAt = 0;
             if (xbox) {
-                place(desc.lenTextureDir);
-                place(desc.lenTextureData);
+                textureDirAt = place(desc.lenTextureDir);
+                textureDataAt = place(desc.lenTextureData);
                 batchesAt = place(desc.lenBatches);
             }
             const uint64_t faceRemapAt = place(desc.lenFaceRemap);
@@ -795,9 +814,16 @@ namespace formats {
             // The baked sections this object still holds are compared byte
             // for byte at the offsets the walk just derived. Found by a
             // negative control: with only the count checks above, an nv2a
-            // archive with a flipped vertex byte verified clean. The DXT
+            // archive with a flipped vertex byte verified clean. The PC DXT
             // texture arrays/atlas remain structural-only - their bytes are
-            // produced inside save() and not retained.
+            // produced inside save() and not retained. The Xbox per-texture
+            // directory/data are no longer structural-only either (v10
+            // follow-up, below): Mpak_ValidateTextureDirectory checks the
+            // directory's real content (chain lengths, 128-byte padding,
+            // WITH the padding-content check on, unlike ref/nv2a's own
+            // load-time call) against the texture-data lump's real bytes,
+            // and each entry's width/height is compared to the retained,
+            // already-POT-resampled bake sources below.
             auto checkBaked = [&](const char* name, uint64_t ofs, const void* src, uint64_t size) {
                 if (size == 0) return;
                 if (ofs + size > static_cast<uint64_t>(fileSize)) {
@@ -824,6 +850,54 @@ namespace formats {
                 // comparison as face draw cmds/face info above.
                 if (xbox) checkBaked("texture batches", batchesAt, mTextureBatches.data(), static_cast<uint64_t>(mTextureBatches.size()) * sizeof(MpakTextureBatch));
                 checkBaked("face remap", faceRemapAt, mFaceRemap.data(), static_cast<uint64_t>(mFaceRemap.size()) * sizeof(uint32_t));
+
+                // v10 follow-up: the texture directory's own CONTENT (chain
+                // lengths, 128-byte padding) used to be checked only by
+                // ref/nv2a's real map loader - never here, and never by the
+                // PC tests. Mpak_ValidateTextureDirectory
+                // (filesystem/mpak_texture_dir.h) is the exact same rule
+                // ref/nv2a now calls, but with the padding-content check ON
+                // (ref/nv2a passes data = NULL there on purpose - see that
+                // function's own doc comment for why that is safe and does
+                // not need mirroring here).
+                if (xbox) {
+                    if (textureDirAt + desc.lenTextureDir > static_cast<uint64_t>(fileSize)) {
+                        fail("texture directory: section runs past the end of the file");
+                    } else if (textureDataAt + desc.lenTextureData > static_cast<uint64_t>(fileSize)) {
+                        fail("texture data: section runs past the end of the file");
+                    } else {
+                        uint32_t bad = 0;
+                        mpak_texdir_status_t status = Mpak_ValidateTextureDirectory(
+                            data.data() + textureDirAt, desc.lenTextureDir, desc.textureCount,
+                            data.data() + textureDataAt, desc.lenTextureData, &bad);
+                        if (status != MPAK_TEXDIR_OK) {
+                            fail("texture directory: " + std::string(Mpak_TextureDirStatusString(status)) +
+                                 " at entry " + std::to_string(bad));
+                        }
+                    }
+
+                    // Compare each entry's own width/height against the
+                    // retained, already-POT-resampled bake sources
+                    // (mXboxTextureWidths/mXboxTextureHeights, PakManager.h)
+                    // - the same "compare to the bake" idea checkBaked
+                    // already applies to every retained section above.
+                    // Skipped (not failed) when the counts already
+                    // disagree - the textureCount check earlier in this
+                    // function already reports that mismatch.
+                    if (desc.textureCount == mXboxTextures.size()) {
+                        for (uint32_t j = 0; j < desc.textureCount; ++j) {
+                            const uint64_t base = textureDirAt + static_cast<uint64_t>(j) * sizeof(MpakTextureInfo);
+                            if (base + sizeof(MpakTextureInfo) > static_cast<uint64_t>(fileSize))
+                                break; // already reported by the bounds check above
+                            MpakTextureInfo info{};
+                            std::memcpy(&info, data.data() + base, sizeof(info));
+                            if (info.width != mXboxTextureWidths[j] || info.height != mXboxTextureHeights[j])
+                                fail("texture directory entry " + std::to_string(j) + ": " +
+                                     std::to_string(info.width) + "x" + std::to_string(info.height) +
+                                     " != baked " + std::to_string(mXboxTextureWidths[j]) + "x" + std::to_string(mXboxTextureHeights[j]));
+                        }
+                    }
+                }
             }
         }
 

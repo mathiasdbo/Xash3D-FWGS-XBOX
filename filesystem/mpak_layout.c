@@ -246,7 +246,13 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 	// - like faceInfo/planes/etc. above - a declared length that isn't an
 	// exact multiple of their real size is a truncated/corrupted archive,
 	// caught by Mpak_PlaceLump's own recordSize check rather than producing
-	// a fractional directory/batch count later.
+	// a fractional directory/batch count later. This function does NOT
+	// validate the texture directory's own CONTENT (chain lengths, 128-byte
+	// padding) - it only places the lump and checks its length is a whole
+	// number of entries. That rule lives in mpak_texture_dir.h's
+	// Mpak_ValidateTextureDirectory(), which ref/nv2a's real map loader
+	// calls after Mpak_ComputeLayout places this lump (no runtime path in
+	// this directory reads directory content, only placement).
 	if( header->flags & MPAK_TARGET_XBOX_FLAG )
 	{
 		if( !Mpak_PlaceLump( "textureDir", header->lenTextureDir, sizeof( mpak_texture_info_t ),
