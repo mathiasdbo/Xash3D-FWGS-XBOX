@@ -791,6 +791,20 @@ static CVAR_DEFINE_AUTO( nv2a_r_noalphatest, "1", 0, "ref_nv2a: disable native a
    itself is already proven, only which stage it's applied to is new here. */
 static CVAR_DEFINE_AUTO( nv2a_r_texturenearest, "0", 0, "ref_nv2a: point-filter the diffuse stage only (lightmap always stays bilinear)" );
 
+/* X9-N2: the two knobs ref/gl has for how soon mipmapped textures blur -
+   gl_anisotropy (default "8") and gl_texture_lodbias (default "0.0"),
+   ref/gl/gl_opengl.c:9-10. Without anisotropy a floor seen at a glancing
+   angle drops to a smaller mip level within a few units, which real
+   hardware showed as a visible resolution change just ahead of the
+   player. NV2A's per-stage anisotropy is CONTROL0's 2-bit ANISOTROPY
+   field (nv_regs.h:595, log2 of the ratio: 0 = 1x ... 3 = 8x). The
+   default is 2x, the only level proven on real hardware (Perfect Dark X's
+   gfx_nv2a.cpp sets 0x10 on mipmapped textures and caps at 2x); 4 and 8
+   are selectable to test. The LOD bias goes in FILTER bits 0-12 as signed
+   fixed point with 8 fraction bits, clamped to +-3. */
+static CVAR_DEFINE_AUTO( nv2a_r_anisotropy, "2", 0, "ref_nv2a: anisotropic filtering for mipmapped textures: 1, 2, 4 or 8 (2 is hardware-proven)" );
+static CVAR_DEFINE_AUTO( nv2a_r_lodbias, "0", 0, "ref_nv2a: mip LOD bias, -3..3 (negative = sharper, later switch to smaller levels)" );
+
 /* The real, live camera eye position, captured once per real frame by
    GL_RenderFrame alongside nv2a_map_viewproj/nv2a_frustum - needed here
    because nv2a_draw_map_geometry() (called later the same frame, from
@@ -1429,6 +1443,22 @@ static void nv2a_batch_dword_range( uint32_t start_index, uint32_t index_count, 
 		*out_end = dword_count;
 }
 
+/* X9-N2: nv2a_r_anisotropy -> CONTROL0's ANISOTROPY field (log2 ratio). */
+static uint32_t nv2a_anisotropy_bits( void )
+{
+	int level = (int)nv2a_r_anisotropy.value;
+	uint32_t log2 = level >= 8 ? 3 : level >= 4 ? 2 : level >= 2 ? 1 : 0;
+	return MASK( NV097_SET_TEXTURE_CONTROL0_ANISOTROPY, log2 );
+}
+
+/* X9-N2: nv2a_r_lodbias -> FILTER bits 0-12, signed, 8 fraction bits. */
+static uint32_t nv2a_lod_bias_bits( void )
+{
+	float bias = bound( -3.0f, nv2a_r_lodbias.value, 3.0f );
+	int fixed = (int)( bias * 256.0f + ( bias < 0.0f ? -0.5f : 0.5f ));
+	return (uint32_t)fixed & 0x1FFFu;
+}
+
 /* X9-K codex review, real finding: this used to be inlined at the top of
    nv2a_draw_map_geometry()'s per-batch loop and pushed unconditionally,
    once per batch, BEFORE either draw branch below had checked whether
@@ -1490,7 +1520,7 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, tex_pitch << 16 );
 	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( tex_width << 16 ) | ( 1u << tex->log2Height ));
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00010101 );
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 | nv2a_anisotropy_bits() );
 	/* X9-N: MIN=6 (TENT_TENT_LOD: bilinear within the two nearest mip
 	   levels, blended - trilinear, GL_LINEAR_MIPMAP_LINEAR), MAG=2
 	   (TENT, bilinear): 0x02062000. The nearest option is MIN=3
@@ -1500,7 +1530,7 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 	   MIN/MAG=CONVOLUTION_2D_LOD0 - xemu samples it as bilinear, real
 	   hardware filters with the convolution kernel and smears (Perfect
 	   Dark X's gfx_nv2a.cpp documents the same). */
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_r_texturenearest.value ? 0x01032000 : 0x02062000 );
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, ( nv2a_r_texturenearest.value ? 0x01032000 : 0x02062000 ) | nv2a_lod_bias_bits() );
 	pb_end( p );
 }
 
@@ -2624,6 +2654,8 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_nocullback );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_noalphatest );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_texturenearest );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_anisotropy );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lodbias );
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not

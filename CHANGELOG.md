@@ -5,6 +5,18 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added — anisotropic filtering and LOD bias for `ref/nv2a` (X9-N2)
+
+With mipmaps on, a real Original Xbox showed a visible resolution change a
+few units ahead on floors. Without anisotropic filtering, a surface seen at
+a glancing angle switches to a small mip level almost at once; ref/gl
+avoids that with `gl_anisotropy` 8 by default. Two new settings:
+- `nv2a_r_anisotropy` (1, 2, 4 or 8, default 2): 2x is the level Perfect
+  Dark X runs on real hardware; 4 and 8 can be tried from a config file.
+- `nv2a_r_lodbias` (-3 to 3, default 0), like ref/gl's `gl_texture_lodbias`.
+
+Checked in xemu; real-hardware check pending.
+
 ### Added — mipmaps for `ref/nv2a` textures (X9-N, MPAK v10)
 
 Every Xbox texture had one level, so tiled textures on distant or oblique
