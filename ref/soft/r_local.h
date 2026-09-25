@@ -991,7 +991,9 @@ extern int            r_currentbkey;
 extern qboolean       insubmodel;
 
 extern vec3_t         r_entorigin;
-#if XASH_XBOX
+#if XASH_XBOX && XASH_LOW_MEMORY
+extern unsigned short *r_leafkeys; // [MAX_MAP_LEAFS], R_AllocStatics (divergences.md #114) - upstream's element type kept
+#elif XASH_XBOX
 extern int            *r_leafkeys; // [MAX_MAP_LEAFS], R_AllocStatics (divergences.md #114)
 #elif XASH_LOW_MEMORY
 extern unsigned short r_leafkeys[MAX_MAP_LEAFS];

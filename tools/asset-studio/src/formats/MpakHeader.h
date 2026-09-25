@@ -436,7 +436,7 @@ namespace formats {
         int32_t lightmapmins[2] = {0, 0}; // texture-space units (Mod_CalcSurfaceExtents's texturemins)
         int32_t extents[2] = {0, 0};      // texture-space units ((bmaxs-bmins)*16), 0 if no real lightmap
         uint32_t lightmapPage = 0;        // which atlas page this face's lightmap block lives on
-        uint32_t lightmapBlockX = 0;      // bordered block origin within that page (luxels)
+        uint32_t lightmapBlockX = 0;      // block origin within that page (luxels) - bordered on PC bakes, tight on Xbox (X9-U)
         uint32_t lightmapBlockY = 0;
     };
 #pragma pack(pop)

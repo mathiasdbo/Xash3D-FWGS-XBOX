@@ -453,7 +453,9 @@ void R_DrawSubmodelPolygons( model_t *pmodel, int clipflags, mnode_t *topnode )
 	}
 }
 
-#if XASH_XBOX
+#if XASH_XBOX && XASH_LOW_MEMORY
+unsigned short *r_leafkeys; // R_AllocStatics (divergences.md #114) - upstream's element type kept
+#elif XASH_XBOX
 int *r_leafkeys; // R_AllocStatics (divergences.md #114)
 #elif XASH_LOW_MEMORY
 unsigned short r_leafkeys[MAX_MAP_LEAFS];

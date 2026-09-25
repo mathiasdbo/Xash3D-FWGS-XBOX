@@ -19,15 +19,19 @@ uint32_t peak(const std::string& ents) { return nv2aPeakEdicts(ents.data(), ents
 
 int main() {
     // --- edict slots: world + one client + entities that survive Spawn ---
-    CHECK(peak("{\"classname\" \"worldspawn\"}") == 2, "worldspawn alone: the world and one client");
-    CHECK(peak("{\"classname\" \"worldspawn\"}{\"classname\" \"func_wall\"}") == 3, "a func_wall holds a slot");
-    CHECK(peak("{\"classname\" \"light\"}{\"classname\" \"light_spot\"}{\"classname\" \"light_environment\"}") == 2,
+    const uint32_t base = 2 + kSdkWorldEdicts; // the world, one client, soundent + bodyque
+    CHECK(peak("{\"classname\" \"worldspawn\"}") == base, "worldspawn alone: the world, one client and the world's own edicts");
+    CHECK(peak("{\"classname\" \"worldspawn\" \"netname\" \"#C1A0\"}") == base + 1, "a chapter title adds CWorld's env_message");
+    CHECK(peak("{\"classname\" \"worldspawn\"}{\"classname\" \"func_wall\"}") == base + 1, "a func_wall holds a slot");
+    CHECK(peak("{\"classname\" \"light\"}{\"classname\" \"light_spot\"}{\"classname\" \"light_environment\"}") == base,
           "unnamed lights remove themselves in CLight::Spawn");
-    CHECK(peak("{\"classname\" \"light\" \"targetname\" \"sw1\"}") == 3, "a named light stays (it can be switched)");
-    CHECK(peak("{\"classname\" \"info_null\"}{\"classname\" \"info_node\"}{\"classname\" \"info_node_air\"}") == 2,
+    CHECK(peak("{\"classname\" \"light\" \"targetname\" \"sw1\"}") == base + 1, "a named light stays (it can be switched)");
+    CHECK(peak("{\"classname\" \"info_null\"}{\"classname\" \"info_node\"}{\"classname\" \"info_node_air\"}") == base,
           "info_null and nodes remove themselves in Spawn");
-    CHECK(peak("{\"classname\" \"infodecal\"}") == 3, "infodecal holds its slot until its first think");
-    CHECK(peak("{\"origin\" \"0 0 0\"}") == 2, "a block with no classname takes no slot");
+    CHECK(peak("{\"classname\" \"infodecal\"}") == base + 1, "infodecal holds its slot until its first think");
+    CHECK(peak("{\"origin\" \"0 0 0\"}") == base, "a block with no classname takes no slot");
+    CHECK(peak("{\"classname\" \"env_message\" \"message\" \"a } b {\"}{\"classname\" \"func_wall\"}") == base + 2,
+          "braces inside a quoted value do not end or start a block");
 
     // --- per-allocation overhead: 24-byte header + sentinel, dlmalloc chunk ---
     CHECK(nv2aZoneChunk(0) == 32, "an empty allocation still costs a header and a chunk");
@@ -58,8 +62,9 @@ int main() {
         Nv2aWorldLumps small;
         small.faces = 20 * 1000;
         CHECK(nv2aCheckBeforeBake(small, 500, 900).ok, "a small map with 500 slots fits");
-        const Nv2aFit tooMany = nv2aCheckBeforeBake(small, 901, 900);
-        CHECK(!tooMany.ok && tooMany.reason.find("entities") != std::string::npos, "901 slots of 900 fails, and says why");
+        CHECK(nv2aCheckBeforeBake(small, 900 - kXboxEdictHeadroom, 900).ok, "exactly the headroom left fits");
+        const Nv2aFit tooMany = nv2aCheckBeforeBake(small, 901 - kXboxEdictHeadroom, 900);
+        CHECK(!tooMany.ok && tooMany.reason.find("entities") != std::string::npos, "one slot into the headroom fails, and says why");
 
         Nv2aWorldLumps huge;
         huge.lighting = 40ull * kMiB; // the engine's lighting copy alone is over budget

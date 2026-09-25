@@ -454,6 +454,7 @@ typedef struct
 } nv2a_map_face_t;
 
 #define NV2A_FACE_NO_TEXTURE 0xFFFFu
+STATIC_ASSERT( NV2A_MAP_MAX_TEXTURES < NV2A_FACE_NO_TEXTURE, "a texture index must fit nv2a_map_face_t::texture below the sentinel" );
 
 /* X9-U: the distinct vertex-chunk bases of the current map, in the order
    faces first use them; nv2a_map_face_t::chunk indexes this. A retail map
@@ -3530,6 +3531,8 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 	uint32_t texture_count, batch_count;
 	uint32_t i;
 
+	nv2a_map_chunk_count = 0; /* X9-U: this map's chunk table starts empty, whatever came before */
+
 	/* Every raw index must reference a real slot in the vertex array
 	   - malformed data must fail cleanly here, not be trusted into a GPU
 	   attribute-array read out of bounds later. (Every baked vertex is
@@ -3909,12 +3912,20 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 					if( !tiling_ok )
 						break;
 					/* X9-U: whole units, rounded outward, so the stored box
-					   always contains the face. */
+					   always contains the face. A face reaching past int16
+					   (the engine allows +-32768, BOGUS_RANGE) cannot be
+					   stored that way, so it refuses the table rather than
+					   clamping the box inward (nv2a-xbox-specialist, X9-U
+					   review). No retail map comes close. */
 					for( c = 0; c < 3; c++ )
 					{
+						if( floorf( fmins[c] ) < -32768.0f || ceilf( fmaxs[c] ) > 32767.0f )
+							tiling_ok = false;
 						faces[i].mins[c] = (int16_t)bound( -32768.0f, floorf( fmins[c] ), 32767.0f );
 						faces[i].maxs[c] = (int16_t)bound( -32768.0f, ceilf( fmaxs[c] ), 32767.0f );
 					}
+					if( !tiling_ok )
+						break;
 				}
 
 				faces[i].index_begin = start_index;
@@ -4763,15 +4774,40 @@ static void R_EndFrame( void )
    keeps the tables for one retry, unless it was the retry. */
 static void nv2a_try_pending_upload( void )
 {
-	/* X9-U: the tables first, once; a failure there is final (the archive
-	   is malformed or the map does not fit), and frees everything. */
+	/* X9-U: the tables first. R_NewMap runs before the client frees the
+	   previous map's unused models (Mod_FreeUnused, cl_parse.c), so a
+	   table build that runs out of memory gets the same one retry from
+	   R_EndFrame as the GPU buffers (nv2a-xbox-specialist, X9-U review); a
+	   malformed archive just fails twice. nv2a_load_map_geometry frees the
+	   map's resources on failure, pending included, so what the retry
+	   needs is kept here and put back. */
 	if( !nv2a_pending_upload.tables_built )
 	{
+		static mpak_header_t header;
+		static byte first_sector[MPAK_SECTOR_SIZE];
 		char name[sizeof( nv2a_pending_upload.name )];
+		const model_t *owner = nv2a_map_owner;
+		const qboolean retried = nv2a_pending_upload.retried;
 
 		memcpy( name, nv2a_pending_upload.name, sizeof( name ));
-		if( !nv2a_load_map_geometry( &nv2a_pending_upload.header, nv2a_pending_upload.first_sector, name ))
-			return; /* nv2a_load_map_geometry freed the map resources, pending included */
+		memcpy( &header, &nv2a_pending_upload.header, sizeof( header ));
+		memcpy( first_sector, nv2a_pending_upload.first_sector, sizeof( first_sector ));
+		if( !nv2a_load_map_geometry( &header, first_sector, name ))
+		{
+			if( retried )
+			{
+				gEngfuncs.Con_Printf( "ref_nv2a: %s's tables still could not be built - not drawing its real geometry\n", name );
+				return;
+			}
+			nv2a_map_owner = owner;
+			memcpy( &nv2a_pending_upload.header, &header, sizeof( header ));
+			memcpy( nv2a_pending_upload.first_sector, first_sector, sizeof( first_sector ));
+			memcpy( nv2a_pending_upload.name, name, sizeof( name ));
+			nv2a_pending_upload.pending = true;
+			nv2a_pending_upload.tables_built = false;
+			nv2a_pending_upload.retried = true; /* R_EndFrame tries once more */
+			return;
+		}
 		nv2a_pending_upload.tables_built = true;
 	}
 

@@ -60,7 +60,7 @@ typedef struct
 typedef struct cl_entity_s cl_entity_t;
 
 // Resonance3D (docs/r3d/divergences.md #116): on the Original Xbox the
-// client allocates one cl_entity_t per edict slot (1,100), and this
+// client allocates one cl_entity_t per edict slot (900), and this
 // position history was 1,792 of its ~3,000 bytes. The engine reads it only
 // through HISTORY_MASK, for interpolation that looks back a few updates;
 // 16 entries still cover well over the ~100 ms it needs. The engine

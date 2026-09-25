@@ -51,7 +51,10 @@ for map in "${MAPS[@]}"; do
 	mismatches="$(printf '%s' "$line" | awk '{print $7}')"
 	edges="$(printf '%s' "$line" | awk '{print $5}')"
 	total_edges=$((total_edges + edges))
-	if [ "$mismatches" != "0" ]; then
+	if [ "$edges" = "0" ]; then
+		echo "FAIL $line (no edge planes compared)"
+		failed=$((failed + 1))
+	elif [ "$mismatches" != "0" ]; then
 		echo "FAIL $line"
 		failed=$((failed + 1))
 	else

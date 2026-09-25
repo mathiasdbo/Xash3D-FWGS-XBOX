@@ -1150,6 +1150,13 @@ namespace formats {
                 checkBaked("baked vertices", vertexAt, mVertices.data(), static_cast<uint64_t>(mVertices.size()) * sizeof(Vertex));
                 checkBaked("baked indices", indexAt, mIndices.data(), static_cast<uint64_t>(mIndices.size()) * sizeof(uint16_t));
                 checkBaked("face draw cmds", drawCmdAt, mFaceDrawCmds.data(), static_cast<uint64_t>(mFaceDrawCmds.size()) * sizeof(FaceDrawCmd));
+                // X9-U: ref/nv2a stores a face's index count in 16 bits
+                // (nv2a_map_face_t) and refuses the whole face table past it.
+                for (const FaceDrawCmd& cmd : mFaceDrawCmds)
+                    if (cmd.index_count > 0xFFFFu) {
+                        fail("a face has " + std::to_string(cmd.index_count) + " indices; ref/nv2a stores at most 65,535 per face");
+                        break;
+                    }
                 checkBaked("lightmap atlas", lightmapAt, mLightmapAtlasData.data(), mLightmapAtlasData.size());
                 checkBaked("face info", faceInfoAt, mFaceInfos.data(), static_cast<uint64_t>(mFaceInfos.size()) * sizeof(MpakFaceInfo));
                 checkBaked("extra light blocks", extraLightBlocksAt, mExtraLightBlocks.data(), static_cast<uint64_t>(mExtraLightBlocks.size()) * sizeof(MpakExtraLightBlock));

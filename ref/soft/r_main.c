@@ -1430,7 +1430,14 @@ qboolean R_AllocStatics( void )
 	vid_ptr = calloc( 1, sizeof( *vid_ptr ));
 	r_leafkeys = calloc( MAX_MAP_LEAFS, sizeof( *r_leafkeys ));
 	r_warpbuffer = calloc( WARP_WIDTH * WARP_HEIGHT, 1 );
-	return vid_ptr && r_leafkeys && r_warpbuffer && R_AllocImageStatics() && R_AllocStudioStatics();
+	if( vid_ptr && r_leafkeys && r_warpbuffer && R_AllocImageStatics() && R_AllocStudioStatics())
+		return true;
+
+	// All or nothing: R_Shutdown only skips R_ShutdownImages when vid_ptr
+	// is NULL, so a part-way failure must not leave vid_ptr set with
+	// r_images NULL (upstream-fidelity-specialist, X9-U review).
+	R_FreeStatics();
+	return false;
 }
 
 void R_FreeStatics( void )

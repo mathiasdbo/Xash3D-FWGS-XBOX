@@ -259,7 +259,7 @@ typedef struct mextrasurf_s
 #endif
 
 #if XASH_XBOX
-	// Resonance3D (docs/r3d/divergences.md #110): the engine allocates one
+	// Resonance3D (docs/r3d/divergences.md #110, #116): the engine allocates one
 	// of these per world surface in a single block (Mod_LoadSurfaces), 324
 	// bytes each - 13 MB on rocket_frenzy's 41,000 surfaces, more than the
 	// console had left. On Xbox only ref/soft and ref/nv2a are linked. The
@@ -605,7 +605,7 @@ typedef struct
 
 STATIC_CHECK_SIZEOF( mnode_t, 52, 72 );
 #if XASH_XBOX
-STATIC_CHECK_SIZEOF( mextrasurf_t, 112, 152 ); // Resonance3D: the slimmer Xbox layout above (divergences.md #110)
+STATIC_CHECK_SIZEOF( mextrasurf_t, 112, 152 ); // Resonance3D: the slimmer Xbox layout above (divergences.md #110, #116)
 #else
 STATIC_CHECK_SIZEOF( mextrasurf_t, 324, 496 );
 #endif

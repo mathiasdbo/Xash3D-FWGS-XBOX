@@ -36,7 +36,13 @@ namespace formats {
     // nv2aEngineWorldBytes below), and the precaches and entity spawns
     // between that and R_NewMap took 6.2-8.1 MiB (10.1 on rocket_frenzy).
     // Re-measure when the engine's memory changes; the constants are only
-    // as good as the build they came from.
+    // as good as the build they came from. Known limits (nv2a-xbox-
+    // specialist, X9-U review): all ten were cold loads, not a changelevel
+    // with the previous map's models still resident; the precache term is
+    // flat though it varies by map; and C3 counts bytes, while the lightmap,
+    // texture data and vertex buffer each need one physically contiguous
+    // run. Roadmap X9 item 12 measures transitions and the largest
+    // contiguous run.
     constexpr uint64_t kMiB = 1024ull * 1024ull;
     constexpr uint64_t kXboxFreeAtWorldLoadBytes = 36ull * kMiB + kMiB / 4; // 36.25 MiB, the lowest measured
     constexpr uint64_t kXboxPrecacheBytes = 9ull * kMiB;                    // above the 8.1 MiB highest of the nine maps that load
@@ -62,7 +68,7 @@ namespace formats {
 
     // The engine's world model once Mod_LoadBrushModel has built it, with
     // the Xbox's 32-bit struct sizes: msurface_t 92, mextrasurf_t 112
-    // (divergence #110), one 28-byte mfacebevel_t per face in one block
+    // (divergences #110, #116), one 28-byte mfacebevel_t per face in one block
     // (#113), mnode_t 52, mleaf_t 60, mtexinfo_t 44, texture_t 68, medge16
     // and mclipnode16 8, mplane_t 20, dmodel_t 64; plus the engine's own
     // copies of visibility, lighting and entities, hull 1's clipnodes and
@@ -97,39 +103,53 @@ namespace formats {
         return 4ull + 44ull * textures;
     }
 
-    // Edict slots at the load's peak: the world, one client, and every map
-    // entity that survives its own Spawn. The HL SDK removes these in
-    // Spawn, and during the load the engine reuses a freed slot at once
-    // (SV_AllocEdict, sv.time < 2): light, light_spot and
-    // light_environment without a targetname (CLight::Spawn), info_null
-    // (CNullEntity::Spawn) and info_node / info_node_air (CNodeEnt::Spawn).
-    // Everything else holds its slot, including infodecal, which removes
-    // itself only on its first think. Measured: disposal 882 loads and
-    // rocket_frenzy 988 does not, with the retail limit of 900.
+    // Edict slots at the load's peak: the world, one client, the edicts the
+    // SDK's world creates for itself, and every map entity that survives
+    // its own Spawn. The HL SDK removes these in Spawn, and during the load
+    // the engine reuses a freed slot at once (SV_AllocEdict, sv.time < 2):
+    // light, light_spot and light_environment without a targetname
+    // (CLight::Spawn), info_null (CNullEntity::Spawn) and info_node /
+    // info_node_air (CNodeEnt::Spawn). Everything else holds its slot,
+    // including infodecal, which removes itself only on its first think.
+    // CWorld::Precache adds a soundent and four bodyque edicts, and an
+    // env_message when worldspawn has a netname (deps/hlsdk/dlls/world.cpp).
+    // The engine reserves maxclients + 1 slots, so hosting N players takes
+    // N - 1 more than this count (roadmap X9 item 13). Not counted: child
+    // edicts some entities create in Spawn (an env_laser's sprite). Measured:
+    // disposal (887) loads and rocket_frenzy (993) does not, at 900.
+    constexpr uint32_t kSdkWorldEdicts = 5;      // soundent + 4 bodyque
+    constexpr uint32_t kXboxEdictHeadroom = 8;   // slots left for what spawns at run time (projectiles, gibs, corpses)
+
     inline uint32_t nv2aPeakEdicts(const char* entities, size_t length) {
-        uint32_t count = 2; // the world and one client
+        uint32_t count = 2 + kSdkWorldEdicts; // the world, one client, the world's own edicts
         size_t i = 0;
+        // One entity block: {"key" "value" ...}. Braces inside a quoted
+        // value belong to the value, not the block.
         while (i < length) {
             if (entities[i] != '{') { ++i; continue; }
-            size_t end = i + 1;
-            while (end < length && entities[end] != '}') ++end;
-            std::string block(entities + i + 1, end - i - 1);
-            auto value = [&block](const char* key) -> std::string {
-                const std::string k = std::string("\"") + key + "\"";
-                size_t p = block.find(k);
-                if (p == std::string::npos) return {};
-                p = block.find('"', p + k.size());
-                if (p == std::string::npos) return {};
-                const size_t q = block.find('"', p + 1);
-                return q == std::string::npos ? std::string() : block.substr(p + 1, q - p - 1);
-            };
-            const std::string cls = value("classname");
-            const bool unnamed = value("targetname").empty();
-            const bool removed = cls.empty() || cls == "worldspawn" || cls == "info_null" || cls == "info_node" || cls == "info_node_air"
-                || (unnamed && (cls == "light" || cls == "light_spot" || cls == "light_environment"));
-            if (!removed)
+            std::string cls, targetname, netname, key;
+            bool haveKey = false;
+            size_t j = i + 1;
+            while (j < length && entities[j] != '}') {
+                if (entities[j] != '"') { ++j; continue; }
+                const size_t start = ++j;
+                while (j < length && entities[j] != '"') ++j;
+                const std::string token(entities + start, j - start);
+                ++j; // past the closing quote
+                if (!haveKey) { key = token; haveKey = true; continue; }
+                haveKey = false;
+                if (key == "classname") cls = token;
+                else if (key == "targetname") targetname = token;
+                else if (key == "netname") netname = token;
+            }
+            if (cls == "worldspawn") {
+                if (!netname.empty())
+                    ++count; // CWorld::Precache's env_message for the chapter title
+            } else if (!cls.empty() && cls != "info_null" && cls != "info_node" && cls != "info_node_air"
+                       && !(targetname.empty() && (cls == "light" || cls == "light_spot" || cls == "light_environment"))) {
                 ++count;
-            i = end + 1;
+            }
+            i = j + 1;
         }
         return count;
     }
@@ -150,10 +170,11 @@ namespace formats {
     // Before the bake: entity slots and C1, from the source map.
     inline Nv2aFit nv2aCheckBeforeBake(const Nv2aWorldLumps& l, uint32_t peakEdicts, uint32_t maxEdicts) {
         Nv2aFit f;
-        if (peakEdicts > maxEdicts) {
+        if (peakEdicts + kXboxEdictHeadroom > maxEdicts) {
             f.ok = false;
-            f.reason += "entities: " + std::to_string(peakEdicts) + " edict slots at the load's peak, the game allows "
-                + std::to_string(maxEdicts) + " (max_edicts)\n";
+            f.reason += "entities: " + std::to_string(peakEdicts) + " edict slots at the load's peak + "
+                + std::to_string(kXboxEdictHeadroom) + " for run time, the game allows " + std::to_string(maxEdicts)
+                + " (max_edicts)\n";
         }
         const uint64_t engine = nv2aEngineWorldBytes(l) + nv2aClassicPrefixBytes(l);
         if (engine + kXboxLoadMarginBytes > kXboxFreeAtWorldLoadBytes) {

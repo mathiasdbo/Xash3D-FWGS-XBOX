@@ -17,8 +17,10 @@ namespace {
 // X9-U: the game's edict limit, as the engine resolves it
 // (filesystem/gameinfo.c FS_ParseGameInfo): gameinfo.txt's max_edicts, or
 // liblist.gam's edicts when there is no gameinfo.txt, clamped to
-// MIN_EDICTS..MAX_EDICTS (600..8196), else DEFAULT_MAX_EDICTS
-// (common/defaults.h, 1200). The retail valve/gameinfo.txt sets 900.
+// MIN_EDICTS..MAX_EDICTS (64..8192, engine/common/protocol.h), else
+// DEFAULT_MAX_EDICTS (common/defaults.h, 1200). The retail
+// valve/gameinfo.txt sets 900. This reads the game folder the baker is
+// given - the staged Xbox disc copies the same gameinfo.txt.
 uint32_t readGameMaxEdicts(const std::string& gameDir) {
     auto readKey = [](const std::string& path, const char* key, uint32_t& out) -> bool {
         std::ifstream f(path);
@@ -47,7 +49,7 @@ uint32_t readGameMaxEdicts(const std::string& gameDir) {
     } else {
         readKey(gameDir + "/liblist.gam", "edicts", value);
     }
-    return std::min<uint32_t>(std::max<uint32_t>(value, 600), 8196);
+    return std::min<uint32_t>(std::max<uint32_t>(value, 64), 8192);
 }
 
 // AssetManifest: the replacement for embedding models/sprites/sounds into
