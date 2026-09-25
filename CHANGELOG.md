@@ -5,6 +5,21 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed — the Xbox game no longer hangs at boot with every map baked (X9-V)
+
+With all 124 baked maps in the game folder, the Xbox build froze on the
+boot logo. Each map archive keeps its file open for the whole session, and
+the Xbox file layer allowed only 64 open files, so the archives used them
+all up before the game could read its config. The limit is now 256 (about
+2 KiB of memory), enough for every retail map plus the files the game opens
+while it plays.
+
+- Level transitions measured in xemu: a deathmatch `map` cycle, and a
+  19-minute session played by hand from Black Mesa Inbound to Unforeseen
+  Consequences, show no memory fragmentation and no drift between loads
+  (roadmap X9 item 12). The game held 60 fps on every map but `c1a0b`
+  (54 fps average).
+
 ### Changed — more memory for every Xbox map; the baker refuses maps that cannot load (X9-U)
 
 `rocket_frenzy` was the one retail map that did not load on the Xbox. The

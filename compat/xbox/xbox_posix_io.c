@@ -29,11 +29,20 @@ anything else here changes.
 #include <stdio.h>   /* SEEK_SET / SEEK_CUR / SEEK_END */
 #include <stdint.h>  /* intptr_t, for _get_osfhandle */
 
-/* Console, so a small table is plenty. filesystem/ keeps few files open at a
- * time, and XASH_REDUCE_FD exists upstream precisely for platforms that cannot
- * afford many. 0-2 are reserved so a descriptor is never confused with a
- * standard stream. */
-#define R3D_MAX_FDS   64
+/* Sized for the archives, not for loose files. Every mounted archive holds
+ * one descriptor for the whole session (filesystem/mpak.c keeps its handle
+ * open, as pak.c does upstream when XASH_REDUCE_FD is off), and the engine
+ * mounts every .mpak in the game folder at startup - one per baked map, 124
+ * for retail Half-Life today. The old 64-slot table ran out before the
+ * config was read and the game hung on the boot logo (found in X9 item 12:
+ * all 61 usable slots, fds 3-63, taken). 256 leaves room for every retail
+ * map plus the loose files, WADs and sounds open at once, and costs ~2.3 KiB
+ * of tables (HANDLE + char + FILE* per slot). Only open(), dup(), fileno()
+ * and _r3d_release_stream_fd scan the table, none of them per frame. The
+ * limit is still fixed: a game folder with ~250 archives would hang the same
+ * way (docs/r3d/fork-plan.md X9 item 12). 0-2 are reserved so a descriptor
+ * is never confused with a standard stream. */
+#define R3D_MAX_FDS   256
 #define R3D_FIRST_FD  3
 
 static HANDLE r3d_fds[R3D_MAX_FDS];
@@ -964,7 +973,7 @@ and engine/common/sys_con.c:126 stores the result in s_ld.logfileno and then
 passes it to write() at :251 and :257 - resolved through compat/xbox/io.h to
 the write() above, which treats its argument as an index into r3d_fds.
 
-An NT handle is not a descriptor index. Small handles land inside [3, 64) and
+An NT handle is not a descriptor index. Small handles land inside [3, R3D_MAX_FDS) and
 would have written console output into whatever unrelated file occupied that
 slot; larger ones fail FD_VALID and the log body vanishes silently, because
 both call sites discard the error. Only the header and footer, which go through
@@ -1038,7 +1047,7 @@ ONLY by this file's own close(fd) - never by fclose() alone, since fclose
 is pdclib's own function with no idea this table exists. opusfile's
 default close callback is plain fclose. Found in review: without this,
 every seekable opusfile open permanently consumed one of R3D_MAX_FDS - 3
-= 61 slots for the rest of the process's life, and after enough of them
+(then 61) slots for the rest of the process's life, and after enough of them
 fileno()/_filelengthi64 would start failing even though the underlying
 file was genuinely closed - not yet exercised at runtime (nothing calls
 opusfile from the engine yet), but a real bug regardless of when it fires.

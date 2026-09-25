@@ -8860,6 +8860,43 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
     a GPU arena reserved once at `R_Init` and sub-allocated per map, and
     `Mod_FreeUnused` before the upload.
 
+    **Measured (X9-V, xemu, probe build):**
+    - *Deathmatch `map` cycle* (crossfire, disposal, pool_party,
+      contamination, boot_camp, disposal, crossfire, disposal), free
+      MiB at `R_NewMap` / largest contiguous block / after the upload:
+      27.7/27.7/25.5, 20.5/20.4/13.1, 20.6/20.6/15.4, 21.3/21.2/15.5,
+      24.6/24.6/21.1, 20.5/20.5/13.2, 25.2/25.2/23.3, 20.2/20.2/13.0.
+      Every load became ready and the largest block stays within 0.1 MiB
+      of free memory, so there is no fragmentation. `disposal` loses
+      0.3 MiB over two revisits; `crossfire` starts 2.5 MiB lower on its
+      second load than on the first boot (not yet attributed).
+    - *Played by hand with every archive staged*, `c0a0` through `c1a0c`
+      (Unforeseen Consequences), 19 minutes, 14 loads including a
+      `c1a0`/`c1a0d` back-and-forth through a landmark: 22.3-26.6 MiB
+      free at each map start, the largest block equal to free every time
+      (0.1 MiB short once), revisits back at the same figures. Level
+      changes take 2.0-3.9 s. Frame rate holds at the 60 Hz vsync (59.5-
+      60.2 fps per map) except `c1a0b` (54.4 average, 1% low 29 fps);
+      three single frames of 261-416 ms during play, none repeating. This
+      covers the single-player chain the scripted `changelevel` run was
+      meant to measure.
+    - *Conclusion:* no drift and no fragmentation across level changes, so
+      the GPU arena and the early `Mod_FreeUnused` are not needed. Open:
+      `c1a0b`'s frame rate, and the 2.5 MiB `crossfire` difference.
+    - *Found on the way:* with every retail archive in the game folder
+      the game hung on the boot logo. Each mounted `.mpak` keeps its file
+      open and the Xbox POSIX layer had 64 descriptors
+      (`compat/xbox/xbox_posix_io.c`); 124 archives took all of them
+      before the config was read. Raised to 256. Still open: the limit is
+      fixed and running out still hangs silently, so a folder of ~250
+      archives would hang again. Cheap guards are a message when the
+      table is full or a baker check on archives per folder; the
+      structural fix is opening each archive on demand in
+      `filesystem/mpak.c` instead of holding its handle for the session.
+      Each open file also costs a few hundred bytes of kernel pool, which
+      the heap probe does not see (~25-60 KiB for 124 archives, estimated;
+      measure on hardware with `MmQueryStatistics`).
+
 13. **Offline PHS for Xbox-hosted multiplayer.** With `maxclients` above 1
     the engine builds the map's PHS at load (`Mod_CalcPHS`,
     `mod_bmodel.c`): a transient of about `2 x rowbytes x (numleafs + 1)`
