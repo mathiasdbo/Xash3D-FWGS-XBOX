@@ -71,6 +71,8 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	const uint32_t lenLighting = 48;
 	const uint32_t lenMiptex = 4 + 4 + 40; // dmiptexlump_t{1} + one header-only miptex entry
 	const uint32_t lenExtraLightBlocks = nv2a ? 2 * 20u : 0u; // 2 MpakExtraLightBlock records
+	const uint32_t lenPhsOffsets = ( nv2a && targetXbox ) ? 3 * 4u : 0u; // v13: 3 rows (visleafs 2), Xbox only
+	const uint32_t lenPhsData = ( nv2a && targetXbox ) ? 9u : 0u;         // v13: three compressed rows
 	const uint32_t lenFaceVertexBase = nv2a ? 2 * 4u : 0u; // v11: one base per face (both faces in chunk 0 here, as a multi-chunk map would ship)
 	const uint32_t lightmapW = 4, lightmapH = 4, lightmapLayers = nv2a ? 1u : 0u;
 	const uint32_t lenLightmap = nv2a ? lightmapW * lightmapH * 4 : 0u;
@@ -99,6 +101,7 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	fs_offset_t vertexesOffset, edgesOffset, surfedgesOffset, facesOffset, lightingOffset, miptexOffset;
 	fs_offset_t extraLightBlocksOffset;
 	fs_offset_t faceVertexBaseOffset;
+	fs_offset_t phsOffsetsOffset, phsDataOffset;
 	byte *buf;
 
 	memset( &sector, 0, sizeof( sector ));
@@ -129,6 +132,8 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	sector.desc.lenMiptex = lenMiptex;
 	sector.desc.lenExtraLightBlocks = lenExtraLightBlocks;
 	sector.desc.lenFaceVertexBase = lenFaceVertexBase;
+	sector.desc.lenPhsOffsets = lenPhsOffsets;
+	sector.desc.lenPhsData = lenPhsData;
 
 	// Independently walk the same section order mpak_layout.c documents
 	// (its own header comment, verified against PakManager.cpp's save()),
@@ -196,6 +201,12 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	cursor += RoundUpSector( lenExtraLightBlocks );
 	faceVertexBaseOffset = cursor;
 	cursor += RoundUpSector( lenFaceVertexBase );
+	// v13: the PHS offsets, then its rows, after every other section.
+	phsOffsetsOffset = cursor;
+	cursor += RoundUpSector( lenPhsOffsets );
+	phsDataOffset = cursor;
+	cursor += RoundUpSector( lenPhsData );
+	sector.desc.phsOffset = lenPhsOffsets ? (uint32_t)phsOffsetsOffset : 0u;
 
 	// The dheader_t: the same offsets, in bspfile.h's lump order.
 	sector.bsp.version = HLBSP_VERSION;
@@ -272,6 +283,8 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 		}
 		memset( buf + extraLightBlocksOffset, 0x99, lenExtraLightBlocks );
 		memset( buf + faceVertexBaseOffset, 0x77, lenFaceVertexBase );
+		memset( buf + phsOffsetsOffset, 0x5A, lenPhsOffsets );
+		memset( buf + phsDataOffset, 0xA5, lenPhsData );
 	}
 
 	*outSize = cursor;
@@ -433,6 +446,20 @@ static qboolean TestValidArchive( qboolean targetXbox, qboolean nv2a )
 			printf( "TestValidArchive(%s): faceVertexBase lump resolved to the wrong bytes\n", Label( targetXbox, nv2a ));
 			ok = false;
 		}
+
+		// v13: the PHS sections, Xbox only, found where phsOffset says.
+		if( layout.phsOffsets.length != header.lenPhsOffsets || layout.phsData.length != header.lenPhsData ||
+			( header.lenPhsOffsets && ( layout.phsOffsets.offset != (fs_offset_t)header.phsOffset ||
+			buf[layout.phsOffsets.offset] != 0x5A || buf[layout.phsData.offset] != 0xA5 )))
+		{
+			printf( "TestValidArchive(%s): PHS sections resolved to the wrong bytes\n", Label( targetXbox, nv2a ));
+			ok = false;
+		}
+		if( targetXbox != ( header.lenPhsOffsets != 0 ))
+		{
+			printf( "TestValidArchive(%s): the PHS belongs to the Xbox archive only\n", Label( targetXbox, nv2a ));
+			ok = false;
+		}
 	}
 	else if( layout.textureDir.length != 0 || layout.textureData.length != 0 || layout.batches.length != 0 ||
 		layout.faceRemap.length != 0 || layout.array256.length != 0 || layout.lightmapAtlas.length != 0 ||
@@ -564,6 +591,42 @@ static qboolean TestRejectsNonDivisibleExtraLightBlocksLength( void )
 	free( buf );
 	if( !rejected ) printf( "TestRejectsNonDivisibleExtraLightBlocksLength: accepted\n" );
 	return rejected;
+}
+
+// v13: phsOffset must name exactly where the walk puts the PHS, and the
+// offsets and rows come as a pair.
+static qboolean TestRejectsBadPhsFields( void )
+{
+	fs_offset_t fileSize;
+	byte *buf = BuildMinimalArchive( true, true, &fileSize, NULL ); // Xbox nv2a: the one archive with a PHS
+	mpak_header_t base, header;
+	mpak_layout_t layout;
+	qboolean ok = true;
+
+	memcpy( &base, buf + MPAK_DESCRIPTOR_OFFSET, sizeof( base ));
+
+	header = base;
+	header.phsOffset += MPAK_SECTOR_SIZE;
+	if( Mpak_ComputeLayout( &header, fileSize, &layout )) { printf( "TestRejectsBadPhsFields: moved phsOffset accepted\n" ); ok = false; }
+
+	header = base;
+	header.lenPhsData = 0;
+	if( Mpak_ComputeLayout( &header, fileSize, &layout )) { printf( "TestRejectsBadPhsFields: offsets without rows accepted\n" ); ok = false; }
+
+	header = base;
+	header.lenPhsOffsets = 0;
+	if( Mpak_ComputeLayout( &header, fileSize, &layout )) { printf( "TestRejectsBadPhsFields: rows without offsets accepted\n" ); ok = false; }
+
+	header = base;
+	header.lenPhsOffsets += 1; // no longer whole uint32_t rows
+	if( Mpak_ComputeLayout( &header, fileSize, &layout )) { printf( "TestRejectsBadPhsFields: ragged offsets accepted\n" ); ok = false; }
+
+	header = base;
+	header.lenPhsOffsets = header.lenPhsData = 0; // no PHS, but a stale offset left behind
+	if( Mpak_ComputeLayout( &header, fileSize, &layout )) { printf( "TestRejectsBadPhsFields: phsOffset without a PHS accepted\n" ); ok = false; }
+
+	free( buf );
+	return ok;
 }
 
 static qboolean TestRejectsLightmapSizeMismatch( void )
@@ -1125,6 +1188,7 @@ int main( void )
 	ok &= TestRejectsNonDivisibleFacesLength();
 	ok &= TestRejectsNonDivisibleExtraLightBlocksLength();
 	ok &= TestRejectsLightmapSizeMismatch();
+	ok &= TestRejectsBadPhsFields();
 	ok &= TestRejectsUint32MaxRawLumpLength();
 	ok &= TestRejectsOverflowingVertexCount();
 	ok &= TestRejectsPaddedExtentOverflow();

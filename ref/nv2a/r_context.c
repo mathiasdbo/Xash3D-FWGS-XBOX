@@ -1134,7 +1134,9 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 	/* X9-K sky-skip fix: only MpakFaceInfo::flags is read. */
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceInfo, &out->faceInfo )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenExtraLightBlocks, &skip )) return false;
-	/* X9-S (MPAK v11): the per-face vertex-chunk bases, the last lump. */
+	/* X9-S (MPAK v11): the per-face vertex-chunk bases, the last lump this
+	   mirror reads. The v13 PHS sections follow it; they are the engine's
+	   (Mod_ReadBakedPHS), and this walk has no end-of-file check to trip. */
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceVertexBase, &out->faceVertexBase )) return false;
 
 	return true;

@@ -91,6 +91,7 @@ int main(int argc, char** argv) {
     ok &= CheckDivisible("lenFaceInfo", h.lenFaceInfo, sizeof(MpakFaceInfo));
     ok &= CheckDivisible("lenExtraLightBlocks", h.lenExtraLightBlocks, sizeof(MpakExtraLightBlock));
     ok &= CheckDivisible("lenFaceVertexBase", h.lenFaceVertexBase, sizeof(uint32_t));
+    ok &= CheckDivisible("lenPhsOffsets", h.lenPhsOffsets, sizeof(uint32_t));
     ok &= CheckDivisible("lenTextureDir", h.lenTextureDir, sizeof(MpakTextureInfo));
     ok &= CheckDivisible("lenBatches", h.lenBatches, sizeof(MpakTextureBatch));
     ok &= CheckDivisible("lenFaceRemap", h.lenFaceRemap, sizeof(uint32_t));
@@ -146,6 +147,19 @@ int main(int argc, char** argv) {
         Place(cursor, h.lenFaceInfo);
         Place(cursor, h.lenExtraLightBlocks);
         Place(cursor, h.lenFaceVertexBase);
+        // v13: the offline PHS, after every other section, where phsOffset says.
+        if ((h.lenPhsOffsets == 0) != (h.lenPhsData == 0)) {
+            std::fprintf(stderr, "INVALID: PHS offsets (%u bytes) and rows (%u bytes) must both be present or both absent\n",
+                h.lenPhsOffsets, h.lenPhsData);
+            ok = false;
+        }
+        if (h.phsOffset != (h.lenPhsOffsets ? cursor : 0)) {
+            std::fprintf(stderr, "INVALID: phsOffset %u, but the PHS sits at %llu\n", h.phsOffset,
+                static_cast<unsigned long long>(cursor));
+            ok = false;
+        }
+        Place(cursor, h.lenPhsOffsets);
+        Place(cursor, h.lenPhsData);
 
         if (cursor != fileSize) {
             std::fprintf(stderr,
@@ -191,5 +205,8 @@ int main(int argc, char** argv) {
     std::printf("lenLighting: %u, lenMiptex: %u\n", h.lenLighting, h.lenMiptex);
     std::printf("lenExtraLightBlocks: %u (%zu record(s))\n", h.lenExtraLightBlocks,
         h.lenExtraLightBlocks / sizeof(MpakExtraLightBlock));
+    std::printf("lenFaceVertexBase: %u\n", h.lenFaceVertexBase);
+    std::printf("PHS: phsOffset %u, lenPhsOffsets %u (%u rows), lenPhsData %u\n", h.phsOffset, h.lenPhsOffsets,
+        static_cast<unsigned>(h.lenPhsOffsets / sizeof(uint32_t)), h.lenPhsData);
     return 0;
 }

@@ -114,6 +114,17 @@ namespace formats {
     // IMPORTANT below) rather than removed, since removing a field is a
     // version bump this scope change does not otherwise need.
     //
+    // v12 -> v13: the map's PHS, built offline (PhsBuilder.h), appended
+    // after every other section as two sector-padded sections: the row
+    // offsets (uint32_t[visleafs + 1], world.phsofs) and the compressed
+    // rows (world.compressed_phs). Three header fields are appended:
+    // phsOffset, the absolute byte offset of the offsets section, so the
+    // engine can find it without the layout walk it cannot link (the Xbox
+    // is one image, and filesystem/mpak_layout.c already lives in it once),
+    // and the two lengths. The data section starts at the next 2048-byte
+    // boundary after the offsets. All three are 0 when the map has no PHS
+    // (no vis data, or one PhsBuilder.h cannot reproduce). Xbox target only.
+    //
     // v11 -> v12: the SAME sections and header, in a new order - every
     // classic BSP lump first (visibility, nodes, leaves, marksurfaces,
     // planes, clipnodes, models, entities, texinfo, vertexes, edges,
@@ -280,7 +291,7 @@ namespace formats {
         // overrides this field with MPAK_UI_BACKGROUND_VERSION instead - see
         // that constant's own doc comment above for why it needs a number
         // that isn't this one.
-        uint32_t version = 12;
+        uint32_t version = 13;
         uint32_t headerSize = 0;      // sizeof(MpakHeader6); set in PakManager::save just before writing
         uint32_t bakerBuildId = MPAK_BAKER_BUILD_ID;
         uint32_t flags = 0; // 1 = Xbox, 0 = PC
@@ -345,13 +356,18 @@ namespace formats {
 
         // --- MPAKv11 addition (see the v10 -> v11 note above; nv2a profile, only when a map has >1 vertex chunk) ---
         uint32_t lenFaceVertexBase = 0; // uint32_t[face count], SORTED order: each face's vertex-chunk base (absolute vertex index)
+
+        // --- MPAKv13 addition (see the v12 -> v13 note above; Xbox target, maps with vis data) ---
+        uint32_t phsOffset = 0;     // absolute byte offset of the PHS offsets section; 0 = no PHS
+        uint32_t lenPhsOffsets = 0; // uint32_t[visleafs + 1]: world.phsofs
+        uint32_t lenPhsData = 0;    // compressed PHS rows: world.compressed_phs; starts at the next sector after the offsets
     };
     // The C reader's mirror, filesystem/mpak_layout.h's mpak_header_t, pins
     // the same size: since MPAK v12 filesystem/mpak.c refuses to mount an
     // archive whose headerSize differs, so a field added to one struct only
     // would silently stop every map from mounting (asset-pipeline-specialist,
     // X9-T review).
-    static_assert(sizeof(MpakHeader6) == 180, "MpakHeader6 must match filesystem/mpak_layout.h's mpak_header_t (180 bytes)");
+    static_assert(sizeof(MpakHeader6) == 192, "MpakHeader6 must match filesystem/mpak_layout.h's mpak_header_t (192 bytes)");
 
     // v9: one entry per unique texture this map actually uses - the Xbox
     // per-texture-WRAP replacement for the old shared atlas (see MpakHeader6's

@@ -471,6 +471,20 @@ namespace formats {
         }
         header.lenTexinfo = static_cast<uint32_t>(mTexinfoData.size());
 
+        // v13: the offline PHS (PhsBuilder.h). A map without one still
+        // bakes; an Xbox host then falls back to computing it
+        // (docs/r3d/divergences.md #117).
+        std::string phsWhy;
+        const PhsData phs = buildArchivePhs(&phsWhy);
+        if (!phs.offsets.empty()) {
+            header.lenPhsOffsets = static_cast<uint32_t>(phs.offsets.size() * sizeof(uint32_t));
+            header.lenPhsData = static_cast<uint32_t>(phs.data.size());
+            std::cout << "PHS: " << phs.offsets.size() << " rows, " << phs.data.size() << " bytes compressed ("
+                      << phsResidentBytes(phs) << " resident on the Xbox)\n";
+        } else if (!phsWhy.empty()) {
+            std::cout << "PHS: not baked (" << phsWhy << ")\n";
+        }
+
         header.lenVertexes = static_cast<uint32_t>(mVertexesData.size());
         header.lenEdges = static_cast<uint32_t>(mEdgesData.size());
         header.lenSurfedges = static_cast<uint32_t>(mSurfedgesData.size());
@@ -701,6 +715,12 @@ namespace formats {
         // v8 (MpakHeader.h's v7 -> v8 note) and v11 additions.
         if (header.lenExtraLightBlocks > 0) writePadded(mExtraLightBlocks.data(), mExtraLightBlocks.size() * sizeof(MpakExtraLightBlock));
         if (header.lenFaceVertexBase > 0) writePadded(mFaceVertexBase.data(), mFaceVertexBase.size() * sizeof(uint32_t));
+        // v13, after every other section: the offsets, then the rows at the
+        // next sector. phsOffset is how the engine finds them.
+        if (header.lenPhsOffsets > 0) {
+            header.phsOffset = writePadded(phs.offsets.data(), header.lenPhsOffsets);
+            writePadded(phs.data.data(), header.lenPhsData);
+        }
 
         // Now the first sector, with every offset known.
         file.seekp(0);
@@ -851,6 +871,15 @@ namespace formats {
                 std::cout << "Xbox fit: world structures " << nv2aMiB(nv2aEngineWorldBytes(lumps))
                           << ", renderer " << nv2aMiB(tables + (vbBytes + texBytes + lmBytes > temporaries ? vbBytes + texBytes + lmBytes : temporaries))
                           << " - fits\n";
+                // X9-W: advisory only - single-player never builds a PHS.
+                std::string hostLimit;
+                const uint32_t hostPlayers = nv2aMaxHostPlayers(lumps, engineBytes, tables, temporaries, vbBytes + texBytes + lmBytes,
+                                                                phs.offsets.size(), phs.data.size(), mPeakEdicts, mMaxEdicts, hostLimit);
+                if (hostPlayers)
+                    std::cout << "Xbox hosting (multiplayer, advisory): up to " << hostPlayers << " players";
+                else
+                    std::cout << "Xbox hosting (multiplayer, advisory): cannot host";
+                std::cout << (hostPlayers == kMaxHostPlayers ? "\n" : "; next: " + hostLimit);
             }
 
             std::cout << std::fixed << std::setprecision(1)
@@ -869,6 +898,20 @@ namespace formats {
         std::cout << "Successfully serialized and verified MPAKv" << header.version << " archive ("
                   << (nv2a ? "nv2a" : "core") << " profile) to " << outputPath << "\n";
         return true;
+    }
+
+    PhsData PakManager::buildArchivePhs(std::string* why) const {
+        // Xbox nv2a bakes only: the console is the one host that cannot
+        // afford Mod_CalcPHS at load, and only the nv2a profile's verify
+        // compares the section bytes (asset-pipeline review, X9-W).
+        PhsData phs;
+        if (!mIsXboxTarget || !mProfileNv2a) return phs;
+        std::string reason;
+        if (!buildPhs(mVisibilityData, mLeavesData, mModelsData, phs, reason)) {
+            phs = PhsData{};
+            if (why) *why = reason;
+        }
+        return phs;
     }
 
     size_t PakManager::pruneUnusedXboxTextures() {
@@ -1094,6 +1137,13 @@ namespace formats {
             const uint64_t faceInfoAt = place(desc.lenFaceInfo);
             const uint64_t extraLightBlocksAt = place(desc.lenExtraLightBlocks);
             const uint64_t faceVertexBaseAt = place(desc.lenFaceVertexBase);
+            const uint64_t phsOffsetsAt = place(desc.lenPhsOffsets);
+            const uint64_t phsDataAt = place(desc.lenPhsData);
+            const PhsData phs = buildArchivePhs(nullptr);
+            if (desc.lenPhsOffsets != phs.offsets.size() * sizeof(uint32_t) || desc.lenPhsData != phs.data.size())
+                fail("PHS lengths != baked");
+            if (desc.phsOffset != (desc.lenPhsOffsets ? phsOffsetsAt : 0))
+                fail("phsOffset " + std::to_string(desc.phsOffset) + " but the section walk puts the PHS at " + std::to_string(phsOffsetsAt));
 
             // MPAK v12: the classic lumps end where the renderer sections
             // begin, and that offset is the .bsp view filesystem/mpak.c
@@ -1161,6 +1211,8 @@ namespace formats {
                 checkBaked("face info", faceInfoAt, mFaceInfos.data(), static_cast<uint64_t>(mFaceInfos.size()) * sizeof(MpakFaceInfo));
                 checkBaked("extra light blocks", extraLightBlocksAt, mExtraLightBlocks.data(), static_cast<uint64_t>(mExtraLightBlocks.size()) * sizeof(MpakExtraLightBlock));
                 checkBaked("face vertex bases", faceVertexBaseAt, mFaceVertexBase.data(), desc.lenFaceVertexBase);
+                checkBaked("PHS offsets", phsOffsetsAt, phs.offsets.data(), desc.lenPhsOffsets);
+                checkBaked("PHS rows", phsDataAt, phs.data.data(), desc.lenPhsData);
                 // v9: retained (unlike the per-texture DXT directory/data,
                 // which - like the old atlas - are produced inside save()
                 // and not kept around) so these get the same full byte

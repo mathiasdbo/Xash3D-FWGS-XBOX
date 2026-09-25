@@ -88,7 +88,7 @@ MPAK_BSP_VERSION = 30          # HLBSP_VERSION, common/bspfile.h; MpakHeader.h:3
 MPAK_DESCRIPTOR_OFFSET = 128   # MpakHeader.h:37 MPAK_DESCRIPTOR_OFFSET
 # MpakHeader6::version's default is the MAP format version, kept in lockstep
 # with filesystem/mpak_layout.h:54's MPAK_LAYOUT_VERSION - MpakHeader.h:213.
-MPAK_LAYOUT_VERSION = 12
+MPAK_LAYOUT_VERSION = 13
 MPAK_FLAG_XBOX = 1        # MpakHeader.h:18
 MPAK_FLAG_NV2A_BLOCK = 2  # MpakHeader.h:19
 SECTOR = 2048
@@ -106,7 +106,7 @@ MAX_RETAINED_MISMATCHES = 20  # only this many Mismatch objects are ever kept; s
 
 # MpakHeader6's own field order (MpakHeader.h:211-275) - every field after
 # the 4-byte magic is a uint32_t, byte order IS the format (no offset
-# table), so this list must track that struct exactly. 44 fields (v11).
+# table), so this list must track that struct exactly. 47 fields (v13).
 _HEADER_FIELDS = [
     "version", "headerSize", "bakerBuildId", "flags",
     "vCount", "iCount",
@@ -121,8 +121,9 @@ _HEADER_FIELDS = [
     "lenVertexes", "lenEdges", "lenSurfedges", "lenFaces", "lenLighting", "lenMiptex",
     "lenExtraLightBlocks",
     "lenFaceVertexBase",  # v11: per-face vertex-chunk bases, multi-chunk maps only
+    "phsOffset", "lenPhsOffsets", "lenPhsData",  # v13: the offline PHS, after every other section
 ]
-assert len(_HEADER_FIELDS) == 44
+assert len(_HEADER_FIELDS) == 47
 
 
 class VerifyError(Exception):
@@ -262,6 +263,17 @@ def _walk_sections(h, file_size):
     place("faceInfo", h["lenFaceInfo"])
     place("extraLightBlocks", h["lenExtraLightBlocks"])
     place("faceVertexBase", h["lenFaceVertexBase"])
+    # v13: the two PHS lengths come as a pair, the offsets are whole
+    # uint32_t rows, and phsOffset names exactly where they start
+    # (Mpak_ComputeLayout, filesystem/mpak_layout.c).
+    if (h["lenPhsOffsets"] == 0) != (h["lenPhsData"] == 0):
+        raise VerifyError("PHS offsets and rows must both be present or both absent")
+    if h["lenPhsOffsets"] % 4:
+        raise VerifyError(f"lenPhsOffsets {h['lenPhsOffsets']} is not whole uint32_t rows")
+    if h["phsOffset"] != (cursor if h["lenPhsOffsets"] else 0):
+        raise VerifyError(f"phsOffset {h['phsOffset']} but the PHS sits at {cursor}")
+    place("phsOffsets", h["lenPhsOffsets"])
+    place("phsData", h["lenPhsData"])
 
     if cursor != file_size:
         raise VerifyError(

@@ -113,8 +113,8 @@ namespace formats {
     // including infodecal, which removes itself only on its first think.
     // CWorld::Precache adds a soundent and four bodyque edicts, and an
     // env_message when worldspawn has a netname (deps/hlsdk/dlls/world.cpp).
-    // The engine reserves maxclients + 1 slots, so hosting N players takes
-    // N - 1 more than this count (roadmap X9 item 13). Not counted: child
+    // Hosting takes more: each further player's own slot, and every
+    // player's weapons (nv2aCheckHosting, kHostEdictsPerPlayer). Not counted: child
     // edicts some entities create in Spawn (an env_laser's sprite). Measured:
     // disposal (887) loads and rocket_frenzy (993) does not, at 900.
     constexpr uint32_t kSdkWorldEdicts = 5;      // soundent + 4 bodyque
@@ -205,6 +205,117 @@ namespace formats {
                 + nv2aMiB(kXboxPrecacheBytes) + "); short by " + nv2aMiB(need - left) + "\n";
         }
         return f;
+    }
+
+    // X9-W: can an Xbox HOST a multiplayer game on this map, and for how
+    // many players? Advisory - a map that fails still ships, since
+    // single-player never builds a PHS (Mod_CalcPHS runs only with
+    // maxclients > 1). Everything nv2aCheckArchive counts, plus what a
+    // listen server adds over the single-player load the constants above
+    // were calibrated on (memory-budget review, X9-W; struct sizes read
+    // from the Xbox compiler: entity_state_t 340, client_frame_t 6,128,
+    // sv_client_t 91,296; XASH_LOW_MEMORY 1 keeps MULTIPLAYER_BACKUP 64,
+    // engine/common/netchan.h):
+    //  - before the world loads (SV_InitGame, sv_init.c:830-832): one
+    //    sv_client_t per player and the server's packet entities,
+    //    players x 64 frames x 64 entities, where single-player has 4
+    //    frames - so C1 and C3 both carry it;
+    //  - after the world, before R_NewMap (CL_InitEdicts, cl_game.c:999):
+    //    the local client's packet entities, 64 frames instead of 4;
+    //  - per connected client (SV_ConnectClient, sv_client.c:447): 64
+    //    client_frame_t instead of 4;
+    //  - the baked PHS (Mod_ReadBakedPHS, divergences.md #117): read while
+    //    the world loads, then resident (its offsets are read in place on
+    //    the Xbox, so no temporary).
+    // The per-player sum is ~1.8 MiB: in xemu 2-player hosting took 3.4 and
+    // 4.1 MiB more than single-player beyond the PHS on pool_party and
+    // disposal, which these terms account for. A map baked without a PHS
+    // cannot be hosted: the fallback is Mod_CalcPHS's full uncompressed
+    // rows at load. Edict slots: each player holds its own edict and its
+    // weapons, and a dead player's weaponbox holds them a while longer
+    // (deps/hlsdk/dlls/weapons.cpp) - kHostEdictsPerPlayer is that upper
+    // bound. Not modelled: a multiplayer game's larger precache (player
+    // models, every weapon's models and sounds) and the second client's
+    // resources, which the 1.5 MiB steady margin has to cover.
+    constexpr uint64_t kEntityStateBytes = 340;
+    constexpr uint64_t kClientFrameBytes = 6128;
+    constexpr uint64_t kSvClientBytes = 91296;
+    constexpr uint64_t kPacketEntities = 64;      // NUM_PACKET_ENTITIES under XASH_LOW_MEMORY
+    constexpr uint64_t kMultiplayerBackup = 64;   // MULTIPLAYER_BACKUP
+    constexpr uint64_t kSingleplayerBackup = 4;   // SINGLEPLAYER_BACKUP under XASH_LOW_MEMORY
+    constexpr uint32_t kHostEdictsPerPlayer = 16; // the player, 14 weapons, a weaponbox
+    constexpr uint32_t kMaxHostPlayers = 32;      // MAX_CLIENTS
+
+    struct Nv2aHostingCost {
+        uint64_t beforeWorld = 0;  // allocated by SV_InitGame, before the world loads
+        uint64_t afterWorld = 0;   // allocated between the world load and R_NewMap
+    };
+
+    // What hosting `players` adds over the single-player load.
+    inline Nv2aHostingCost nv2aHostingCost(uint32_t players) {
+        const uint64_t spFrames = kSingleplayerBackup * kPacketEntities * kEntityStateBytes;
+        const uint64_t mpFrames = kMultiplayerBackup * kPacketEntities * kEntityStateBytes;
+        Nv2aHostingCost c;
+        c.beforeWorld = players * mpFrames - spFrames                        // server packet entities
+                      + (players - 1) * nv2aZoneChunk(kSvClientBytes);       // svs.clients
+        c.afterWorld = (mpFrames - spFrames)                                 // client packet entities
+                     + players * kMultiplayerBackup * kClientFrameBytes      // frames per connected client
+                     - kSingleplayerBackup * kClientFrameBytes;
+        return c;
+    }
+
+    inline Nv2aFit nv2aCheckHosting(const Nv2aWorldLumps& l, uint64_t prefixBytes, uint64_t tableBytes,
+                                    uint64_t loadTemporaryBytes, uint64_t gpuBytes,
+                                    uint64_t phsRows, uint64_t phsDataBytes,
+                                    uint32_t peakEdicts, uint32_t maxEdicts, uint32_t players) {
+        Nv2aFit f;
+        if (phsRows == 0) {
+            f.ok = false;
+            f.reason += "hosting: the map has no baked PHS, and building one at load needs its full uncompressed rows\n";
+            return f;
+        }
+        const Nv2aHostingCost host = nv2aHostingCost(players);
+        const uint64_t world = nv2aEngineWorldBytes(l);
+        const uint64_t phs = nv2aZoneChunk(phsDataBytes) + nv2aZoneChunk(4 * phsRows);
+        if (world + prefixBytes + phs + host.beforeWorld + kXboxLoadMarginBytes > kXboxFreeAtWorldLoadBytes) {
+            f.ok = false;
+            f.reason += "hosting C1 (" + std::to_string(players) + " players): world structures " + nv2aMiB(world) + " + prefix "
+                + nv2aMiB(prefixBytes) + " + PHS " + nv2aMiB(phs) + " + server buffers " + nv2aMiB(host.beforeWorld)
+                + " exceed the " + nv2aMiB(kXboxFreeAtWorldLoadBytes) + " free when the world starts loading\n";
+        }
+        const uint64_t spent = world + phs + host.beforeWorld + host.afterWorld + kXboxPrecacheBytes;
+        const uint64_t left = spent < kXboxFreeAtWorldLoadBytes ? kXboxFreeAtWorldLoadBytes - spent : 0;
+        const uint64_t need = tableBytes + (gpuBytes > loadTemporaryBytes ? gpuBytes : loadTemporaryBytes) + kXboxSteadyMarginBytes;
+        if (need > left) {
+            f.ok = false;
+            f.reason += "hosting C3 (" + std::to_string(players) + " players): renderer needs " + nv2aMiB(need) + ", ~" + nv2aMiB(left)
+                + " is left after the world (" + nv2aMiB(world) + "), the PHS (" + nv2aMiB(phs) + "), the listen server's buffers ("
+                + nv2aMiB(host.beforeWorld + host.afterWorld) + ") and precaches; short by " + nv2aMiB(need - left) + "\n";
+        }
+        const uint64_t slots = static_cast<uint64_t>(peakEdicts) + static_cast<uint64_t>(players - 1) * kHostEdictsPerPlayer
+                             + kHostEdictsPerPlayer - 1 + kXboxEdictHeadroom; // the first player's own slot is in peakEdicts
+        if (maxEdicts && slots > maxEdicts) {
+            f.ok = false;
+            f.reason += "hosting entities (" + std::to_string(players) + " players): " + std::to_string(slots)
+                + " edict slots with each player's weapons, the game allows " + std::to_string(maxEdicts) + "\n";
+        }
+        return f;
+    }
+
+    // The most players an Xbox can host on this map (0: not even two), and
+    // the reason the next count fails.
+    inline uint32_t nv2aMaxHostPlayers(const Nv2aWorldLumps& l, uint64_t prefixBytes, uint64_t tableBytes,
+                                       uint64_t loadTemporaryBytes, uint64_t gpuBytes, uint64_t phsRows, uint64_t phsDataBytes,
+                                       uint32_t peakEdicts, uint32_t maxEdicts, std::string& limit) {
+        uint32_t best = 0;
+        limit.clear();
+        for (uint32_t n = 2; n <= kMaxHostPlayers; n++) {
+            const Nv2aFit f = nv2aCheckHosting(l, prefixBytes, tableBytes, loadTemporaryBytes, gpuBytes,
+                                               phsRows, phsDataBytes, peakEdicts, maxEdicts, n);
+            if (!f.ok) { limit = f.reason; break; }
+            best = n;
+        }
+        return best;
     }
 
 } // namespace formats

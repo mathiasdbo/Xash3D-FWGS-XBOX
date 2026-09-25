@@ -186,6 +186,11 @@ void Mod_FaceBevelEdge( const model_t *mod, const msurface_t *surf, int edge, mp
 #if XASH_ENGINE_TESTS
 void Mod_DumpWorld_f( void ); // test_dumpworld <mapname> <outfile> - see mod_bmodel.c, tools/mpak-diff.sh
 void Mod_TestBevels_f( void ); // test_bevels <mapname> - see mod_bmodel.c, tools/test-bevels.sh
+void Mod_TestPHS_f( void ); // test_phs <mapname> - see mod_bmodel.c, tools/test-phs.sh
+#endif
+#if XASH_XBOX || XASH_ENGINE_TESTS
+// mod_phs_baked.c: the baked PHS (divergences.md #117)
+qboolean Mod_ReadBakedPHS( const model_t *mod, size_t visdatasize, byte **out_phs, size_t **out_ofs, size_t *out_len );
 #endif
 
 //

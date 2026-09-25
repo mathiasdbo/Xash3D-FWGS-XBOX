@@ -539,6 +539,7 @@ int main(int argc, char *argv[]) {
             const uint32_t peak = formats::nv2aPeakEdicts(reinterpret_cast<const char*>(ents.data()), ents.size());
             const uint32_t maxEdicts = readGameMaxEdicts(gameDir);
             const formats::Nv2aFit fit = formats::nv2aCheckBeforeBake(lumps, peak, maxEdicts);
+            pak.setEdictBudget(peak, maxEdicts);
             if (!fit.ok) {
                 std::cerr << "ERROR: " << mapPath << " does not fit the Original Xbox (tools/asset-studio/src/formats/Nv2aMapFit.h). Not baking it.\n"
                           << fit.reason;

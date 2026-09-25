@@ -66,3 +66,7 @@ add_test(NAME nv2a_map_fit_test COMMAND nv2a_map_fit_test)
 add_executable(lightmap_atlas_packer_test tests/lightmap_atlas_packer_test.cpp)
 target_link_libraries(lightmap_atlas_packer_test PRIVATE AssetStudioFormats)
 add_test(NAME lightmap_atlas_packer_test COMMAND lightmap_atlas_packer_test)
+
+add_executable(phs_builder_test tests/phs_builder_test.cpp)
+target_link_libraries(phs_builder_test PRIVATE AssetStudioFormats)
+add_test(NAME phs_builder_test COMMAND phs_builder_test)

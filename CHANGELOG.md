@@ -5,6 +5,26 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - an Xbox can host multiplayer on the large maps: the PHS is baked offline (X9-W)
+
+A game hosting multiplayer builds each map's PHS (which parts of the map can
+hear each other) when the map loads. That needs up to 10 MiB of scratch memory
+on the big deathmatch maps, more than the Xbox has to spare. The baker now
+builds the PHS itself and stores it in the map archive (MPAK v13), and the
+Xbox engine loads it from there instead. It is proven identical to the
+engine's own on every retail map, byte for byte.
+
+- In xemu, 2-player listen servers load `crossfire`, `pool_party` and
+  `disposal`, with 6.5 to 21.1 MiB left.
+- The baker now reports how many players the Xbox could host on each map:
+  3 on `pool_party` and `disposal`, 4 on `contamination`, 8 to 12 on the
+  others.
+- Known issue: changing level while hosting stalls on the Xbox (the local
+  client never rejoins). It happens with or without the baked PHS and is
+  tracked in roadmap X9 item 13.
+- If an archive has no PHS, the engine builds it as before.
+- Every map needs rebaking; v12 archives are refused.
+
 ### Fixed — the Xbox game no longer hangs at boot with every map baked (X9-V)
 
 With all 124 baked maps in the game folder, the Xbox build froze on the

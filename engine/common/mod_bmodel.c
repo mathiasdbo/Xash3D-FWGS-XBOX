@@ -3861,6 +3861,7 @@ static void Mod_CalcPHS( model_t *mod )
 	// TODO: cache the PHS somewhere, it might take a long time on giant maps
 }
 
+
 /*
 =================
 Mod_LoadClipnodes
@@ -4339,7 +4340,19 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 #endif // XASH_DEDICATED
 
 		if( SV_Active() && svs.maxclients > 1 )
+		{
+#if XASH_XBOX
+			// divergences.md #117: the baked PHS, so a console host does
+			// not need Mod_CalcPHS's load-time rows (~9-12 MiB on the
+			// large maps); computed as upstream only if the archive has
+			// none.
+			size_t len;
+			if( Mod_ReadBakedPHS( mod, bmod->visdatasize, &world.compressed_phs, &world.phsofs, &len ))
+				Con_Reportf( "Baked PHS size: %s\n", Q_memprint( len + sizeof( *world.phsofs ) * ( mod->numleafs + 1 )));
+			else
+#endif
 			Mod_CalcPHS( mod );
+		}
 	}
 
 	qboolean wadlist_warn = false;
@@ -4870,6 +4883,115 @@ void Mod_TestBevels_f( void )
 
 	Con_Printf( "test_bevels: %s %d surfaces %d edges %d mismatches\n", Cmd_Argv( 1 ), surfaces, edges, mismatches );
 }
+
+#if XASH_ENGINE_TESTS
+/*
+=================
+Mod_CompressedRowBytes
+
+Bytes one row takes in Mod_CompressPVS's output: Mod_CalcPHS compresses
+every row from all rowbytes (padding included), so walking the encoding
+until rowbytes are covered lands exactly on the row's end. Only for
+in-memory rows the engine just built (test_phs).
+=================
+*/
+static size_t Mod_CompressedRowBytes( const byte *in, size_t rowbytes )
+{
+	const byte *start = in;
+	size_t covered = 0;
+
+	while( covered < rowbytes )
+	{
+		if( *in ) { in++; covered++; }
+		else { covered += in[1]; in += 2; }
+	}
+	return in - start;
+}
+
+/*
+=================
+Mod_TestPHS_f
+
+test_phs <mapname>: the proof behind divergences.md #117. Loads the map,
+builds its PHS with Mod_CalcPHS, reads the baked one from
+maps/<mapname>.mpak with Mod_ReadBakedPHS - the Xbox path - and compares
+every offset and every byte, the total length included. Driven by
+tools/test-phs.sh over the retail maps.
+=================
+*/
+void Mod_TestPHS_f( void )
+{
+	char    mapname[MAX_QPATH];
+	model_t *mod;
+	byte    *baked, *computed;
+	size_t  *bakedofs, *computedofs, bakedlen, computedlen, count, mismatches = 0;
+
+	if( Cmd_Argc() != 2 )
+	{
+		Con_Printf( S_USAGE "test_phs <mapname>\n" );
+		return;
+	}
+
+	Q_snprintf( mapname, sizeof( mapname ), "maps/%s.bsp", Cmd_Argv( 1 ));
+	mod = Mod_LoadWorld( mapname, true );
+	if( !mod || mod->type != mod_brush )
+	{
+		Con_Printf( S_ERROR "test_phs: %s did not load as a brush model\n", mapname );
+		return;
+	}
+
+	count = mod->numleafs + 1;
+	Mod_CalcPHS( mod );
+	computed = world.compressed_phs;
+	computedofs = world.phsofs;
+	world.compressed_phs = NULL;
+	world.phsofs = NULL;
+	if( !computed )
+	{
+		Con_Printf( "test_phs: %s no-vis\n", Cmd_Argv( 1 ));
+		return;
+	}
+	computedlen = computedofs[count - 1] + Mod_CompressedRowBytes( computed + computedofs[count - 1], ALIGN( world.visbytes, 4 ));
+
+	if( !Mod_ReadBakedPHS( mod, 0, &baked, &bakedofs, &bakedlen ))
+	{
+		Con_Printf( "test_phs: %s %zu rows unbaked\n", Cmd_Argv( 1 ), count );
+		return;
+	}
+
+	if( bakedlen != computedlen )
+		mismatches++;
+	for( size_t i = 0; i < count; i++ )
+	{
+		if( bakedofs[i] != computedofs[i] )
+			mismatches++;
+	}
+	if( !mismatches && memcmp( baked, computed, bakedlen ))
+		mismatches++;
+
+	Mem_Free( baked );
+	Mem_Free( bakedofs );
+
+	// Mod_ReadBakedPHS must refuse an archive whose visibility lump is not
+	// the loaded world's (a loose .bsp beside another build's archive).
+	// The world no longer carries its lump length, so ask with the wrong
+	// one: SIZE_MAX never matches a 32-bit lenVisibility.
+	{
+		size_t wronglen;
+		if( Mod_ReadBakedPHS( mod, SIZE_MAX, &baked, &bakedofs, &wronglen ))
+		{
+			mismatches++;
+			Mem_Free( baked );
+			Mem_Free( bakedofs );
+			Con_Printf( S_ERROR "test_phs: a mismatched visibility length was accepted\n" );
+		}
+	}
+
+	Con_Printf( "test_phs: %s %zu rows %zu bytes %zu mismatches\n", Cmd_Argv( 1 ), count, bakedlen, mismatches );
+	Mem_Free( computed );
+	Mem_Free( computedofs );
+}
+#endif // XASH_ENGINE_TESTS
 
 void Mod_DumpWorld_f( void )
 {

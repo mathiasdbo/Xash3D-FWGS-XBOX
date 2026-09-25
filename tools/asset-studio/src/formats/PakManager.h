@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "MpakHeader.h"
+#include "PhsBuilder.h"
 
 namespace formats {
 
@@ -136,6 +137,11 @@ namespace formats {
         // palette or index byte in a copy) possible. The nv2a block's bytes
         // are outside this check - only its lengths are - see the doc.
         bool verifyFile(const std::string& path) const;
+        // v13: the offline PHS this archive carries - Xbox nv2a bakes of a
+        // map PhsBuilder.h can reproduce; empty otherwise, with `why` set.
+        // Built from the retained lumps, so save() and a standalone
+        // verifyFile() (--verify) agree on it.
+        PhsData buildArchivePhs(std::string* why) const;
         void addAsset(const std::string& name, const std::vector<uint8_t>& data);
 
         void setVisibilityData(const std::vector<uint8_t>& data) { mVisibilityData = data; }
@@ -176,6 +182,9 @@ namespace formats {
         }
 
         void setTargetXbox(bool xbox) { mIsXboxTarget = xbox; }
+        // X9-W: the map's edict slots at the load peak and the game's
+        // max_edicts (main.cpp), for the advisory hosting check.
+        void setEdictBudget(uint32_t peak, uint32_t maxEdicts) { mPeakEdicts = peak; mMaxEdicts = maxEdicts; }
         bool isXboxTarget() const { return mIsXboxTarget; }
 
         void addArray64(const std::vector<uint8_t>& data) { mArray64.push_back(data); }
@@ -199,6 +208,8 @@ namespace formats {
         std::vector<Vertex> mVertices;
         std::unordered_map<Vertex, uint16_t, VertexHasher> mVertexMap; // current chunk only, chunk-relative indices
         uint32_t mVertexChunkBase = 0;   // v11: absolute index of the current chunk's first vertex
+        uint32_t mPeakEdicts = 0;        // X9-W: setEdictBudget, 0 = unknown
+        uint32_t mMaxEdicts = 0;
         uint32_t mVertexChunkCount = 1;  // v11: chunks used so far (a map always has at least one)
         std::vector<uint32_t> mFaceVertexBase; // v11: per sorted face, written only when mVertexChunkCount > 1
         std::vector<uint16_t> mIndices;

@@ -372,6 +372,34 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 			fileSize, &cursor, &out->faceVertexBase ))
 		return false;
 
+	// v13 (MpakHeader.h's v12 -> v13 note): the offline PHS, after every
+	// other section. The engine finds it through phsOffset alone
+	// (Mod_ReadBakedPHS, engine/common/mod_phs_baked.c), so the offset must
+	// be exactly where this walk puts it, and the two lengths come as a
+	// pair: offsets without rows (or rows without offsets) is refused.
+	if(( header->lenPhsOffsets == 0 ) != ( header->lenPhsData == 0 ))
+	{
+		Con_Reportf( S_ERROR "Mpak_ComputeLayout: PHS offsets (%u bytes) and rows (%u bytes) must both be present or both absent\n",
+			header->lenPhsOffsets, header->lenPhsData );
+		return false;
+	}
+	if( header->lenPhsOffsets == 0 && header->phsOffset != 0 )
+	{
+		Con_Reportf( S_ERROR "Mpak_ComputeLayout: phsOffset %u set without a PHS\n", header->phsOffset );
+		return false;
+	}
+	if( header->lenPhsOffsets != 0 && (fs_offset_t)header->phsOffset != cursor )
+	{
+		Con_Reportf( S_ERROR "Mpak_ComputeLayout: phsOffset %u is not where the PHS sits (%lld)\n",
+			header->phsOffset, (long long)cursor );
+		return false;
+	}
+	if( !Mpak_PlaceLump( "phsOffsets", header->lenPhsOffsets, sizeof( uint32_t ),
+			fileSize, &cursor, &out->phsOffsets ))
+		return false;
+	if( !Mpak_PlaceLump( "phsData", header->lenPhsData, 0, fileSize, &cursor, &out->phsData ))
+		return false;
+
 	return true;
 }
 

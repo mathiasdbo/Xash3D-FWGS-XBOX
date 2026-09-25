@@ -8910,7 +8910,43 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
       the heap probe does not see (~25-60 KiB for 124 archives, estimated;
       measure on hardware with `MmQueryStatistics`).
 
-13. **Offline PHS for Xbox-hosted multiplayer.** With `maxclients` above 1
+13. **Offline PHS for Xbox-hosted multiplayer - done (X9-W), except the
+    two PC-compatibility items at the end.** MPAK v13 carries the PHS
+    (`PhsBuilder.h`), the Xbox engine reads it (`Mod_ReadBakedPHS`,
+    divergence #117), `tools/test-phs.sh` proves it against `Mod_CalcPHS`
+    (124 maps, 0 mismatches) and `Nv2aMapFit.h` reports hosting as
+    advisory. In xemu, 2-player listen servers load with 21.1 MiB free
+    on `crossfire`, 7.8 on `pool_party` and 6.5 on `disposal`.
+    - *How many players:* a listen server's own buffers grow with the
+      player count - the server's packet entities (players x 64 frames x
+      64 x 340 bytes), a 91 KB client slot and 64 frames of 6 KB per
+      player, and the local client's packet entities (1.3 MiB) - about
+      1.8 MiB per player (memory-budget review; the 2-player xemu figures
+      are 3.4-4.1 MiB below single-player beyond the PHS, which these
+      terms account for). With them, and each player holding up to 16
+      edict slots with its weapons, the bake reports: `pool_party` and
+      `disposal` 3 players, `contamination` 4, `boot_camp` 8, the other
+      deathmatch maps 10-12 (`rocket_frenzy` is refused outright).
+    - *Found: a hosted `changelevel` stalls on the Xbox.* The server
+      moves to the next map, but the local client stays in `ca_connected`
+      waiting for `svc_serverdata` and never reaches `R_NewMap` (ref/nv2a
+      then draws its test triangle). Seen crossfire -> bounce -> crossfire
+      at `maxplayers 2`, and identically with archives stripped of their
+      PHS (the upstream `Mod_CalcPHS` path), so it is not the baked PHS;
+      single-player `changelevel` works (item 12). Probably the
+      multiplayer reconnect over the Xbox's stubbed network layer
+      (`NET_Config` opens sockets when `maxclients` > 1) - its own item.
+      Until it is fixed, a hosted game cannot change level, and the
+      fragmentation check across a hosted map cycle (largest contiguous
+      block, as item 12 did for single-player) cannot run: only cold
+      loads were measured.
+    - *Before hosting ships:* cap `maxplayers` on the Xbox per map (from
+      the bake's player count), turn `sv_allowdownload` off (a remote
+      client's download loads the whole file, `net_chan.c:977`), and
+      measure a multiplayer game's precache, which the model's 1.5 MiB
+      margin has to cover today.
+    - Not done: a real multiplayer session (a client joining over the
+      network, roadmap XN). The original item follows. With `maxclients` above 1
     the engine builds the map's PHS at load (`Mod_CalcPHS`,
     `mod_bmodel.c`): a transient of about `2 x rowbytes x (numleafs + 1)`
     plus the compressed result, ~9-12 MiB on `disposal`/`pool_party` and

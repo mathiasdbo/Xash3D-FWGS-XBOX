@@ -79,6 +79,43 @@ int main() {
         const uint64_t room = kXboxFreeAtWorldLoadBytes - nv2aEngineWorldBytes(small) - kXboxPrecacheBytes - kXboxSteadyMarginBytes;
         CHECK(nv2aCheckArchive(small, 2048, 0, room, room).ok, "temporaries and GPU buffers of exactly the room left fit: max, not sum");
         CHECK(!nv2aCheckArchive(small, 2048, 0, room, room + 1).ok, "one byte over fails");
+
+        // --- X9-W hosting: the baked PHS and the listen server's buffers ---
+        const Nv2aFit noPhs = nv2aCheckHosting(small, 2048, 1 * kMiB, 1 * kMiB, 4 * kMiB, 0, 0, 100, 900, 2);
+        CHECK(!noPhs.ok && noPhs.reason.find("no baked PHS") != std::string::npos, "a map without a baked PHS cannot be hosted");
+        CHECK(nv2aCheckHosting(small, 2048, 1 * kMiB, 1 * kMiB, 4 * kMiB, 1000, 200 * 1024, 100, 900, 2).ok, "a small map hosts 2 players");
+
+        // 2 players over single-player: server packet entities 2 x 64 x 64 x 340
+        // - 4 x 64 x 340, one more sv_client_t, client packet entities 64 x 64 x 340
+        // - 4 x 64 x 340, frames 2 x 64 x 6128 - 4 x 6128 (~4.3 MiB in all).
+        const Nv2aHostingCost two = nv2aHostingCost(2);
+        CHECK(two.beforeWorld == 2 * 64 * 64 * 340 - 4 * 64 * 340 + nv2aZoneChunk(91296), "2 players: server buffers before the world");
+        CHECK(two.afterWorld == 64 * 64 * 340 - 4 * 64 * 340 + 2 * 64 * 6128 - 4 * 6128, "2 players: client buffers and frames");
+        const Nv2aHostingCost three = nv2aHostingCost(3);
+        const uint64_t perPlayer = (three.beforeWorld + three.afterWorld) - (two.beforeWorld + two.afterWorld);
+        CHECK(perPlayer == 64 * 64 * 340 + nv2aZoneChunk(91296) + 64 * 6128, "each further player adds packet entities, a client slot and frames");
+
+        const uint64_t rows = 1000, data = 100 * 1024;
+        const uint64_t resident = nv2aZoneChunk(data) + nv2aZoneChunk(4 * rows);
+        const uint64_t hostRoom = room - resident - two.beforeWorld - two.afterWorld;
+        CHECK(nv2aCheckHosting(small, 2048, 0, hostRoom, hostRoom, rows, data, 100, 900, 2).ok,
+              "the PHS and the server's buffers take exactly their size out of C3's room");
+        const Nv2aFit tight = nv2aCheckHosting(small, 2048, 0, hostRoom + 1, hostRoom + 1, rows, data, 100, 900, 2);
+        CHECK(!tight.ok && tight.reason.find("hosting C3") != std::string::npos, "one byte more than that fails hosting C3");
+        const Nv2aFit bigPhs = nv2aCheckHosting(small, 2048, 0, 0, 0, rows, 40 * kMiB, 100, 900, 2);
+        CHECK(!bigPhs.ok && bigPhs.reason.find("hosting C1") != std::string::npos, "a PHS too big to read at world load fails hosting C1");
+
+        // Edicts: the first player's slot is in the peak; every player holds
+        // up to kHostEdictsPerPlayer with its weapons.
+        const uint32_t fullAt2 = 900 - kXboxEdictHeadroom - (2 * kHostEdictsPerPlayer - 1);
+        CHECK(nv2aCheckHosting(small, 2048, 0, 0, 0, rows, data, fullAt2, 900, 2).ok, "exactly enough edict slots for 2 armed players");
+        const Nv2aFit edicts = nv2aCheckHosting(small, 2048, 0, 0, 0, rows, data, fullAt2 + 1, 900, 2);
+        CHECK(!edicts.ok && edicts.reason.find("hosting entities") != std::string::npos, "one slot short fails, and says why");
+
+        std::string limit;
+        CHECK(nv2aMaxHostPlayers(small, 2048, 0, 0, 0, rows, data, fullAt2, 900, limit) == 2 && !limit.empty(),
+              "the player count stops where the edicts run out, with the reason");
+        CHECK(nv2aMaxHostPlayers(small, 2048, 0, 0, 0, 0, 0, 100, 900, limit) == 0, "no PHS: not even two players");
     }
 
     if (failures) {
