@@ -18,7 +18,10 @@ while it plays.
   19-minute session played by hand from Black Mesa Inbound to Unforeseen
   Consequences, show no memory fragmentation and no drift between loads
   (roadmap X9 item 12). The game held 60 fps on every map but `c1a0b`
-  (54 fps average).
+  (54 fps average). The session report, with the frame-time graph, is
+  `docs/r3d/reports/x9-item12-blackmesa-frametimes.html`. On a real Xbox
+  the same route averages 44 fps, with four maps near 30
+  (`docs/r3d/reports/x9-item12-xbox-frametimes.html`).
 
 ### Changed — more memory for every Xbox map; the baker refuses maps that cannot load (X9-U)
 

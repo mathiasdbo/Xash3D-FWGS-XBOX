@@ -8879,7 +8879,20 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
       60.2 fps per map) except `c1a0b` (54.4 average, 1% low 29 fps);
       three single frames of 261-416 ms during play, none repeating. This
       covers the single-player chain the scripted `changelevel` run was
-      meant to measure.
+      meant to measure. Full timeline and per-map table:
+      `docs/r3d/reports/x9-item12-blackmesa-frametimes.html` (open it in
+      a browser).
+    - *The same route on a real Original Xbox* (probe saving to
+      `D:\probe_ft.bin`, pulled over FTP; 17.6 minutes, 14 loads):
+      memory as in xemu (23.3-26.4 MiB free at each map start, within
+      1.4 MiB of xemu per map, no fragmentation, no drift), level changes
+      1.7-4.1 s - but **44 fps overall, not 60**: the tram 50, `c0a0e` and
+      `c1a0d` 60, and four maps near 30 (`c0a0c` 31, `c0a0d` 31, `c1a0e`
+      34, `c1a0c` 30), most frames there at 31-36 ms. xemu caps at the
+      60 Hz refresh and hides this. Frame times vary smoothly (no
+      16.7/33.3 ms steps), so presentation does not wait on vsync. Report:
+      `docs/r3d/reports/x9-item12-xbox-frametimes.html`. The four slow
+      maps are X11's first profiling targets (CPU against GPU).
     - *Conclusion:* no drift and no fragmentation across level changes, so
       the GPU arena and the early `Mod_FreeUnused` are not needed. Open:
       `c1a0b`'s frame rate, and the 2.5 MiB `crossfire` difference.
