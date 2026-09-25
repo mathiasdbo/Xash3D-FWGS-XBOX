@@ -5,6 +5,38 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — MPAK v12: large maps load on the Xbox; the engine no longer holds the renderer's data (X9-T)
+
+The engine loads a map by reading the whole file, and on the largest maps
+more than half of an Xbox `.mpak` is data only the Xbox renderer uses
+(vertices, lightmap, textures). Measured in xemu, about 32.8 MiB is free
+before a map loads, so `pool_party`, `contamination` and `disposal` ran
+out of memory. Now:
+
+- The archive puts the classic BSP lumps first. The engine is given only
+  that part as `maps/<name>.bsp`; the renderer reads its own data from the
+  whole archive, `maps/<name>.mpak`.
+- The renderer builds its GPU buffers when the map starts
+  (`R_NewMap`), after the engine has let go of its copy, and retries once
+  if memory is short.
+- The lightmap is one page up to 4096 rows tall instead of a second page
+  the renderer cannot use.
+- On the Xbox the engine's per-surface extra data shrinks from 324 to 148
+  bytes, and Xbox map archives no longer carry 8-bit texture pixels
+  nothing on the Xbox draws.
+
+Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
+loads, `crossfire` is unchanged, and 17 maps booted in a partial xemu corpus
+run, all drawing their real geometry. A load-memory model built from each
+archive's lump counts reproduces those measurements (disposal's engine
+structures plus prefix to within 0.3 MiB). Run over all 125 retail maps, it
+predicts that every map but `rocket_frenzy` loads, with at least 2.7 MiB
+free (`disposal`, then `contamination` 4.2, `pool_party` 6.0, and 11.9 or
+more for the rest). `rocket_frenzy` bakes (78% of the ledger) but still
+does not load: the engine runs out of memory building its world model
+(34.4 MiB needed of 32.8), and past that it would be about 20 MiB short for
+its GPU buffers. Roadmap X9 item 11. MPAK moves to v12, so every map needs a rebake.
+
 ### Changed — MPAK v11: vertex chunks lift the 65,536-vertex bake limit (X9-S)
 
 Four retail maps (`contamination`, `disposal`, `pool_party`,

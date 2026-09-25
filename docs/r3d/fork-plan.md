@@ -8765,33 +8765,238 @@ counts the real 52-byte `nv2a_map_face_t` (it assumed 32), which adds
      also need two lightmap pages even with X9-R's packing, which
      `ref/nv2a` does not support.
 
-10. **NEXT TASK - load-time memory: the 24 MiB ledger is not what is
-    actually free.** Found 2026-09-24 while testing item 9: `pool_party`
-    passes the ledger at 95.9% yet its 3 MB lightmap allocation
-    (`MmAllocateContiguousMemoryEx`) fails at load in xemu, after the
-    engine already holds the whole 16 MB archive plus the vertex buffer and
-    textures. `boot_camp` (64.2%) loads. So the ledger's cap is too
-    optimistic for today's engine footprint, and the single biggest term on
-    every large map is the whole archive held in memory while its GPU parts
-    are copied out. In order:
-    - Measure: free contiguous memory and heap at map-load time in xemu and
-      on hardware (engine baseline, pbkit buffers, audio), so the cap is a
-      measurement, not a guess (`memory-budget-specialist` review of #135).
-    - Stop holding the whole archive while copying: read the vertex,
-      texture and lightmap lumps straight into their contiguous buffers (or
-      free the archive buffer before the GPU copies), removing the double
-      count of those lumps.
-    - Split the ledger into its two real pools, contiguous GPU memory and
-      the zone heap, each with its own measured cap. (The ledger's stale
-      32-byte face term was fixed in X9-S: it now counts the real 52-byte
-      `nv2a_map_face_t`, pinned by a STATIC_ASSERT and mirrored in
-      `Nv2aMapBudget.h`.)
-    - Allocate the most fragmentation-sensitive buffer first, or reserve
-      one contiguous pool per map: the lightmap is allocated last, after
-      the vertex buffer and textures (`nv2a-xbox-specialist`, X9-S review).
-    - Then revisit: RGB565 lightmaps, multi-page lightmaps in `ref/nv2a`
-      for `disposal`/`rocket_frenzy`, and whether those two maps can fit at
-      all.
+10. ~~**Load-time memory: the 24 MiB ledger is not what is actually
+    free.**~~ **Done for 124 of 125 maps, X9-T (`divergences.md` #110-#112,
+    MPAK v12).** Measured in xemu with a temporary `MmQueryStatistics`
+    probe: 43.6 MiB free at `R_Init`, **32.8 MiB on the first frames before
+    any map loads**, and a deathmatch map's precaches arrive between the
+    table build and `R_NewMap`. What changed:
+    - `ref/nv2a` builds its GPU buffers at `R_NewMap`, streamed from the
+      archive, after the engine has freed its copy; the lightmap is
+      allocated first, and a failed upload is retried once.
+    - MPAK v12 puts the classic lumps first; the engine is served only that
+      prefix as `maps/<name>.bsp`, `ref/nv2a` reads the rest from
+      `maps/<name>.mpak`.
+    - One lightmap page up to 4096 rows (no second layer).
+    - Xbox `mextrasurf_t` 324 -> 148 bytes; Xbox nv2a maps carry miptex
+      headers only.
+Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
+    loads, `crossfire` is unchanged, and 17 maps booted in a partial xemu corpus
+    run, all drawing their real geometry. A load-memory model built from each
+    archive's lump counts reproduces those measurements (disposal's engine
+    structures plus prefix to within 0.3 MiB). Run over all 125 retail maps, it
+    predicts that every map but `rocket_frenzy` loads, with at least 2.7 MiB
+    free (`disposal`, then `contamination` 4.2, `pool_party` 6.0, and 11.9 or
+    more for the rest). `rocket_frenzy` bakes (78% of the ledger) but still
+    does not load: the engine runs out of memory building its world model
+    (34.4 MiB needed of 32.8), and past that it would be about 20 MiB short for
+    its GPU buffers. Roadmap X9 item 11.
+    Left open from the reviews:
+    - The ledger does not see the engine's world structures or the
+      precaches, so a map can pass it and still not load (`rocket_frenzy`
+      passes at 78%). Replace it with `E(map) + max(prefix + temporaries +
+      tables, tables + precache + GPU) + reserve <= measured free`, with
+      `E(map)` from lump counts (`memory-budget-specialist`'s model matches
+      xemu to ~0.3 MiB) and the precache a measured per-game constant.
+    - Only the lightmap should need one large contiguous run: allocate the
+      texture data per texture and the vertex buffer per 65,536-vertex
+      chunk (`nv2a_bind_vertex_base` already re-points per chunk), and
+      measure the largest allocatable run, not just free pages
+      (`nv2a-xbox-specialist`). Cycle maps to check fragmentation.
+    - A 4096-row `IMAGE_RECT` lightmap is unverified on hardware.
+    - The persistent tables still use `Mem_Malloc`, which calls `Sys_Error`
+      when it runs out.
+    - With header-only miptex the engine reads and decodes each WAD
+      texture only for `ref/nv2a` to discard it: drop the worldspawn `wad`
+      key in the Xbox nv2a bake, or stop staging the texture WADs.
+
+11. **NEXT TASK - `rocket_frenzy`: find ~17 MiB.** It is the one retail map
+    that still does not load in xemu: the engine runs out building its
+    world model (`Sys_Error`: `Mem_Alloc` of 1.28 MB in `Mod_LoadNodes`).
+    `memory-budget-specialist`'s model (X9-T review): its engine world
+    structures are 24.7 MiB - face bevels 6.0 (41,123 separate
+    allocations, `mod_bmodel.c:1724`), `mextrasurf_t` 5.8, `msurface_t`
+    3.5, lighting 2.9, nodes 1.3, leafs 1.0 - and at steady state it is
+    15-18 MiB short. Ranked by bytes saved against divergence cost:
+    1. Lightmap atlas (~6.2 MiB): no 1-luxel borders (sample luxel
+       centres, as `ref/gl` does), style 0 only (`ref/nv2a` never reads
+       the extra-style blocks), then RGB565. Fork-owned; also shrinks the
+       largest contiguous run.
+    2. Face bevels (5.2-6.0 MiB): compute edge planes when a trace needs
+       them (`pm_surface.c`), or at least one block allocation instead of
+       41k (~1.25 MiB). Bit-identical results.
+    3. Secondary thread stacks 1 MiB -> 64-128 KiB (~1.8 MiB).
+    4. Vertex buffer 28 -> 20 or 16 bytes (1.4-2.1 MiB).
+    5. `nv2a_map_face_t` reusing the engine's surface bounds, u16 remaps
+       (~1.0 MiB).
+    6. Then one of: 8-bit engine lighting (~1.9), `HISTORY_MAX` 64 -> 16
+       (~1.5, needs the SDK client rebuilt), a further `mextrasurf_t`
+       trim (~1.6).
+    Measure first: `soundlist`/`memlist` at `R_NewMap` (precached sounds
+    are fully resident, `s_load.c:291-296`), what the 10.8 MiB between
+    `R_Init` and the first frame is, and `maxclients` (above 1,
+    `Mod_CalcPHS` needs a ~31.7 MiB transient on this map).
+
+12. **Level transitions: can the console run out between maps?** Every
+    X9-T measurement booted one map from a fresh start. On a listen server
+    the previous map's unused models are freed only after the new map's
+    precaches and `R_NewMap` (`Mod_FreeUnused`, `cl_parse.c:1719`), so
+    during a transition both maps' models are resident while the new GPU
+    buffers are allocated; X9-T's one upload retry from `R_EndFrame` covers
+    only the GPU half of that. Repeated loads can also fragment memory
+    until the lightmap's contiguous run no longer fits, even with enough
+    free pages. Measure in xemu, with a temporary probe at each `R_NewMap`:
+    free pages, the largest allocatable contiguous block (bisect
+    `MmAllocateContiguousMemoryEx`) and dlmalloc's `mallinfo`, across a
+    single-player `changelevel` chain (e.g. `c1a0` through `c1a4`,
+    including the largest maps and a return trip through a landmark) and
+    across repeated `map` cycles (`crossfire`, `disposal`, `crossfire`,
+    ... five or more times). Any downward drift or failure becomes a fix:
+    a GPU arena reserved once at `R_Init` and sub-allocated per map, and
+    `Mod_FreeUnused` before the upload.
+
+X9-T load-memory model for every retail map, baked at v12. It uses the
+engine's world structures from lump counts, with 32-bit struct sizes and
+per-allocation overhead. P is the classic prefix the engine holds while
+building them; T+Tmp are `ref/nv2a`'s tables and load temporaries; G is
+the GPU buffers, with the lightmap in brackets. The precache is calibrated
+from xemu: SP 9.89, DM 8.47 MiB, the largest implied by 18 maps booted in
+xemu. The budget is 32.8 MiB, measured before any map loads. "Load peak
+free" is what is left while the engine builds the world with the prefix,
+tables and temporaries held; "Steady free" is what is left after the GPU
+buffers, with the xemu measurement in brackets where there is one. Checks:
+- C1: the engine runs out building the world (a fatal `Sys_Error`).
+- C2: `ref/nv2a`'s tables do not fit.
+- C3: the GPU buffers do not fit.
+- MP: `Mod_CalcPHS`, which runs only with `maxclients` > 1.
+
+| Map | Ledger % | E engine | P prefix | T+Tmp | G GPU (lightmap) | Load peak free | Steady free | Flags |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| boot_camp | 22.5 | 7.00 | 2.60 | 1.44 | 4.62 (2.48) | 21.8 | 11.9 (xemu 13.4) | - |
+| bounce | 12.2 | 3.05 | 1.33 | 0.56 | 2.61 (1.48) | 27.9 | 18.4 (xemu 19.8) | - |
+| c0a0 | 11.1 | 2.81 | 1.26 | 0.51 | 2.40 (1.33) | 28.2 | 17.4 (xemu 18.8) | - |
+| c0a0a | 10.8 | 2.75 | 1.21 | 0.50 | 2.34 (1.22) | 28.3 | 17.6 (xemu 19.3) | - |
+| c0a0b | 14.2 | 3.64 | 1.60 | 0.64 | 3.05 (1.47) | 26.9 | 15.9 (xemu 16.9) | - |
+| c0a0c | 14.7 | 4.08 | 1.89 | 0.67 | 3.17 (1.91) | 26.2 | 15.3 (xemu 16.0) | - |
+| c0a0d | 10.6 | 2.79 | 1.21 | 0.51 | 2.27 (1.08) | 28.3 | 17.6 (xemu 18.6) | - |
+| c0a0e | 6.7 | 1.46 | 0.65 | 0.27 | 1.46 (0.67) | 30.4 | 19.9 (xemu 22.1) | - |
+| c1a0 | 10.7 | 2.57 | 1.01 | 0.52 | 2.30 (0.94) | 28.7 | 17.8 (xemu 19.6) | - |
+| c1a0a | 10.7 | 2.65 | 1.07 | 0.51 | 2.31 (0.89) | 28.6 | 17.7 (xemu 19.8) | - |
+| c1a0b | 11.6 | 2.87 | 1.20 | 0.53 | 2.50 (1.03) | 28.2 | 17.3 (xemu 19.1) | - |
+| c1a0c | 11.5 | 3.31 | 1.36 | 0.62 | 2.44 (1.00) | 27.5 | 16.8 (xemu 18.4) | - |
+| c1a0d | 11.0 | 2.81 | 1.05 | 0.58 | 2.33 (0.86) | 28.4 | 17.5 (xemu 19.3) | - |
+| c1a0e | 12.5 | 3.02 | 1.54 | 0.46 | 2.75 (1.62) | 27.8 | 16.9 (xemu 16.9) | - |
+| c1a1 | 12.0 | 3.28 | 1.35 | 0.61 | 2.56 (1.06) | 27.6 | 16.8 (xemu 18.0) | - |
+| c1a1a | 10.8 | 2.63 | 0.98 | 0.55 | 2.31 (0.81) | 28.6 | 17.7 (xemu 19.3) | - |
+| c1a1b | 13.9 | 4.49 | 1.85 | 0.84 | 2.90 (1.59) | 25.6 | 15.1 | - |
+| c1a1c | 14.5 | 4.32 | 1.76 | 0.83 | 3.04 (1.53) | 25.9 | 15.1 | - |
+| c1a1d | 4.4 | 1.22 | 0.52 | 0.23 | 0.94 (0.50) | 30.8 | 20.6 | - |
+| c1a1f | 15.8 | 4.14 | 1.70 | 0.79 | 3.36 (1.62) | 26.2 | 15.0 | - |
+| c1a2 | 15.3 | 5.19 | 1.98 | 1.05 | 3.12 (1.67) | 24.6 | 14.1 | - |
+| c1a2a | 14.0 | 5.05 | 1.82 | 1.05 | 2.80 (1.41) | 24.9 | 14.5 | - |
+| c1a2b | 15.0 | 5.36 | 1.99 | 1.10 | 3.03 (1.55) | 24.4 | 13.9 | - |
+| c1a2c | 8.5 | 2.64 | 1.02 | 0.53 | 1.76 (0.91) | 28.6 | 18.2 | - |
+| c1a2d | 4.9 | 1.49 | 0.57 | 0.31 | 1.01 (0.50) | 30.4 | 20.3 | - |
+| c1a3 | 13.8 | 3.68 | 1.46 | 0.72 | 2.93 (1.42) | 26.9 | 15.9 | - |
+| c1a3a | 12.6 | 3.57 | 1.40 | 0.71 | 2.65 (1.44) | 27.1 | 16.3 | - |
+| c1a3b | 5.5 | 1.43 | 0.56 | 0.28 | 1.16 (0.59) | 30.5 | 20.2 | - |
+| c1a3c | 4.3 | 0.91 | 0.40 | 0.16 | 0.95 (0.44) | 31.3 | 21.0 | - |
+| c1a3d | 6.0 | 1.62 | 0.64 | 0.32 | 1.28 (0.56) | 30.2 | 19.8 | - |
+| c1a4 | 11.5 | 3.35 | 1.48 | 0.60 | 2.43 (1.42) | 27.4 | 16.8 | - |
+| c1a4b | 11.2 | 3.46 | 1.41 | 0.66 | 2.33 (1.16) | 27.3 | 16.8 | - |
+| c1a4d | 14.0 | 4.49 | 1.74 | 0.89 | 2.88 (1.55) | 25.7 | 15.1 | - |
+| c1a4e | 7.9 | 2.19 | 0.95 | 0.39 | 1.70 (0.94) | 29.3 | 18.8 | - |
+| c1a4f | 14.9 | 4.49 | 1.86 | 0.85 | 3.13 (1.86) | 25.6 | 14.8 | - |
+| c1a4g | 15.3 | 4.95 | 2.11 | 0.90 | 3.19 (2.05) | 24.8 | 14.3 | - |
+| c1a4i | 14.0 | 3.90 | 1.77 | 0.68 | 2.99 (1.81) | 26.4 | 15.7 | - |
+| c1a4j | 4.0 | 1.25 | 0.52 | 0.23 | 0.83 (0.45) | 30.8 | 20.7 | - |
+| c1a4k | 8.2 | 1.95 | 0.94 | 0.33 | 1.78 (1.11) | 29.6 | 19.0 | - |
+| c2a1 | 13.1 | 4.39 | 1.72 | 0.84 | 2.70 (1.38) | 25.9 | 15.4 | - |
+| c2a1a | 15.9 | 5.13 | 1.88 | 1.05 | 3.26 (1.53) | 24.7 | 14.0 | - |
+| c2a1b | 6.7 | 2.28 | 0.84 | 0.47 | 1.35 (0.64) | 29.2 | 19.0 | - |
+| c2a2 | 7.9 | 2.05 | 0.85 | 0.40 | 1.68 (0.84) | 29.5 | 19.0 | - |
+| c2a2a | 16.3 | 5.20 | 2.06 | 1.01 | 3.37 (1.86) | 24.5 | 13.8 | - |
+| c2a2b1 | 15.2 | 4.53 | 1.72 | 0.91 | 3.17 (1.50) | 25.6 | 14.7 | - |
+| c2a2b2 | 12.3 | 3.20 | 1.28 | 0.63 | 2.63 (1.22) | 27.7 | 16.8 | - |
+| c2a2c | 13.3 | 4.11 | 1.53 | 0.84 | 2.76 (1.38) | 26.3 | 15.6 | - |
+| c2a2d | 14.9 | 4.51 | 1.80 | 0.87 | 3.12 (1.61) | 25.6 | 14.8 | - |
+| c2a2e | 17.9 | 5.61 | 2.22 | 1.09 | 3.73 (2.03) | 23.9 | 13.0 | - |
+| c2a2f | 13.8 | 4.34 | 1.68 | 0.85 | 2.86 (1.55) | 25.9 | 15.3 | - |
+| c2a2g | 12.3 | 3.32 | 1.33 | 0.63 | 2.60 (1.08) | 27.5 | 16.6 | - |
+| c2a2h | 11.3 | 2.96 | 1.16 | 0.57 | 2.41 (0.97) | 28.1 | 17.2 | - |
+| c2a3 | 12.3 | 3.73 | 1.52 | 0.70 | 2.58 (1.38) | 26.8 | 16.2 | - |
+| c2a3a | 12.2 | 3.16 | 1.18 | 0.65 | 2.60 (1.12) | 27.8 | 16.8 | - |
+| c2a3b | 15.4 | 3.64 | 1.60 | 0.67 | 3.33 (1.83) | 26.9 | 15.6 | - |
+| c2a3c | 11.5 | 3.19 | 1.21 | 0.64 | 2.43 (1.09) | 27.8 | 17.0 | - |
+| c2a3d | 11.6 | 3.25 | 1.31 | 0.63 | 2.44 (1.38) | 27.6 | 16.9 | - |
+| c2a3e | 8.9 | 2.00 | 0.87 | 0.38 | 1.94 (1.02) | 29.6 | 18.8 | - |
+| c2a4 | 6.7 | 2.05 | 0.85 | 0.35 | 1.41 (0.66) | 29.6 | 19.3 | - |
+| c2a4a | 14.0 | 5.05 | 1.86 | 1.00 | 2.83 (1.52) | 24.9 | 14.5 | - |
+| c2a4b | 16.0 | 4.72 | 1.90 | 0.91 | 3.36 (1.88) | 25.3 | 14.4 | - |
+| c2a4c | 17.9 | 5.75 | 2.14 | 1.17 | 3.68 (2.00) | 23.7 | 12.9 | - |
+| c2a4d | 8.7 | 2.07 | 0.79 | 0.41 | 1.87 (0.67) | 29.5 | 18.8 | - |
+| c2a4e | 17.8 | 5.87 | 2.11 | 1.19 | 3.63 (1.81) | 23.6 | 12.8 | - |
+| c2a4f | 12.9 | 3.90 | 1.43 | 0.79 | 2.68 (1.17) | 26.7 | 15.9 | - |
+| c2a4g | 6.3 | 1.31 | 0.53 | 0.24 | 1.39 (0.44) | 30.7 | 20.1 | - |
+| c2a5 | 11.6 | 3.94 | 1.60 | 0.69 | 2.40 (1.28) | 26.6 | 16.2 | - |
+| c2a5a | 6.9 | 2.17 | 0.85 | 0.39 | 1.43 (0.69) | 29.4 | 19.1 | - |
+| c2a5b | 10.5 | 2.83 | 1.13 | 0.51 | 2.24 (0.84) | 28.3 | 17.6 | - |
+| c2a5c | 8.0 | 2.00 | 0.82 | 0.37 | 1.73 (0.69) | 29.6 | 19.0 | - |
+| c2a5d | 7.6 | 2.00 | 0.81 | 0.38 | 1.62 (0.70) | 29.6 | 19.1 | - |
+| c2a5e | 18.1 | 5.25 | 2.06 | 1.01 | 3.79 (1.73) | 24.5 | 13.3 | - |
+| c2a5f | 16.7 | 5.88 | 2.20 | 1.17 | 3.39 (1.67) | 23.6 | 13.0 | - |
+| c2a5g | 9.8 | 2.42 | 1.00 | 0.45 | 2.12 (0.86) | 28.9 | 18.1 | - |
+| c2a5w | 8.7 | 2.57 | 1.09 | 0.45 | 1.83 (0.91) | 28.7 | 18.3 | - |
+| c2a5x | 8.8 | 2.85 | 1.25 | 0.50 | 1.85 (1.03) | 28.2 | 17.9 | - |
+| c3a1 | 15.8 | 4.18 | 1.74 | 0.78 | 3.37 (1.62) | 26.1 | 15.0 | - |
+| c3a1a | 14.3 | 3.55 | 1.39 | 0.70 | 3.06 (1.22) | 27.1 | 15.9 | - |
+| c3a1b | 12.0 | 2.91 | 1.24 | 0.55 | 2.59 (1.27) | 28.1 | 17.1 | - |
+| c3a2 | 7.7 | 1.37 | 0.57 | 0.28 | 1.71 (0.61) | 30.6 | 19.7 | - |
+| c3a2a | 16.6 | 4.64 | 1.85 | 0.94 | 3.49 (2.05) | 25.4 | 14.3 | - |
+| c3a2b | 9.0 | 2.06 | 0.95 | 0.36 | 1.97 (1.06) | 29.4 | 18.7 | - |
+| c3a2c | 15.3 | 4.19 | 1.64 | 0.83 | 3.24 (1.64) | 26.1 | 15.0 | - |
+| c3a2d | 11.4 | 2.43 | 1.14 | 0.42 | 2.51 (1.31) | 28.8 | 17.7 | - |
+| c3a2e | 10.1 | 2.45 | 0.95 | 0.51 | 2.15 (1.03) | 28.9 | 18.1 | - |
+| c3a2f | 6.2 | 1.18 | 0.51 | 0.22 | 1.37 (0.53) | 30.9 | 20.2 | - |
+| c4a1 | 8.7 | 2.98 | 1.33 | 0.50 | 1.81 (1.12) | 28.0 | 17.9 | - |
+| c4a1a | 9.0 | 3.28 | 1.34 | 0.58 | 1.85 (0.97) | 27.6 | 17.5 | - |
+| c4a1b | 10.8 | 4.56 | 1.80 | 0.80 | 2.08 (1.19) | 25.6 | 15.8 | - |
+| c4a1c | 5.3 | 1.51 | 0.67 | 0.26 | 1.14 (0.55) | 30.4 | 20.1 | - |
+| c4a1d | 9.4 | 3.07 | 1.30 | 0.55 | 1.96 (1.12) | 27.9 | 17.6 | - |
+| c4a1e | 8.2 | 2.82 | 1.27 | 0.47 | 1.71 (1.08) | 28.2 | 18.1 | - |
+| c4a1f | 3.3 | 0.79 | 0.34 | 0.14 | 0.71 (0.23) | 31.5 | 21.3 | - |
+| c4a2 | 5.7 | 1.55 | 0.75 | 0.23 | 1.24 (0.77) | 30.3 | 20.0 | - |
+| c4a2a | 5.6 | 1.52 | 0.68 | 0.25 | 1.21 (0.59) | 30.4 | 20.0 | - |
+| c4a2b | 4.4 | 0.81 | 0.43 | 0.12 | 0.98 (0.47) | 31.4 | 21.1 | - |
+| c4a3 | 14.7 | 4.39 | 2.07 | 0.69 | 3.14 (1.89) | 25.7 | 15.0 | - |
+| c5a1 | 17.8 | 6.19 | 2.64 | 1.04 | 3.69 (2.30) | 22.9 | 12.5 | - |
+| contamination | 38.2 | 10.96 | 3.96 | 2.36 | 7.94 (3.94) | 15.5 | 4.2 | - |
+| crossfire | 11.6 | 3.09 | 1.20 | 0.60 | 2.46 (1.05) | 27.9 | 18.4 (xemu 19.1) | - |
+| datacore | 11.2 | 3.18 | 1.20 | 0.66 | 2.34 (1.17) | 27.8 | 18.5 | - |
+| disposal | 43.4 | 11.22 | 4.43 | 2.26 | 9.24 (4.41) | 14.9 | 2.7 (xemu 2.7) | - |
+| doublecross | 14.9 | 3.92 | 1.51 | 0.76 | 3.17 (1.31) | 26.6 | 16.8 | - |
+| frenzy | 5.9 | 1.53 | 0.65 | 0.29 | 1.25 (0.69) | 30.3 | 21.4 | - |
+| gasworks | 10.3 | 2.62 | 0.94 | 0.56 | 2.17 (0.91) | 28.7 | 19.2 | - |
+| hldemo1 | 10.8 | 3.34 | 1.34 | 0.64 | 2.25 (1.11) | 27.5 | 18.4 | - |
+| hldemo2 | 14.7 | 4.79 | 1.78 | 0.96 | 3.02 (1.39) | 25.3 | 16.0 | - |
+| hldemo3 | 11.6 | 3.59 | 1.41 | 0.68 | 2.41 (1.25) | 27.1 | 18.0 | - |
+| lambda_bunker | 13.8 | 3.38 | 1.36 | 0.65 | 2.97 (1.31) | 27.4 | 17.6 | - |
+| pool_party | 31.4 | 10.76 | 4.18 | 2.15 | 6.41 (2.94) | 15.7 | 6.0 | - |
+| rapidcore | 11.2 | 3.25 | 1.35 | 0.61 | 2.37 (1.09) | 27.6 | 18.4 | - |
+| rocket_frenzy | 78.0 | 25.67 | 8.71 | 5.73 | 15.74 (7.89) | -7.3 | -20.1 | C1 ENGINE OOM building world (needs 34.4 of 32.8); C3 GPU buffers do not fit (20.1 MiB short); MP maxclients>1: Mod_CalcPHS needs 74.6 MiB more at load |
+| rustmill | 18.4 | 5.51 | 2.11 | 1.05 | 3.83 (1.94) | 24.1 | 14.4 | - |
+| snark_pit | 7.7 | 1.94 | 0.74 | 0.40 | 1.64 (0.75) | 29.7 | 20.5 | - |
+| stalkyard | 6.7 | 1.75 | 0.68 | 0.36 | 1.43 (0.70) | 30.0 | 21.0 | - |
+| subtransit | 13.3 | 3.99 | 1.56 | 0.78 | 2.77 (1.44) | 26.5 | 17.1 | - |
+| t0a0 | 15.8 | 4.63 | 1.77 | 0.92 | 3.29 (1.75) | 25.5 | 14.5 | - |
+| t0a0a | 16.9 | 4.66 | 1.81 | 0.92 | 3.57 (1.81) | 25.4 | 14.2 | - |
+| t0a0b | 21.6 | 5.88 | 2.42 | 1.13 | 4.57 (2.78) | 23.4 | 11.9 | - |
+| t0a0b1 | 13.6 | 3.53 | 1.46 | 0.69 | 2.90 (1.66) | 27.1 | 16.1 | - |
+| t0a0b2 | 10.7 | 2.56 | 1.10 | 0.48 | 2.32 (1.30) | 28.7 | 17.8 | - |
+| t0a0c | 11.1 | 2.82 | 1.10 | 0.57 | 2.37 (1.14) | 28.3 | 17.4 | - |
+| t0a0d | 7.1 | 1.57 | 0.62 | 0.32 | 1.54 (0.59) | 30.3 | 19.6 | - |
+| undertow | 9.6 | 2.37 | 1.02 | 0.44 | 2.08 (1.09) | 29.0 | 19.6 | - |
+| xen_dm | 5.6 | 1.62 | 0.70 | 0.28 | 1.19 (0.67) | 30.2 | 21.4 | - |
 
 X9-M onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.

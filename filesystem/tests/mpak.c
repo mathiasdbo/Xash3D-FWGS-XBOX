@@ -2,9 +2,10 @@
 // filesystem/mpak.c): an .mpak archive dropped into a scanned game
 // directory is discovered via g_archives[] (searchpath.c), and asking the
 // VFS for the map name it represents ("maps/<basename>.bsp") returns the
-// archive's bytes back verbatim. Does NOT exercise MpakHeader6's lump
-// layout - filesystem/mpak.c is deliberately a whole-file passthrough,
-// not a BSP-lump parser (see its own header comment for why). Also
+// archive's classic-lump prefix, and "maps/<basename>.mpak" the whole
+// archive, byte for byte (MPAK v12 - filesystem/mpak.c's header comment).
+// Also proves an archive whose dheader_t disagrees with its descriptor is
+// not mounted at all. Also
 // proves a loose "maps/<name>.bsp" still wins over a same-named .mpak
 // when both are present - the ONLY currently-safe ordering, since
 // nothing can parse an .mpak's bytes yet (see
@@ -16,11 +17,14 @@
 
 // A v7 map archive's first sector holds a real BSP30 dheader_t at 0 and
 // the MpakHeader6 descriptor at MPAK_DESCRIPTOR_OFFSET
-// (tools/asset-studio/src/formats/MpakHeader.h's first-sector note) - mpak.c
-// probes both and nothing past the descriptor's first 8 bytes ("MPAK" +
-// version, little-endian). Everything after the first sector here is
-// arbitrary payload standing in for the real lump data.
+// (tools/asset-studio/src/formats/MpakHeader.h's first-sector note). mpak.c
+// probes both, and since v12 walks the whole descriptor's layout, so a
+// mountable test archive has to be a real (tiny) one: its payload is the
+// entities lump - the only classic lump - followed by a renderer-only
+// faceRemap section. WriteFirstSector alone still writes the broken
+// sectors TestRejectsBadArchive needs.
 #define TEST_FIRST_SECTOR 2048u
+#define TEST_REMAP_BYTES  512u  // the renderer-only section: 128 uint32_t face-remap entries
 
 static qboolean WriteFirstSector( file_t *f, uint32_t bspVersion, const char magic[4], uint32_t version )
 {
@@ -34,34 +38,63 @@ static qboolean WriteFirstSector( file_t *f, uint32_t bspVersion, const char mag
 	return g_fs.Write( f, sector, sizeof( sector )) == (fs_offset_t)sizeof( sector );
 }
 
-static qboolean WriteMpakFile( const char *path, uint32_t version, const byte *payload, size_t payloadSize )
+// Writes a valid v12 map archive: payload is the entities lump (at most
+// one sector), then TEST_REMAP_BYTES of 0xA5 as the renderer-only
+// faceRemap section, every section padded to a whole sector the way
+// PakManager.cpp's writePadded does. entitiesOfs overrides the dheader_t's
+// entities offset (0 = the real one), to write an archive whose dheader_t
+// and descriptor disagree.
+static qboolean WriteMpakFile( const char *path, uint32_t version, const byte *payload, size_t payloadSize, int32_t entitiesOfs )
 {
-	file_t *f = g_fs.Open( path, "wb", true );
+	byte sector[TEST_FIRST_SECTOR];
+	byte section[TEST_FIRST_SECTOR];
+	mpak_header_t desc;
+	dheader_t *bsp = (dheader_t *)sector;
+	file_t *f;
+	qboolean ok;
 
+	if( payloadSize == 0 || payloadSize > sizeof( section ))
+		return false;
+
+	memset( sector, 0, sizeof( sector ));
+	bsp->version = HLBSP_VERSION;
+	bsp->lumps[LUMP_ENTITIES].fileofs = entitiesOfs ? entitiesOfs : (int32_t)TEST_FIRST_SECTOR;
+	bsp->lumps[LUMP_ENTITIES].filelen = (int32_t)payloadSize;
+
+	memset( &desc, 0, sizeof( desc ));
+	memcpy( desc.magic, "MPAK", 4 );
+	desc.version = version; // this test only runs little-endian hosts
+	desc.headerSize = sizeof( mpak_header_t );
+	desc.lenEntities = (uint32_t)payloadSize;
+	desc.lenFaceRemap = TEST_REMAP_BYTES;
+	memcpy( sector + MPAK_DESCRIPTOR_OFFSET, &desc, sizeof( desc ));
+
+	f = g_fs.Open( path, "wb", true );
 	if( !f )
 	{
 		printf( "WriteMpakFile: Open(%s) failed\n", path );
 		return false;
 	}
 
-	if( !WriteFirstSector( f, HLBSP_VERSION, "MPAK", version ) ||
-		( payloadSize > 0 && g_fs.Write( f, payload, payloadSize ) != (fs_offset_t)payloadSize ))
-	{
-		printf( "WriteMpakFile: short write\n" );
-		g_fs.Close( f );
-		return false;
-	}
-
+	ok = g_fs.Write( f, sector, sizeof( sector )) == (fs_offset_t)sizeof( sector );
+	memset( section, 0, sizeof( section ));
+	memcpy( section, payload, payloadSize );
+	ok = ok && g_fs.Write( f, section, sizeof( section )) == (fs_offset_t)sizeof( section );
+	memset( section, 0, sizeof( section ));
+	memset( section, 0xA5, TEST_REMAP_BYTES );
+	ok = ok && g_fs.Write( f, section, sizeof( section )) == (fs_offset_t)sizeof( section );
 	g_fs.Close( f );
-	return true;
+
+	if( !ok )
+		printf( "WriteMpakFile: short write\n" );
+	return ok;
 }
 
 static qboolean TestDiscoveryAndWholeFilePassthrough( void )
 {
 	byte payload[512];
-	byte fullExpected[TEST_FIRST_SECTOR + sizeof( payload )];
-	byte *data;
-	fs_offset_t len;
+	byte *data, *archive;
+	fs_offset_t len, archiveLen;
 	qboolean ok;
 
 	for( size_t i = 0; i < sizeof( payload ); i++ )
@@ -71,7 +104,7 @@ static qboolean TestDiscoveryAndWholeFilePassthrough( void )
 	// create anything (same ordering filecopy.c/caseinsensitive.c use).
 	g_fs.AddGameDirectory( "./", FS_GAMEDIR_PATH );
 
-	if( !WriteMpakFile( "c1a3.mpak", MPAK_LAYOUT_VERSION,payload, sizeof( payload )))
+	if( !WriteMpakFile( "c1a3.mpak", MPAK_LAYOUT_VERSION, payload, sizeof( payload ), 0 ))
 		return false;
 
 	// Re-scan: this second call is what actually exercises the new "mpak"
@@ -93,25 +126,40 @@ static qboolean TestDiscoveryAndWholeFilePassthrough( void )
 		return false;
 	}
 
-	// The same first sector WriteFirstSector wrote, rebuilt here by hand,
-	// then the payload: the whole file, byte for byte.
-	memset( fullExpected, 0, TEST_FIRST_SECTOR );
-	memcpy( fullExpected, &( uint32_t ){ HLBSP_VERSION }, sizeof( uint32_t ));
-	memcpy( fullExpected + MPAK_DESCRIPTOR_OFFSET, "MPAK", 4 );
-	memcpy( fullExpected + MPAK_DESCRIPTOR_OFFSET + 4, &( uint32_t ){ MPAK_LAYOUT_VERSION }, sizeof( uint32_t ));
-	memcpy( fullExpected + TEST_FIRST_SECTOR, payload, sizeof( payload ));
-
+	// v12: the .bsp name is the classic prefix - the first sector and the
+	// entities lump's sector - and stops before the renderer section.
 	ok = true;
-	if( len != (fs_offset_t)sizeof( fullExpected ))
+	if( len != (fs_offset_t)( 2 * TEST_FIRST_SECTOR ))
 	{
-		printf( "TestDiscoveryAndWholeFilePassthrough: size mismatch (%lld != %lld)\n",
-			(long long)len, (long long)sizeof( fullExpected ));
+		printf( "TestDiscoveryAndWholeFilePassthrough: .bsp view is %lld bytes, expected the %u-byte classic prefix\n",
+			(long long)len, 2 * TEST_FIRST_SECTOR );
 		ok = false;
 	}
-	else if( memcmp( data, fullExpected, sizeof( fullExpected )) != 0 )
+	else if( memcmp( data + TEST_FIRST_SECTOR, payload, sizeof( payload )) != 0
+		|| memcmp( data + MPAK_DESCRIPTOR_OFFSET, "MPAK", 4 ) != 0 )
 	{
-		printf( "TestDiscoveryAndWholeFilePassthrough: content mismatch\n" );
+		printf( "TestDiscoveryAndWholeFilePassthrough: .bsp view content mismatch\n" );
 		ok = false;
+	}
+
+	// The .mpak name is the whole archive, renderer section included.
+	archive = g_fs.LoadFile( "maps/c1a3.mpak", &archiveLen, true );
+	if( !archive )
+	{
+		printf( "TestDiscoveryAndWholeFilePassthrough: LoadFile(maps/c1a3.mpak) failed\n" );
+		ok = false;
+	}
+	else
+	{
+		if( archiveLen != (fs_offset_t)( 3 * TEST_FIRST_SECTOR )
+			|| memcmp( archive, data, (size_t)( 2 * TEST_FIRST_SECTOR )) != 0
+			|| archive[2 * TEST_FIRST_SECTOR] != 0xA5 || archive[2 * TEST_FIRST_SECTOR + TEST_REMAP_BYTES - 1] != 0xA5 )
+		{
+			printf( "TestDiscoveryAndWholeFilePassthrough: .mpak view is not the whole archive (len %lld)\n",
+				(long long)archiveLen );
+			ok = false;
+		}
+		free( archive );
 	}
 
 	free( data );
@@ -173,7 +221,12 @@ static qboolean TestRejectsBadArchive( void )
 	if( !WriteBrokenSectorFile( "badmagic.mpak", HLBSP_VERSION, "XXXX", payload, sizeof( payload )))
 		return false;
 
-	if( !WriteMpakFile( "badversion.mpak", 99, payload, sizeof( payload )))
+	if( !WriteMpakFile( "badversion.mpak", 99, payload, sizeof( payload ), 0 ))
+		return false;
+
+	// v12: the right version, but the dheader_t puts the entities lump one
+	// sector later than the descriptor's walk does - writer/reader drift.
+	if( !WriteMpakFile( "badlayout.mpak", MPAK_LAYOUT_VERSION, payload, sizeof( payload ), 2 * TEST_FIRST_SECTOR ))
 		return false;
 
 	// v7: a descriptor with no BSP30 dheader_t in front of it is not a map
@@ -196,6 +249,12 @@ static qboolean TestRejectsBadArchive( void )
 		ok = false;
 	}
 
+	if( g_fs.FileExists( "maps/badlayout.bsp", true ) || g_fs.FileExists( "maps/badlayout.mpak", true ))
+	{
+		printf( "TestRejectsBadArchive: archive with a drifted dheader_t was incorrectly mounted\n" );
+		ok = false;
+	}
+
 	if( g_fs.FileExists( "maps/nobsp.bsp", true ))
 	{
 		printf( "TestRejectsBadArchive: archive with no dheader_t was incorrectly mounted\n" );
@@ -204,6 +263,7 @@ static qboolean TestRejectsBadArchive( void )
 
 	g_fs.Delete( "badmagic.mpak" );
 	g_fs.Delete( "badversion.mpak" );
+	g_fs.Delete( "badlayout.mpak" );
 	g_fs.Delete( "nobsp.mpak" );
 	return ok;
 }
@@ -255,7 +315,7 @@ static qboolean TestLooseMapStillWinsOverMpak( void )
 	// Writing relative to precedence_test/ only needs the writepath
 	// established by main()'s earlier AddGameDirectory("./", ...) calls -
 	// it does not scan or mount precedence_test/ itself.
-	if( !WriteMpakFile( "precedence_test/crossfire.mpak", MPAK_LAYOUT_VERSION,mpakPayload, sizeof( mpakPayload )))
+	if( !WriteMpakFile( "precedence_test/crossfire.mpak", MPAK_LAYOUT_VERSION, mpakPayload, sizeof( mpakPayload ), 0 ))
 		return false;
 
 	f = g_fs.Open( "precedence_test/maps/crossfire.bsp", "wb", true );

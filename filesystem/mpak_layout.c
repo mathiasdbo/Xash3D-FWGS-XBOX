@@ -190,20 +190,10 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 	// the header is never empty).
 	cursor = MPAK_SECTOR_SIZE;
 
-	// Geometry: no length field of its own in the header at all (only
-	// counts) - real BSP-format ("structural") lumps start right after it.
-	// Widened to uint64_t BEFORE multiplying, not after - found in the same
-	// review pass as Mpak_PlaceLump's own length-narrowing fix above: the
-	// previous `(fs_offset_t)header->vCount * sizeof(...)` cast vCount to a
-	// possibly-32-bit signed type first, so the multiplication itself could
-	// already have wrapped before Mpak_PlaceLump ever saw the result.
-	if( !Mpak_PlaceLump( "vertices", (uint64_t)header->vCount * sizeof( mpak_vertex_t ),
-			0, fileSize, &cursor, &out->vertices ))
-		return false;
-	if( !Mpak_PlaceLump( "indices", (uint64_t)header->iCount * sizeof( uint16_t ),
-			0, fileSize, &cursor, &out->indices ))
-		return false;
-
+	// v12 (MpakHeader.h's v11 -> v12 note): every classic BSP lump comes
+	// first, then every renderer-only section. filesystem/mpak.c serves
+	// the engine only the prefix that ends at classicEnd, which is why the
+	// grouping - not just the order within each group - is the format.
 	// Raw BSP-format lumps, byte-identical copies of the source .bsp's own
 	// LUMP_VISIBILITY/NODES/LEAVES/MARKSURFACES/PLANES/CLIPNODES/MODELS
 	// (verified against tools/asset-studio/src/formats/BspParser.cpp's
@@ -218,19 +208,60 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 	if( !Mpak_PlaceLump( "marksurfaces", header->lenMarksurfaces, sizeof( dmarkface_t ),
 			fileSize, &cursor, &out->marksurfaces ))
 		return false;
-	// FaceDrawCmd (tools/asset-studio/src/formats/PakManager.h): two
-	// uint32_t, 8 bytes - not a real BSP lump, but occupies real space
-	// between marksurfaces and planes that every offset after it must
-	// skip over correctly.
-	if( !Mpak_PlaceLump( "faceDrawCmds", header->lenFaceDrawCmds, 2 * sizeof( uint32_t ),
-			fileSize, &cursor, &out->faceDrawCmds ))
-		return false;
 	if( !Mpak_PlaceLump( "planes", header->lenPlanes, sizeof( dplane_t ), fileSize, &cursor, &out->planes ))
 		return false;
 	if( !Mpak_PlaceLump( "clipnodes", header->lenClipnodes, sizeof( dclipnode_t ),
 			fileSize, &cursor, &out->clipnodes ))
 		return false;
 	if( !Mpak_PlaceLump( "models", header->lenModels, sizeof( dmodel_t ), fileSize, &cursor, &out->models ))
+		return false;
+
+	if( !Mpak_PlaceLump( "entities", header->lenEntities, 0, fileSize, &cursor, &out->entities ))
+		return false;
+
+	if( !Mpak_PlaceLump( "texinfo", header->lenTexinfo, sizeof( dtexinfo_t ), fileSize, &cursor, &out->texinfo ))
+		return false;
+
+	// v7 classic core (MpakHeader.h's v6 -> v7 note), in this order. Real
+	// GoldSrc record sizes from common/bspfile.h; LIGHTING is a sample blob
+	// and the miptex lump is self-describing, so those two get no
+	// divisibility check.
+	if( !Mpak_PlaceLump( "vertexes", header->lenVertexes, sizeof( dvertex_t ), fileSize, &cursor, &out->vertexes ))
+		return false;
+	if( !Mpak_PlaceLump( "edges", header->lenEdges, sizeof( dedge_t ), fileSize, &cursor, &out->edges ))
+		return false;
+	if( !Mpak_PlaceLump( "surfedges", header->lenSurfedges, sizeof( dsurfedge_t ), fileSize, &cursor, &out->surfedges ))
+		return false;
+	if( !Mpak_PlaceLump( "faces", header->lenFaces, sizeof( dface_t ), fileSize, &cursor, &out->faces ))
+		return false;
+	if( !Mpak_PlaceLump( "lighting", header->lenLighting, 0, fileSize, &cursor, &out->lighting ))
+		return false;
+	if( !Mpak_PlaceLump( "miptex", header->lenMiptex, 0, fileSize, &cursor, &out->miptex ))
+		return false;
+
+	// Everything the engine's own map loader reads lies before this
+	// offset; the first sector's dheader_t points nowhere past it.
+	out->classicEnd = cursor;
+
+	// Renderer-only sections from here on. Geometry: no length field of
+	// its own in the header at all (only counts).
+	// Widened to uint64_t BEFORE multiplying, not after - found in the same
+	// review pass as Mpak_PlaceLump's own length-narrowing fix above: the
+	// previous `(fs_offset_t)header->vCount * sizeof(...)` cast vCount to a
+	// possibly-32-bit signed type first, so the multiplication itself could
+	// already have wrapped before Mpak_PlaceLump ever saw the result.
+	if( !Mpak_PlaceLump( "vertices", (uint64_t)header->vCount * sizeof( mpak_vertex_t ),
+			0, fileSize, &cursor, &out->vertices ))
+		return false;
+	if( !Mpak_PlaceLump( "indices", (uint64_t)header->iCount * sizeof( uint16_t ),
+			0, fileSize, &cursor, &out->indices ))
+		return false;
+
+	// FaceDrawCmd (tools/asset-studio/src/formats/PakManager.h): two
+	// uint32_t, 8 bytes - not a real BSP lump; v12 moved it out of the
+	// classic lumps, after the indices.
+	if( !Mpak_PlaceLump( "faceDrawCmds", header->lenFaceDrawCmds, 2 * sizeof( uint32_t ),
+			fileSize, &cursor, &out->faceDrawCmds ))
 		return false;
 
 	// Textures: v9 replaces the single shared atlas (v6-v8) with a
@@ -286,9 +317,6 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 	if( !Mpak_PlaceLump( "assetData", header->lenAssetData, 0, fileSize, &cursor, &out->assetData ))
 		return false;
 
-	if( !Mpak_PlaceLump( "entities", header->lenEntities, 0, fileSize, &cursor, &out->entities ))
-		return false;
-
 	// Cross-checked against the header's own declared dimensions, not
 	// just bounds-checked - a real correctness signal beyond "fits in the
 	// file", since lightmapWidth/Height/Layers/Format are already known.
@@ -333,27 +361,7 @@ qboolean Mpak_ComputeLayout( const mpak_header_t *header, fs_offset_t fileSize, 
 
 	if( !Mpak_PlaceLump( "faceInfo", header->lenFaceInfo, MPAK_FACEINFO_SIZE, fileSize, &cursor, &out->faceInfo ))
 		return false;
-	if( !Mpak_PlaceLump( "texinfo", header->lenTexinfo, sizeof( dtexinfo_t ), fileSize, &cursor, &out->texinfo ))
-		return false;
-
-	// v7 classic core (MpakHeader.h's v6 -> v7 note), appended in this
-	// order. Real GoldSrc record sizes from common/bspfile.h; LIGHTING is a
-	// sample blob and the miptex lump is self-describing, so those two get
-	// no divisibility check.
-	if( !Mpak_PlaceLump( "vertexes", header->lenVertexes, sizeof( dvertex_t ), fileSize, &cursor, &out->vertexes ))
-		return false;
-	if( !Mpak_PlaceLump( "edges", header->lenEdges, sizeof( dedge_t ), fileSize, &cursor, &out->edges ))
-		return false;
-	if( !Mpak_PlaceLump( "surfedges", header->lenSurfedges, sizeof( dsurfedge_t ), fileSize, &cursor, &out->surfedges ))
-		return false;
-	if( !Mpak_PlaceLump( "faces", header->lenFaces, sizeof( dface_t ), fileSize, &cursor, &out->faces ))
-		return false;
-	if( !Mpak_PlaceLump( "lighting", header->lenLighting, 0, fileSize, &cursor, &out->lighting ))
-		return false;
-	if( !Mpak_PlaceLump( "miptex", header->lenMiptex, 0, fileSize, &cursor, &out->miptex ))
-		return false;
-
-	// v8 (MpakHeader.h's v7 -> v8 note), appended after the classic core.
+	// v8 (MpakHeader.h's v7 -> v8 note).
 	if( !Mpak_PlaceLump( "extraLightBlocks", header->lenExtraLightBlocks, MPAK_EXTRALIGHTBLOCK_SIZE,
 			fileSize, &cursor, &out->extraLightBlocks ))
 		return false;

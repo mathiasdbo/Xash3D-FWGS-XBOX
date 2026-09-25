@@ -114,6 +114,20 @@ namespace formats {
     // IMPORTANT below) rather than removed, since removing a field is a
     // version bump this scope change does not otherwise need.
     //
+    // v11 -> v12: the SAME sections and header, in a new order - every
+    // classic BSP lump first (visibility, nodes, leaves, marksurfaces,
+    // planes, clipnodes, models, entities, texinfo, vertexes, edges,
+    // surfedges, faces, lighting, miptex), then every renderer-only section
+    // (vertices, indices, faceDrawCmds, the texture directory/data/batches,
+    // faceRemap, the PC arrays, assets, lightmapAtlas, faceInfo,
+    // extraLightBlocks, faceVertexBase), each group keeping its v11
+    // relative order. filesystem/mpak.c serves "maps/<name>.bsp" as only
+    // the classic prefix, so the engine's whole-file map load no longer
+    // pulls in the renderer's data, and serves the whole archive as
+    // "maps/<name>.mpak" for ref/nv2a to stream its own sections from.
+    // On disposal and rocket_frenzy that data is more than half the file,
+    // and holding all of it at once is what kept them from loading.
+    //
     // v10 -> v11: maps whose per-face vertices outgrow 16-bit indices
     // (more than 65,536 - four retail maps: contamination, disposal,
     // pool_party, rocket_frenzy) are split into vertex chunks of at most
@@ -266,7 +280,7 @@ namespace formats {
         // overrides this field with MPAK_UI_BACKGROUND_VERSION instead - see
         // that constant's own doc comment above for why it needs a number
         // that isn't this one.
-        uint32_t version = 11;
+        uint32_t version = 12;
         uint32_t headerSize = 0;      // sizeof(MpakHeader6); set in PakManager::save just before writing
         uint32_t bakerBuildId = MPAK_BAKER_BUILD_ID;
         uint32_t flags = 0; // 1 = Xbox, 0 = PC
@@ -306,7 +320,7 @@ namespace formats {
         uint32_t lenEntities = 0;       // raw LUMP_ENTITIES ASCII text, NUL-terminated
 
         uint32_t lightmapWidth = 0;     // per-page luxel width (e.g. 1024)
-        uint32_t lightmapHeight = 0;    // per-page luxel height: one page is trimmed to the rows it uses (4..1024, a multiple of 4, X9-R); several pages stay 1024. lv is normalized by this value, lu by lightmapWidth
+        uint32_t lightmapHeight = 0;    // per-page luxel height: one page is trimmed to the rows it uses (a multiple of 4; 4..1024 since X9-R, 4..4096 since X9-T); several pages stay 4096. lv is normalized by this value, lu by lightmapWidth
         uint32_t lightmapLayers = 0;    // number of atlas pages
         uint32_t lightmapFormat = 0;    // 0 = RGBA8; reserved for RGB565/ARGB1555 (Xbox)
         uint32_t lenLightmapAtlas = 0;  // total byte length of the layer-major atlas
@@ -332,6 +346,12 @@ namespace formats {
         // --- MPAKv11 addition (see the v10 -> v11 note above; nv2a profile, only when a map has >1 vertex chunk) ---
         uint32_t lenFaceVertexBase = 0; // uint32_t[face count], SORTED order: each face's vertex-chunk base (absolute vertex index)
     };
+    // The C reader's mirror, filesystem/mpak_layout.h's mpak_header_t, pins
+    // the same size: since MPAK v12 filesystem/mpak.c refuses to mount an
+    // archive whose headerSize differs, so a field added to one struct only
+    // would silently stop every map from mounting (asset-pipeline-specialist,
+    // X9-T review).
+    static_assert(sizeof(MpakHeader6) == 180, "MpakHeader6 must match filesystem/mpak_layout.h's mpak_header_t (180 bytes)");
 
     // v9: one entry per unique texture this map actually uses - the Xbox
     // per-texture-WRAP replacement for the old shared atlas (see MpakHeader6's

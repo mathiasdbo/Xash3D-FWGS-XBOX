@@ -30,6 +30,18 @@ filesystem plumbing: discovering the archive in a game directory,
 probing that it really is one (dheader_t at 0 AND the MPAK descriptor at
 MPAK_DESCRIPTOR_OFFSET), and answering the one name it represents.
 
+MPAK v12: the archive answers to TWO names. "maps/<name>.bsp" is only the
+classic prefix - the first sector plus the fifteen classic BSP lumps,
+which v12 writes before every renderer-only section - so the engine's
+whole-file map load (Mod_LoadModel -> FS_LoadFile) no longer holds the
+renderer's vertices, lightmap and textures as well; on the largest retail
+maps that was more than half the file, and more memory than the console
+had. "maps/<name>.mpak" is the whole archive, which ref/nv2a opens to
+stream its own sections from. The prefix's length comes from the real
+layout walk (Mpak_ComputeLayout), and the dheader_t is checked against
+that walk at mount (Mpak_ValidateBspHeader), so no lump the engine will
+read can point past the end of what it is served.
+
 Copyright (C) 2015-2023 Xash3D FWGS contributors (searchpath_t pattern,
 adapted from pak.c/wad.c in this same directory)
 Copyright (C) Resonance3D contributors (this file)
@@ -71,10 +83,9 @@ One archive, one map, one virtual name - see this file's header comment.
 */
 
 // Mirrors formats::MpakHeader6's first two members byte-for-byte
-// (tools/asset-studio/src/formats/MpakHeader.h) - this reader only reads
-// enough of the descriptor to validate the archive before serving it
-// whole; it does not need the rest of the lump layout (see the scope
-// note above).
+// (tools/asset-studio/src/formats/MpakHeader.h) - the probe that decides
+// whether this is an archive of the version this build reads at all,
+// before the whole descriptor is trusted for the layout walk (v12).
 //
 // v7: the descriptor no longer sits at offset 0. A map archive IS a BSP30
 // file - a real dheader_t leads the first sector, so every engine path
@@ -97,22 +108,31 @@ typedef struct
 struct mpak_s
 {
 	file_t      *handle;
-	fs_offset_t filesize;         // whole-archive length, served verbatim as the map's own bytes
-	string      virtualName;      // "maps/<archive's own basename>.bsp" - the one name this archive answers to
+	fs_offset_t filesize;         // whole-archive length, served as archiveName
+	fs_offset_t classicEnd;       // v12: length of the classic-lump prefix, served as virtualName
+	string      virtualName;      // "maps/<archive's own basename>.bsp" - what the engine loads the map as
+	string      archiveName;      // v12: "maps/<archive's own basename>.mpak" - the whole archive, for ref/nv2a
 };
+
+// pack_ind values FS_FindFile_MPAK hands back to FS_OpenFile_MPAK.
+#define MPAK_ENTRY_BSP     0
+#define MPAK_ENTRY_ARCHIVE 1
 
 /*
 =================
 FS_LoadMpak
 
 Takes an explicit (not game tree related) path to an mpak file. Validates
-the header and derives the one virtual name this archive answers to; does
-not read or interpret anything past mpak_probe_header_t.
+the header, walks the layout to find where the classic lumps end (v12),
+and derives the two virtual names this archive answers to.
 =================
 */
 static mpak_t *FS_LoadMpak( const char *mpakfile )
 {
 	mpak_probe_header_t header;
+	mpak_header_t descriptor;
+	mpak_layout_t layout;
+	fs_offset_t filesize;
 	mpak_t *mpak;
 	string basename;
 
@@ -124,7 +144,7 @@ static mpak_t *FS_LoadMpak( const char *mpakfile )
 		return NULL;
 	}
 
-	byte firstSector[MPAK_DESCRIPTOR_OFFSET + sizeof( mpak_probe_header_t )];
+	byte firstSector[MPAK_DESCRIPTOR_OFFSET + sizeof( mpak_header_t )];
 	const dheader_t *bsp = (const dheader_t *)firstSector;
 
 	if( FS_Read( handle, firstSector, sizeof( firstSector )) != sizeof( firstSector ))
@@ -162,12 +182,30 @@ static mpak_t *FS_LoadMpak( const char *mpakfile )
 		return NULL;
 	}
 
+	// v12: the version matches, so the whole descriptor is this build's
+	// own layout. Walk it to find the end of the classic prefix, and check
+	// the dheader_t against that same walk, so the prefix the engine is
+	// served holds every lump its dheader_t names.
+	memcpy( &descriptor, firstSector + MPAK_DESCRIPTOR_OFFSET, sizeof( descriptor ));
+	filesize = FS_FileLength( handle );
+
+	if( descriptor.headerSize != sizeof( mpak_header_t )
+		|| !Mpak_ComputeLayout( &descriptor, filesize, &layout )
+		|| !Mpak_ValidateBspHeader( firstSector, &layout ))
+	{
+		Con_Reportf( S_ERROR "%s has an inconsistent MPAK layout. Ignored.\n", mpakfile );
+		FS_Close( handle );
+		return NULL;
+	}
+
 	mpak = (mpak_t *)Mem_Calloc( fs_mempool, sizeof( mpak_t ));
 	mpak->handle = handle;
-	mpak->filesize = FS_FileLength( handle );
+	mpak->filesize = filesize;
+	mpak->classicEnd = layout.classicEnd;
 
 	COM_FileBase( mpakfile, basename, sizeof( basename ));
 	Q_snprintf( mpak->virtualName, sizeof( mpak->virtualName ), "maps/%s.bsp", basename );
+	Q_snprintf( mpak->archiveName, sizeof( mpak->archiveName ), "maps/%s.mpak", basename );
 
 	// pak.c's equivalent XASH_REDUCE_FD block passes its own file_t* to
 	// close(2) rather than the underlying int descriptor - a type
@@ -184,50 +222,83 @@ static mpak_t *FS_LoadMpak( const char *mpakfile )
 ===========
 FS_OpenFile_MPAK
 
-The whole archive IS the file this searchpath answers to - open it at
-offset 0, length filesize, same as any other file this filesystem serves.
+v12: the map's .bsp name opens the classic prefix only - offset 0,
+length classicEnd - and the .mpak name opens the whole archive.
 ===========
 */
 static file_t *FS_OpenFile_MPAK( searchpath_t *search, const char *filename, const char *mode, int pack_ind )
 {
-	return FS_OpenHandle( search, search->mpak->handle->handle, 0, search->mpak->filesize );
+	const fs_offset_t length = pack_ind == MPAK_ENTRY_ARCHIVE ? search->mpak->filesize : search->mpak->classicEnd;
+
+	return FS_OpenHandle( search, search->mpak->handle->handle, 0, length );
 }
 
 /*
 ===========
 FS_FindFile_MPAK
 
-A single-entry archive: matches only its own virtual name.
+A two-entry archive (v12): the map's .bsp name and the whole archive's
+.mpak name. The returned index tells FS_OpenFile_MPAK which view to open.
 ===========
 */
 static int FS_FindFile_MPAK( searchpath_t *search, const char *path, char *fixedname, size_t len )
 {
-	if( Q_stricmp( search->mpak->virtualName, path ))
+	const char *name;
+	int index;
+
+	if( !Q_stricmp( search->mpak->virtualName, path ))
+	{
+		name = search->mpak->virtualName;
+		index = MPAK_ENTRY_BSP;
+	}
+	else if( !Q_stricmp( search->mpak->archiveName, path ))
+	{
+		name = search->mpak->archiveName;
+		index = MPAK_ENTRY_ARCHIVE;
+	}
+	else
 		return -1;
 
 	if( fixedname )
-		Q_strncpy( fixedname, search->mpak->virtualName, len );
+		Q_strncpy( fixedname, name, len );
 
-	// index 0 is the only valid "found" value for a one-entry archive;
-	// pfnOpenFile below ignores it regardless, same as FS_OpenFile_MPAK's
-	// pak_ind-ignoring signature already documents.
-	return 0;
+	return index;
 }
 
 /*
 ===========
 FS_Search_MPAK
 
-Matches the one virtual name against a glob, same path-stripping loop as
+Matches both virtual names against a glob, same path-stripping loop as
 FS_Search_PAK (pak.c) so directory-level patterns (e.g. "maps/*.bsp" from
 con_utils.c's map-name autocompletion) still see this archive's map.
 ===========
 */
+static void FS_SearchMpakName( char *temp, stringlist_t *list, const char *pattern );
+
 static void FS_Search_MPAK( searchpath_t *search, stringlist_t *list, const char *pattern, int caseinsensitive )
 {
-	string temp;
+	int entry;
 
-	Q_strncpy( temp, search->mpak->virtualName, sizeof( temp ));
+	for( entry = MPAK_ENTRY_BSP; entry <= MPAK_ENTRY_ARCHIVE; entry++ )
+	{
+		string temp;
+
+		Q_strncpy( temp, entry == MPAK_ENTRY_ARCHIVE ? search->mpak->archiveName : search->mpak->virtualName, sizeof( temp ));
+		FS_SearchMpakName( temp, list, pattern );
+	}
+}
+
+/*
+===========
+FS_SearchMpakName
+
+One name's worth of FS_Search_MPAK: appends it, and each directory above
+it, to `list` when it matches `pattern`. Consumes `temp`.
+===========
+*/
+static void FS_SearchMpakName( char *temp, stringlist_t *list, const char *pattern )
+{
 	while( temp[0] )
 	{
 		const char *slash, *backslash, *colon, *separator;
@@ -277,7 +348,7 @@ FS_PrintInfo_MPAK
 */
 static void FS_PrintInfo_MPAK( searchpath_t *search, char *dst, size_t size )
 {
-	Q_snprintf( dst, size, "%s (%s)", search->filename, search->mpak->virtualName );
+	Q_snprintf( dst, size, "%s (%s, %s)", search->filename, search->mpak->virtualName, search->mpak->archiveName );
 }
 
 /*

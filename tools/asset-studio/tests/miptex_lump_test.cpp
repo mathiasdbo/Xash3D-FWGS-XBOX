@@ -196,6 +196,30 @@ int main() {
         CHECK(mt && reinterpret_cast<const uint8_t*>(mt)[mt->offsets[0]] == 0x22, "wad-order: resolved from the last listed WAD");
     }
 
+    // --- headersOnly (the nv2a profile): no pixels, embedded or from a WAD,
+    //     only names and dimensions ---
+    {
+        auto embedded = makeMiptex("own", 8, 8, 0x44, true);
+        auto external = makeMiptex("fromwad", 16, 8, 0, false);
+        std::vector<WadLump> wadLumps{ makeWadLump("fromwad", makeMiptex("fromwad", 16, 8, 0x55, true)) };
+        std::unordered_map<std::string, const WadLump*> wads;
+        indexWadLumpsForCore(wads, wadLumps);
+        auto lump = makeLump({ &embedded, &external });
+
+        auto out = buildEmbeddedMiptexLump(lump, wads, true);
+        const miptex_t* a = entryAt(out, 0);
+        const miptex_t* b = entryAt(out, 1);
+        int32_t ofs0, ofs1;
+        entryAt(out, 0, &ofs0);
+        entryAt(out, 1, &ofs1);
+        CHECK(a && std::strcmp(a->name, "own") == 0 && a->width == 8 && a->height == 8 && a->offsets[0] == 0,
+              "headers-only: embedded texture keeps name and size, loses its pixels");
+        CHECK(b && std::strcmp(b->name, "fromwad") == 0 && b->width == 16 && b->offsets[0] == 0,
+              "headers-only: a WAD texture is not resolved");
+        CHECK(ofs1 - ofs0 == static_cast<int32_t>(sizeof(miptex_t)) && out.size() == static_cast<size_t>(ofs1) + sizeof(miptex_t),
+              "headers-only: each entry is exactly one header");
+    }
+
     // --- empty / degenerate lumps ---
     {
         std::unordered_map<std::string, const WadLump*> wads;

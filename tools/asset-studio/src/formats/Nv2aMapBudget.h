@@ -62,16 +62,51 @@ namespace formats {
     // bytes); r_context.c STATIC_ASSERTs the same 52 so the two cannot drift.
     constexpr uint64_t kNv2aMapFaceBytes = 52;
 
-    inline uint64_t nv2aMapLedgerBytes(const MpakHeader6& h, uint64_t fileSize) {
+    // MPAK v12: the bytes the engine is served as the map's .bsp - the
+    // first sector plus every classic lump, each padded to a whole sector
+    // (filesystem/mpak_layout.c's classicEnd; filesystem/mpak.c serves
+    // exactly this prefix). This, not the whole file, is the buffer the
+    // engine holds while ref/nv2a builds its tables.
+    inline uint64_t mpakClassicPrefixBytes(const MpakHeader6& h) {
+        const uint32_t classic[] = {
+            h.lenVisibility, h.lenNodes, h.lenLeaves, h.lenMarksurfaces, h.lenPlanes, h.lenClipnodes,
+            h.lenModels, h.lenEntities, h.lenTexinfo, h.lenVertexes, h.lenEdges, h.lenSurfedges,
+            h.lenFaces, h.lenLighting, h.lenMiptex,
+        };
+        uint64_t bytes = 2048;
+        for (uint32_t len : classic)
+            bytes += ((static_cast<uint64_t>(len) + 2047) / 2048) * 2048;
+        return bytes;
+    }
+
+    // Bytes per vertex of the positions-only copy ref/nv2a streams in while
+    // it builds the per-face bounds (nv2a_read_map_lumps: vec3, 3 floats).
+    constexpr uint64_t kNv2aPositionBytes = 12;
+
+    inline uint64_t nv2aMapLedgerBytes(const MpakHeader6& h, uint64_t engineBytes) {
         const uint64_t vbBytes = static_cast<uint64_t>(h.vCount) * kNv2aLitVertexBytes;
         const uint64_t idxBytes = ((static_cast<uint64_t>(h.iCount) + 1) / 2) * 4;
-        return vbBytes + idxBytes
+        // X9-T: the peak, as ref/nv2a now computes it - the tables live on,
+        // the engine's buffer and the load's temporaries live only while
+        // they are built, and the three GPU buffers are built after both
+        // are freed (R_NewMap), so the ledger is tables + max(load, GPU
+        // buffers). MPAK v12: `engineBytes` is the classic prefix the
+        // engine holds (mpakClassicPrefixBytes), and the load side adds
+        // the renderer lumps nv2a_read_map_lumps copies out of the archive
+        // for the duration of the load.
+        const uint64_t tables = idxBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds / 8) * kNv2aMapFaceBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds) / 8
-            + static_cast<uint64_t>(h.lenFaceRemap) * 2
+            + static_cast<uint64_t>(h.lenFaceRemap) * 2;
+        const uint64_t gpu = vbBytes
             + static_cast<uint64_t>(h.lenTextureData)
-            + static_cast<uint64_t>(h.lenLightmapAtlas)
-            + fileSize;
+            + static_cast<uint64_t>(h.lenLightmapAtlas);
+        const uint64_t load = engineBytes
+            + static_cast<uint64_t>(h.vCount) * kNv2aPositionBytes
+            + static_cast<uint64_t>(h.lenFaceDrawCmds) + static_cast<uint64_t>(h.lenFaceVertexBase)
+            + static_cast<uint64_t>(h.lenFaceRemap) + static_cast<uint64_t>(h.lenTextureDir)
+            + static_cast<uint64_t>(h.lenBatches);
+        return tables + (gpu > load ? gpu : load);
     }
 
     // Mirrors r_context.c nv2a_load_map_geometry's strict `total_bytes > NV2A_MAP_BUDGET_BYTES`

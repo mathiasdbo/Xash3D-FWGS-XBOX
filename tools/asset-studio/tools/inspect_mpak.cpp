@@ -106,16 +106,25 @@ int main(int argc, char** argv) {
 
         // Exact write order from PakManager.cpp's save() (mirrored by
         // that file's own verifyFile(), not re-derived independently).
-        Place(cursor, nv2a ? static_cast<uint64_t>(h.vCount) * sizeof(Vertex) : 0);
-        Place(cursor, nv2a ? static_cast<uint64_t>(h.iCount) * sizeof(uint16_t) : 0);
+        // v12: every classic BSP lump first, then the renderer sections.
         Place(cursor, h.lenVisibility);
         Place(cursor, h.lenNodes);
         Place(cursor, h.lenLeaves);
         Place(cursor, h.lenMarksurfaces);
-        Place(cursor, h.lenFaceDrawCmds);
         Place(cursor, h.lenPlanes);
         Place(cursor, h.lenClipnodes);
         Place(cursor, h.lenModels);
+        Place(cursor, h.lenEntities);
+        Place(cursor, h.lenTexinfo);
+        Place(cursor, h.lenVertexes);
+        Place(cursor, h.lenEdges);
+        Place(cursor, h.lenSurfedges);
+        Place(cursor, h.lenFaces);
+        Place(cursor, h.lenLighting);
+        Place(cursor, h.lenMiptex);
+        Place(cursor, nv2a ? static_cast<uint64_t>(h.vCount) * sizeof(Vertex) : 0);
+        Place(cursor, nv2a ? static_cast<uint64_t>(h.iCount) * sizeof(uint16_t) : 0);
+        Place(cursor, h.lenFaceDrawCmds);
         // v9: texture directory/data/batches (Xbox only), then the face
         // remap (both targets), then the PC arrays (PC only) - PakManager.cpp
         // save()'s own write order, which matches the header's field order
@@ -133,16 +142,8 @@ int main(int argc, char** argv) {
         }
         Place(cursor, h.lenAssetDict);
         Place(cursor, h.lenAssetData);
-        Place(cursor, h.lenEntities);
         Place(cursor, h.lenLightmapAtlas);
         Place(cursor, h.lenFaceInfo);
-        Place(cursor, h.lenTexinfo);
-        Place(cursor, h.lenVertexes);
-        Place(cursor, h.lenEdges);
-        Place(cursor, h.lenSurfedges);
-        Place(cursor, h.lenFaces);
-        Place(cursor, h.lenLighting);
-        Place(cursor, h.lenMiptex);
         Place(cursor, h.lenExtraLightBlocks);
         Place(cursor, h.lenFaceVertexBase);
 

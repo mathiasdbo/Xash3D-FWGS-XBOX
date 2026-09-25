@@ -103,9 +103,20 @@ namespace formats {
     //    creates its default texture (Mod_CreateDefaultTexture :722).
     // Every offset is bounded by the input buffer (found in review: a later
     // directory entry pointing past the lump used to become the copy limit).
+    //
+    // headersOnly (the nv2a profile, X9-T): every entry is the header alone,
+    // offsets zero - what a retail .bsp whose textures live in WADs carries.
+    // ref/nv2a draws from the archive's own DXT1 directory and discards the
+    // pixels the engine hands it (its GL_LoadTexture returns 0), so the 8-bit
+    // copies only cost memory: they are 4.5 MB of rocket_frenzy's classic
+    // prefix, which the engine holds whole while it builds the world model.
+    // The engine then takes its own no-pixels path (a WAD lookup, then its
+    // default texture), and names and dimensions are kept, for the same
+    // reasons as the header-only case above.
     // Unit-tested in tests/miptex_lump_test.cpp.
     std::vector<uint8_t> buildEmbeddedMiptexLump(const std::vector<uint8_t>& texData,
-                                                 const std::unordered_map<std::string, const WadLump*>& externalWadTextures) {
+                                                 const std::unordered_map<std::string, const WadLump*>& externalWadTextures,
+                                                 bool headersOnly) {
         std::vector<uint8_t> out;
         if (texData.size() < sizeof(int32_t)) {
             // No texture lump at all: an empty dmiptexlump_t (nummiptex 0)
@@ -152,7 +163,7 @@ namespace formats {
             size_t entrySize = sizeof(miptex_t);
             bool headerOnly = true;
 
-            if (src->offsets[0] >= sizeof(miptex_t)) {
+            if (!headersOnly && src->offsets[0] >= sizeof(miptex_t)) {
                 // Embedded pixels. This entry's bytes end at the next VALID
                 // directory offset after it, or at the lump's end - never past
                 // the buffer, whatever the directory claims.
@@ -171,7 +182,7 @@ namespace formats {
                 // else: truncated - fall through to the WAD, then to header-only
             }
 
-            if (headerOnly) {
+            if (headerOnly && !headersOnly) {
                 auto it = externalWadTextures.find(nameLower);
                 if (it != externalWadTextures.end() && it->second->data.size() >= sizeof(miptex_t)) {
                     entry = it->second->data.data();
@@ -985,7 +996,9 @@ namespace formats {
         pak.setSurfedgesData(surfedgeData);
         pak.setFacesData(faceData);
         pak.setLightingData(getLumpData(LUMP_LIGHTING));
-        pak.setMiptexData(buildEmbeddedMiptexLump(texData, coreWadTextures));
+        // Headers only for the Xbox nv2a bake, the one ref/nv2a draws: a PC
+        // nv2a-profile bake keeps its pixels for the PC renderers.
+        pak.setMiptexData(buildEmbeddedMiptexLump(texData, coreWadTextures, pak.isProfileNv2a() && pak.isXboxTarget()));
     }
 
 } // namespace formats

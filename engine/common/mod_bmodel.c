@@ -4666,8 +4666,9 @@ byte-identical; the .bsp path is the reference and any difference is a
 loader or baker bug. Floats print as %.9g, which round-trips IEEE single,
 so identical bits give identical text and different bits differ.
 
-Deliberately NOT dumped: world.wadlist[].usage (an .mpak embeds its
-textures, so the WAD lookup counts legitimately differ), and anything only
+Deliberately NOT dumped: world.wadlist[].usage (a core-profile .mpak
+embeds its textures and an Xbox nv2a-profile one carries miptex headers
+only, so the WAD lookup counts legitimately differ), and anything only
 a renderer fills (gl_texturenum, light_s/t, polys). Test builds only.
 
 ===============================================================================

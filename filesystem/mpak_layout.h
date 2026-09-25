@@ -55,7 +55,7 @@ extern "C" {
 #endif
 
 #define MPAK_LAYOUT_MAGIC   "MPAK"
-#define MPAK_LAYOUT_VERSION 11u
+#define MPAK_LAYOUT_VERSION 12u
 #define MPAK_SECTOR_SIZE    2048u
 #define MPAK_TARGET_XBOX_FLAG 1u  // MpakHeader6::flags bit 0 - 1 = Xbox, 0 = PC
 #define MPAK_FLAG_NV2A_BLOCK  2u  // flags bit 1 - the baked v6 block is populated (X9 profile)
@@ -139,7 +139,7 @@ typedef struct
 	uint32_t lenEntities;
 
 	uint32_t lightmapWidth;
-	uint32_t lightmapHeight;  // one page: trimmed to the rows used (4..1024, multiple of 4, X9-R); several pages: 1024. lv is normalized by it
+	uint32_t lightmapHeight;  // one page: trimmed to the rows used (multiple of 4; 4..1024 since X9-R, 4..4096 since X9-T); several pages: the full 4096. lv is normalized by it
 	uint32_t lightmapLayers;
 	uint32_t lightmapFormat; // 0 = RGBA8
 	uint32_t lenLightmapAtlas;
@@ -168,6 +168,12 @@ typedef struct
 	// which is what every single-chunk map ships.
 	uint32_t lenFaceVertexBase;
 } mpak_header_t;
+
+// Pinned to the same size as formats::MpakHeader6's own static_assert
+// (MpakHeader.h): filesystem/mpak.c refuses an archive whose headerSize is
+// not this, so the two structs drifting apart would stop every map from
+// mounting.
+STATIC_ASSERT( sizeof( mpak_header_t ) == 180, "mpak_header_t must match formats::MpakHeader6 (180 bytes)" );
 
 // Mirrors formats::Vertex (tools/asset-studio/src/formats/PakManager.h)
 // byte-for-byte - only its SIZE matters to this file (skipping the
@@ -320,6 +326,9 @@ typedef struct
 	// v11 - uint32_t per sorted face, each face's vertex-chunk base; length
 	// 0 when the map has a single chunk (every base 0).
 	mpak_lump_t faceVertexBase;
+	// v12 - where the classic BSP lumps end (sector-aligned): the length
+	// of the prefix filesystem/mpak.c serves the engine as the map's .bsp.
+	fs_offset_t classicEnd;
 } mpak_layout_t;
 
 // Validates magic/version and returns true if header looks like a real,

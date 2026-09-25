@@ -12,7 +12,14 @@
 namespace formats {
 namespace lightmap_atlas {
 
-    constexpr uint32_t LM_PAGE_SIZE = 1024;   // luxels per atlas page (matches BLOCK_SIZE_MAX)
+    constexpr uint32_t LM_PAGE_SIZE = 1024;   // luxels per atlas page ROW (the width; matches BLOCK_SIZE_MAX)
+    // X9-T: a page is LM_PAGE_SIZE wide but may grow to this many rows.
+    // ref/nv2a draws one lightmap page only (it rejects a vertex on any
+    // other layer), so a map whose blocks overflowed a square 1024x1024
+    // page (disposal, rocket_frenzy) could not draw at all; one taller
+    // page keeps every block on layer 0, and atlasHeight() still trims
+    // it to the rows used. 4096 is the NV2A's own texture size limit.
+    constexpr uint32_t LM_PAGE_MAX_HEIGHT = 4096;
     constexpr uint32_t LM_SAMPLE_SIZE = 16;   // GoldSrc's fixed lightmap luxel granularity
     constexpr uint32_t LM_MAX_LUXELS = 64;    // reject pathological face extents
     // Faces with no real lightmap (sky/liquid/fullbright/anomalous) sample the
@@ -31,7 +38,7 @@ namespace lightmap_atlas {
         uint32_t rowHeight = 0;
         uint32_t usedHeight = 0; // highest Y written to, for atlas height trimming
 
-        LightmapPage() : rgba(static_cast<size_t>(LM_PAGE_SIZE) * LM_PAGE_SIZE * 4, 255) {}
+        LightmapPage() : rgba(static_cast<size_t>(LM_PAGE_SIZE) * LM_PAGE_MAX_HEIGHT * 4, 255) {}
     };
 
     struct LightmapAllocation {
@@ -40,7 +47,8 @@ namespace lightmap_atlas {
         uint32_t blockY = 0;
     };
 
-    // Shelf-packs bordered lightmap blocks into 1024x1024-luxel RGBA8 pages,
+    // Shelf-packs bordered lightmap blocks into 1024-luxel-wide RGBA8 pages
+    // up to LM_PAGE_MAX_HEIGHT rows tall,
     // mirroring the row-cursor packing already used for Xbox texture atlases in
     // PakManager::addTexture. Each block gets a 1-luxel replicated border so
     // bilinear sampling never bleeds across faces (see B4's sampler notes).
@@ -89,7 +97,7 @@ namespace lightmap_atlas {
                 mPages.back().cursorX = 0;
                 mPages.back().rowHeight = 0;
             }
-            if (mPages.back().cursorY + paddedH > LM_PAGE_SIZE) {
+            if (mPages.back().cursorY + paddedH > LM_PAGE_MAX_HEIGHT) {
                 mPages.emplace_back();
             }
 
@@ -170,16 +178,18 @@ namespace lightmap_atlas {
 
         // X9-R: the atlas height the baker ships. One page is trimmed to
         // the rows it actually uses (rounded up to a multiple of 4);
-        // several pages keep the full LM_PAGE_SIZE, since every layer of
-        // one atlas must share a height. Only valid once every block has
+        // several pages keep the full LM_PAGE_MAX_HEIGHT, since every
+        // layer of one atlas must share a height. (X9-T: the page used to
+        // stop at 1024 rows; a single page now runs to 4096, so a second
+        // page only opens past 4096 rows, which no retail map reaches.) Only valid once every block has
         // been allocated - the caller normalizes lv by this value, which
         // is why allocation now happens in a pre-pass before any vertex
         // is built.
         uint32_t atlasHeight() const {
             if (mPages.size() != 1)
-                return LM_PAGE_SIZE;
+                return LM_PAGE_MAX_HEIGHT;
             const uint32_t h = (mPages[0].usedHeight + 3u) & ~3u;
-            return h < LM_RAMP_HEIGHT ? LM_RAMP_HEIGHT : (h > LM_PAGE_SIZE ? LM_PAGE_SIZE : h);
+            return h < LM_RAMP_HEIGHT ? LM_RAMP_HEIGHT : (h > LM_PAGE_MAX_HEIGHT ? LM_PAGE_MAX_HEIGHT : h);
         }
 
         // Flattens all pages into one layer-major RGBA8 buffer, each page

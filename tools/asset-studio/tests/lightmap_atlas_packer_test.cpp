@@ -72,20 +72,36 @@ static void testFlattenTrimsToAtlasHeight() {
     CHECK(out[off] == 0 && out[off + 3] == 255);
 }
 
-static void testMultiPageKeepsFullHeight() {
+static void testTallPageInsteadOfSecondPage() {
     LightmapAtlasPacker p;
     // 64x64 blocks are 66x66 bordered: 15 per 1024-wide row (the first row
-    // starts after the 260-wide ramp, so 11), 15 rows per page. 300 blocks
-    // cannot fit one page, so a second page opens.
+    // starts after the 260-wide ramp, so 11). 300 blocks need 21 rows of 66 =
+    // 1386 rows (row 0 holds 11 after the ramp, then 15 a row), trimmed to 1388 - more than the old 1024-row page held. X9-T: they stay
+    // on page 0, which grows and is trimmed to the rows used.
     std::vector<std::pair<uint32_t, uint32_t>> sizes(300, {64, 64});
     std::vector<LightmapAllocation> a = p.allocateSorted(sizes);
-    CHECK(p.pageCount() >= 2);
-    CHECK(a.back().page >= 1);
-    CHECK(p.atlasHeight() == LM_PAGE_SIZE);
+    CHECK(p.pageCount() == 1);
+    CHECK(a.back().page == 0);
+    CHECK(p.atlasHeight() == 1388);
     uint32_t h = 0;
     std::vector<uint8_t> out = p.flatten(h);
-    CHECK(h == LM_PAGE_SIZE);
-    CHECK(out.size() == static_cast<size_t>(p.pageCount()) * LM_PAGE_SIZE * LM_PAGE_SIZE * 4);
+    CHECK(h == 1388);
+    CHECK(out.size() == static_cast<size_t>(LM_PAGE_SIZE) * 1388 * 4);
+}
+
+static void testMultiPageKeepsFullHeight() {
+    LightmapAtlasPacker p;
+    // 62 rows of 66 luxels fill 4092 of the 4096 rows; a 63rd row opens
+    // a second page, and every layer then keeps the full height.
+    std::vector<std::pair<uint32_t, uint32_t>> sizes(15 * 63, {64, 64});
+    std::vector<LightmapAllocation> a = p.allocateSorted(sizes);
+    CHECK(p.pageCount() == 2);
+    CHECK(a.back().page == 1);
+    CHECK(p.atlasHeight() == LM_PAGE_MAX_HEIGHT);
+    uint32_t h = 0;
+    std::vector<uint8_t> out = p.flatten(h);
+    CHECK(h == LM_PAGE_MAX_HEIGHT);
+    CHECK(out.size() == static_cast<size_t>(p.pageCount()) * LM_PAGE_SIZE * LM_PAGE_MAX_HEIGHT * 4);
 }
 
 int main() {
@@ -93,6 +109,7 @@ int main() {
     testHeightRoundsUpToMultipleOf4();
     testEmptyAtlasKeepsTheRamp();
     testFlattenTrimsToAtlasHeight();
+    testTallPageInsteadOfSecondPage();
     testMultiPageKeepsFullHeight();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);

@@ -46,6 +46,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 */
 
 #include <math.h>
+#include <stdlib.h> /* malloc/free for load temporaries - see nv2a_read_map_lumps */
 #include <string.h>
 #include "xash3d_types.h"
 #include "const.h"
@@ -197,6 +198,35 @@ static uint32_t *nv2a_map_index_dwords;             /* Ordinary engine-pooled CP
                                                         sized to the real map's own iCount, not a fixed
                                                         bring-up cap. */
 static uint32_t  nv2a_map_dword_count;
+
+/* X9-T: the three contiguous GPU buffers of the current map, still to be
+   built. nv2a_load_map_geometry() runs inside Mod_ProcessRenderData while
+   the engine holds its copy of the map (engine/common/model.c's
+   Mod_LoadModel frees it right after), so it only builds the tables and
+   records where the big lumps are; nv2a_upload_map_gpu_data() reads them
+   straight from the file into contiguous memory once that buffer is gone.
+   Measured in xemu (temporary probe): pool_party had 4.0 MiB free with its
+   15.5 MiB archive held, and ~19.5 MiB once it is freed.
+
+   R_NewMap runs after the map's precaches but before the client frees the
+   previous map's unused models (Mod_FreeUnused, cl_parse.c), so a failed
+   upload keeps the tables and is retried once, from the next R_EndFrame
+   (nv2a-xbox-specialist, X9-T review). */
+static struct
+{
+	qboolean    pending;
+	qboolean    retried;       /* the one retry after a failed R_NewMap upload was spent */
+	char        name[64];      /* "maps/<name>.mpak" - the whole archive (MPAK v12) */
+	fs_offset_t file_length;   /* its length when the tables were read; checked again at reopen */
+	fs_offset_t vertices_offset;
+	uint32_t    vertex_count;
+	uint64_t    vb_bytes;
+	fs_offset_t texture_offset;
+	fs_offset_t texture_bytes;
+	fs_offset_t lightmap_offset;
+	fs_offset_t lightmap_bytes;
+	uint32_t    lightmap_width, lightmap_height;
+} nv2a_pending_upload;
 
 /* X9-K: real per-texture NV2A hardware-WRAP addressing, replacing the
    shared 2048x2048 DXT1 atlas (X9-B through X9-J) and its per-vertex
@@ -1029,16 +1059,28 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 
 	memset( out, 0, sizeof( *out ));
 
-	if( !nv2a_mpak_place( fileSize, &cursor, (uint64_t)header->vCount * sizeof( mpak_vertex_t ), &out->vertices )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, (uint64_t)header->iCount * sizeof( uint16_t ), &out->indices )) return false;
+	/* MPAK v12 (filesystem/mpak_layout.c): every classic BSP lump first -
+	   the prefix filesystem/mpak.c serves the engine as the map's .bsp -
+	   then every renderer-only section, which is all this module reads. */
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenVisibility, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenNodes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLeaves, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenMarksurfaces, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceDrawCmds, &out->faceDrawCmds )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenPlanes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenClipnodes, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenModels, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenEntities, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenTexinfo, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenVertexes, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenEdges, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenSurfedges, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaces, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLighting, &skip )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenMiptex, &skip )) return false;
+
+	if( !nv2a_mpak_place( fileSize, &cursor, (uint64_t)header->vCount * sizeof( mpak_vertex_t ), &out->vertices )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, (uint64_t)header->iCount * sizeof( uint16_t ), &out->indices )) return false;
+	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceDrawCmds, &out->faceDrawCmds )) return false;
 
 	if( !( header->flags & MPAK_TARGET_XBOX_FLAG ))
 		return false; /* PC-target archive - no per-texture/batch lumps at all, nothing this slice can draw */
@@ -1059,25 +1101,11 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 	   stale pre-narrowing archive ever declares them non-empty. */
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenAssetDict, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenAssetData, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenEntities, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLightmapAtlas, &out->lightmapAtlas )) return false;
-
-	/* X9-K sky-skip fix: lenFaceInfo is the very next header field after
-	   lenLightmapAtlas (mpak_layout.h's own field order) - one more step is
-	   all that's needed to reach it; nothing after it (lenTexinfo onward)
-	   is read by this module, so the walk still stops here. */
+	/* X9-K sky-skip fix: only MpakFaceInfo::flags is read. */
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceInfo, &out->faceInfo )) return false;
-	/* X9-S (MPAK v11): the per-face vertex-chunk bases are the archive's
-	   LAST lump, so the walk now continues through the raw classic lumps
-	   that follow faceInfo, in filesystem/mpak_layout.c's order. */
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenTexinfo, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenVertexes, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenEdges, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenSurfedges, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaces, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenLighting, &skip )) return false;
-	if( !nv2a_mpak_place( fileSize, &cursor, header->lenMiptex, &skip )) return false;
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenExtraLightBlocks, &skip )) return false;
+	/* X9-S (MPAK v11): the per-face vertex-chunk bases, the last lump. */
 	if( !nv2a_mpak_place( fileSize, &cursor, header->lenFaceVertexBase, &out->faceVertexBase )) return false;
 
 	return true;
@@ -2591,6 +2619,7 @@ static void R_SimpleStub( void )
 	;
 }
 
+
 static void R_SimpleStubInt( int unused )
 {
 	;
@@ -2690,6 +2719,7 @@ static void nv2a_free_map_resources( void )
 	   from. */
 	nv2a_num_solid_brush_entities = 0;
 	nv2a_num_trans_brush_entities = 0;
+	nv2a_pending_upload.pending = false; /* X9-T */
 	nv2a_map_ready = false;
 	nv2a_map_owner = NULL;
 	nv2a_map_vert_count = 0;
@@ -3088,15 +3118,12 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
    numbers this one function happens to compute). The buffer this
    function is CALLED with is already real and already resident though
    (Mod_ProcessRenderData's own contract - engine/common/model.c's
-   Mod_LoadModel FS_LoadFile's the whole archive before calling in), so
-   it belongs in the sum this function CAN check. Cross-checked in
-   Python against the real crossfire.mpak (docs/r3d/divergences.md #91):
-   19,480 verts * 28B + 34,326 indices/2*4B + a real 2048x2048 DXT1 atlas
-   + a real 1024x1024 RGBA8 lightmap page + the archive's own 10.5MB on
-   disk totals ~16.6MB - comfortably under this cap, with real margin
-   left to catch a corrupt or absurdly oversized archive before it can
-   hurt a 64MiB console, without pretending this one function can see
-   the platform's whole memory picture. */
+   Mod_LoadModel FS_LoadFile's the map before calling in; since MPAK v12
+   only its classic-lump prefix), so it belongs in the sum this function
+   CAN check - see nv2a_load_map_geometry for the terms. The ledger is
+   still not what is free: measured in xemu, ~32.8 MiB is free before any
+   map loads and a deathmatch map's precaches take ~7.5 MiB after this
+   check runs (docs/r3d/fork-plan.md, X9 item 10). */
 #define NV2A_MAP_BUDGET_BYTES ( 24u * 1024u * 1024u )
 
 /* The baker's own fixed lightmap page width, tools/asset-studio/src/
@@ -3107,40 +3134,298 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
    another width would otherwise pass validation and still sample with
    the wrong divisor). lv is different since X9-R: it is divided by the
    atlas's own trimmed height, which the header does carry, so the height
-   is only range-checked (4..this constant). */
+   is only range-checked (4..NV2A_LM_MAX_HEIGHT). */
 #define NV2A_LM_PAGE_SIZE 1024u
 
-static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte *buffer, size_t buffersize )
+/* X9-T: the tallest lightmap page the baker ships (LightmapAtlasPacker.h
+   LM_PAGE_MAX_HEIGHT) - one 1024-wide page grows up to this many rows
+   instead of spilling onto a second layer, which this renderer never
+   binds. 4096 is the NV2A's own texture size limit; IMAGE_RECT's height
+   field is 16 bits (nv_regs.h NV097_SET_TEXTURE_IMAGE_RECT_HEIGHT). */
+#define NV2A_LM_MAX_HEIGHT 4096u
+
+
+/* Reads `bytes` at `offset` of `f` into `dst`; false on any short read. */
+static qboolean nv2a_read_at( file_t *f, fs_offset_t offset, void *dst, fs_offset_t bytes )
+{
+	if( gEngfuncs.fsapi->Seek( f, offset, SEEK_SET ) != 0 )
+		return false;
+	return gEngfuncs.fsapi->Read( f, dst, (size_t)bytes ) == bytes;
+}
+
+/* X9-T: builds the vertex buffer, the texture data and the lightmap from
+   the map archive on disk. Called from R_NewMap, after the engine freed
+   its copy of the archive. The lightmap is allocated first: it is the one
+   whose contiguous allocation failed under memory pressure (and it
+   usually is the largest), so it gets the first pick. Vertices are read
+   1,024 at a time and converted to nv2a_lit_vertex_t on the way in (pos,
+   diffuse UV, and lightmap UV scaled to texels - LINEAR textures are
+   addressed in texel units, docs/r3d/divergences.md #100). Any failure
+   frees what was built and leaves the map not ready (the test triangle),
+   exactly as a failed load always has. */
+static qboolean nv2a_upload_map_gpu_data( void )
+{
+	file_t *f;
+	mpak_vertex_t *chunk;
+	uint32_t done;
+	qboolean ok = false;
+
+	f = gEngfuncs.fsapi->Open( nv2a_pending_upload.name, "rb", false );
+	if( !f )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: could not reopen %s for its GPU data\n", nv2a_pending_upload.name );
+		return false;
+	}
+	if( gEngfuncs.fsapi->FileLength( f ) != nv2a_pending_upload.file_length )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: %s changed since its tables were read\n", nv2a_pending_upload.name );
+		gEngfuncs.fsapi->Close( f );
+		return false;
+	}
+
+	nv2a_map_lightmap = MmAllocateContiguousMemoryEx( (uint32_t)nv2a_pending_upload.lightmap_bytes, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+	nv2a_map_texture_data = nv2a_map_lightmap
+		? MmAllocateContiguousMemoryEx( (uint32_t)nv2a_pending_upload.texture_bytes, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE ) : NULL;
+	nv2a_map_vb = nv2a_map_texture_data
+		? MmAllocateContiguousMemoryEx( (uint32_t)nv2a_pending_upload.vb_bytes, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE ) : NULL;
+	chunk = nv2a_map_vb ? malloc( 1024 * sizeof( mpak_vertex_t )) : NULL; /* malloc: Mem_Malloc cannot fail softly (zone.c Sys_Error) */
+	if( !chunk )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: map GPU buffer allocation failed (lightmap %u, textures %u, vertices %u bytes)\n",
+			(unsigned int)nv2a_pending_upload.lightmap_bytes, (unsigned int)nv2a_pending_upload.texture_bytes,
+			(unsigned int)nv2a_pending_upload.vb_bytes );
+		goto done;
+	}
+
+	if( !nv2a_read_at( f, nv2a_pending_upload.lightmap_offset, nv2a_map_lightmap, nv2a_pending_upload.lightmap_bytes )
+		|| !nv2a_read_at( f, nv2a_pending_upload.texture_offset, nv2a_map_texture_data, nv2a_pending_upload.texture_bytes ))
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: short read of %s's lightmap/texture data\n", nv2a_pending_upload.name );
+		goto done;
+	}
+
+	for( done = 0; done < nv2a_pending_upload.vertex_count; )
+	{
+		nv2a_lit_vertex_t *dst = (nv2a_lit_vertex_t *)nv2a_map_vb + done;
+		uint32_t n = nv2a_pending_upload.vertex_count - done, k;
+
+		if( n > 1024 )
+			n = 1024;
+		if( !nv2a_read_at( f, nv2a_pending_upload.vertices_offset + (fs_offset_t)done * sizeof( mpak_vertex_t ),
+			chunk, (fs_offset_t)n * sizeof( mpak_vertex_t )))
+		{
+			gEngfuncs.Con_Printf( "ref_nv2a: short read of %s's vertices\n", nv2a_pending_upload.name );
+			goto done;
+		}
+		for( k = 0; k < n; k++ )
+		{
+			dst[k].pos[0] = chunk[k].x;
+			dst[k].pos[1] = chunk[k].y;
+			dst[k].pos[2] = chunk[k].z;
+			/* uv0: already normalized by the texture's native size at bake
+			   time, hardware-WRAP-addressed as is (X9-K). */
+			dst[k].uv0[0] = chunk[k].u;
+			dst[k].uv0[1] = chunk[k].v;
+			/* uv1: the baker normalizes lu by the atlas width and lv by
+			   its (trimmed, X9-R) height; the LINEAR lightmap stage wants
+			   texels, so scale back by the same header values stage 1
+			   pushes to IMAGE_RECT (X9-J, divergences.md #100). */
+			dst[k].uv1[0] = chunk[k].lu * (float)nv2a_pending_upload.lightmap_width;
+			dst[k].uv1[1] = chunk[k].lv * (float)nv2a_pending_upload.lightmap_height;
+		}
+		done += n;
+	}
+	ok = true;
+
+done:
+	free( chunk );
+	gEngfuncs.fsapi->Close( f );
+	if( !ok )
+	{
+		if( nv2a_map_vb ) { MmFreeContiguousMemory( nv2a_map_vb ); nv2a_map_vb = NULL; }
+		if( nv2a_map_texture_data ) { MmFreeContiguousMemory( nv2a_map_texture_data ); nv2a_map_texture_data = NULL; }
+		if( nv2a_map_lightmap ) { MmFreeContiguousMemory( nv2a_map_lightmap ); nv2a_map_lightmap = NULL; }
+	}
+	return ok;
+}
+
+/* MPAK v12: the renderer-only sections nv2a_build_map_tables() reads,
+   copied out of the archive file into temporaries, since the engine's
+   buffer is now only the classic-lump prefix (filesystem/mpak.c). Each is
+   freed once the tables are built; none outlives the load. The indices
+   are the exception: they are read straight into nv2a_map_index_dwords,
+   whose packed layout (two u16 per dword, low half first) IS the
+   archive's own u16 array on a little-endian CPU. faceInfo is read in
+   windows (it is 44 bytes a face, 1.7 MB on rocket_frenzy, and only its
+   flags are used), and the vertices only as positions, 12 of their 48
+   bytes, for the per-face bounds. */
+#define NV2A_FACEINFO_WINDOW 256u
+
+typedef struct
+{
+	file_t           *file;             /* the whole archive, "maps/<name>.mpak" */
+	float            *positions;        /* vec3 per vertex, for the per-face bounds */
+	byte             *texture_dir;      /* mpak_texture_info_t[header->textureCount] */
+	byte             *batches;          /* mpak_texture_batch_t[header->batchCount] */
+	byte             *face_draw_cmds;   /* 2 x uint32_t per sorted face */
+	byte             *face_vertex_base; /* uint32_t per sorted face, or NULL (single chunk) */
+	byte             *face_remap;       /* uint32_t per original face */
+	mpak_face_info_t *face_info_window; /* NV2A_FACEINFO_WINDOW records */
+} nv2a_map_lumps_t;
+
+/* Reads one whole lump into a new malloc'd block. A zero-length lump
+   leaves *out NULL and succeeds. The load's temporaries use malloc, not
+   Mem_Malloc: the zone allocator calls Sys_Error when it runs out
+   (engine/common/zone.c), and a map too big for what is free should fall
+   back to the test triangle, not end the game (nv2a-xbox-specialist,
+   X9-T review). */
+static qboolean nv2a_read_lump( file_t *f, const mpak_lump_t *lump, byte **out )
+{
+	*out = NULL;
+	if( lump->length == 0 )
+		return true;
+	*out = malloc( (size_t)lump->length );
+	return *out && nv2a_read_at( f, lump->offset, *out, lump->length );
+}
+
+static void nv2a_free_map_lumps( nv2a_map_lumps_t *lumps )
+{
+	free( lumps->positions );
+	free( lumps->texture_dir );
+	free( lumps->batches );
+	free( lumps->face_draw_cmds );
+	free( lumps->face_vertex_base );
+	free( lumps->face_remap );
+	free( lumps->face_info_window );
+	memset( lumps, 0, sizeof( *lumps ));
+}
+
+/* Fills `lumps` (and nv2a_map_index_dwords) from the archive. Vertices
+   are streamed 1,024 at a time: only their positions are kept, and a
+   vertex on any lightmap layer but 0 fails the load, as it always has
+   (this renderer binds one lightmap page). */
+static qboolean nv2a_read_map_lumps( file_t *f, const mpak_header_t *header, const nv2a_mpak_geometry_t *geo, nv2a_map_lumps_t *lumps )
+{
+	const uint32_t vert_count = header->vCount, index_count = header->iCount;
+	const uint32_t dword_count = ( index_count + 1 ) / 2;
+	mpak_vertex_t *chunk;
+	uint32_t done;
+
+	lumps->file = f;
+	lumps->positions = malloc( (size_t)vert_count * 3 * sizeof( float ));
+	chunk = lumps->positions ? malloc( 1024 * sizeof( mpak_vertex_t )) : NULL;
+	if( !chunk )
+		return false;
+	for( done = 0; done < vert_count; )
+	{
+		uint32_t n = vert_count - done, k;
+
+		if( n > 1024 )
+			n = 1024;
+		if( !nv2a_read_at( f, geo->vertices.offset + (fs_offset_t)done * sizeof( mpak_vertex_t ), chunk, (fs_offset_t)n * sizeof( mpak_vertex_t )))
+			break;
+		for( k = 0; k < n; k++ )
+		{
+			if( chunk[k].lightmap_layer != 0 )
+				break;
+			lumps->positions[( done + k ) * 3 + 0] = chunk[k].x;
+			lumps->positions[( done + k ) * 3 + 1] = chunk[k].y;
+			lumps->positions[( done + k ) * 3 + 2] = chunk[k].z;
+		}
+		if( k != n )
+			break;
+		done += n;
+	}
+	free( chunk );
+	if( done != vert_count )
+		return false;
+
+	nv2a_map_index_dwords = Mem_Malloc( r_temppool, (size_t)dword_count * sizeof( uint32_t ));
+	if( !nv2a_map_index_dwords )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: map index buffer allocation failed (%u bytes)\n", (unsigned int)( dword_count * sizeof( uint32_t )));
+		return false;
+	}
+	nv2a_map_dword_count = dword_count;
+	if( !nv2a_read_at( f, geo->indices.offset, nv2a_map_index_dwords, geo->indices.length ))
+		return false;
+	/* An odd index_count pads its final dword's high half by repeating
+	   the last real index (see nv2a_map_index_dwords's own comment).
+	   memcpy, not a uint16_t store: the storage is uint32_t. */
+	if( index_count & 1 )
+		memcpy( (byte *)nv2a_map_index_dwords + (size_t)index_count * 2, (const byte *)nv2a_map_index_dwords + (size_t)( index_count - 1 ) * 2, 2 );
+
+	lumps->face_info_window = malloc( NV2A_FACEINFO_WINDOW * sizeof( mpak_face_info_t ));
+	return lumps->face_info_window
+		&& nv2a_read_lump( f, &geo->textureDir, &lumps->texture_dir )
+		&& nv2a_read_lump( f, &geo->batches, &lumps->batches )
+		&& nv2a_read_lump( f, &geo->faceDrawCmds, &lumps->face_draw_cmds )
+		&& nv2a_read_lump( f, &geo->faceVertexBase, &lumps->face_vertex_base )
+		&& nv2a_read_lump( f, &geo->faceRemap, &lumps->face_remap );
+}
+
+static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_mpak_geometry_t *geo_in, const nv2a_map_lumps_t *lumps );
+
+/* Loads a map's renderer data from its archive, "maps/<name>.mpak"
+   (MPAK v12: the whole file; the engine's own buffer is only the classic
+   prefix, engine_bytes long). Checks the ledger before anything is
+   allocated, reads the renderer-only lumps (nv2a_read_map_lumps), builds
+   every CPU-side table from them (nv2a_build_map_tables), then frees the
+   temporaries. The GPU buffers come later, at R_NewMap (X9-T). */
+static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte *engine_buffer, size_t engine_bytes, const char *archive_name )
 {
 	nv2a_mpak_geometry_t geo;
+	nv2a_map_lumps_t lumps;
+	file_t *f;
 	uint32_t vert_count, index_count, dword_count;
-	uint32_t i;
 	uint64_t vb_bytes, idx_bytes, total_bytes;
-	uint32_t texture_count, batch_count;
+	byte first_sector[MPAK_SECTOR_SIZE];
+	qboolean ok = false;
 
-	if( !nv2a_compute_mpak_layout( header, (fs_offset_t)buffersize, &geo ))
+	memset( &lumps, 0, sizeof( lumps ));
+	f = gEngfuncs.fsapi->Open( archive_name, "rb", false );
+	if( !f )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: could not open %s\n", archive_name );
 		return false;
+	}
+
+	/* The .mpak must be the archive the engine just loaded the .bsp view
+	   of: both names come from the same search path today, but a loose
+	   file under either name would otherwise pair one archive's offsets
+	   with another's bytes (asset-pipeline and nv2a-xbox specialists, X9-T
+	   review). The first sector holds the dheader_t and the descriptor. */
+	if( engine_bytes < MPAK_SECTOR_SIZE || !nv2a_read_at( f, 0, first_sector, MPAK_SECTOR_SIZE )
+		|| memcmp( first_sector, engine_buffer, MPAK_SECTOR_SIZE ) != 0 )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: %s is not the archive the map was loaded from\n", archive_name );
+		goto done;
+	}
+	nv2a_pending_upload.file_length = gEngfuncs.fsapi->FileLength( f );
+
+	if( !nv2a_compute_mpak_layout( header, nv2a_pending_upload.file_length, &geo ))
+		goto done;
 
 	if( geo.textureDir.length == 0 || geo.textureData.length == 0 || geo.batches.length == 0
 		|| geo.faceRemap.length == 0 || geo.lightmapAtlas.length == 0 )
-		return false;
+		goto done;
 
 	vert_count = header->vCount;
 	index_count = header->iCount;
 	if( vert_count < 3 || index_count == 0 )
-		return false;
+		goto done;
 	if( (uint64_t)vert_count * sizeof( mpak_vertex_t ) != (uint64_t)geo.vertices.length )
-		return false;
+		goto done;
 	if( (uint64_t)index_count * sizeof( uint16_t ) != (uint64_t)geo.indices.length )
-		return false;
+		goto done;
 
 	dword_count = ( index_count + 1 ) / 2;
 	vb_bytes = (uint64_t)vert_count * sizeof( nv2a_lit_vertex_t );
 	idx_bytes = (uint64_t)dword_count * sizeof( uint32_t );
-	/* buffersize (the source archive, already resident per
-	   Mod_ProcessRenderData's own contract) is real, known cost this
-	   function CAN account for - see NV2A_MAP_BUDGET_BYTES's own comment
-	   for what this check does and does not cover. */
+	/* engine_bytes (the engine's copy of the classic prefix, already
+	   resident per Mod_ProcessRenderData's own contract) is real, known
+	   cost this function CAN account for - see NV2A_MAP_BUDGET_BYTES's
+	   own comment for what this check does and does not cover. */
 	/* X9-F: the per-face table is one nv2a_map_face_t per on-disk
 	   FaceDrawCmd (8 bytes each). X9-S: counted as face_count * sizeof,
 	   not the old "4x the lump" - the struct grew from 32 to 52 bytes
@@ -3162,44 +3447,72 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   nv2a_map_textures[]/nv2a_map_batches[] arrays are static BSS, not a
 	   per-map allocation, so - like nv2a_visbytes above them - they do not
 	   belong in this per-map ledger. */
-	total_bytes = vb_bytes + idx_bytes + (uint64_t)( geo.faceDrawCmds.length / 8 ) * sizeof( nv2a_map_face_t )
-		+ (uint64_t)geo.faceDrawCmds.length / 8
-		+ (uint64_t)geo.faceRemap.length * 2
-		+ (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length + (uint64_t)buffersize;
+	/* X9-T: the peak, not the sum. The tables below live from here on;
+	   the engine's buffer and this load's temporaries live only until it
+	   returns, and the three GPU buffers are built after that (R_NewMap),
+	   so the two never coexist. MPAK v12: the engine's buffer is only the
+	   classic prefix, and the load side adds the temporaries
+	   nv2a_read_map_lumps() holds while the tables are built (the indices
+	   are already in `tables`; faceInfo's window is too small to count). */
+	{
+		const uint64_t tables = idx_bytes + (uint64_t)( geo.faceDrawCmds.length / 8 ) * sizeof( nv2a_map_face_t )
+			+ (uint64_t)geo.faceDrawCmds.length / 8
+			+ (uint64_t)geo.faceRemap.length * 2;
+		const uint64_t gpu = vb_bytes + (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length;
+		const uint64_t load = (uint64_t)engine_bytes + (uint64_t)vert_count * 3 * sizeof( float )
+			+ (uint64_t)geo.faceDrawCmds.length + (uint64_t)geo.faceVertexBase.length + (uint64_t)geo.faceRemap.length
+			+ (uint64_t)geo.textureDir.length + (uint64_t)geo.batches.length;
+		total_bytes = tables + ( gpu > load ? gpu : load );
+	}
 	if( total_bytes > NV2A_MAP_BUDGET_BYTES )
 	{
 		gEngfuncs.Con_Printf( "ref_nv2a: map exceeds NV2A_MAP_BUDGET_BYTES (%u > %u bytes) - not drawing its real geometry\n",
 			(unsigned int)total_bytes, (unsigned int)NV2A_MAP_BUDGET_BYTES );
-		return false;
+		goto done;
 	}
 
-	/* Every baked vertex is remapped 1:1 - the shared index buffer already
-	   references vertices by their final position in this same array
-	   (that's what makes shared indexing possible at all), so unlike the
-	   old one-face slice there is no "which vertices does this face touch"
-	   deduplication to do here. */
-	for( i = 0; i < vert_count; i++ )
+	if( !nv2a_read_map_lumps( f, header, &geo, &lumps ))
 	{
-		mpak_vertex_t v;
-
-		memcpy( &v, buffer + geo.vertices.offset + (uint64_t)i * sizeof( mpak_vertex_t ), sizeof( v ));
-
-		/* X9-D still only handles vertices on lightmap page 0 - multi-page
-		   lightmap support stays explicitly deferred (same limit X9-C
-		   already documented), so a vertex on any other page must fail the
-		   whole load cleanly rather than silently sample the wrong page. */
-		if( v.lightmap_layer != 0 )
-			return false;
+		gEngfuncs.Con_Printf( "ref_nv2a: could not read %s's renderer data - not drawing its real geometry\n", archive_name );
+		goto done;
 	}
 
-	/* Every raw index must reference a real slot in the vertex array above
+	ok = nv2a_build_map_tables( header, &geo, &lumps );
+
+done:
+	nv2a_free_map_lumps( &lumps );
+	gEngfuncs.fsapi->Close( f );
+	if( !ok )
+		nv2a_free_map_resources();
+	return ok;
+}
+
+/* Validates the renderer-only lumps nv2a_read_map_lumps() read and builds
+   every CPU-side table from them: the texture directory and batch table,
+   the per-face culling table with its bounds, the face remap and the PVS
+   table. The GPU buffers' locations are recorded for R_NewMap. */
+static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_mpak_geometry_t *geo_in, const nv2a_map_lumps_t *lumps )
+{
+	const nv2a_mpak_geometry_t geo = *geo_in;
+	const byte *indices = (const byte *)nv2a_map_index_dwords; /* u16 each, read with memcpy: the storage is uint32_t */
+	const uint32_t vert_count = header->vCount, index_count = header->iCount;
+	const uint32_t dword_count = ( index_count + 1 ) / 2;
+	const uint64_t vb_bytes = (uint64_t)vert_count * sizeof( nv2a_lit_vertex_t );
+	uint32_t texture_count, batch_count;
+	uint32_t i;
+
+	/* Every raw index must reference a real slot in the vertex array
 	   - malformed data must fail cleanly here, not be trusted into a GPU
-	   attribute-array read out of bounds later. */
+	   attribute-array read out of bounds later. (Every baked vertex is
+	   used 1:1 - the shared index buffer already references vertices by
+	   their final position.) X9-S: a single-chunk map's indices are
+	   absolute; on a multi-chunk map they are chunk-relative and the
+	   per-face check below adds each face's base. */
 	for( i = 0; i < index_count; i++ )
 	{
 		uint16_t idx;
 
-		memcpy( &idx, buffer + geo.indices.offset + (uint64_t)i * sizeof( uint16_t ), sizeof( idx ));
+		memcpy( &idx, indices + (size_t)i * 2, sizeof( idx ));
 		if( idx >= vert_count )
 			return false;
 	}
@@ -3268,7 +3581,7 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	{
 		uint32_t bad = 0;
 		mpak_texdir_status_t status = Mpak_ValidateTextureDirectory(
-			buffer + geo.textureDir.offset, (uint64_t)geo.textureDir.length, texture_count,
+			lumps->texture_dir, (uint64_t)geo.textureDir.length, texture_count,
 			NULL, (uint64_t)geo.textureData.length, &bad );
 
 		if( status != MPAK_TEXDIR_OK )
@@ -3292,12 +3605,12 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 
 		for( i = 0; i < texture_count; i++ )
 		{
-			uint64_t base = geo.textureDir.offset + (uint64_t)i * MPAK_TEXTURE_INFO_SIZE;
+			const byte *base = lumps->texture_dir + (size_t)i * MPAK_TEXTURE_INFO_SIZE;
 			uint32_t log2w, log2h, dataLength;
 
-			memcpy( &log2w,      buffer + base + MPAK_TEXTURE_INFO_OFS_LOG2WIDTH,  sizeof( log2w ));
-			memcpy( &log2h,      buffer + base + MPAK_TEXTURE_INFO_OFS_LOG2HEIGHT, sizeof( log2h ));
-			memcpy( &dataLength, buffer + base + MPAK_TEXTURE_INFO_OFS_DATALENGTH, sizeof( dataLength ));
+			memcpy( &log2w,      base + MPAK_TEXTURE_INFO_OFS_LOG2WIDTH,  sizeof( log2w ));
+			memcpy( &log2h,      base + MPAK_TEXTURE_INFO_OFS_LOG2HEIGHT, sizeof( log2h ));
+			memcpy( &dataLength, base + MPAK_TEXTURE_INFO_OFS_DATALENGTH, sizeof( dataLength ));
 
 			nv2a_map_textures[i].physOffset = (uint32_t)running;
 			nv2a_map_textures[i].log2Width  = log2w;
@@ -3330,14 +3643,14 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 
 		for( i = 0; i < batch_count; i++ )
 		{
-			uint64_t base = geo.batches.offset + (uint64_t)i * sizeof( mpak_texture_batch_t );
+			const byte *base = lumps->batches + (size_t)i * sizeof( mpak_texture_batch_t );
 			uint32_t textureIndex, startFace, faceCount, startIndex, indexCount;
 
-			memcpy( &textureIndex, buffer + base + 0,  sizeof( textureIndex ));
-			memcpy( &startFace,    buffer + base + 4,  sizeof( startFace ));
-			memcpy( &faceCount,    buffer + base + 8,  sizeof( faceCount ));
-			memcpy( &startIndex,   buffer + base + 12, sizeof( startIndex ));
-			memcpy( &indexCount,   buffer + base + 16, sizeof( indexCount ));
+			memcpy( &textureIndex, base + 0,  sizeof( textureIndex ));
+			memcpy( &startFace,    base + 4,  sizeof( startFace ));
+			memcpy( &faceCount,    base + 8,  sizeof( faceCount ));
+			memcpy( &startIndex,   base + 12, sizeof( startIndex ));
+			memcpy( &indexCount,   base + 16, sizeof( indexCount ));
 
 			if( textureIndex >= texture_count || (uint64_t)startFace != face_cursor || (uint64_t)startIndex != index_cursor
 				|| index_cursor + indexCount > (uint64_t)index_count )
@@ -3371,7 +3684,10 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	{
 		uint64_t expected_lm = (uint64_t)header->lightmapWidth * header->lightmapHeight * header->lightmapLayers * 4;
 
-		if( header->lightmapWidth == 0 || header->lightmapHeight == 0 || header->lightmapLayers == 0
+		/* One layer: this renderer binds one lightmap page, and every
+		   layer would otherwise still be uploaded (nv2a-xbox-specialist,
+		   X9-T review). */
+		if( header->lightmapWidth == 0 || header->lightmapHeight == 0 || header->lightmapLayers != 1
 			|| header->lightmapFormat != 0 /* 0 = RGBA8, the only format anything bakes today */
 			|| expected_lm != (uint64_t)geo.lightmapAtlas.length )
 			return false;
@@ -3380,7 +3696,7 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 		   1024 (tools/asset-studio/src/formats/BspParser.cpp), and - since
 		   X9-R - lv by the atlas's own final height, which it trims to the
 		   rows it uses (LightmapAtlasPacker::atlasHeight, a multiple of 4 up
-		   to 1024). The remap loop below undoes both with the header
+		   to 1024; up to 4096 since X9-T). The remap loop below undoes both with the header
 		   fields (the same values stage 1 pushes to IMAGE_RECT), so the
 		   inverse is exact when the width is the baker's 1024 and the
 		   height is whatever the header says. Archives from before X9-R
@@ -3389,86 +3705,29 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 		   constant, not a header field (codex review: a square-but-not-1024
 		   page would otherwise sample from the wrong place). */
 		if( header->lightmapWidth != NV2A_LM_PAGE_SIZE
-			|| header->lightmapHeight < 4 || header->lightmapHeight > NV2A_LM_PAGE_SIZE )
+			|| header->lightmapHeight < 4 || header->lightmapHeight > NV2A_LM_MAX_HEIGHT )
 		{
 			gEngfuncs.Con_Printf( "ref_nv2a: lightmap page %ux%u is not %u wide by 4..%u high - the baker's lu is normalized by a fixed %u-luxel width, not drawing its real geometry\n",
 				(unsigned int)header->lightmapWidth, (unsigned int)header->lightmapHeight,
-				NV2A_LM_PAGE_SIZE, NV2A_LM_PAGE_SIZE, NV2A_LM_PAGE_SIZE );
+				NV2A_LM_PAGE_SIZE, NV2A_LM_MAX_HEIGHT, NV2A_LM_PAGE_SIZE );
 			return false;
 		}
 	}
 
-	nv2a_map_vb = MmAllocateContiguousMemoryEx( (uint32_t)vb_bytes, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
-	if( !nv2a_map_vb )
-	{
-		/* codex review, real finding: a validated, real nv2a-profile
-		   archive that fails an allocation here fell back to the test
-		   triangle with no diagnostic at all - the NV2A_MAP_BUDGET_BYTES
-		   check above only guards against a corrupt/absurd archive, not
-		   real contiguous-memory fragmentation on an already-running
-		   console, so this path is genuinely reachable and worth a real
-		   message when it happens. */
-		gEngfuncs.Con_Printf( "ref_nv2a: map vertex buffer allocation failed (%u bytes)\n", (unsigned int)vb_bytes );
-		return false;
-	}
-	{
-		nv2a_lit_vertex_t *dst = (nv2a_lit_vertex_t *)nv2a_map_vb;
-
-		for( i = 0; i < vert_count; i++ )
-		{
-			mpak_vertex_t v;
-
-			memcpy( &v, buffer + geo.vertices.offset + (uint64_t)i * sizeof( mpak_vertex_t ), sizeof( v ));
-
-			dst[i].pos[0] = v.x;
-			dst[i].pos[1] = v.y;
-			dst[i].pos[2] = v.z;
-			/* X9-K: no more atlas-rect remap - v.u/v.v are used AS-IS.
-			   They are already in the exact format NV2A's native WRAP
-			   addressing needs: BspParser.cpp normalizes them by the
-			   TEXTURE's own native (pre-resample) pixel size
-			   (PakManager.cpp:20-21), so they carry real, unclamped repeat
-			   counts for a tiling face (a face spanning 6 texture repeats
-			   reads u in [0,6), not folded into [0,1) the way the old
-			   atlas-rect frac() remap required) - hardware WRAP tiles
-			   exactly that range in silicon, no shader-side wrap needed.
-			   See this function's own top-of-function comment for the
-			   full before/after account. */
-			dst[i].uv0[0] = v.u;
-			dst[i].uv0[1] = v.v;
-			/* The lightmap is bound as a LINEAR texture (LU_IMAGE_A8B8G8R8 +
-			   CONTROL1 pitch + IMAGE_RECT, stage 1 in nv2a_draw_map_geometry),
-			   and NV2A addresses linear textures in UNNORMALIZED texel
-			   coordinates (0..width, 0..height), like GL rectangle textures -
-			   not 0..1 (xemu hw/xbox/nv2a/pgraph/glsl/psh.c: `rect_tex[i] =
-			   f.linear` and `norm(coord) = coord / textureSize()` for linear
-			   stages only; deps/nxdk/samples/mesh/verts.h feeds integer texel
-			   UVs such as {44,143} to its 256x256 LU_IMAGE_A8R8G8B8 texture,
-			   main.c:145-150, and vs.vs.cg passes them through unscaled). The
-			   baker normalizes lu by LM_PAGE_SIZE and lv by the atlas's final
-			   (trimmed, X9-R) height, and the header carries exactly those two
-			   values (checked at load above), so header->
-			   lightmapWidth/Height - the same values stage 1 pushes to
-			   IMAGE_RECT (nv2a_map_lightmap_width/height are assigned from
-			   them further down, after this loop) - are the exact inverse of
-			   that divisor. Fed 0..1, clamp + bilinear only ever blended page
-			   texels (0,0) and (1,0), i.e. the ramp strip's values 0 and 1: a
-			   lightmap-only debug shader produced exactly two values across
-			   the whole frame, 0 (254,979 px) and 1 (50,263 px), while the
-			   GPU-visible uv1 and the baked luxels at those texels were
-			   correct (mean 105/255). uv0 (above) needs no equivalent
-			   descale: it is already normalized by the diffuse texture's
-			   own native pixel size at bake time (this function's own
-			   top-of-function comment), independent of the lightmap's
-			   separate LM_PAGE_SIZE convention. Multi-page lightmaps
-			   (lightmap_layer != 0) stay rejected at
-			   load (above); with texel coordinates a page > 0 would need a
-			   per-page V offset or a separate binding, not just a scale.
-			   docs/r3d/divergences.md #100. */
-			dst[i].uv1[0] = v.lu * (float)header->lightmapWidth;
-			dst[i].uv1[1] = v.lv * (float)header->lightmapHeight;
-		}
-	}
+	/* X9-T: the vertex buffer, the texture data and the lightmap - the
+	   three contiguous GPU buffers - are no longer built here. The engine
+	   holds this whole archive (`buffer`) until Mod_ProcessRenderData
+	   returns, so copying out of it here stacked the GPU copies on top of
+	   it: pool_party had 4.0 MiB free at this point and its 3 MB lightmap
+	   allocation failed. nv2a_upload_map_gpu_data() builds them from the
+	   file at R_NewMap instead, after the engine has freed the archive -
+	   see nv2a_pending_upload's own comment. Only where they live is
+	   recorded here. */
+	nv2a_pending_upload.vertices_offset = geo.vertices.offset;
+	nv2a_pending_upload.vertex_count    = vert_count;
+	nv2a_pending_upload.vb_bytes        = vb_bytes;
+	nv2a_pending_upload.lightmap_width  = header->lightmapWidth;
+	nv2a_pending_upload.lightmap_height = header->lightmapHeight;
 	nv2a_map_vert_count = vert_count;
 
 	/* X9-K: ONE contiguous buffer for every texture's own DXT1 bytes,
@@ -3479,63 +3738,22 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   comment). nv2a_map_textures[].physOffset (computed in the
 	   validation pass above) is each texture's own byte offset into THIS
 	   buffer. */
-	nv2a_map_texture_data = MmAllocateContiguousMemoryEx( geo.textureData.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
-	if( !nv2a_map_texture_data )
-	{
-		gEngfuncs.Con_Printf( "ref_nv2a: map texture-data allocation failed (%u bytes)\n", (unsigned int)geo.textureData.length );
-		nv2a_free_map_resources();
-		return false;
-	}
-	memcpy( nv2a_map_texture_data, buffer + geo.textureData.offset, geo.textureData.length );
+	/* X9-T: filled by nv2a_upload_map_gpu_data() at R_NewMap. */
+	nv2a_pending_upload.texture_offset  = geo.textureData.offset;
+	nv2a_pending_upload.texture_bytes   = geo.textureData.length;
+	nv2a_pending_upload.lightmap_offset = geo.lightmapAtlas.offset;
+	nv2a_pending_upload.lightmap_bytes  = geo.lightmapAtlas.length;
 	nv2a_map_texture_count = texture_count;
 	nv2a_map_batch_count   = batch_count;
-
-	nv2a_map_lightmap = MmAllocateContiguousMemoryEx( geo.lightmapAtlas.length, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
-	if( !nv2a_map_lightmap )
-	{
-		gEngfuncs.Con_Printf( "ref_nv2a: map lightmap allocation failed (%u bytes)\n", (unsigned int)geo.lightmapAtlas.length );
-		nv2a_free_map_resources();
-		return false;
-	}
-	memcpy( nv2a_map_lightmap, buffer + geo.lightmapAtlas.offset, geo.lightmapAtlas.length );
 	nv2a_map_lightmap_width  = header->lightmapWidth;
 	nv2a_map_lightmap_height = header->lightmapHeight;
 	nv2a_map_lightmap_pitch  = nv2a_map_lightmap_width * 4; /* RGBA8, LU_IMAGE - no block rounding */
 
-	/* Pack pairs of raw indices into dwords for NV20_TCL_PRIMITIVE_3D_
-	   INDEX_DATA (see nv2a_map_index_dwords's own declaration comment for
-	   why - low half first, matching deps/nxdk/samples/mesh/verts.h's own
-	   data). An odd index_count pads its final dword's high half by
-	   repeating the last real index. Unlike X9-B/C there is no local-index
-	   remap here - every raw index already names its final slot in
-	   nv2a_map_vb directly, so this is a straight widen-and-pack walk over
-	   the whole buffer. */
-	nv2a_map_index_dwords = Mem_Malloc( r_temppool, (size_t)idx_bytes );
-	if( !nv2a_map_index_dwords )
-	{
-		gEngfuncs.Con_Printf( "ref_nv2a: map index buffer allocation failed (%u bytes)\n", (unsigned int)idx_bytes );
-		nv2a_free_map_resources();
-		return false;
-	}
-	nv2a_map_dword_count = dword_count;
-	for( i = 0; i < dword_count; i++ )
-	{
-		uint16_t lo16, hi16;
-		uint32_t lo, hi;
-
-		memcpy( &lo16, buffer + geo.indices.offset + (uint64_t)( i * 2 ) * sizeof( uint16_t ), sizeof( lo16 ));
-		lo = lo16;
-		if( i * 2 + 1 < index_count )
-		{
-			memcpy( &hi16, buffer + geo.indices.offset + (uint64_t)( i * 2 + 1 ) * sizeof( uint16_t ), sizeof( hi16 ));
-			hi = hi16;
-		}
-		else
-		{
-			hi = lo;
-		}
-		nv2a_map_index_dwords[i] = lo | ( hi << 16 );
-	}
+	/* The raw indices packed two to a dword for NV20_TCL_PRIMITIVE_3D_
+	   INDEX_DATA (low half first - see nv2a_map_index_dwords's own
+	   declaration comment) are already in nv2a_map_index_dwords: MPAK v12
+	   reads them straight in (nv2a_read_map_lumps), since that packing is
+	   the archive's own u16 array on a little-endian CPU. */
 
 	/* X9-E: the camera is no longer computed here. nv2a_map_viewproj is
 	   now written every real frame by GL_RenderFrame's own real
@@ -3571,7 +3789,6 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 		{
 			uint32_t expect_cursor = 0;
 			qboolean tiling_ok = true;
-			nv2a_lit_vertex_t *verts = (nv2a_lit_vertex_t *)nv2a_map_vb;
 			/* X9-K sky-skip fix: MpakFaceInfo is one record per face, in the
 			   SAME (sorted) order FaceDrawCmds already uses - fails open
 			   (every face's .sky left false, drawn same as before this fix)
@@ -3593,15 +3810,21 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			{
 				uint32_t start_index, face_indices, k;
 
-				memcpy( &start_index,  buffer + geo.faceDrawCmds.offset + (uint64_t)i * 8,     sizeof( start_index ));
-				memcpy( &face_indices, buffer + geo.faceDrawCmds.offset + (uint64_t)i * 8 + 4, sizeof( face_indices ));
+				memcpy( &start_index,  lumps->face_draw_cmds + (size_t)i * 8,     sizeof( start_index ));
+				memcpy( &face_indices, lumps->face_draw_cmds + (size_t)i * 8 + 4, sizeof( face_indices ));
 
+				/* MPAK v12: faceInfo is read NV2A_FACEINFO_WINDOW records at
+				   a time; a short read fails open like a bad length. */
+				if( faceinfo_ok && ( i % NV2A_FACEINFO_WINDOW ) == 0 )
+				{
+					uint32_t n = face_count - i < NV2A_FACEINFO_WINDOW ? face_count - i : NV2A_FACEINFO_WINDOW;
+
+					faceinfo_ok = nv2a_read_at( lumps->file, geo.faceInfo.offset + (fs_offset_t)i * sizeof( mpak_face_info_t ),
+						lumps->face_info_window, (fs_offset_t)n * sizeof( mpak_face_info_t ));
+				}
 				if( faceinfo_ok )
 				{
-					mpak_face_info_t info;
-
-					memcpy( &info, buffer + geo.faceInfo.offset + (uint64_t)i * sizeof( mpak_face_info_t ), sizeof( info ));
-					faces[i].sky = ( info.flags & MPAK_SURF_DRAWSKY ) != 0;
+					faces[i].sky = ( lumps->face_info_window[i % NV2A_FACEINFO_WINDOW].flags & MPAK_SURF_DRAWSKY ) != 0;
 				}
 				else
 				{
@@ -3617,14 +3840,14 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 
 				faces[i].vertex_base = 0;
 				if( geo.faceVertexBase.length != 0 )
-					memcpy( &faces[i].vertex_base, buffer + geo.faceVertexBase.offset + (uint64_t)i * sizeof( uint32_t ), sizeof( uint32_t ));
+					memcpy( &faces[i].vertex_base, lumps->face_vertex_base + (size_t)i * sizeof( uint32_t ), sizeof( uint32_t ));
 
 				ClearBounds( faces[i].mins, faces[i].maxs );
 				for( k = start_index; k < start_index + face_indices; k++ )
 				{
 					uint16_t vi;
 
-					memcpy( &vi, buffer + geo.indices.offset + (uint64_t)k * sizeof( uint16_t ), sizeof( vi ));
+					memcpy( &vi, indices + (size_t)k * 2, sizeof( vi ));
 					/* X9-S: indices are chunk-relative; the absolute vertex
 					   must still be inside the vertex array. */
 					if( (uint64_t)faces[i].vertex_base + vi >= vert_count )
@@ -3632,7 +3855,10 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 						tiling_ok = false;
 						break;
 					}
-					AddPointToBounds( verts[faces[i].vertex_base + vi].pos, faces[i].mins, faces[i].maxs );
+					/* X9-T: positions from the archive (the vertex buffer
+					   is built later, at R_NewMap); v12: streamed into
+					   lumps->positions by nv2a_read_map_lumps. */
+					AddPointToBounds( &lumps->positions[( (size_t)faces[i].vertex_base + vi ) * 3], faces[i].mins, faces[i].maxs );
 				}
 				if( !tiling_ok )
 					break;
@@ -3737,7 +3963,7 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 						{
 							uint32_t sortedIdx;
 
-							memcpy( &sortedIdx, buffer + geo.faceRemap.offset + (uint64_t)j * sizeof( uint32_t ), sizeof( sortedIdx ));
+							memcpy( &sortedIdx, lumps->face_remap + (size_t)j * sizeof( uint32_t ), sizeof( sortedIdx ));
 							if( sortedIdx >= face_count || orig[sortedIdx] != 0xFFFFFFFFu )
 							{
 								remap_ok = false;
@@ -3831,11 +4057,27 @@ static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte
 
 	if( nv2a_mpak_header_valid( buffer, buffersize, &header ))
 	{
+		/* MPAK v12: `buffer` is only the archive's classic prefix, served
+		   as "maps/<name>.bsp" (filesystem/mpak.c); the renderer's own
+		   sections are read from the whole archive, "maps/<name>.mpak". */
+		char archive_name[sizeof( nv2a_pending_upload.name )];
+		const char *dot = strrchr( mod->name, '.' );
+		size_t stem = dot ? (size_t)( dot - mod->name ) : strlen( mod->name );
+
 		nv2a_free_map_resources();
-		if( nv2a_load_map_geometry( header, buffer, buffersize ))
+		if( stem + sizeof( ".mpak" ) > sizeof( archive_name ))
+			return true;
+		memcpy( archive_name, mod->name, stem );
+		memcpy( archive_name + stem, ".mpak", sizeof( ".mpak" ));
+
+		if( nv2a_load_map_geometry( header, buffer, buffersize, archive_name ))
 		{
-			nv2a_map_ready = true;
+			/* X9-T: the GPU buffers come later, from R_NewMap, once the
+			   engine has freed `buffer` - nv2a_pending_upload. */
 			nv2a_map_owner = mod;
+			memcpy( nv2a_pending_upload.name, archive_name, sizeof( archive_name ));
+			nv2a_pending_upload.pending = true;
+			nv2a_pending_upload.retried = false;
 		}
 	}
 
@@ -4433,10 +4675,17 @@ static void VGUI_SetupDrawing( qboolean rect )
    triangle every frame, at the same point ref/soft's own R_EndFrame does
    its real work (R_BlitScreen) - see this file's header comment for why
    R_BeginFrame/R_RenderScene stay no-ops for this bring-up. */
+static void nv2a_try_pending_upload( void );
+
 static void R_EndFrame( void )
 {
 	if( !nv2a_ready )
 		return;
+
+	/* X9-T: the one retry of a failed R_NewMap upload - by the first frame
+	   after it, the client has freed the previous map's unused models. */
+	if( nv2a_pending_upload.pending && nv2a_pending_upload.retried )
+		nv2a_try_pending_upload();
 
 	debug_frame_count++;
 
@@ -4475,6 +4724,33 @@ static void R_EndFrame( void )
 
 	while( pb_finished())
 		;
+}
+
+/* X9-T: the engine has freed the map archive by the time it calls this
+   (Mod_LoadModel frees it right after Mod_ProcessRenderData), which is
+   what makes room for the map's GPU buffers. */
+/* Builds the pending map's GPU buffers (nv2a_pending_upload). A failure
+   keeps the tables for one retry, unless it was the retry. */
+static void nv2a_try_pending_upload( void )
+{
+	if( nv2a_upload_map_gpu_data())
+	{
+		nv2a_pending_upload.pending = false;
+		nv2a_map_ready = true;
+	}
+	else if( nv2a_pending_upload.retried )
+	{
+		gEngfuncs.Con_Printf( "ref_nv2a: %s's GPU buffers still do not fit - not drawing its real geometry\n", nv2a_pending_upload.name );
+		nv2a_free_map_resources();
+	}
+	else
+		nv2a_pending_upload.retried = true; /* R_EndFrame tries once more */
+}
+
+static void R_NewMap( void )
+{
+	if( nv2a_pending_upload.pending )
+		nv2a_try_pending_upload();
 }
 
 const ref_interface_t gReffuncs =
@@ -4569,7 +4845,7 @@ const ref_interface_t gReffuncs =
 	.GL_OrthoBounds    = GL_OrthoBounds,
 	.R_SpeedsMessage   = R_SpeedsMessage,
 	.Mod_GetCurrentVis = Mod_GetCurrentVis,
-	.R_NewMap          = R_SimpleStub,
+	.R_NewMap          = R_NewMap,
 	.R_ClearScene      = R_ClearScene,
 
 	.TriRenderMode = R_SimpleStubInt,

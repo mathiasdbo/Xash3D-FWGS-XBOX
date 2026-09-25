@@ -15,8 +15,11 @@ namespace formats {
     // unmodified Mod_LoadTextures path parses (see the definition's own
     // comment for the per-texture policy). Public so it can be unit-tested
     // against hand-built lumps without a retail install.
+    // headersOnly (the nv2a profile, MPAK v12): every entry is the 40-byte
+    // header alone - see the definition's comment.
     std::vector<uint8_t> buildEmbeddedMiptexLump(const std::vector<uint8_t>& texData,
-                                                 const std::unordered_map<std::string, const WadLump*>& externalWadTextures);
+                                                 const std::unordered_map<std::string, const WadLump*>& externalWadTextures,
+                                                 bool headersOnly = false);
 
     // Indexes one WAD's lumps by lower-cased name into the lookup the core
     // miptex builder consumes, later calls overriding earlier ones. Called

@@ -243,14 +243,28 @@ typedef struct mextrasurf_s
 	struct cl_entity_s	*parent;		// upcast to owner entity
 
 	int		mirrortexturenum;	// gl texnum
+#if !XASH_XBOX
 	float		mirrormatrix[4][4];
+#endif
 
 	struct grasshdr_s	*grass;		// grass that linked by this surface
 	unsigned short	grasscount;	// number of bushes per polygon (used to determine total VBO size)
 	unsigned short	numverts;		// world->vertexes[]
 	int		firstvertex;	// fisrt look up in tr.tbn_vectors[], then acess to world->vertexes[]
 
+#if XASH_XBOX
+	// Resonance3D (docs/r3d/divergences.md #110): the engine allocates one
+	// of these per world surface in a single block (Mod_LoadSurfaces), 324
+	// bytes each - 13 MB on rocket_frenzy's 41,000 surfaces, more than the
+	// console had left. On Xbox only ref/soft and ref/nv2a are linked:
+	// neither reads mirrormatrix (only ref/gl does), and ref/soft's
+	// surface cache is the only user of reserved[], its first MIPLEVELS
+	// slots (CACHESPOT, ref/soft/r_local.h). Both shrink to what is used,
+	// 148 bytes a surface.
+	intptr_t	reserved[MIPLEVELS];
+#else
 	intptr_t	reserved[32];	// just for future expansions or mod-makers
+#endif
 } mextrasurf_t;
 
 #ifdef SUPPORT_HL25_EXTENDED_STRUCTS
@@ -583,7 +597,11 @@ typedef struct
 #define MAX_REQUESTS	64
 
 STATIC_CHECK_SIZEOF( mnode_t, 52, 72 );
+#if XASH_XBOX
+STATIC_CHECK_SIZEOF( mextrasurf_t, 148, 208 ); // Resonance3D: the slimmer Xbox layout above (divergences.md #110)
+#else
 STATIC_CHECK_SIZEOF( mextrasurf_t, 324, 496 );
+#endif
 STATIC_CHECK_SIZEOF( decal_t, 60, 88 );
 STATIC_CHECK_SIZEOF( mfaceinfo_t, 176, 304 );
 

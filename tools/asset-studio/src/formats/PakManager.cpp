@@ -634,29 +634,49 @@ namespace formats {
             header.lenArray512 = static_cast<uint32_t>(flat512.size());
         }
 
-        // Write Geometry (nv2a profile only - header.vCount/iCount are 0 otherwise,
-        // and writePadded with size 0 writes nothing)
-        writePadded(mVertices.data(), header.vCount * sizeof(Vertex));
-        writePadded(mIndices.data(), header.iCount * sizeof(uint16_t));
-
-        // Write BSP Lumps. The write order below is the format - the descriptor
-        // has no offset table and filesystem/mpak_layout.c walks these sections
-        // in exactly this order; never change one without the other.
+        // The write order below is the format - the descriptor has no offset
+        // table and filesystem/mpak_layout.c walks these sections in exactly
+        // this order; never change one without the other.
+        //
+        // v12: every classic BSP lump comes first, then every section only
+        // ref/nv2a reads. The engine loads a map by reading the whole file
+        // it is served; filesystem/mpak.c now serves "maps/<name>.bsp" as
+        // just this classic prefix (the first sector up to the first
+        // renderer section) and the whole archive as "maps/<name>.mpak",
+        // which the renderer streams from. On the largest maps more than
+        // half the archive is renderer-only data (vertices, lightmap,
+        // textures), and the engine holding all of it at once is what kept
+        // disposal and rocket_frenzy from loading at all. The classic lumps
+        // keep their v11 relative order, and so do the renderer sections.
         if (header.lenVisibility > 0) lump(LUMP_VISIBILITY, writePadded(mVisibilityData.data(), mVisibilityData.size()), header.lenVisibility);
         if (header.lenNodes > 0) lump(LUMP_NODES, writePadded(mNodesData.data(), mNodesData.size()), header.lenNodes);
         if (header.lenLeaves > 0) lump(LUMP_LEAVES, writePadded(mLeavesData.data(), mLeavesData.size()), header.lenLeaves);
         if (header.lenMarksurfaces > 0) lump(LUMP_MARKSURFACES, writePadded(mMarksurfacesData.data(), mMarksurfacesData.size()), header.lenMarksurfaces);
-        if (header.lenFaceDrawCmds > 0) writePadded(mFaceDrawCmds.data(), mFaceDrawCmds.size() * sizeof(FaceDrawCmd));
         if (header.lenPlanes > 0) lump(LUMP_PLANES, writePadded(mPlanesData.data(), mPlanesData.size()), header.lenPlanes);
         if (header.lenClipnodes > 0) lump(LUMP_CLIPNODES, writePadded(mClipnodesData.data(), mClipnodesData.size()), header.lenClipnodes);
         if (header.lenModels > 0) lump(LUMP_MODELS, writePadded(mModelsData.data(), mModelsData.size()), header.lenModels);
+        if (header.lenEntities > 0) lump(LUMP_ENTITIES, writePadded(mEntitiesData.data(), mEntitiesData.size()), header.lenEntities);
+        if (header.lenTexinfo > 0) lump(LUMP_TEXINFO, writePadded(mTexinfoData.data(), mTexinfoData.size()), header.lenTexinfo);
+        // The v7 classic core (MpakHeader.h's v6 -> v7 note).
+        if (header.lenVertexes > 0) lump(LUMP_VERTICES, writePadded(mVertexesData.data(), mVertexesData.size()), header.lenVertexes);
+        if (header.lenEdges > 0) lump(LUMP_EDGES, writePadded(mEdgesData.data(), mEdgesData.size()), header.lenEdges);
+        if (header.lenSurfedges > 0) lump(LUMP_SURFEDGES, writePadded(mSurfedgesData.data(), mSurfedgesData.size()), header.lenSurfedges);
+        if (header.lenFaces > 0) lump(LUMP_FACES, writePadded(mFacesData.data(), mFacesData.size()), header.lenFaces);
+        if (header.lenLighting > 0) lump(LUMP_LIGHTING, writePadded(mLightingData.data(), mLightingData.size()), header.lenLighting);
+        if (header.lenMiptex > 0) lump(LUMP_TEXTURES, writePadded(mMiptexData.data(), mMiptexData.size()), header.lenMiptex);
 
-        // Write Textures (DXT compressed, nv2a profile only). Write order
-        // matches the header's own field order (MpakHeader.h's v8 -> v9
-        // note): texture directory, texture data, batches, then face remap -
-        // all four independently skipped (0 bytes) when this bake doesn't
-        // produce them, so an Xbox archive's PC array section below
-        // contributes nothing and vice versa.
+        // Renderer-only sections from here on. Geometry (nv2a profile only -
+        // header.vCount/iCount are 0 otherwise, and writePadded with size 0
+        // writes nothing).
+        writePadded(mVertices.data(), header.vCount * sizeof(Vertex));
+        writePadded(mIndices.data(), header.iCount * sizeof(uint16_t));
+        if (header.lenFaceDrawCmds > 0) writePadded(mFaceDrawCmds.data(), mFaceDrawCmds.size() * sizeof(FaceDrawCmd));
+
+        // Textures (DXT compressed, nv2a profile only), in the header's own
+        // field order (MpakHeader.h's v8 -> v9 note): texture directory,
+        // texture data, batches, then face remap - all four independently
+        // skipped (0 bytes) when this bake doesn't produce them, so an Xbox
+        // archive's PC array section below contributes nothing and vice versa.
         if (nv2a) {
             if (mIsXboxTarget) {
                 if (header.lenTextureDir > 0) writePadded(textureDir.data(), textureDir.size() * sizeof(MpakTextureInfo));
@@ -671,28 +691,13 @@ namespace formats {
             }
         }
 
-        // Write Assets (always empty since the X2 scope narrowing)
+        // Assets (always empty since the X2 scope narrowing).
         if (header.lenAssetDict > 0) writePadded(mAssetDict.data(), mAssetDict.size() * sizeof(AssetEntry));
         if (header.lenAssetData > 0) writePadded(mAssetData.data(), mAssetData.size());
 
-        // MPAKv4+ additions - appended in header field order.
-        if (header.lenEntities > 0) lump(LUMP_ENTITIES, writePadded(mEntitiesData.data(), mEntitiesData.size()), header.lenEntities);
         if (header.lenLightmapAtlas > 0) writePadded(mLightmapAtlasData.data(), mLightmapAtlasData.size());
-
-        // MPAKv6 additions.
         if (header.lenFaceInfo > 0) writePadded(mFaceInfos.data(), mFaceInfos.size() * sizeof(MpakFaceInfo));
-        if (header.lenTexinfo > 0) lump(LUMP_TEXINFO, writePadded(mTexinfoData.data(), mTexinfoData.size()), header.lenTexinfo);
-
-        // MPAKv7 additions: the classic core (MpakHeader.h's v6 -> v7 note).
-        if (header.lenVertexes > 0) lump(LUMP_VERTICES, writePadded(mVertexesData.data(), mVertexesData.size()), header.lenVertexes);
-        if (header.lenEdges > 0) lump(LUMP_EDGES, writePadded(mEdgesData.data(), mEdgesData.size()), header.lenEdges);
-        if (header.lenSurfedges > 0) lump(LUMP_SURFEDGES, writePadded(mSurfedgesData.data(), mSurfedgesData.size()), header.lenSurfedges);
-        if (header.lenFaces > 0) lump(LUMP_FACES, writePadded(mFacesData.data(), mFacesData.size()), header.lenFaces);
-        if (header.lenLighting > 0) lump(LUMP_LIGHTING, writePadded(mLightingData.data(), mLightingData.size()), header.lenLighting);
-        if (header.lenMiptex > 0) lump(LUMP_TEXTURES, writePadded(mMiptexData.data(), mMiptexData.size()), header.lenMiptex);
-
-        // MPAKv8 addition (MpakHeader.h's v7 -> v8 note) - not a classic BSP
-        // lump, same shape as lenFaceInfo/lenLightmapAtlas above.
+        // v8 (MpakHeader.h's v7 -> v8 note) and v11 additions.
         if (header.lenExtraLightBlocks > 0) writePadded(mExtraLightBlocks.data(), mExtraLightBlocks.size() * sizeof(MpakExtraLightBlock));
         if (header.lenFaceVertexBase > 0) writePadded(mFaceVertexBase.data(), mFaceVertexBase.size() * sizeof(uint32_t));
 
@@ -773,7 +778,8 @@ namespace formats {
             const uint64_t remapBytes = static_cast<uint64_t>(header.lenFaceRemap) * 2;
             const uint64_t texBytes = static_cast<uint64_t>(header.lenTextureData);
             const uint64_t lmBytes = static_cast<uint64_t>(header.lenLightmapAtlas);
-            const uint64_t total = nv2aMapLedgerBytes(header, fileSize);
+            const uint64_t engineBytes = mpakClassicPrefixBytes(header); // MPAK v12: what the engine holds
+            const uint64_t total = nv2aMapLedgerBytes(header, engineBytes);
             const double pct = 100.0 * static_cast<double>(total) / static_cast<double>(kNv2aMapBudgetBytes);
 
             if (!nv2aMapWithinBudget(total)) {
@@ -783,7 +789,7 @@ namespace formats {
                           << ") - this archive would not draw on the Xbox target. Failing the bake.\n"
                           << "  [vb=" << vbBytes << " idx=" << idxBytes << " faces=" << facesBytes
                           << " vis=" << visBytes << " remap=" << remapBytes << " tex=" << texBytes
-                          << " lm=" << lmBytes << " file=" << fileSize << "]\n";
+                          << " lm=" << lmBytes << " bsp=" << engineBytes << " file=" << fileSize << "]\n";
                 // The 512 caps above fail before any section is written, so
                 // they only ever leave a 2048-byte stub behind. This check
                 // runs after the full archive is written and verified, so
@@ -814,7 +820,7 @@ namespace formats {
                       << "nv2a map budget: " << total << " / " << kNv2aMapBudgetBytes
                       << " bytes (" << pct << "%) [vb=" << vbBytes << " idx=" << idxBytes
                       << " faces=" << facesBytes << " vis=" << visBytes << " remap=" << remapBytes
-                      << " tex=" << texBytes << " lm=" << lmBytes << " file=" << fileSize << "]\n"
+                      << " tex=" << texBytes << " lm=" << lmBytes << " bsp=" << engineBytes << " file=" << fileSize << "]\n"
                       << std::defaultfloat;
         }
 
@@ -979,16 +985,26 @@ namespace formats {
                 return at;
             };
             uint64_t at[MPAK_BSP_LUMPS] = {};
-            const uint64_t vertexAt = place(static_cast<uint64_t>(desc.vCount) * sizeof(Vertex));
-            const uint64_t indexAt = place(static_cast<uint64_t>(desc.iCount) * sizeof(uint16_t));
+            // v12: the classic lumps first (the engine's view of the map
+            // ends where they do), then the renderer-only sections.
             at[LUMP_VISIBILITY] = place(desc.lenVisibility);
             at[LUMP_NODES] = place(desc.lenNodes);
             at[LUMP_LEAVES] = place(desc.lenLeaves);
             at[LUMP_MARKSURFACES] = place(desc.lenMarksurfaces);
-            const uint64_t drawCmdAt = place(desc.lenFaceDrawCmds);
             at[LUMP_PLANES] = place(desc.lenPlanes);
             at[LUMP_CLIPNODES] = place(desc.lenClipnodes);
             at[LUMP_MODELS] = place(desc.lenModels);
+            at[LUMP_ENTITIES] = place(desc.lenEntities);
+            at[LUMP_TEXINFO] = place(desc.lenTexinfo);
+            at[LUMP_VERTICES] = place(desc.lenVertexes);
+            at[LUMP_EDGES] = place(desc.lenEdges);
+            at[LUMP_SURFEDGES] = place(desc.lenSurfedges);
+            at[LUMP_FACES] = place(desc.lenFaces);
+            at[LUMP_LIGHTING] = place(desc.lenLighting);
+            at[LUMP_TEXTURES] = place(desc.lenMiptex);
+            const uint64_t vertexAt = place(static_cast<uint64_t>(desc.vCount) * sizeof(Vertex));
+            const uint64_t indexAt = place(static_cast<uint64_t>(desc.iCount) * sizeof(uint16_t));
+            const uint64_t drawCmdAt = place(desc.lenFaceDrawCmds);
             // v9: texture directory/data/batches (Xbox only), then the face
             // remap (both targets), then the PC arrays (PC only) - matches
             // save()'s own write order, which matches the header's field
@@ -1008,18 +1024,18 @@ namespace formats {
             }
             place(desc.lenAssetDict);
             place(desc.lenAssetData);
-            at[LUMP_ENTITIES] = place(desc.lenEntities);
             const uint64_t lightmapAt = place(desc.lenLightmapAtlas);
             const uint64_t faceInfoAt = place(desc.lenFaceInfo);
-            at[LUMP_TEXINFO] = place(desc.lenTexinfo);
-            at[LUMP_VERTICES] = place(desc.lenVertexes);
-            at[LUMP_EDGES] = place(desc.lenEdges);
-            at[LUMP_SURFEDGES] = place(desc.lenSurfedges);
-            at[LUMP_FACES] = place(desc.lenFaces);
-            at[LUMP_LIGHTING] = place(desc.lenLighting);
-            at[LUMP_TEXTURES] = place(desc.lenMiptex);
             const uint64_t extraLightBlocksAt = place(desc.lenExtraLightBlocks);
             const uint64_t faceVertexBaseAt = place(desc.lenFaceVertexBase);
+
+            // MPAK v12: the classic lumps end where the renderer sections
+            // begin, and that offset is the .bsp view filesystem/mpak.c
+            // serves (Mpak_ComputeLayout's classicEnd) - checked here on
+            // every bake against the ledger's own mirror of it.
+            if (vertexAt != mpakClassicPrefixBytes(desc))
+                fail("classic prefix ends at " + std::to_string(vertexAt) + " but mpakClassicPrefixBytes says " +
+                     std::to_string(mpakClassicPrefixBytes(desc)));
 
             if (cursor != static_cast<uint64_t>(fileSize))
                 fail("descriptor sections end at " + std::to_string(cursor) + " but the file is " + std::to_string(fileSize) + " bytes");

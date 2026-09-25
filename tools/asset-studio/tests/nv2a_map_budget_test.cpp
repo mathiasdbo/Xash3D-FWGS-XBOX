@@ -55,7 +55,8 @@ int main() {
     {
         MpakHeader6 h = zeroHeader();
         h.lenFaceDrawCmds = 15; // 15/8 = 1 face: 1*52 (faces term) + 15/8 (vis term, truncates to 1)
-        CHECK(nv2aMapLedgerBytes(h, 0) == 1 * 52 + 1, "lenFaceDrawCmds=15 must give one 52-byte face and vis=1 (integer truncation)");
+        // MPAK v12: plus the 15-byte lump itself, read in for the load.
+        CHECK(nv2aMapLedgerBytes(h, 0) == 1 * 52 + 1 + 15, "lenFaceDrawCmds=15 must give one 52-byte face, vis=1 (integer truncation) and its 15-byte load copy");
     }
 
     // --- the vertex term uses kNv2aLitVertexBytes (28), the RUNTIME nv2a_lit_vertex_t
@@ -64,7 +65,14 @@ int main() {
         MpakHeader6 h = zeroHeader();
         h.vCount = 1;
         CHECK(kNv2aLitVertexBytes == 28, "nv2a_lit_vertex_t must be 28 bytes (packed float pos[3], uv0[2], uv1[2])");
-        CHECK(nv2aMapLedgerBytes(h, 100) == 28 + 100, "vCount=1 must contribute exactly 28 bytes, plus fileSize");
+        CHECK(nv2aMapLedgerBytes(h, 0) == 28, "vCount=1 must contribute exactly 28 bytes of GPU buffer");
+        // X9-T: GPU buffers and the archive never coexist - the larger counts, not the sum.
+        // MPAK v12: the load side is the engine's bytes plus the 12-byte
+        // positions copy of every vertex.
+        CHECK(nv2aMapLedgerBytes(h, 100) == 100 + 12, "a 100-byte prefix + 12 bytes of positions outweigh 28 bytes of GPU buffers: max, not sum");
+        h.lenLightmapAtlas = 200;
+        CHECK(nv2aMapLedgerBytes(h, 100) == 28 + 200, "228 bytes of GPU buffers outweigh a 112-byte load");
+        h.lenLightmapAtlas = 0;
     }
 
     // --- no 32-bit overflow: every term is computed in uint64, unlike the
@@ -76,6 +84,24 @@ int main() {
         const uint64_t expected = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) * kNv2aLitVertexBytes;
         CHECK(nv2aMapLedgerBytes(h, 0) == expected, "vCount=UINT32_MAX must not overflow the vertex term");
         CHECK(!nv2aMapWithinBudget(nv2aMapLedgerBytes(h, 0)), "a UINT32_MAX vertex count must be far over budget");
+    }
+
+    // --- MPAK v12: the engine's view is the first sector plus every
+    //     classic lump padded to a sector; renderer lumps are not in it ---
+    {
+        MpakHeader6 h = zeroHeader();
+        CHECK(mpakClassicPrefixBytes(h) == 2048, "an archive with no classic lumps is just its first sector");
+        h.lenEntities = 1;
+        h.lenMiptex = 2049;
+        h.lenLightmapAtlas = 4096;
+        h.lenFaceDrawCmds = 8;
+        CHECK(mpakClassicPrefixBytes(h) == 2048 + 2048 + 4096, "classic lumps pad to whole sectors; renderer lumps do not count");
+        // The renderer-only temporaries the load reads in count once.
+        MpakHeader6 t = zeroHeader();
+        t.lenTextureDir = 16;
+        t.lenBatches = 20;
+        t.lenFaceVertexBase = 4;
+        CHECK(nv2aMapLedgerBytes(t, 0) == 16 + 20 + 4, "the texture directory, batches and vertex bases are load temporaries");
     }
 
     if (failures) {

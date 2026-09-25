@@ -135,17 +135,35 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	// computing each offset by hand rather than reusing anything from
 	// mpak_layout.c itself.
 	cursor = SECTOR; // first sector: dheader_t + descriptor
-	cursor += RoundUpSector( 0 ); // vertices (vCount=0)
-	cursor += RoundUpSector( 0 ); // indices (iCount=0)
+	// v12: every classic BSP lump first...
 	cursor += RoundUpSector( 0 ); // visibility
 	cursor += RoundUpSector( 0 ); // nodes
 	cursor += RoundUpSector( 0 ); // leaves
 	cursor += RoundUpSector( 0 ); // marksurfaces
-	cursor += RoundUpSector( 0 ); // faceDrawCmds
 	planesOffset = cursor;
 	cursor += RoundUpSector( lenPlanes );
 	cursor += RoundUpSector( 0 ); // clipnodes
 	cursor += RoundUpSector( 0 ); // models
+	entitiesOffset = cursor;
+	cursor += RoundUpSector( lenEntities );
+	texinfoOffset = cursor;
+	cursor += RoundUpSector( lenTexinfo );
+	vertexesOffset = cursor;
+	cursor += RoundUpSector( lenVertexes );
+	edgesOffset = cursor;
+	cursor += RoundUpSector( lenEdges );
+	surfedgesOffset = cursor;
+	cursor += RoundUpSector( lenSurfedges );
+	facesOffset = cursor;
+	cursor += RoundUpSector( lenFaces );
+	lightingOffset = cursor;
+	cursor += RoundUpSector( lenLighting );
+	miptexOffset = cursor;
+	cursor += RoundUpSector( lenMiptex );
+	// ...then every renderer-only section.
+	cursor += RoundUpSector( 0 ); // vertices (vCount=0)
+	cursor += RoundUpSector( 0 ); // indices (iCount=0)
+	cursor += RoundUpSector( 0 ); // faceDrawCmds
 	// v9: texture directory/data/batches (Xbox only), then the face remap
 	// (both targets) - matches mpak_layout.c's own write-order walk, which
 	// in turn matches PakManager.cpp save()'s real write order.
@@ -171,25 +189,9 @@ static byte *BuildMinimalArchive( qboolean targetXbox, qboolean nv2a, fs_offset_
 	}
 	cursor += RoundUpSector( 0 ); // assetDict
 	cursor += RoundUpSector( 0 ); // assetData
-	entitiesOffset = cursor;
-	cursor += RoundUpSector( lenEntities );
 	lightmapOffset = cursor;
 	cursor += RoundUpSector( lenLightmap );
 	cursor += RoundUpSector( 0 ); // faceInfo
-	texinfoOffset = cursor;
-	cursor += RoundUpSector( lenTexinfo );
-	vertexesOffset = cursor;
-	cursor += RoundUpSector( lenVertexes );
-	edgesOffset = cursor;
-	cursor += RoundUpSector( lenEdges );
-	surfedgesOffset = cursor;
-	cursor += RoundUpSector( lenSurfedges );
-	facesOffset = cursor;
-	cursor += RoundUpSector( lenFaces );
-	lightingOffset = cursor;
-	cursor += RoundUpSector( lenLighting );
-	miptexOffset = cursor;
-	cursor += RoundUpSector( lenMiptex );
 	extraLightBlocksOffset = cursor;
 	cursor += RoundUpSector( lenExtraLightBlocks );
 	faceVertexBaseOffset = cursor;
@@ -315,6 +317,16 @@ static qboolean TestValidArchive( qboolean targetXbox, qboolean nv2a )
 		printf( "TestValidArchive(%s): ValidateBspHeader rejected a consistent dheader_t\n", Label( targetXbox, nv2a ));
 		ok = false;
 		goto done;
+	}
+
+	// v12: the engine's view of the map ends right after the last classic
+	// lump (miptex), and every renderer section lies past it.
+	if( layout.classicEnd != layout.miptex.offset + RoundUpSector( layout.miptex.length )
+		|| layout.lightmapAtlas.offset < layout.classicEnd || layout.faceRemap.offset < layout.classicEnd )
+	{
+		printf( "TestValidArchive(%s): classicEnd %lld is not where the classic lumps end\n",
+			Label( targetXbox, nv2a ), (long long)layout.classicEnd );
+		ok = false;
 	}
 
 	if( layout.planes.length != header.lenPlanes ||

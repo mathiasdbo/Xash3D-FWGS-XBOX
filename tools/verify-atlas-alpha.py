@@ -88,7 +88,7 @@ MPAK_BSP_VERSION = 30          # HLBSP_VERSION, common/bspfile.h; MpakHeader.h:3
 MPAK_DESCRIPTOR_OFFSET = 128   # MpakHeader.h:37 MPAK_DESCRIPTOR_OFFSET
 # MpakHeader6::version's default is the MAP format version, kept in lockstep
 # with filesystem/mpak_layout.h:54's MPAK_LAYOUT_VERSION - MpakHeader.h:213.
-MPAK_LAYOUT_VERSION = 11
+MPAK_LAYOUT_VERSION = 12
 MPAK_FLAG_XBOX = 1        # MpakHeader.h:18
 MPAK_FLAG_NV2A_BLOCK = 2  # MpakHeader.h:19
 SECTOR = 2048
@@ -233,25 +233,15 @@ def _walk_sections(h, file_size):
         if length > 0:
             cursor += _sector_pad(length)
 
-    place("vertices", h["vCount"] * VERTEX_SIZE)
-    place("indices", h["iCount"] * INDEX_SIZE)
+    # v12: every classic BSP lump first, then the renderer sections.
     place("visibility", h["lenVisibility"])
     place("nodes", h["lenNodes"])
     place("leaves", h["lenLeaves"])
     place("marksurfaces", h["lenMarksurfaces"])
-    place("faceDrawCmds", h["lenFaceDrawCmds"])
     place("planes", h["lenPlanes"])
     place("clipnodes", h["lenClipnodes"])
     place("models", h["lenModels"])
-    place("textureDir", h["lenTextureDir"])
-    place("textureData", h["lenTextureData"])
-    place("batches", h["lenBatches"])
-    place("faceRemap", h["lenFaceRemap"])
-    place("assetDict", h["lenAssetDict"])
-    place("assetData", h["lenAssetData"])
     place("entities", h["lenEntities"])
-    place("lightmapAtlas", h["lenLightmapAtlas"])
-    place("faceInfo", h["lenFaceInfo"])
     place("texinfo", h["lenTexinfo"])
     place("vertexesRaw", h["lenVertexes"])
     place("edges", h["lenEdges"])
@@ -259,6 +249,17 @@ def _walk_sections(h, file_size):
     place("faces", h["lenFaces"])
     place("lighting", h["lenLighting"])
     place("miptex", h["lenMiptex"])
+    place("vertices", h["vCount"] * VERTEX_SIZE)
+    place("indices", h["iCount"] * INDEX_SIZE)
+    place("faceDrawCmds", h["lenFaceDrawCmds"])
+    place("textureDir", h["lenTextureDir"])
+    place("textureData", h["lenTextureData"])
+    place("batches", h["lenBatches"])
+    place("faceRemap", h["lenFaceRemap"])
+    place("assetDict", h["lenAssetDict"])
+    place("assetData", h["lenAssetData"])
+    place("lightmapAtlas", h["lenLightmapAtlas"])
+    place("faceInfo", h["lenFaceInfo"])
     place("extraLightBlocks", h["lenExtraLightBlocks"])
     place("faceVertexBase", h["lenFaceVertexBase"])
 
