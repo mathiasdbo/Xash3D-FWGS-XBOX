@@ -92,7 +92,11 @@ mvertex_t    *r_pcurrentvertbase;
 // int                     c_surf;
 qboolean     r_surfsonstack;
 int          r_clipflags;
+#if XASH_XBOX
+byte         *r_warpbuffer; // R_AllocStatics (divergences.md #114)
+#else
 byte         r_warpbuffer[WARP_WIDTH * WARP_HEIGHT];
+#endif
 int          r_numallocatededges;
 
 float        r_aliasuvscale = 1.0;
@@ -1343,6 +1347,14 @@ qboolean GAME_EXPORT R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_sort_textures );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_builtin_renderer );
 
+#if XASH_XBOX
+	if( !R_AllocStatics( ))
+	{
+		gEngfuncs.Con_Printf( "ref_soft: not enough memory for its tables\n" );
+		return false; // the engine unloads the ref, and R_Shutdown frees what was allocated
+	}
+#endif
+
 	r_temppool = Mem_AllocPool( "ref_soft zone" );
 
 	glblit = !!gEngfuncs.Sys_CheckParm( "-glblit" );
@@ -1393,9 +1405,46 @@ qboolean GAME_EXPORT R_Init( void )
 
 void GAME_EXPORT R_Shutdown( void )
 {
+#if XASH_XBOX
+	if( vid_ptr ) // R_Init got as far as R_AllocStatics
+#endif
 	R_ShutdownImages();
 	gEngfuncs.R_Free_Video();
+#if XASH_XBOX
+	R_FreeStatics();
+#endif
 }
+
+#if XASH_XBOX
+/*
+===============
+R_AllocStatics / R_FreeStatics
+
+Resonance3D (divergences.md #114): ref/soft's tables that upstream keeps
+static - vid, r_images, r_leafkeys, g_studio, r_warpbuffer - zeroed exactly
+as static storage would be, for as long as this renderer is loaded.
+===============
+*/
+qboolean R_AllocStatics( void )
+{
+	vid_ptr = calloc( 1, sizeof( *vid_ptr ));
+	r_leafkeys = calloc( MAX_MAP_LEAFS, sizeof( *r_leafkeys ));
+	r_warpbuffer = calloc( WARP_WIDTH * WARP_HEIGHT, 1 );
+	return vid_ptr && r_leafkeys && r_warpbuffer && R_AllocImageStatics() && R_AllocStudioStatics();
+}
+
+void R_FreeStatics( void )
+{
+	R_FreeStudioStatics();
+	R_FreeImageStatics();
+	free( r_warpbuffer );
+	r_warpbuffer = NULL;
+	free( r_leafkeys );
+	r_leafkeys = NULL;
+	free( vid_ptr );
+	vid_ptr = NULL;
+}
+#endif
 
 
 /*

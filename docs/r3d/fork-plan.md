@@ -8810,32 +8810,37 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
       texture only for `ref/nv2a` to discard it: drop the worldspawn `wad`
       key in the Xbox nv2a bake, or stop staging the texture WADs.
 
-11. **NEXT TASK - `rocket_frenzy`: find ~17 MiB.** It is the one retail map
-    that still does not load in xemu: the engine runs out building its
-    world model (`Sys_Error`: `Mem_Alloc` of 1.28 MB in `Mod_LoadNodes`).
-    `memory-budget-specialist`'s model (X9-T review): its engine world
-    structures are 24.7 MiB - face bevels 6.0 (41,123 separate
-    allocations, `mod_bmodel.c:1724`), `mextrasurf_t` 5.8, `msurface_t`
-    3.5, lighting 2.9, nodes 1.3, leafs 1.0 - and at steady state it is
-    15-18 MiB short. Ranked by bytes saved against divergence cost:
-    1. Lightmap atlas (~6.2 MiB): no 1-luxel borders (sample luxel
-       centres, as `ref/gl` does), style 0 only (`ref/nv2a` never reads
-       the extra-style blocks), then RGB565. Fork-owned; also shrinks the
-       largest contiguous run.
-    2. Face bevels (5.2-6.0 MiB): compute edge planes when a trace needs
-       them (`pm_surface.c`), or at least one block allocation instead of
-       41k (~1.25 MiB). Bit-identical results.
-    3. Secondary thread stacks 1 MiB -> 64-128 KiB (~1.8 MiB).
-    4. Vertex buffer 28 -> 20 or 16 bytes (1.4-2.1 MiB).
-    5. `nv2a_map_face_t` reusing the engine's surface bounds, u16 remaps
-       (~1.0 MiB).
-    6. Then one of: 8-bit engine lighting (~1.9), `HISTORY_MAX` 64 -> 16
-       (~1.5, needs the SDK client rebuilt), a further `mextrasurf_t`
-       trim (~1.6).
-    Measure first: `soundlist`/`memlist` at `R_NewMap` (precached sounds
-    are fully resident, `s_load.c:291-296`), what the 10.8 MiB between
-    `R_Init` and the first frame is, and `maxclients` (above 1,
-    `Mod_CalcPHS` needs a ~31.7 MiB transient on this map).
+11. ~~**`rocket_frenzy`: find ~17 MiB.**~~ **Closed, X9-U: the baker refuses
+    it (`divergences.md` #113-#116).** Working on it freed memory for every
+    map - measured in xemu, ~36.5 MiB is now free before a map loads (was
+    32.8) - but `rocket_frenzy` does not fit, and past the engine's own
+    limits it is not a memory problem alone:
+    - It has 988 edict slots at its load peak (1,016 entities, 278
+      `env_glow`) against the game's `max_edicts` of 900; it fails the same
+      way on PC Xash. GoldSrc adds 15 slots per player, so it is a
+      multiplayer map that needs 8+ slots; Xash uses the flat limit.
+    - With the engine's memory cut (bevels on demand, slimmer
+      `mextrasurf_t`/`cl_entity_t`, `ref/soft`'s tables at init) it gets
+      through its world load, but at `R_NewMap` it had 7.2 MiB free for
+      11.5 MiB of GPU buffers.
+    - Hosting it (`maxclients` > 1) would also need ~75 MiB for
+      `Mod_CalcPHS` - item 13.
+    Instead of more cuts with visible or ABI costs, the baker now checks
+    every map before and after the bake (`Nv2aMapFit.h`): edict slots at
+    the load peak against `max_edicts`, the engine's world load (C1) and
+    the renderer's tables and GPU buffers at `R_NewMap` (C3), calibrated in
+    xemu on ten maps. Over the 125 retail maps it refuses `rocket_frenzy`
+    alone; the tightest that fit are `disposal` (882 of 900 slots, 10.1 MiB
+    of C3 headroom), `contamination` (11.4) and `pool_party` (12.0).
+    Kept from the work, and useful to every map: face bevels on demand
+    (#113), `ref/soft`'s tables at `R_Init` (#114), ref/nv2a's tables built
+    at `R_NewMap` and a 24-byte face table, per-map tables from `malloc`, a
+    tight style-0 lightmap atlas, only drawn textures baked (#115),
+    `HISTORY_MAX` 16 and a 112-byte `mextrasurf_t` on Xbox (#116). The
+    `max_edicts 1100` raise tried for it was reverted (~0.8 MiB on every
+    map). Left, if it is ever wanted: the unused 1.2 MiB HAL framebuffer
+    (an nxdk patch), the client's 64-slot frame arrays of which one-player
+    games use 4, lightmap UVs as shorts.
 
 12. **Level transitions: can the console run out between maps?** Every
     X9-T measurement booted one map from a fresh start. On a listen server
@@ -8854,6 +8859,24 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
     ... five or more times). Any downward drift or failure becomes a fix:
     a GPU arena reserved once at `R_Init` and sub-allocated per map, and
     `Mod_FreeUnused` before the upload.
+
+13. **Offline PHS for Xbox-hosted multiplayer.** With `maxclients` above 1
+    the engine builds the map's PHS at load (`Mod_CalcPHS`,
+    `mod_bmodel.c`): a transient of about `2 x rowbytes x (numleafs + 1)`
+    plus the compressed result, ~9-12 MiB on `disposal`/`pool_party` and
+    ~75 MiB on `rocket_frenzy` - so an Xbox listen server runs out on the
+    large maps however much else is cut (joining as a client never builds
+    it). Bake the compressed PHS into the archive with the baker (a new
+    optional lump, MPAK version bump), have the engine use it on Xbox
+    instead of calling `Mod_CalcPHS`, and prove it byte for byte against
+    `Mod_CalcPHS` on the PC test engine over every retail map (the
+    `test_bevels` pattern, `tools/test-bevels.sh`). Then add hosting to
+    `Nv2aMapFit.h`'s checks (the PHS as a resident term) and measure a
+    real multiplayer session in xemu. Related, for PC multiplayer
+    compatibility: a map CRC stored at bake time from the retail `.bsp`
+    (the Xbox archives' `LUMP_TEXTURES` differs, so `CRC32_MapFile` does),
+    and whether `XASH_LOW_MEMORY=1`'s 64-entity client frames can follow a
+    busy PC server.
 
 X9-T load-memory model for every retail map, baked at v12. It uses the
 engine's world structures from lump counts, with 32-bit struct sizes and

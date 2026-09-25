@@ -59,7 +59,19 @@ typedef struct
 
 typedef struct cl_entity_s cl_entity_t;
 
+// Resonance3D (docs/r3d/divergences.md #116): on the Original Xbox the
+// client allocates one cl_entity_t per edict slot (1,100), and this
+// position history was 1,792 of its ~3,000 bytes. The engine reads it only
+// through HISTORY_MASK, for interpolation that looks back a few updates;
+// 16 entries still cover well over the ~100 ms it needs. The engine
+// (common/cl_entity.h) and the SDK client (deps/hlsdk/common/cl_entity.h)
+// must agree, since every field after ph[] moves: both use NXDK, which
+// every Xbox compile defines (tools/xbox-cc.sh, tools/xbox-cxx.sh).
+#if defined( NXDK )
+#define HISTORY_MAX 16 // Must be power of 2
+#else
 #define HISTORY_MAX		64		// Must be power of 2
+#endif
 #define HISTORY_MASK	( HISTORY_MAX - 1 )
 
 #include "entity_state.h"

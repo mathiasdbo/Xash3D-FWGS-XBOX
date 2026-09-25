@@ -189,8 +189,8 @@ static uint32_t  nv2a_map_vert_count;
    at the GPU. nv2a_map_dword_count counts DWORDS, not logical indices -
    an odd logical index count pads its final dword by repeating the last
    real index (a harmless degenerate triangle, not corrupt data). */
-static uint32_t *nv2a_map_index_dwords;             /* Ordinary engine-pooled CPU memory (r_temppool,
-                                                        Mem_Malloc/Mem_Free) - unlike nv2a_map_vb this
+static uint32_t *nv2a_map_index_dwords;             /* Ordinary CPU memory (malloc/free since X9-U;
+                                                        r_temppool before) - unlike nv2a_map_vb this
                                                         is only ever CPU-read into the pushbuffer, never
                                                         touched by the GPU directly, so it has no reason
                                                         to cost scarce contiguous write-combined memory
@@ -199,14 +199,16 @@ static uint32_t *nv2a_map_index_dwords;             /* Ordinary engine-pooled CP
                                                         bring-up cap. */
 static uint32_t  nv2a_map_dword_count;
 
-/* X9-T: the three contiguous GPU buffers of the current map, still to be
-   built. nv2a_load_map_geometry() runs inside Mod_ProcessRenderData while
-   the engine holds its copy of the map (engine/common/model.c's
-   Mod_LoadModel frees it right after), so it only builds the tables and
-   records where the big lumps are; nv2a_upload_map_gpu_data() reads them
-   straight from the file into contiguous memory once that buffer is gone.
-   Measured in xemu (temporary probe): pool_party had 4.0 MiB free with its
-   15.5 MiB archive held, and ~19.5 MiB once it is freed.
+/* X9-T: the current map's renderer data, still to be built. X9-U: all of
+   it - the tables and the three contiguous GPU buffers - is built at
+   R_NewMap, from the archive file, after the engine has freed its copy of
+   the map (engine/common/model.c's Mod_LoadModel frees it right after
+   Mod_ProcessRenderData). Mod_ProcessRenderData only validates the header
+   and keeps it, with the first sector for nv2a_load_map_geometry's
+   identity check. Measured in xemu (temporary probe): pool_party had 4.0
+   MiB free with its 15.5 MiB archive held, and ~19.5 MiB once it is
+   freed; on rocket_frenzy building the tables beside the engine's 8.7 MiB
+   prefix alone did not fit.
 
    R_NewMap runs after the map's precaches but before the client frees the
    previous map's unused models (Mod_FreeUnused, cl_parse.c), so a failed
@@ -216,6 +218,9 @@ static struct
 {
 	qboolean    pending;
 	qboolean    retried;       /* the one retry after a failed R_NewMap upload was spent */
+	qboolean    tables_built;  /* X9-U: nv2a_load_map_geometry has run for this map */
+	mpak_header_t header;      /* X9-U: the descriptor Mod_ProcessRenderData validated */
+	byte        first_sector[MPAK_SECTOR_SIZE]; /* X9-U: the engine's first sector, for the identity check */
 	char        name[64];      /* "maps/<name>.mpak" - the whole archive (MPAK v12) */
 	fs_offset_t file_length;   /* its length when the tables were read; checked again at reopen */
 	fs_offset_t vertices_offset;
@@ -415,48 +420,71 @@ static qboolean  nv2a_view_captured_this_frame; /* X9-E, codex review, real
    today when nothing is culled (docs/r3d/divergences.md #96). */
 typedef struct
 {
-	vec3_t   mins, maxs;
-	uint32_t dword_begin, dword_end;
-	uint32_t vertex_base;            /* X9-S, MPAK v11: this face's vertex-chunk base -
-	                                    its u16 indices are relative to it, so the vertex
-	                                    attribute arrays must point at vertex_base before
-	                                    it draws (nv2a_bind_vertex_base). */
-	uint32_t index_begin, index_end; /* X9-M: this face's EXACT logical
-	                                    index range [begin, end) - the
-	                                    dword range above is snapped out to
-	                                    6-index boundaries and can take in
-	                                    a neighbouring face's triangles,
-	                                    which is harmless between two world
-	                                    faces of one texture but wrong
-	                                    across a world/brush-entity
-	                                    boundary (see nv2a_draw_exact_indices). */
-	uint32_t texture;                /* X9-M: textureIndex of the batch
+	/* X9-U: 24 bytes, was 52 - 41,000 faces on rocket_frenzy. The bounds
+	   are the face's own, rounded outward to whole units (GoldSrc
+	   coordinates fit an int16), so culling stays conservative; the
+	   dword range the table used to carry was never read. */
+	int16_t  mins[3], maxs[3];
+	uint32_t index_begin;            /* X9-M: this face's EXACT logical
+	                                    index range [begin, begin + count) -
+	                                    exact, not snapped to dwords, so a
+	                                    run never takes in a neighbouring
+	                                    brush-entity face's triangles (see
+	                                    nv2a_draw_exact_indices). */
+	uint16_t index_count;
+	uint16_t texture;                /* X9-M: textureIndex of the batch
 	                                    this sorted face belongs to, for
 	                                    the brush-entity pass, which draws
-	                                    one entity's faces across batches. */
-	qboolean sky; /* X9-K: MpakFaceInfo::flags & MPAK_SURF_DRAWSKY for this
-	                 face, read once at load (see the face-table build loop
-	                 below) - ref/nv2a has never implemented a real skybox,
-	                 and previously drew sky faces as ordinary textured
-	                 geometry with the WAD's literal "sky" placeholder
-	                 miptex; under the old shared-atlas remap that showed as
-	                 one flat stretched patch (unremarkable), but under
-	                 native WRAP addressing (X9-K) the same small texture
-	                 tiles at high frequency across a typically-huge sky
-	                 face - a real, visually obvious defect a live
-	                 comparison against ref_soft caught (crossfire's sky
-	                 rendered as a dense fence-like pattern instead of flat
-	                 sky colour). A sky face is excluded from every draw run
-	                 regardless of frustum/PVS visibility (see this file's
-	                 own per-face cull check) - matching the reference's own
-	                 minimum behaviour (never draw the sky's literal
-	                 placeholder texture as normal geometry), short of
-	                 implementing a real skybox, which stays future work. */
+	                                    one entity's faces across batches;
+	                                    NV2A_FACE_NO_TEXTURE if no valid
+	                                    batch covers it. */
+	uint8_t  chunk;                  /* X9-S, MPAK v11: this face's vertex
+	                                    chunk, an index into
+	                                    nv2a_map_chunk_base[] - its u16
+	                                    indices are relative to that base, so
+	                                    the vertex attribute arrays must
+	                                    point there before it draws
+	                                    (nv2a_bind_vertex_base). */
+	uint8_t  sky; /* X9-K: MpakFaceInfo::flags & MPAK_SURF_DRAWSKY for this
+	                 face, read once at load - ref/nv2a has never implemented
+	                 a real skybox, so a sky face is excluded from every draw
+	                 run regardless of frustum/PVS visibility, matching the
+	                 reference's own minimum behaviour (never draw the sky's
+	                 literal placeholder texture as normal geometry). */
 } nv2a_map_face_t;
+
+#define NV2A_FACE_NO_TEXTURE 0xFFFFu
+
+/* X9-U: the distinct vertex-chunk bases of the current map, in the order
+   faces first use them; nv2a_map_face_t::chunk indexes this. A retail map
+   has at most three chunks (X9-S). */
+#define NV2A_MAP_MAX_CHUNKS 16
+static uint32_t nv2a_map_chunk_base[NV2A_MAP_MAX_CHUNKS];
+static uint32_t nv2a_map_chunk_count;
+
+static inline uint32_t nv2a_face_index_end( const nv2a_map_face_t *face )
+{
+	return face->index_begin + face->index_count;
+}
+
+static inline uint32_t nv2a_face_vertex_base( const nv2a_map_face_t *face )
+{
+	return nv2a_map_chunk_base[face->chunk];
+}
+
+/* nv2a_frustum_cull_box takes float bounds. */
+static qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs );
+static inline qboolean nv2a_frustum_cull_face( const nv2a_map_face_t *face )
+{
+	const vec3_t mins = { face->mins[0], face->mins[1], face->mins[2] };
+	const vec3_t maxs = { face->maxs[0], face->maxs[1], face->maxs[2] };
+
+	return nv2a_frustum_cull_box( mins, maxs );
+}
 
 /* Nv2aMapBudget.h's kNv2aMapFaceBytes mirrors this size for the bake-time
    budget; change both together. */
-STATIC_ASSERT( sizeof( nv2a_map_face_t ) == 52, "nv2a_map_face_t size changed - update kNv2aMapFaceBytes in tools/asset-studio/src/formats/Nv2aMapBudget.h" );
+STATIC_ASSERT( sizeof( nv2a_map_face_t ) == 24, "nv2a_map_face_t size changed - update kNv2aMapFaceBytes in tools/asset-studio/src/formats/Nv2aMapBudget.h" );
 
 static nv2a_map_face_t *nv2a_map_faces;      /* NULL = no per-face table this
                                                  map (never built, or the
@@ -2171,9 +2199,9 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 			nv2a_bind_map_texture_stage0( &nv2a_map_textures[face->texture] );
 			bound_texture = face->texture;
 		}
-		if( face->vertex_base != nv2a_bound_vertex_base ) /* X9-S: entity faces may sit in any chunk */
-			nv2a_bind_vertex_base( face->vertex_base );
-		nv2a_draw_exact_indices( face->index_begin, face->index_end );
+		if( nv2a_face_vertex_base( face ) != nv2a_bound_vertex_base ) /* X9-S: entity faces may sit in any chunk */
+			nv2a_bind_vertex_base( nv2a_face_vertex_base( face ));
+		nv2a_draw_exact_indices( face->index_begin, nv2a_face_index_end( face ));
 	}
 
 	nv2a_reset_render_mode();
@@ -2436,7 +2464,7 @@ static void nv2a_draw_map_geometry( void )
 				   usable per-face table only single-chunk maps load at all,
 				   so base 0 is then correct. */
 				uint32_t base = ( nv2a_map_faces && batch->startFace < nv2a_map_face_count )
-					? nv2a_map_faces[batch->startFace].vertex_base : 0;
+					? nv2a_face_vertex_base( &nv2a_map_faces[batch->startFace] ) : 0;
 				if( base != nv2a_bound_vertex_base )
 					nv2a_bind_vertex_base( base );
 				nv2a_bind_map_texture_stage0( tex );
@@ -2513,7 +2541,7 @@ static void nv2a_draw_map_geometry( void )
 				   must not run on a face the cheaper frustum/PVS tests
 				   already reject. Short-circuit here, before paying for the
 				   plane fetch at all. */
-				if( nv2a_frustum_cull_box( face->mins, face->maxs ) || pvs_culled )
+				if( nv2a_frustum_cull_face( face ) || pvs_culled )
 					continue;
 
 				/* X9-K: `i` here is a SORTED-order position (this batch's own
@@ -2561,7 +2589,7 @@ static void nv2a_draw_map_geometry( void )
 				   must never be drawn from the world. */
 				if( have_run && face->index_begin == run_end )
 				{
-					run_end = face->index_end;
+					run_end = nv2a_face_index_end( face );
 				}
 				else
 				{
@@ -2583,12 +2611,12 @@ static void nv2a_draw_map_geometry( void )
 						nv2a_bind_map_texture_stage0( tex );
 						/* X9-S: the baker never lets a batch span two vertex
 						   chunks, so one base bind per batch covers every run. */
-						if( face->vertex_base != nv2a_bound_vertex_base )
-							nv2a_bind_vertex_base( face->vertex_base );
+						if( nv2a_face_vertex_base( face ) != nv2a_bound_vertex_base )
+							nv2a_bind_vertex_base( nv2a_face_vertex_base( face ));
 						stage0_bound = true;
 					}
 					run_begin = face->index_begin;
-					run_end = face->index_end;
+					run_end = nv2a_face_index_end( face );
 					have_run = true;
 				}
 			}
@@ -2728,13 +2756,19 @@ static void nv2a_free_map_resources( void )
 	nv2a_map_texture_count = 0;
 	nv2a_map_batch_count = 0;
 	nv2a_map_face_remap_count = 0;
+	nv2a_map_chunk_count = 0; /* X9-U */
+	/* X9-U: the per-map tables come from malloc, not the zone: Mem_Malloc
+	   calls Sys_Error when it runs out (engine/common/zone.c), and a map
+	   too big for what is free must fall back to the test triangle
+	   (nv2a-xbox-specialist, X9-T review; rocket_frenzy ended the game at
+	   its index buffer). */
 	if( nv2a_map_vb )            { MmFreeContiguousMemory( nv2a_map_vb );            nv2a_map_vb            = NULL; }
-	if( nv2a_map_index_dwords )  { Mem_Free( nv2a_map_index_dwords );                nv2a_map_index_dwords  = NULL; }
-	if( nv2a_map_faces )         { Mem_Free( nv2a_map_faces );                       nv2a_map_faces         = NULL; }
-	if( nv2a_map_face_visible )  { Mem_Free( nv2a_map_face_visible );                nv2a_map_face_visible  = NULL; }
+	if( nv2a_map_index_dwords )  { free( nv2a_map_index_dwords );                nv2a_map_index_dwords  = NULL; }
+	if( nv2a_map_faces )         { free( nv2a_map_faces );                       nv2a_map_faces         = NULL; }
+	if( nv2a_map_face_visible )  { free( nv2a_map_face_visible );                nv2a_map_face_visible  = NULL; }
 	if( nv2a_map_texture_data )  { MmFreeContiguousMemory( nv2a_map_texture_data );  nv2a_map_texture_data  = NULL; }
-	if( nv2a_map_face_remap )    { Mem_Free( nv2a_map_face_remap );                  nv2a_map_face_remap    = NULL; }
-	if( nv2a_map_face_orig )     { Mem_Free( nv2a_map_face_orig );                   nv2a_map_face_orig     = NULL; }
+	if( nv2a_map_face_remap )    { free( nv2a_map_face_remap );                  nv2a_map_face_remap    = NULL; }
+	if( nv2a_map_face_orig )     { free( nv2a_map_face_orig );                   nv2a_map_face_orig     = NULL; }
 	if( nv2a_map_lightmap )      { MmFreeContiguousMemory( nv2a_map_lightmap );      nv2a_map_lightmap      = NULL; }
 
 	/* X9-G: both point into the outgoing world model's own leafs[] array
@@ -3115,15 +3149,12 @@ static qboolean nv2a_mpak_header_valid( const byte *buffer, size_t buffersize, c
    proper admission-control budget belongs at BAKE time, in
    tools/asset-studio, where the real total per-map cost is known before
    a single byte reaches the console, not guessed at here from four
-   numbers this one function happens to compute). The buffer this
-   function is CALLED with is already real and already resident though
-   (Mod_ProcessRenderData's own contract - engine/common/model.c's
-   Mod_LoadModel FS_LoadFile's the map before calling in; since MPAK v12
-   only its classic-lump prefix), so it belongs in the sum this function
-   CAN check - see nv2a_load_map_geometry for the terms. The ledger is
-   still not what is free: measured in xemu, ~32.8 MiB is free before any
-   map loads and a deathmatch map's precaches take ~7.5 MiB after this
-   check runs (docs/r3d/fork-plan.md, X9 item 10). */
+   numbers this one function happens to compute) - see
+   nv2a_load_map_geometry for the terms. The ledger is still not what is
+   free: measured in xemu, ~32.8 MiB is free before any map loads, and the
+   engine's own world structures and a map's precaches (~7-10 MiB) are
+   resident by the time this check runs at R_NewMap (docs/r3d/fork-plan.md,
+   X9 items 10 and 11). */
 #define NV2A_MAP_BUDGET_BYTES ( 24u * 1024u * 1024u )
 
 /* The baker's own fixed lightmap page width, tools/asset-studio/src/
@@ -3340,7 +3371,7 @@ static qboolean nv2a_read_map_lumps( file_t *f, const mpak_header_t *header, con
 	if( done != vert_count )
 		return false;
 
-	nv2a_map_index_dwords = Mem_Malloc( r_temppool, (size_t)dword_count * sizeof( uint32_t ));
+	nv2a_map_index_dwords = malloc( (size_t)dword_count * sizeof( uint32_t ));
 	if( !nv2a_map_index_dwords )
 	{
 		gEngfuncs.Con_Printf( "ref_nv2a: map index buffer allocation failed (%u bytes)\n", (unsigned int)( dword_count * sizeof( uint32_t )));
@@ -3367,12 +3398,14 @@ static qboolean nv2a_read_map_lumps( file_t *f, const mpak_header_t *header, con
 static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_mpak_geometry_t *geo_in, const nv2a_map_lumps_t *lumps );
 
 /* Loads a map's renderer data from its archive, "maps/<name>.mpak"
-   (MPAK v12: the whole file; the engine's own buffer is only the classic
-   prefix, engine_bytes long). Checks the ledger before anything is
-   allocated, reads the renderer-only lumps (nv2a_read_map_lumps), builds
-   every CPU-side table from them (nv2a_build_map_tables), then frees the
-   temporaries. The GPU buffers come later, at R_NewMap (X9-T). */
-static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte *engine_buffer, size_t engine_bytes, const char *archive_name )
+   (MPAK v12: the whole file; the engine only loaded the classic prefix),
+   after checking it starts with the engine's first sector. Checks the
+   ledger before anything is allocated, reads the renderer-only lumps
+   (nv2a_read_map_lumps), builds every CPU-side table from them
+   (nv2a_build_map_tables), then frees the temporaries. X9-U: called from
+   R_NewMap (nv2a_try_pending_upload), after the engine has freed its copy
+   of the map, just before the GPU buffers are built. */
+static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte *engine_first_sector, const char *archive_name )
 {
 	nv2a_mpak_geometry_t geo;
 	nv2a_map_lumps_t lumps;
@@ -3395,8 +3428,8 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   file under either name would otherwise pair one archive's offsets
 	   with another's bytes (asset-pipeline and nv2a-xbox specialists, X9-T
 	   review). The first sector holds the dheader_t and the descriptor. */
-	if( engine_bytes < MPAK_SECTOR_SIZE || !nv2a_read_at( f, 0, first_sector, MPAK_SECTOR_SIZE )
-		|| memcmp( first_sector, engine_buffer, MPAK_SECTOR_SIZE ) != 0 )
+	if( !nv2a_read_at( f, 0, first_sector, MPAK_SECTOR_SIZE )
+		|| memcmp( first_sector, engine_first_sector, MPAK_SECTOR_SIZE ) != 0 )
 	{
 		gEngfuncs.Con_Printf( "ref_nv2a: %s is not the archive the map was loaded from\n", archive_name );
 		goto done;
@@ -3422,10 +3455,6 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	dword_count = ( index_count + 1 ) / 2;
 	vb_bytes = (uint64_t)vert_count * sizeof( nv2a_lit_vertex_t );
 	idx_bytes = (uint64_t)dword_count * sizeof( uint32_t );
-	/* engine_bytes (the engine's copy of the classic prefix, already
-	   resident per Mod_ProcessRenderData's own contract) is real, known
-	   cost this function CAN account for - see NV2A_MAP_BUDGET_BYTES's
-	   own comment for what this check does and does not cover. */
 	/* X9-F: the per-face table is one nv2a_map_face_t per on-disk
 	   FaceDrawCmd (8 bytes each). X9-S: counted as face_count * sizeof,
 	   not the old "4x the lump" - the struct grew from 32 to 52 bytes
@@ -3448,18 +3477,18 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   per-map allocation, so - like nv2a_visbytes above them - they do not
 	   belong in this per-map ledger. */
 	/* X9-T: the peak, not the sum. The tables below live from here on;
-	   the engine's buffer and this load's temporaries live only until it
-	   returns, and the three GPU buffers are built after that (R_NewMap),
-	   so the two never coexist. MPAK v12: the engine's buffer is only the
-	   classic prefix, and the load side adds the temporaries
-	   nv2a_read_map_lumps() holds while the tables are built (the indices
-	   are already in `tables`; faceInfo's window is too small to count). */
+	   this load's temporaries (nv2a_read_map_lumps - the indices are
+	   already in `tables`, faceInfo's window is too small to count) live
+	   only until it returns, and the three GPU buffers are built after
+	   that, so the two never coexist. X9-U: this runs at R_NewMap, after
+	   the engine has freed its copy of the map, so that copy is no longer
+	   part of either side. */
 	{
 		const uint64_t tables = idx_bytes + (uint64_t)( geo.faceDrawCmds.length / 8 ) * sizeof( nv2a_map_face_t )
 			+ (uint64_t)geo.faceDrawCmds.length / 8
 			+ (uint64_t)geo.faceRemap.length * 2;
 		const uint64_t gpu = vb_bytes + (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length;
-		const uint64_t load = (uint64_t)engine_bytes + (uint64_t)vert_count * 3 * sizeof( float )
+		const uint64_t load = (uint64_t)vert_count * 3 * sizeof( float )
 			+ (uint64_t)geo.faceDrawCmds.length + (uint64_t)geo.faceVertexBase.length + (uint64_t)geo.faceRemap.length
 			+ (uint64_t)geo.textureDir.length + (uint64_t)geo.batches.length;
 		total_bytes = tables + ( gpu > load ? gpu : load );
@@ -3778,7 +3807,7 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 	if( geo.faceDrawCmds.length != 0 && ( geo.faceDrawCmds.length % 8 ) == 0 )
 	{
 		uint32_t face_count = (uint32_t)( geo.faceDrawCmds.length / 8 );
-		nv2a_map_face_t *faces = Mem_Malloc( r_temppool, (size_t)face_count * sizeof( nv2a_map_face_t ));
+		nv2a_map_face_t *faces = malloc( (size_t)face_count * sizeof( nv2a_map_face_t ));
 
 		if( !faces )
 		{
@@ -3831,66 +3860,66 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 					faces[i].sky = false;
 				}
 
-				if( face_indices == 0 || ( face_indices % 3 ) != 0 || start_index != expect_cursor
+				/* X9-U: a face's index count is stored in 16 bits. */
+				if( face_indices == 0 || ( face_indices % 3 ) != 0 || face_indices > 0xFFFFu || start_index != expect_cursor
 					|| (uint64_t)start_index + face_indices > index_count )
 				{
 					tiling_ok = false;
 					break;
 				}
 
-				faces[i].vertex_base = 0;
-				if( geo.faceVertexBase.length != 0 )
-					memcpy( &faces[i].vertex_base, lumps->face_vertex_base + (size_t)i * sizeof( uint32_t ), sizeof( uint32_t ));
-
-				ClearBounds( faces[i].mins, faces[i].maxs );
-				for( k = start_index; k < start_index + face_indices; k++ )
 				{
-					uint16_t vi;
+					uint32_t vertex_base = 0, c;
+					vec3_t fmins, fmaxs;
 
-					memcpy( &vi, indices + (size_t)k * 2, sizeof( vi ));
-					/* X9-S: indices are chunk-relative; the absolute vertex
-					   must still be inside the vertex array. */
-					if( (uint64_t)faces[i].vertex_base + vi >= vert_count )
+					if( geo.faceVertexBase.length != 0 )
+						memcpy( &vertex_base, lumps->face_vertex_base + (size_t)i * sizeof( uint32_t ), sizeof( uint32_t ));
+					/* X9-U: the face stores its chunk's number, not its base. */
+					for( c = 0; c < nv2a_map_chunk_count && nv2a_map_chunk_base[c] != vertex_base; c++ )
+						;
+					if( c == nv2a_map_chunk_count )
 					{
-						tiling_ok = false;
-						break;
+						if( c == NV2A_MAP_MAX_CHUNKS )
+						{
+							tiling_ok = false;
+							break;
+						}
+						nv2a_map_chunk_base[nv2a_map_chunk_count++] = vertex_base;
 					}
-					/* X9-T: positions from the archive (the vertex buffer
-					   is built later, at R_NewMap); v12: streamed into
-					   lumps->positions by nv2a_read_map_lumps. */
-					AddPointToBounds( &lumps->positions[( (size_t)faces[i].vertex_base + vi ) * 3], faces[i].mins, faces[i].maxs );
-				}
-				if( !tiling_ok )
-					break;
+					faces[i].chunk = (uint8_t)c;
 
-				/* Snap outward to a multiple of 6 logical indices (= 3
-				   dwords) - see nv2a_map_face_t's own declaration
-				   comment for why 6, not 2 or 3 alone, is the right
-				   granularity for a packed two-indices-per-dword
-				   buffer. Codex review, real finding: the format
-				   imposes no even-triangle-count constraint on the
-				   MAP TOTAL, only on each face's own count (a
-				   multiple of 3), so index_count itself can be
-				   6k+3 - dword_count (the buffer's own real
-				   allocation, ceil(index_count/2)) is then NOT a
-				   multiple of 3, and the last face's outward snap
-				   can round past it (index_count==3: dword_count==2,
-				   but the unclamped snap gives 3) - a real one-dword
-				   out-of-bounds read submitted straight to the GPU
-				   as two bogus vertex indices. dword_count is always
-				   the correct upper bound regardless (it already
-				   accounts for the odd-index_count padding
-				   half-dword nv2a_map_index_dwords itself fills in),
-				   so clamping to it is not a workaround, it is the
-				   exact right end position for whichever face is
-				   actually last. */
-				faces[i].dword_begin = ( start_index / 6 ) * 3;
+					ClearBounds( fmins, fmaxs );
+					for( k = start_index; k < start_index + face_indices; k++ )
+					{
+						uint16_t vi;
+
+						memcpy( &vi, indices + (size_t)k * 2, sizeof( vi ));
+						/* X9-S: indices are chunk-relative; the absolute vertex
+						   must still be inside the vertex array. */
+						if( (uint64_t)vertex_base + vi >= vert_count )
+						{
+							tiling_ok = false;
+							break;
+						}
+						/* X9-T: positions from the archive (the vertex buffer
+						   is built later, at R_NewMap); v12: streamed into
+						   lumps->positions by nv2a_read_map_lumps. */
+						AddPointToBounds( &lumps->positions[( (size_t)vertex_base + vi ) * 3], fmins, fmaxs );
+					}
+					if( !tiling_ok )
+						break;
+					/* X9-U: whole units, rounded outward, so the stored box
+					   always contains the face. */
+					for( c = 0; c < 3; c++ )
+					{
+						faces[i].mins[c] = (int16_t)bound( -32768.0f, floorf( fmins[c] ), 32767.0f );
+						faces[i].maxs[c] = (int16_t)bound( -32768.0f, ceilf( fmaxs[c] ), 32767.0f );
+					}
+				}
+
 				faces[i].index_begin = start_index;
-				faces[i].index_end   = start_index + face_indices;
-				faces[i].texture     = 0xFFFFFFFFu; /* filled from the batch table below; stays invalid if no valid batch covers it */
-				faces[i].dword_end   = (( start_index + face_indices + 5 ) / 6 ) * 3;
-				if( faces[i].dword_end > dword_count )
-					faces[i].dword_end = dword_count;
+				faces[i].index_count = (uint16_t)face_indices;
+				faces[i].texture     = NV2A_FACE_NO_TEXTURE; /* filled from the batch table below; stays invalid if no valid batch covers it */
 
 				expect_cursor = start_index + face_indices;
 			}
@@ -3913,7 +3942,7 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 						if( (uint64_t)bt->startFace + bt->faceCount > (uint64_t)face_count )
 							continue;
 						for( f2 = bt->startFace; f2 < bt->startFace + bt->faceCount; f2++ )
-							faces[f2].texture = bt->textureIndex;
+							faces[f2].texture = (uint16_t)bt->textureIndex;
 					}
 				}
 
@@ -3943,13 +3972,13 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 					&& ( (uint64_t)geo.faceRemap.length / sizeof( uint32_t )) == (uint64_t)face_count )
 				{
 					uint32_t remap_count = (uint32_t)( (uint64_t)geo.faceRemap.length / sizeof( uint32_t ));
-					uint32_t *remap = Mem_Malloc( r_temppool, (size_t)remap_count * sizeof( uint32_t ));
-					uint32_t *orig  = remap ? Mem_Malloc( r_temppool, (size_t)face_count * sizeof( uint32_t )) : NULL;
+					uint32_t *remap = malloc( (size_t)remap_count * sizeof( uint32_t ));
+					uint32_t *orig  = remap ? malloc( (size_t)face_count * sizeof( uint32_t )) : NULL;
 
 					if( !remap || !orig )
 					{
 						gEngfuncs.Con_Printf( "ref_nv2a: face-remap table allocation failed - PVS culling disabled for this map\n" );
-						if( remap ) Mem_Free( remap );
+						if( remap ) free( remap );
 					}
 					else
 					{
@@ -3982,8 +4011,8 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 						else
 						{
 							gEngfuncs.Con_Printf( "ref_nv2a: face-remap table is not a valid bijection - PVS culling disabled for this map\n" );
-							Mem_Free( remap );
-							Mem_Free( orig );
+							free( remap );
+							free( orig );
 						}
 					}
 				}
@@ -4005,7 +4034,7 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 				   safety net, not the expected steady state. Allocation
 				   failure is not fatal to the load: the map still draws,
 				   frustum-culled only, exactly as it did before X9-G. */
-				nv2a_map_face_visible = Mem_Malloc( r_temppool, (size_t)face_count );
+				nv2a_map_face_visible = malloc( (size_t)face_count );
 				if( nv2a_map_face_visible )
 					memset( nv2a_map_face_visible, 1, (size_t)face_count );
 				else
@@ -4015,7 +4044,7 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 			else
 			{
 				gEngfuncs.Con_Printf( "ref_nv2a: FaceDrawCmds tiling did not validate - drawing this map unculled\n" );
-				Mem_Free( faces );
+				free( faces );
 			}
 		}
 	}
@@ -4065,20 +4094,21 @@ static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte
 		size_t stem = dot ? (size_t)( dot - mod->name ) : strlen( mod->name );
 
 		nv2a_free_map_resources();
-		if( stem + sizeof( ".mpak" ) > sizeof( archive_name ))
+		if( stem + sizeof( ".mpak" ) > sizeof( archive_name ) || buffersize < MPAK_SECTOR_SIZE )
 			return true;
 		memcpy( archive_name, mod->name, stem );
 		memcpy( archive_name + stem, ".mpak", sizeof( ".mpak" ));
 
-		if( nv2a_load_map_geometry( header, buffer, buffersize, archive_name ))
-		{
-			/* X9-T: the GPU buffers come later, from R_NewMap, once the
-			   engine has freed `buffer` - nv2a_pending_upload. */
-			nv2a_map_owner = mod;
-			memcpy( nv2a_pending_upload.name, archive_name, sizeof( archive_name ));
-			nv2a_pending_upload.pending = true;
-			nv2a_pending_upload.retried = false;
-		}
+		/* X9-U: nothing is built here - the tables and the GPU buffers
+		   both come from R_NewMap, once the engine has freed `buffer`
+		   (nv2a_pending_upload). Only what that needs is kept. */
+		nv2a_map_owner = mod;
+		memcpy( &nv2a_pending_upload.header, header, sizeof( *header ));
+		memcpy( nv2a_pending_upload.first_sector, buffer, MPAK_SECTOR_SIZE );
+		memcpy( nv2a_pending_upload.name, archive_name, sizeof( archive_name ));
+		nv2a_pending_upload.pending = true;
+		nv2a_pending_upload.retried = false;
+		nv2a_pending_upload.tables_built = false;
 	}
 
 	return true; /* the model load itself always succeeds regardless; drawing
@@ -4332,7 +4362,7 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 			gEngfuncs.Con_Printf( "ref_nv2a: WARNING - world->numsurfaces (%d) != nv2a_map_face_count (%u); "
 				"disabling PVS culling for this map (frustum culling only)\n",
 				world->numsurfaces, nv2a_map_face_count );
-			Mem_Free( nv2a_map_face_visible );
+			free( nv2a_map_face_visible );
 			nv2a_map_face_visible = NULL;
 			return;
 		}
@@ -4733,6 +4763,18 @@ static void R_EndFrame( void )
    keeps the tables for one retry, unless it was the retry. */
 static void nv2a_try_pending_upload( void )
 {
+	/* X9-U: the tables first, once; a failure there is final (the archive
+	   is malformed or the map does not fit), and frees everything. */
+	if( !nv2a_pending_upload.tables_built )
+	{
+		char name[sizeof( nv2a_pending_upload.name )];
+
+		memcpy( name, nv2a_pending_upload.name, sizeof( name ));
+		if( !nv2a_load_map_geometry( &nv2a_pending_upload.header, nv2a_pending_upload.first_sector, name ))
+			return; /* nv2a_load_map_geometry freed the map resources, pending included */
+		nv2a_pending_upload.tables_built = true;
+	}
+
 	if( nv2a_upload_map_gpu_data())
 	{
 		nv2a_pending_upload.pending = false;

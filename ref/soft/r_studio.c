@@ -109,7 +109,24 @@ CVAR_DEFINE_AUTO( r_studio_builtin_renderer, "0", 0, "use built-in studio model 
 static cvar_t *cl_righthand = NULL;
 
 static r_studio_interface_t *pStudioDraw;
+#if XASH_XBOX
+static studio_draw_state_t  *g_studio_ptr;              // global studio state, R_AllocStudioStatics (divergences.md #114)
+#define g_studio ( *g_studio_ptr )
+
+qboolean R_AllocStudioStatics( void )
+{
+	g_studio_ptr = calloc( 1, sizeof( *g_studio_ptr ));
+	return g_studio_ptr != NULL;
+}
+
+void R_FreeStudioStatics( void )
+{
+	free( g_studio_ptr );
+	g_studio_ptr = NULL;
+}
+#else
 static studio_draw_state_t  g_studio;                   // global studio state
+#endif
 
 // global variables
 static qboolean m_fDoRemap;

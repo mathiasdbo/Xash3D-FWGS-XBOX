@@ -227,7 +227,9 @@ typedef struct mextrasurf_s
 	struct msurface_s	*surf;		// upcast to surface
 
 	// extended light info
+#if !XASH_XBOX
 	int		dlight_s, dlight_t;	// gl lightmap coordinates for dynamic lightmaps
+#endif
 
 	short		lightmapmins[2];	// lightmatrix
 	short		lightextents[2];
@@ -236,31 +238,36 @@ typedef struct mextrasurf_s
 	color24		*deluxemap;	// note: this is the actual deluxemap data for this surface
 	byte		*shadowmap;	// note: occlusion map for this surface
 // begin userdata
+#if !XASH_XBOX
 	struct msurface_s	*lightmapchain;	// lightmapped polys
 	struct mextrasurf_s	*detailchain;	// for detail textures drawing
+#endif
 	mfacebevel_t	*bevel;		// for exact face traceline
+#if !XASH_XBOX
 	struct mextrasurf_s	*lumachain;	// draw fullbrights
+#endif
 	struct cl_entity_s	*parent;		// upcast to owner entity
 
-	int		mirrortexturenum;	// gl texnum
 #if !XASH_XBOX
+	int		mirrortexturenum;	// gl texnum
 	float		mirrormatrix[4][4];
-#endif
 
 	struct grasshdr_s	*grass;		// grass that linked by this surface
 	unsigned short	grasscount;	// number of bushes per polygon (used to determine total VBO size)
 	unsigned short	numverts;		// world->vertexes[]
 	int		firstvertex;	// fisrt look up in tr.tbn_vectors[], then acess to world->vertexes[]
+#endif
 
 #if XASH_XBOX
 	// Resonance3D (docs/r3d/divergences.md #110): the engine allocates one
 	// of these per world surface in a single block (Mod_LoadSurfaces), 324
 	// bytes each - 13 MB on rocket_frenzy's 41,000 surfaces, more than the
-	// console had left. On Xbox only ref/soft and ref/nv2a are linked:
-	// neither reads mirrormatrix (only ref/gl does), and ref/soft's
-	// surface cache is the only user of reserved[], its first MIPLEVELS
-	// slots (CACHESPOT, ref/soft/r_local.h). Both shrink to what is used,
-	// 148 bytes a surface.
+	// console had left. On Xbox only ref/soft and ref/nv2a are linked. The
+	// fields only ref/gl reads (dlight_s/t, the lightmap/detail/luma chains,
+	// the mirror texture and matrix, grass, numverts, firstvertex) are left
+	// out, and reserved[] keeps only the first MIPLEVELS slots, the ones
+	// ref/soft's surface cache uses (CACHESPOT, ref/soft/r_local.h): 112
+	// bytes a surface.
 	intptr_t	reserved[MIPLEVELS];
 #else
 	intptr_t	reserved[32];	// just for future expansions or mod-makers
@@ -598,7 +605,7 @@ typedef struct
 
 STATIC_CHECK_SIZEOF( mnode_t, 52, 72 );
 #if XASH_XBOX
-STATIC_CHECK_SIZEOF( mextrasurf_t, 148, 208 ); // Resonance3D: the slimmer Xbox layout above (divergences.md #110)
+STATIC_CHECK_SIZEOF( mextrasurf_t, 112, 152 ); // Resonance3D: the slimmer Xbox layout above (divergences.md #110)
 #else
 STATIC_CHECK_SIZEOF( mextrasurf_t, 324, 496 );
 #endif

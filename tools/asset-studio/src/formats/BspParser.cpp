@@ -501,7 +501,13 @@ namespace formats {
         uint32_t currentIndexCount = 0;
 
         const auto& lightingData = getLumpData(LUMP_LIGHTING);
-        LightmapAtlasPacker lmPacker;
+        // X9-U: the Xbox atlas is packed tight, like the reference's, and
+        // holds style 0 only - ref/nv2a draws no lightstyle but the first
+        // (MpakExtraLightBlock is never read), so the extra-style blocks
+        // only cost console memory. The PC bake keeps both.
+        const bool lmBordered = !pak.isXboxTarget();
+        const bool lmExtraStyles = !pak.isXboxTarget();
+        LightmapAtlasPacker lmPacker(lmBordered);
         // Centered in the white guard band that follows the gradient (not the
         // gradient itself), so a face with no real lightmap data always samples
         // pure white regardless of any future change to the gradient's own values.
@@ -647,7 +653,7 @@ namespace formats {
                 sizes.emplace_back(e.smax, e.tmax);
                 owner.emplace_back(i, 0);
                 const size_t blockBytes = static_cast<size_t>(e.smax) * e.tmax * 3;
-                for (int styleSlot = 1; styleSlot < 4; ++styleSlot) {
+                for (int styleSlot = 1; lmExtraStyles && styleSlot < 4; ++styleSlot) {
                     if (face.styles[styleSlot] == 255)
                         break;
                     size_t extraOfs = static_cast<size_t>(face.lightofs) + static_cast<size_t>(styleSlot) * blockBytes;
@@ -719,7 +725,7 @@ namespace formats {
                 // above (a truncated LUMP_LIGHTING silently drops the extra
                 // block rather than reading past the end).
                 const size_t blockBytes = static_cast<size_t>(smax) * tmax * 3;
-                for (int styleSlot = 1; styleSlot < 4; ++styleSlot) {
+                for (int styleSlot = 1; lmExtraStyles && styleSlot < 4; ++styleSlot) {
                     if (face.styles[styleSlot] == 255)
                         break; // packed convention: no gaps, first 255 ends the real styles
                     size_t extraOfs = static_cast<size_t>(face.lightofs) + static_cast<size_t>(styleSlot) * blockBytes;
@@ -807,12 +813,15 @@ namespace formats {
                 outVert.v = rawV / static_cast<float>(loc.height > 0 ? loc.height : 64);
 
                 if (hasLightmap) {
-                    // (blockX, blockY) is the origin of the BORDERED (smax+2)x(tmax+2)
-                    // block, so +1 lands on the first data luxel; the +0.5 centers the
-                    // sample in that luxel. Bilinear then reaches at most 0.5 texel
-                    // into the replicated border - never across into a neighboring face.
-                    float lu = (static_cast<float>(lmAlloc.blockX) + 1.0f + (rawU - texturemins[0]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / static_cast<float>(LM_PAGE_SIZE);
-                    float lv = (static_cast<float>(lmAlloc.blockY) + 1.0f + (rawV - texturemins[1]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / lmAtlasHeight; // X9-R: final (trimmed) height
+                    // (blockX, blockY) is the block's origin; + border() lands on the
+                    // first data luxel (1 bordered, 0 tight) and the +0.5 centers the
+                    // sample in that luxel. Bordered, bilinear reaches at most 0.5 texel
+                    // into the replicated border; tight (Xbox, X9-U), half a luxel into
+                    // the neighbouring block, exactly as ref/gl's own
+                    // (light_s + (s - mins) / 16 + 0.5) / BLOCK_SIZE does.
+                    const float border = static_cast<float>(lmPacker.border());
+                    float lu = (static_cast<float>(lmAlloc.blockX) + border + (rawU - texturemins[0]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / static_cast<float>(LM_PAGE_SIZE);
+                    float lv = (static_cast<float>(lmAlloc.blockY) + border + (rawV - texturemins[1]) / static_cast<float>(LM_SAMPLE_SIZE) + 0.5f) / lmAtlasHeight; // X9-R: final (trimmed) height
                     outVert.lu = lu;
                     outVert.lv = lv;
                     outVert.lightmap_layer = lmAlloc.page;
@@ -963,6 +972,13 @@ namespace formats {
         }
 
         pak.setTextureBatches(std::move(batches));
+        // X9-U: only textures a batch draws reach the Xbox archive -
+        // ref/nv2a binds textures through the batch table alone, and the
+        // unused ones were 0.56 MiB of rocket_frenzy's GPU texture data.
+        if (pak.isXboxTarget() && pak.isProfileNv2a()) {
+            const size_t dropped = pak.pruneUnusedXboxTextures();
+            std::cout << "Textures: dropped " << dropped << " no face draws\n";
+        }
         pak.setFaceRemap(std::move(faceRemap));
 
         std::cout << "Vertex chunks: " << pak.vertexChunkCount() << "\n"; // v11 - 1 unless the map outgrows u16 indices

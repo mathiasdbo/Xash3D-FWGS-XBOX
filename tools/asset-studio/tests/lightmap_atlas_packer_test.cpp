@@ -104,6 +104,27 @@ static void testMultiPageKeepsFullHeight() {
     CHECK(out.size() == static_cast<size_t>(p.pageCount()) * LM_PAGE_SIZE * LM_PAGE_MAX_HEIGHT * 4);
 }
 
+static void testTightPackingHasNoBorder() {
+    LightmapAtlasPacker p(false);
+    CHECK(p.border() == 0);
+    // 4x2 luxels take exactly 4x2 tight (6x4 bordered), placed right after
+    // the 260-wide ramp; the block's first data luxel is its origin.
+    std::vector<LightmapAllocation> a = p.allocateSorted({{4, 2}, {4, 2}});
+    CHECK(a[0].blockX == LM_RESERVED_MARGIN && a[0].blockY == 0);
+    CHECK(a[1].blockX == LM_RESERVED_MARGIN + 4 && a[1].blockY == 0);
+    uint8_t rgb[4 * 2 * 3];
+    for (size_t i = 0; i < sizeof(rgb); ++i) rgb[i] = 7;
+    p.writeBlock(a[0], 4, 2, rgb);
+    uint32_t h = 0;
+    std::vector<uint8_t> out = p.flatten(h);
+    CHECK(h == 4); // the ramp's 4 rows; the 2-row blocks fit inside them
+    const size_t first = (static_cast<size_t>(0) * LM_PAGE_SIZE + a[0].blockX) * 4;
+    const size_t after = (static_cast<size_t>(0) * LM_PAGE_SIZE + a[0].blockX + 4) * 4;
+    CHECK(out[first] == 7 && out[first + 3] == 255);
+    CHECK(out[after] == 255); // the neighbour's origin is untouched (page starts white): no border written
+    CHECK(LightmapAtlasPacker().border() == 1);
+}
+
 int main() {
     testTallestFirstAndStableTies();
     testHeightRoundsUpToMultipleOf4();
@@ -111,6 +132,7 @@ int main() {
     testFlattenTrimsToAtlasHeight();
     testTallPageInsteadOfSecondPage();
     testMultiPageKeepsFullHeight();
+    testTightPackingHasNoBorder();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return EXIT_FAILURE;

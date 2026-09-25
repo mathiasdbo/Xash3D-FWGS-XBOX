@@ -31,12 +31,14 @@ int main() {
     //     own strict `>` compare, r_context.c nv2a_load_map_geometry) ---
     {
         MpakHeader6 h = zeroHeader();
-        // Everything else 0, so fileSize alone carries the whole ledger.
-        const uint64_t exact = nv2aMapLedgerBytes(h, kNv2aMapBudgetBytes);
+        // Everything else 0, so the lightmap alone carries the whole ledger.
+        h.lenLightmapAtlas = static_cast<uint32_t>(kNv2aMapBudgetBytes);
+        const uint64_t exact = nv2aMapLedgerBytes(h);
         CHECK(exact == kNv2aMapBudgetBytes, "exact-budget ledger must equal the cap");
         CHECK(nv2aMapWithinBudget(exact), "exactly-at-budget must PASS (strict > in the ref, not >=)");
 
-        const uint64_t overByOne = nv2aMapLedgerBytes(h, kNv2aMapBudgetBytes + 1);
+        h.lenLightmapAtlas = static_cast<uint32_t>(kNv2aMapBudgetBytes + 1);
+        const uint64_t overByOne = nv2aMapLedgerBytes(h);
         CHECK(overByOne == kNv2aMapBudgetBytes + 1, "one-byte-over ledger must equal cap+1");
         CHECK(!nv2aMapWithinBudget(overByOne), "one byte over budget must FAIL");
     }
@@ -45,18 +47,18 @@ int main() {
     {
         MpakHeader6 h = zeroHeader();
         h.iCount = 3; // (3+1)/2 = 2 dwords -> 8 bytes
-        CHECK(nv2aMapLedgerBytes(h, 0) == 8, "iCount=3 must give 8 index bytes");
+        CHECK(nv2aMapLedgerBytes(h) == 8, "iCount=3 must give 8 index bytes");
 
         h.iCount = 0; // (0+1)/2 = 0 dwords -> 0 bytes
-        CHECK(nv2aMapLedgerBytes(h, 0) == 0, "iCount=0 must give 0 index bytes");
+        CHECK(nv2aMapLedgerBytes(h) == 0, "iCount=0 must give 0 index bytes");
     }
 
     // --- faceDrawCmds/8 truncation (the per-face PVS visibility table) ---
     {
         MpakHeader6 h = zeroHeader();
-        h.lenFaceDrawCmds = 15; // 15/8 = 1 face: 1*52 (faces term) + 15/8 (vis term, truncates to 1)
+        h.lenFaceDrawCmds = 15; // 15/8 = 1 face: 1*24 (faces term) + 15/8 (vis term, truncates to 1)
         // MPAK v12: plus the 15-byte lump itself, read in for the load.
-        CHECK(nv2aMapLedgerBytes(h, 0) == 1 * 52 + 1 + 15, "lenFaceDrawCmds=15 must give one 52-byte face, vis=1 (integer truncation) and its 15-byte load copy");
+        CHECK(nv2aMapLedgerBytes(h) == 1 * 24 + 1 + 15, "lenFaceDrawCmds=15 must give one 24-byte face, vis=1 (integer truncation) and its 15-byte load copy");
     }
 
     // --- the vertex term uses kNv2aLitVertexBytes (28), the RUNTIME nv2a_lit_vertex_t
@@ -65,14 +67,15 @@ int main() {
         MpakHeader6 h = zeroHeader();
         h.vCount = 1;
         CHECK(kNv2aLitVertexBytes == 28, "nv2a_lit_vertex_t must be 28 bytes (packed float pos[3], uv0[2], uv1[2])");
-        CHECK(nv2aMapLedgerBytes(h, 0) == 28, "vCount=1 must contribute exactly 28 bytes of GPU buffer");
-        // X9-T: GPU buffers and the archive never coexist - the larger counts, not the sum.
-        // MPAK v12: the load side is the engine's bytes plus the 12-byte
-        // positions copy of every vertex.
-        CHECK(nv2aMapLedgerBytes(h, 100) == 100 + 12, "a 100-byte prefix + 12 bytes of positions outweigh 28 bytes of GPU buffers: max, not sum");
+        CHECK(nv2aMapLedgerBytes(h) == 28, "vCount=1 must contribute exactly 28 bytes of GPU buffer (outweighing its 12-byte positions copy)");
+        // X9-T: GPU buffers and the load temporaries never coexist - the
+        // larger counts, not the sum.
+        h.lenTextureDir = 100;
+        CHECK(nv2aMapLedgerBytes(h) == 100 + 12, "a 100-byte texture directory + 12 bytes of positions outweigh 28 bytes of GPU buffers: max, not sum");
         h.lenLightmapAtlas = 200;
-        CHECK(nv2aMapLedgerBytes(h, 100) == 28 + 200, "228 bytes of GPU buffers outweigh a 112-byte load");
+        CHECK(nv2aMapLedgerBytes(h) == 28 + 200, "228 bytes of GPU buffers outweigh a 112-byte load");
         h.lenLightmapAtlas = 0;
+        h.lenTextureDir = 0;
     }
 
     // --- no 32-bit overflow: every term is computed in uint64, unlike the
@@ -82,8 +85,8 @@ int main() {
         MpakHeader6 h = zeroHeader();
         h.vCount = std::numeric_limits<uint32_t>::max();
         const uint64_t expected = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) * kNv2aLitVertexBytes;
-        CHECK(nv2aMapLedgerBytes(h, 0) == expected, "vCount=UINT32_MAX must not overflow the vertex term");
-        CHECK(!nv2aMapWithinBudget(nv2aMapLedgerBytes(h, 0)), "a UINT32_MAX vertex count must be far over budget");
+        CHECK(nv2aMapLedgerBytes(h) == expected, "vCount=UINT32_MAX must not overflow the vertex term");
+        CHECK(!nv2aMapWithinBudget(nv2aMapLedgerBytes(h)), "a UINT32_MAX vertex count must be far over budget");
     }
 
     // --- MPAK v12: the engine's view is the first sector plus every
@@ -101,7 +104,7 @@ int main() {
         t.lenTextureDir = 16;
         t.lenBatches = 20;
         t.lenFaceVertexBase = 4;
-        CHECK(nv2aMapLedgerBytes(t, 0) == 16 + 20 + 4, "the texture directory, batches and vertex bases are load temporaries");
+        CHECK(nv2aMapLedgerBytes(t) == 16 + 20 + 4, "the texture directory, batches and vertex bases are load temporaries");
     }
 
     if (failures) {

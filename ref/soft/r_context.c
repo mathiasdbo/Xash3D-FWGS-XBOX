@@ -17,7 +17,11 @@ GNU General Public License for more details.
 
 gl_globals_t  tr;
 ref_speeds_t  r_stats;
+#if XASH_XBOX
+viddef_t      *vid_ptr; // R_AllocStatics (divergences.md #114)
+#else
 viddef_t      vid;
+#endif
 
 
 static void GAME_EXPORT R_ClearScreen( void )

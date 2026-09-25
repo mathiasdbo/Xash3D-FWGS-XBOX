@@ -188,6 +188,11 @@ namespace formats {
         // written whenever the nv2a profile is active, since the face sort
         // itself is unconditional in BspParser's shared face loop.
         void setTextureBatches(std::vector<MpakTextureBatch> batches) { mTextureBatches = std::move(batches); }
+        // X9-U: drops every Xbox texture no batch draws - every miptex the
+        // map's WAD set names gets baked, used or not - and remaps the
+        // batches' textureIndex to the compacted order. Call after
+        // setTextureBatches(). Returns the number of textures dropped.
+        size_t pruneUnusedXboxTextures();
         void setFaceRemap(std::vector<uint32_t> remap) { mFaceRemap = std::move(remap); }
 
     private:

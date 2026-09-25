@@ -1,6 +1,7 @@
 #include "PakManager.h"
 #include "BspParser.h" // BspLumpType - the dheader_t lump indices
 #include "Nv2aMapBudget.h"
+#include "Nv2aMapFit.h"
 #include <fstream>
 #include <iostream>
 #include <iomanip>
@@ -778,8 +779,8 @@ namespace formats {
             const uint64_t remapBytes = static_cast<uint64_t>(header.lenFaceRemap) * 2;
             const uint64_t texBytes = static_cast<uint64_t>(header.lenTextureData);
             const uint64_t lmBytes = static_cast<uint64_t>(header.lenLightmapAtlas);
-            const uint64_t engineBytes = mpakClassicPrefixBytes(header); // MPAK v12: what the engine holds
-            const uint64_t total = nv2aMapLedgerBytes(header, engineBytes);
+            const uint64_t engineBytes = mpakClassicPrefixBytes(header); // MPAK v12: what the engine holds (reported only)
+            const uint64_t total = nv2aMapLedgerBytes(header);
             const double pct = 100.0 * static_cast<double>(total) / static_cast<double>(kNv2aMapBudgetBytes);
 
             if (!nv2aMapWithinBudget(total)) {
@@ -816,6 +817,42 @@ namespace formats {
                 return false;
             }
 
+            // X9-U: does the whole load fit the console (Nv2aMapFit.h)?
+            // Checked here, after the ledger, on the finished archive's
+            // exact sizes - main.cpp ran the same model on the source map
+            // before the bake. A map that fails is handled like an
+            // over-budget one: no archive is left behind.
+            if (mIsXboxTarget) {
+                Nv2aWorldLumps lumps;
+                lumps.visibility = header.lenVisibility; lumps.nodes = header.lenNodes; lumps.leaves = header.lenLeaves;
+                lumps.marksurfaces = header.lenMarksurfaces; lumps.planes = header.lenPlanes; lumps.clipnodes = header.lenClipnodes;
+                lumps.models = header.lenModels; lumps.entities = header.lenEntities; lumps.texinfo = header.lenTexinfo;
+                lumps.vertexes = header.lenVertexes; lumps.edges = header.lenEdges; lumps.surfedges = header.lenSurfedges;
+                lumps.faces = header.lenFaces; lumps.lighting = header.lenLighting; lumps.miptex = header.lenMiptex;
+                int32_t textures = 0;
+                if (mMiptexData.size() >= sizeof(textures))
+                    std::memcpy(&textures, mMiptexData.data(), sizeof(textures));
+                lumps.textures = textures > 0 ? static_cast<uint32_t>(textures) : 0u;
+                const uint64_t tables = idxBytes + facesBytes + visBytes + remapBytes;
+                const uint64_t temporaries = static_cast<uint64_t>(header.vCount) * kNv2aPositionBytes
+                    + header.lenFaceDrawCmds + header.lenFaceVertexBase + header.lenFaceRemap + header.lenTextureDir + header.lenBatches;
+                const Nv2aFit fit = nv2aCheckArchive(lumps, engineBytes, tables, temporaries, vbBytes + texBytes + lmBytes);
+                if (!fit.ok) {
+                    std::cerr << "ERROR: this map does not fit the Original Xbox (tools/asset-studio/src/formats/Nv2aMapFit.h). Failing the bake.\n"
+                              << fit.reason;
+                    std::error_code removeEc;
+                    const bool removed = std::filesystem::remove(outputPath, removeEc);
+                    if (removeEc || !removed) {
+                        std::cerr << "ERROR: also failed to remove " << outputPath << ": "
+                                  << (removeEc ? removeEc.message() : "no such file") << "\n";
+                    }
+                    return false;
+                }
+                std::cout << "Xbox fit: world structures " << nv2aMiB(nv2aEngineWorldBytes(lumps))
+                          << ", renderer " << nv2aMiB(tables + (vbBytes + texBytes + lmBytes > temporaries ? vbBytes + texBytes + lmBytes : temporaries))
+                          << " - fits\n";
+            }
+
             std::cout << std::fixed << std::setprecision(1)
                       << "nv2a map budget: " << total << " / " << kNv2aMapBudgetBytes
                       << " bytes (" << pct << "%) [vb=" << vbBytes << " idx=" << idxBytes
@@ -832,6 +869,35 @@ namespace formats {
         std::cout << "Successfully serialized and verified MPAKv" << header.version << " archive ("
                   << (nv2a ? "nv2a" : "core") << " profile) to " << outputPath << "\n";
         return true;
+    }
+
+    size_t PakManager::pruneUnusedXboxTextures() {
+        const size_t count = mXboxTextures.size();
+        std::vector<uint32_t> newIndex(count, UINT32_MAX);
+        for (const MpakTextureBatch& b : mTextureBatches)
+            if (b.textureIndex < count)
+                newIndex[b.textureIndex] = 0; // mark used
+        uint32_t next = 0;
+        for (size_t j = 0; j < count; ++j) {
+            if (newIndex[j] == UINT32_MAX)
+                continue;
+            newIndex[j] = next;
+            if (next != j) {
+                mXboxTextures[next] = std::move(mXboxTextures[j]);
+                mXboxTexturesMasked[next] = mXboxTexturesMasked[j];
+                mXboxTextureWidths[next] = mXboxTextureWidths[j];
+                mXboxTextureHeights[next] = mXboxTextureHeights[j];
+            }
+            ++next;
+        }
+        mXboxTextures.resize(next);
+        mXboxTexturesMasked.resize(next);
+        mXboxTextureWidths.resize(next);
+        mXboxTextureHeights.resize(next);
+        for (MpakTextureBatch& b : mTextureBatches)
+            if (b.textureIndex < count)
+                b.textureIndex = newIndex[b.textureIndex];
+        return count - next;
     }
 
     bool PakManager::verifyFile(const std::string& path) const {

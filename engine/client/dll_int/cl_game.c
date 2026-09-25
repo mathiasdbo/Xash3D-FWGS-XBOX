@@ -1000,6 +1000,11 @@ void CL_InitEdicts( int maxclients )
 #endif
 	cls.num_client_entities = CL_UPDATE_BACKUP * NUM_PACKET_ENTITIES;
 	cls.packet_entities = Mem_Realloc( clgame.mempool, cls.packet_entities, sizeof( entity_state_t ) * cls.num_client_entities );
+#if XASH_XBOX
+	// Resonance3D (divergences.md #116): HISTORY_MAX 16 on Xbox; the SDK
+	// client asserts the same size (deps/hlsdk/cl_dll/cdll_int.cpp).
+	STATIC_ASSERT( sizeof( cl_entity_t ) == 1656, "Xbox cl_entity_t must match the SDK client's" );
+#endif
 	clgame.entities = Mem_Calloc( clgame.mempool, sizeof( cl_entity_t ) * clgame.maxEntities );
 	clgame.static_entities = NULL; // will be initialized later
 	clgame.numStatics = 0;

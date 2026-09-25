@@ -17,7 +17,25 @@ GNU General Public License for more details.
 
 #define TEXTURES_HASH_SIZE ( MAX_TEXTURES >> 2 )
 
+#if XASH_XBOX
+static image_t *r_images; // [MAX_TEXTURES], R_AllocImageStatics (divergences.md #114)
+#define R_IMAGES_BYTES ( MAX_TEXTURES * sizeof( image_t ))
+
+qboolean R_AllocImageStatics( void )
+{
+	r_images = calloc( MAX_TEXTURES, sizeof( image_t ));
+	return r_images != NULL;
+}
+
+void R_FreeImageStatics( void )
+{
+	free( r_images );
+	r_images = NULL;
+}
+#else
 static image_t r_images[MAX_TEXTURES];
+#define R_IMAGES_BYTES sizeof( r_images )
+#endif
 static image_t *r_imagesHashTable[TEXTURES_HASH_SIZE];
 static uint    r_numImages;
 
@@ -922,7 +940,7 @@ R_InitImages
 */
 void R_InitImages( void )
 {
-	memset( r_images, 0, sizeof( r_images ));
+	memset( r_images, 0, R_IMAGES_BYTES );
 	memset( r_imagesHashTable, 0, sizeof( r_imagesHashTable ));
 	r_numImages = 0;
 
@@ -954,6 +972,6 @@ void R_ShutdownImages( void )
 
 	memset( tr.lightmapTextures, 0, sizeof( tr.lightmapTextures ));
 	memset( r_imagesHashTable, 0, sizeof( r_imagesHashTable ));
-	memset( r_images, 0, sizeof( r_images ));
+	memset( r_images, 0, R_IMAGES_BYTES );
 	r_numImages = 0;
 }

@@ -5,6 +5,27 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed — more memory for every Xbox map; the baker refuses maps that cannot load (X9-U)
+
+`rocket_frenzy` was the one retail map that did not load on the Xbox. The
+work to make it fit freed memory for every map - in xemu, about 36.5 MiB is
+now free before a map loads, up from 32.8 - but `rocket_frenzy` still does
+not fit: it needs 988 entity slots where the game allows 900 (it fails the
+same way on PC Xash), and it would still be short of memory for its GPU
+buffers. So the baker now checks every map before baking it and refuses the
+ones that cannot load, saying why, instead of shipping them.
+
+- The engine computes face bevels on demand (6 MB on `rocket_frenzy`),
+  and its per-surface and per-entity structures are smaller on the Xbox.
+- The software renderer's 3.3 MiB of tables are only allocated when that
+  renderer is used.
+- The Xbox renderer builds its tables when the map starts, uses a smaller
+  per-face table, and falls back to its test view instead of ending the
+  game when memory runs out.
+- Xbox lightmaps are packed like the PC renderer's, about half the size,
+  with no visible change; archives carry only the textures a face draws.
+- Over the 125 retail maps the check refuses `rocket_frenzy` only.
+
 ### Changed — MPAK v12: large maps load on the Xbox; the engine no longer holds the renderer's data (X9-T)
 
 The engine loads a map by reading the whole file, and on the largest maps

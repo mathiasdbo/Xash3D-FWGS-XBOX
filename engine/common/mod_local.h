@@ -180,8 +180,12 @@ mleaf_t *Mod_PointInLeaf( const vec3_t p, mnode_t *node, model_t *mod );
 int Mod_SampleSizeForFace( const msurface_t *surf );
 byte *Mod_GetPVSForPoint( const vec3_t p );
 void Mod_PrintWorldStats_f( void );
+#if XASH_XBOX || XASH_ENGINE_TESTS
+void Mod_FaceBevelEdge( const model_t *mod, const msurface_t *surf, int edge, mplane_t *out ); // divergences.md #113
+#endif
 #if XASH_ENGINE_TESTS
 void Mod_DumpWorld_f( void ); // test_dumpworld <mapname> <outfile> - see mod_bmodel.c, tools/mpak-diff.sh
+void Mod_TestBevels_f( void ); // test_bevels <mapname> - see mod_bmodel.c, tools/test-bevels.sh
 #endif
 
 //

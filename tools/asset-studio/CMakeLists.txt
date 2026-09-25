@@ -59,6 +59,10 @@ add_executable(nv2a_map_budget_test tests/nv2a_map_budget_test.cpp)
 target_link_libraries(nv2a_map_budget_test PRIVATE AssetStudioFormats)
 add_test(NAME nv2a_map_budget_test COMMAND nv2a_map_budget_test)
 
+add_executable(nv2a_map_fit_test tests/nv2a_map_fit_test.cpp)
+target_link_libraries(nv2a_map_fit_test PRIVATE AssetStudioFormats)
+add_test(NAME nv2a_map_fit_test COMMAND nv2a_map_fit_test)
+
 add_executable(lightmap_atlas_packer_test tests/lightmap_atlas_packer_test.cpp)
 target_link_libraries(lightmap_atlas_packer_test PRIVATE AssetStudioFormats)
 add_test(NAME lightmap_atlas_packer_test COMMAND lightmap_atlas_packer_test)

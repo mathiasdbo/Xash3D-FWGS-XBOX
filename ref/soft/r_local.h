@@ -118,7 +118,23 @@ typedef struct
 	int          height;
 } viddef_t;
 
+#if XASH_XBOX
+// Resonance3D (divergences.md #114): on Xbox ref/soft is linked in beside
+// ref/nv2a, and its big tables were static - 3.3 MiB of the console's 64
+// resident even while ref/nv2a draws. They are allocated in R_Init
+// (R_AllocStatics) and freed in R_Shutdown instead; `vid` keeps its name
+// through this pointer, so no use of it changes.
+extern viddef_t *vid_ptr;
+#define vid ( *vid_ptr )
+qboolean R_AllocStatics( void );
+void R_FreeStatics( void );
+qboolean R_AllocImageStatics( void );
+void R_FreeImageStatics( void );
+qboolean R_AllocStudioStatics( void );
+void R_FreeStudioStatics( void );
+#else
 extern viddef_t vid;
+#endif
 
 typedef struct
 {
@@ -862,7 +878,11 @@ void R_DrawSurface( void );
 
 // extern int              c_surf;
 
+#if XASH_XBOX
+extern byte *r_warpbuffer; // [WARP_WIDTH * WARP_HEIGHT], R_AllocStatics (divergences.md #114)
+#else
 extern byte r_warpbuffer[WARP_WIDTH * WARP_HEIGHT];
+#endif
 
 
 
@@ -971,7 +991,9 @@ extern int            r_currentbkey;
 extern qboolean       insubmodel;
 
 extern vec3_t         r_entorigin;
-#if XASH_LOW_MEMORY
+#if XASH_XBOX
+extern int            *r_leafkeys; // [MAX_MAP_LEAFS], R_AllocStatics (divergences.md #114)
+#elif XASH_LOW_MEMORY
 extern unsigned short r_leafkeys[MAX_MAP_LEAFS];
 #else
 extern int            r_leafkeys[MAX_MAP_LEAFS];

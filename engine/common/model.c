@@ -188,6 +188,7 @@ void Mod_Init( void )
 	// proof that a map loaded from .mpak is the same runtime model_t as the
 	// one loaded from its .bsp. Test builds only; driven by tools/mpak-diff.sh.
 	Cmd_AddCommand( "test_dumpworld", Mod_DumpWorld_f, "load a map as the world and dump its runtime BSP structures to a file" );
+	Cmd_AddCommand( "test_bevels", Mod_TestBevels_f, "load a map and compare every stored face bevel edge with the on-demand one (divergences.md #113)" );
 #endif
 
 	Mod_ResetStudioAPI ();

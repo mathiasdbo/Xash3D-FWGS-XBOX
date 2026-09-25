@@ -1704,12 +1704,73 @@ static void Mod_CalcSurfaceBounds( model_t *mod, msurface_t *surf, const dbspmod
 	VectorAverage( surf->info->mins, surf->info->maxs, surf->info->origin );
 }
 
+#if XASH_XBOX || XASH_ENGINE_TESTS
+/*
+=================
+Mod_SurfEdgeVertex
+
+Mod_GetVertexByNumber for after the load, when dbspmodel_t is gone: the
+model's own MODEL_QBSP2 flag is set from the same header version.
+=================
+*/
+static const mvertex_t *Mod_SurfEdgeVertex( const model_t *mod, int surfedge )
+{
+	int lindex = mod->surfedges[surfedge];
+
+	if( FBitSet( mod->flags, MODEL_QBSP2 ))
+		return &mod->vertexes[mod->edges32[lindex > 0 ? lindex : -lindex].v[lindex > 0 ? 0 : 1]];
+	return &mod->vertexes[mod->edges16[lindex > 0 ? lindex : -lindex].v[lindex > 0 ? 0 : 1]];
+}
+
+/*
+=================
+Mod_FaceBevelEdge
+
+Resonance3D (docs/r3d/divergences.md #113): one edge plane of a face's
+bevel, computed when a trace needs it instead of stored for every face
+at load. Mod_CreateFaceBevels' own per-edge arithmetic, operation for
+operation, from the vertex, edge and surfedge arrays the model keeps
+anyway. The stored planes were 20 bytes per edge on every surface - with
+one allocation per surface, 6 MB on rocket_frenzy - and only the texture
+traces in pm_surface.c read them, for the one to three faces whose
+bounding sphere a trace line actually enters.
+=================
+*/
+void Mod_FaceBevelEdge( const model_t *mod, const msurface_t *surf, int edge, mplane_t *out )
+{
+	vec3_t		edgevec, faceNormal;
+	const mvertex_t	*v0, *v1;
+
+	memset( out, 0, sizeof( *out )); // the stored planes came from Mem_Calloc
+
+	if( FBitSet( surf->flags, SURF_PLANEBACK ))
+		VectorNegate( surf->plane->normal, faceNormal );
+	else VectorCopy( surf->plane->normal, faceNormal );
+
+	v0 = Mod_SurfEdgeVertex( mod, surf->firstedge + edge );
+	v1 = Mod_SurfEdgeVertex( mod, surf->firstedge + (edge + 1) % surf->numedges );
+	VectorSubtract( v1->position, v0->position, edgevec );
+	CrossProduct( faceNormal, edgevec, out->normal );
+	VectorNormalize( out->normal );
+	out->dist = DotProduct( out->normal, v0->position );
+	out->type = PlaneTypeForNormal( out->normal );
+}
+#endif // XASH_XBOX || XASH_ENGINE_TESTS
+
 /*
 =================
 Mod_CreateFaceBevels
 =================
 */
+#if XASH_XBOX
+// Resonance3D (divergences.md #113): `fb` is this surface's slot in one
+// block allocated for every surface (Mod_LoadSurfaces), and only the
+// origin, radius and contents are stored - the edge planes come from
+// Mod_FaceBevelEdge when a trace needs them, so fb->edges stays NULL.
+static void Mod_CreateFaceBevels( model_t *mod, msurface_t *surf, const dbspmodel_t *bmod, mfacebevel_t *fb )
+#else
 static void Mod_CreateFaceBevels( model_t *mod, msurface_t *surf, const dbspmodel_t *bmod )
+#endif
 {
 	vec3_t		delta, edgevec;
 	vec3_t		faceNormal;
@@ -1720,6 +1781,20 @@ static void Mod_CreateFaceBevels( model_t *mod, msurface_t *surf, const dbspmode
 		contents = Mod_GetFaceContents( surf->texinfo->texture->name );
 	else contents = CONTENTS_SOLID;
 
+#if XASH_XBOX
+	fb->edges = NULL;
+	fb->numedges = surf->numedges;
+	fb->contents = contents;
+	surf->info->bevel = fb;
+
+	// compute face origin, in the same order as below
+	for( int i = 0; i < surf->numedges; i++ )
+	{
+		v0 = Mod_GetVertexByNumber( mod, surf->firstedge + i, bmod );
+		VectorAdd( fb->origin, v0->position, fb->origin );
+	}
+	(void)delta; (void)edgevec; (void)faceNormal; (void)v1;
+#else
 	int		size = sizeof( mfacebevel_t ) + surf->numedges * sizeof( mplane_t );
 	byte		*facebevel = (byte *)Mem_Calloc( mod->mempool, size );
 	mfacebevel_t	*fb = (mfacebevel_t *)facebevel;
@@ -1747,6 +1822,7 @@ static void Mod_CreateFaceBevels( model_t *mod, msurface_t *surf, const dbspmode
 		dest->type = PlaneTypeForNormal( dest->normal );
 		VectorAdd( fb->origin, v0->position, fb->origin );
 	}
+#endif // XASH_XBOX
 
 	VectorScale( fb->origin, 1.0f / surf->numedges, fb->origin );
 
@@ -3299,6 +3375,10 @@ static void Mod_LoadSurfaces( model_t *mod, dbspmodel_t *bmod )
 	mod->surfaces = out = Mem_Calloc( mod->mempool, bmod->numsurfaces * sizeof( msurface_t ));
 	mextrasurf_t *info = Mem_Calloc( mod->mempool, bmod->numsurfaces * sizeof( mextrasurf_t ));
 	mod->numsurfaces = bmod->numsurfaces;
+#if XASH_XBOX
+	// Resonance3D (divergences.md #113): every surface's bevel in one block.
+	mfacebevel_t *bevels = Mem_Calloc( mod->mempool, bmod->numsurfaces * sizeof( mfacebevel_t ));
+#endif
 
 	// predict samplecount based on bspversion
 	if( bmod->version == Q1BSP_VERSION || bmod->version == QBSP2_VERSION )
@@ -3375,7 +3455,11 @@ static void Mod_LoadSurfaces( model_t *mod, dbspmodel_t *bmod )
 
 		Mod_CalcSurfaceBounds( mod, out, bmod );
 		Mod_CalcSurfaceExtents( mod, out, bmod );
+#if XASH_XBOX
+		Mod_CreateFaceBevels( mod, out, bmod, &bevels[i] );
+#else
 		Mod_CreateFaceBevels( mod, out, bmod );
+#endif
 
 		// grab the second sample to detect colored lighting
 		if( test_lightsize > 0 && lightofs != -1 )
@@ -4734,6 +4818,59 @@ static void Mod_DumpModelSummary( file_t *f, const model_t *mod, const model_t *
 	}
 }
 
+/*
+=================
+Mod_TestBevels_f
+
+test_bevels <mapname>: the proof behind divergences.md #113. On a non-Xbox
+test build the world still stores every face's bevel edge planes the
+upstream way; this recomputes each with Mod_FaceBevelEdge, the Xbox
+on-demand path, and counts planes whose bytes differ. Driven by
+tools/test-bevels.sh over the retail maps.
+=================
+*/
+void Mod_TestBevels_f( void )
+{
+	char    mapname[MAX_QPATH];
+	model_t *mod;
+	int     surfaces = 0, edges = 0, mismatches = 0;
+
+	if( Cmd_Argc() != 2 )
+	{
+		Con_Printf( S_USAGE "test_bevels <mapname>\n" );
+		return;
+	}
+
+	Q_snprintf( mapname, sizeof( mapname ), "maps/%s.bsp", Cmd_Argv( 1 ));
+	mod = Mod_LoadWorld( mapname, true );
+	if( !mod || mod->type != mod_brush )
+	{
+		Con_Printf( S_ERROR "test_bevels: %s did not load as a brush model\n", mapname );
+		return;
+	}
+
+	for( int i = 0; i < mod->numsurfaces; i++ )
+	{
+		const msurface_t *surf = &mod->surfaces[i];
+		const mfacebevel_t *fb = surf->info ? surf->info->bevel : NULL;
+
+		if( !fb || !fb->edges )
+			continue;
+		surfaces++;
+		for( int j = 0; j < fb->numedges; j++ )
+		{
+			mplane_t edge;
+
+			Mod_FaceBevelEdge( mod, surf, j, &edge );
+			edges++;
+			if( memcmp( &edge, &fb->edges[j], sizeof( edge )) != 0 )
+				mismatches++;
+		}
+	}
+
+	Con_Printf( "test_bevels: %s %d surfaces %d edges %d mismatches\n", Cmd_Argv( 1 ), surfaces, edges, mismatches );
+}
+
 void Mod_DumpWorld_f( void )
 {
 	char      mapname[MAX_QPATH];
@@ -4912,7 +5049,13 @@ void Mod_DumpWorld_f( void )
 				for( int j = 0; j < bevel->numedges; j++ )
 				{
 					FS_Printf( f, " e%d:", j );
+#if XASH_XBOX
+					mplane_t edge; // divergences.md #113: computed, not stored
+					Mod_FaceBevelEdge( mod, surf, j, &edge );
+					Mod_DumpPlane( f, &edge );
+#else
 					Mod_DumpPlane( f, &bevel->edges[j] );
+#endif
 				}
 			}
 			else FS_Printf( f, " bevel: none" );

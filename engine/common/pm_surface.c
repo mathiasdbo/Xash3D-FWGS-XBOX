@@ -16,6 +16,7 @@ GNU General Public License for more details.
 #include "common.h"
 #include "xash3d_mathlib.h"
 #include "pm_local.h"
+#include "mod_local.h" // Resonance3D: Mod_FaceBevelEdge (divergences.md #113)
 #include "ref_common.h"
 
 #undef FRAC_EPSILON
@@ -151,8 +152,15 @@ loc0:
 		int j;
 		for( j = 0; j < fb->numedges; j++ )
 		{
+#if XASH_XBOX
+			mplane_t edge; // divergences.md #113: computed on demand, not stored
+			Mod_FaceBevelEdge( mod, surf, j, &edge );
+			if( PlaneDiff( mid, &edge ) > FRAC_EPSILON )
+				break; // outside the bounds
+#else
 			if( PlaneDiff( mid, &fb->edges[j] ) > FRAC_EPSILON )
 				break; // outside the bounds
+#endif
 		}
 
 		if( j != fb->numedges )
@@ -278,8 +286,15 @@ loc0:
 		int j;
 		for( j = 0; j < fb->numedges; j++ )
 		{
+#if XASH_XBOX
+			mplane_t edge; // divergences.md #113: computed on demand, not stored
+			Mod_FaceBevelEdge( mod, surf, j, &edge );
+			if( PlaneDiff( mid, &edge ) > FRAC_EPSILON )
+				break; // outside the bounds
+#else
 			if( PlaneDiff( mid, &fb->edges[j] ) > FRAC_EPSILON )
 				break; // outside the bounds
+#endif
 		}
 
 		if( j != fb->numedges )

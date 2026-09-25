@@ -43,7 +43,7 @@ namespace lightmap_atlas {
 
     struct LightmapAllocation {
         uint32_t page = 0;
-        uint32_t blockX = 0; // origin of the (smax+2) x (tmax+2) BORDERED block
+        uint32_t blockX = 0; // origin of the block, border included when the packer has one (border())
         uint32_t blockY = 0;
     };
 
@@ -54,7 +54,14 @@ namespace lightmap_atlas {
     // bilinear sampling never bleeds across faces (see B4's sampler notes).
     class LightmapAtlasPacker {
     public:
-        LightmapAtlasPacker() {
+        // X9-U: `bordered` = false packs blocks tight, with no replicated
+        // 1-luxel border - the reference's own layout (ref/gl's
+        // LM_AllocBlock, sampled at luxel centres), whose bilinear filter
+        // reaches half a luxel into the neighbouring block at a face's
+        // edge. Most blocks are tiny (a 2x2-luxel face is 4x4 bordered), so
+        // the border roughly doubled the Xbox atlas: 7.9 MB on
+        // rocket_frenzy.
+        explicit LightmapAtlasPacker(bool bordered = true) : mBorder(bordered ? 1u : 0u) {
             mPages.emplace_back();
 
             // Bake a luminance ramp strip into page 0's top-left corner: a
@@ -88,9 +95,13 @@ namespace lightmap_atlas {
             mPages[0].usedHeight = LM_RAMP_HEIGHT;
         }
 
+        // Luxels between a block's origin and its first data luxel: 1
+        // bordered, 0 tight. The baker adds it to every lightmap UV.
+        uint32_t border() const { return mBorder; }
+
         LightmapAllocation allocate(uint32_t smax, uint32_t tmax) {
-            uint32_t paddedW = smax + 2;
-            uint32_t paddedH = tmax + 2;
+            uint32_t paddedW = smax + 2 * mBorder;
+            uint32_t paddedH = tmax + 2 * mBorder;
 
             if (mPages.back().cursorX + paddedW > LM_PAGE_SIZE) {
                 mPages.back().cursorY += mPages.back().rowHeight;
@@ -112,12 +123,12 @@ namespace lightmap_atlas {
             return alloc;
         }
 
-        // Writes an smax x tmax RGB24 block into the page at alloc's bordered
-        // origin, then replicates a 1-luxel border around it.
+        // Writes an smax x tmax RGB24 block into the page at alloc's origin,
+        // then, when bordered, replicates a 1-luxel border around it.
         void writeBlock(const LightmapAllocation& alloc, uint32_t smax, uint32_t tmax, const uint8_t* rgb24) {
             LightmapPage& page = mPages[alloc.page];
-            uint32_t destX = alloc.blockX + 1;
-            uint32_t destY = alloc.blockY + 1;
+            uint32_t destX = alloc.blockX + mBorder;
+            uint32_t destY = alloc.blockY + mBorder;
 
             for (uint32_t y = 0; y < tmax; ++y) {
                 for (uint32_t x = 0; x < smax; ++x) {
@@ -129,6 +140,9 @@ namespace lightmap_atlas {
                     page.rgba[destOffset + 3] = 255;
                 }
             }
+
+            if (!mBorder)
+                return;
 
             // Replicate left/right edges, then top/bottom (incl. corners).
             for (uint32_t y = 0; y < tmax; ++y) {
@@ -216,6 +230,7 @@ namespace lightmap_atlas {
         }
 
     private:
+        uint32_t mBorder;
         std::vector<LightmapPage> mPages;
     };
 

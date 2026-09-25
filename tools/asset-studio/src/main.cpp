@@ -7,8 +7,48 @@
 #include "formats/PakManager.h"
 #include "formats/VfsIndexer.h"
 #include "formats/UiPacker.h"
+#include "formats/Nv2aMapFit.h"
+#include <algorithm>
+#include <cctype>
+#include <cstring>
 
 namespace {
+
+// X9-U: the game's edict limit, as the engine resolves it
+// (filesystem/gameinfo.c FS_ParseGameInfo): gameinfo.txt's max_edicts, or
+// liblist.gam's edicts when there is no gameinfo.txt, clamped to
+// MIN_EDICTS..MAX_EDICTS (600..8196), else DEFAULT_MAX_EDICTS
+// (common/defaults.h, 1200). The retail valve/gameinfo.txt sets 900.
+uint32_t readGameMaxEdicts(const std::string& gameDir) {
+    auto readKey = [](const std::string& path, const char* key, uint32_t& out) -> bool {
+        std::ifstream f(path);
+        if (!f) return false;
+        std::string line;
+        const size_t keyLen = std::strlen(key);
+        while (std::getline(f, line)) {
+            size_t p = line.find_first_not_of(" \t");
+            if (p == std::string::npos || line.size() < p + keyLen) continue;
+            std::string word = line.substr(p, keyLen);
+            std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (word != key) continue;
+            const size_t after = p + keyLen;
+            if (after < line.size() && !std::isspace(static_cast<unsigned char>(line[after])) && line[after] != '"') continue;
+            const size_t digit = line.find_first_of("0123456789", after);
+            if (digit == std::string::npos) continue;
+            out = static_cast<uint32_t>(std::strtoul(line.c_str() + digit, nullptr, 10));
+            return true;
+        }
+        return false;
+    };
+    uint32_t value = 1200; // DEFAULT_MAX_EDICTS
+    const std::string gameinfo = gameDir + "/gameinfo.txt";
+    if (std::ifstream(gameinfo)) {
+        readKey(gameinfo, "max_edicts", value);
+    } else {
+        readKey(gameDir + "/liblist.gam", "edicts", value);
+    }
+    return std::min<uint32_t>(std::max<uint32_t>(value, 600), 8196);
+}
 
 // AssetManifest: the replacement for embedding models/sprites/sounds into
 // the .mpak archive at all. Scope decision, found while starting X2's real
@@ -464,6 +504,46 @@ int main(int argc, char *argv[]) {
         if (!bsp.load(resolvedMapPath)) {
             std::cerr << "Could not load BSP map file: " << resolvedMapPath << "\n";
             return 1;
+        }
+
+        // X9-U: before the bake, does this map fit the Original Xbox at all
+        // (Nv2aMapFit.h)? Its entity slots and the engine's own load come
+        // straight from the source map, so a map that cannot load fails
+        // here, before anything is written; PakManager::save repeats the
+        // check on the finished archive and adds the renderer's side.
+        if (pak.isXboxTarget() && pak.isProfileNv2a()) {
+            formats::Nv2aWorldLumps lumps;
+            lumps.visibility = bsp.getLumpData(formats::LUMP_VISIBILITY).size();
+            lumps.nodes = bsp.getLumpData(formats::LUMP_NODES).size();
+            lumps.leaves = bsp.getLumpData(formats::LUMP_LEAVES).size();
+            lumps.marksurfaces = bsp.getLumpData(formats::LUMP_MARKSURFACES).size();
+            lumps.planes = bsp.getLumpData(formats::LUMP_PLANES).size();
+            lumps.clipnodes = bsp.getLumpData(formats::LUMP_CLIPNODES).size();
+            lumps.models = bsp.getLumpData(formats::LUMP_MODELS).size();
+            lumps.entities = bsp.getLumpData(formats::LUMP_ENTITIES).size();
+            lumps.texinfo = bsp.getLumpData(formats::LUMP_TEXINFO).size();
+            lumps.vertexes = bsp.getLumpData(formats::LUMP_VERTICES).size();
+            lumps.edges = bsp.getLumpData(formats::LUMP_EDGES).size();
+            lumps.surfedges = bsp.getLumpData(formats::LUMP_SURFEDGES).size();
+            lumps.faces = bsp.getLumpData(formats::LUMP_FACES).size();
+            lumps.lighting = bsp.getLumpData(formats::LUMP_LIGHTING).size();
+            const auto& miptex = bsp.getLumpData(formats::LUMP_TEXTURES);
+            int32_t textures = 0;
+            if (miptex.size() >= sizeof(textures))
+                std::memcpy(&textures, miptex.data(), sizeof(textures));
+            lumps.textures = textures > 0 ? static_cast<uint32_t>(textures) : 0u;
+            lumps.miptex = formats::nv2aHeaderOnlyMiptexBytes(lumps.textures);
+            const auto& ents = bsp.getLumpData(formats::LUMP_ENTITIES);
+            const uint32_t peak = formats::nv2aPeakEdicts(reinterpret_cast<const char*>(ents.data()), ents.size());
+            const uint32_t maxEdicts = readGameMaxEdicts(gameDir);
+            const formats::Nv2aFit fit = formats::nv2aCheckBeforeBake(lumps, peak, maxEdicts);
+            if (!fit.ok) {
+                std::cerr << "ERROR: " << mapPath << " does not fit the Original Xbox (tools/asset-studio/src/formats/Nv2aMapFit.h). Not baking it.\n"
+                          << fit.reason;
+                return 1;
+            }
+            std::cout << "Xbox fit (before the bake): " << peak << " of " << maxEdicts << " edict slots, engine load "
+                      << formats::nv2aMiB(formats::nv2aEngineWorldBytes(lumps) + formats::nv2aClassicPrefixBytes(lumps)) << "\n";
         }
 
         // 3. Export to MPAK with VFS WAD Resolution

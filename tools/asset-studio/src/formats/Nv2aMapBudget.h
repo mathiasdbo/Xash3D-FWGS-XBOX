@@ -59,8 +59,8 @@ namespace formats {
     // matching the ref's own uint32 dword_count would just reintroduce the
     // overflow risk this baker has no reason to have.
     // ref/nv2a's nv2a_map_face_t, one per face (on-disk FaceDrawCmd is 8
-    // bytes); r_context.c STATIC_ASSERTs the same 52 so the two cannot drift.
-    constexpr uint64_t kNv2aMapFaceBytes = 52;
+    // bytes); r_context.c STATIC_ASSERTs the same 24 (52 before X9-U) so the two cannot drift.
+    constexpr uint64_t kNv2aMapFaceBytes = 24;
 
     // MPAK v12: the bytes the engine is served as the map's .bsp - the
     // first sector plus every classic lump, each padded to a whole sector
@@ -83,17 +83,18 @@ namespace formats {
     // it builds the per-face bounds (nv2a_read_map_lumps: vec3, 3 floats).
     constexpr uint64_t kNv2aPositionBytes = 12;
 
-    inline uint64_t nv2aMapLedgerBytes(const MpakHeader6& h, uint64_t engineBytes) {
+    inline uint64_t nv2aMapLedgerBytes(const MpakHeader6& h) {
         const uint64_t vbBytes = static_cast<uint64_t>(h.vCount) * kNv2aLitVertexBytes;
         const uint64_t idxBytes = ((static_cast<uint64_t>(h.iCount) + 1) / 2) * 4;
         // X9-T: the peak, as ref/nv2a now computes it - the tables live on,
         // the engine's buffer and the load's temporaries live only while
         // they are built, and the three GPU buffers are built after both
         // are freed (R_NewMap), so the ledger is tables + max(load, GPU
-        // buffers). MPAK v12: `engineBytes` is the classic prefix the
-        // engine holds (mpakClassicPrefixBytes), and the load side adds
-        // the renderer lumps nv2a_read_map_lumps copies out of the archive
-        // for the duration of the load.
+        // buffers). The load side is the renderer lumps
+        // nv2a_read_map_lumps copies out of the archive for the duration
+        // of the load; X9-U builds the tables at R_NewMap, after the
+        // engine has freed its copy of the map, so that copy is not in
+        // either side any more.
         const uint64_t tables = idxBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds / 8) * kNv2aMapFaceBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds) / 8
@@ -101,8 +102,7 @@ namespace formats {
         const uint64_t gpu = vbBytes
             + static_cast<uint64_t>(h.lenTextureData)
             + static_cast<uint64_t>(h.lenLightmapAtlas);
-        const uint64_t load = engineBytes
-            + static_cast<uint64_t>(h.vCount) * kNv2aPositionBytes
+        const uint64_t load = static_cast<uint64_t>(h.vCount) * kNv2aPositionBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds) + static_cast<uint64_t>(h.lenFaceVertexBase)
             + static_cast<uint64_t>(h.lenFaceRemap) + static_cast<uint64_t>(h.lenTextureDir)
             + static_cast<uint64_t>(h.lenBatches);
