@@ -760,7 +760,22 @@ for f in stub_game/server/server_stub.c "$SCRATCH/gen/generated_lib_server_expor
 done
 echo "xbox-link-check: stub game module included (server_stub.c + generated export tables)." >&2
 
-NXDK_DIR="deps/nxdk"
+# ${NXDK_DIR:-...}: honour a caller's NXDK_DIR - the same variable nxdk's
+# own bin/activate exports, and keeps if already set. A fresh `git
+# worktree` has deps/nxdk's SOURCES (submodule init) but none of its
+# BUILT output: lib/*.lib, tools/cxbe/cxbe and extract-xiso are untracked
+# build artifacts of `make NXDK_ONLY=y` (tools/xbox-env.sh), so a gate run
+# from a worktree must be pointed at the main checkout's built nxdk,
+# read-only. Both agentic-loop runs to date lost their build gate to
+# exactly this (PRs #148 and #149; docs/r3d/agentic-loop.md). Unset, the
+# default is this checkout's own deps/nxdk, unchanged.
+# A checkout may carry its nxdk location in .sweep/nxdk-dir (the agentic
+# loop's setup stage writes it into each worktree). docs/r3d/lessons.md's
+# entry on /c/msys64/usr/bin/bash shows an exported variable can be dropped
+# at that shell boundary with no error, so the checkout itself answers
+# when the environment does not. Unset and no file: the default below.
+[ -n "${NXDK_DIR:-}" ] || NXDK_DIR="$(cat "$REPO/.sweep/nxdk-dir" 2>/dev/null || true)"
+NXDK_DIR="${NXDK_DIR:-deps/nxdk}"
 LIBS=(
 	"$NXDK_DIR/lib/xboxkrnl/libxboxkrnl.lib" "$NXDK_DIR/lib/libpdclib.lib"
 	"$NXDK_DIR/lib/libwinapi.lib" "$NXDK_DIR/lib/libnxdk_hal.lib"
@@ -830,7 +845,7 @@ LOG="$SCRATCH/link-check.txt"
 # 65535-byte frame; found live, X7.4 step 2). Kept in step here so an
 # engine-only --xbe boot test measures the same binary shape.
 XBOX_STACK_SIZE=1048576
-deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
+"$NXDK_DIR/bin/nxdk-link" -errorlimit:0 -include:_automount_d_drive \
 	-stack:"$XBOX_STACK_SIZE" \
 	-out:"$SCRATCH/link-check.exe" "@$RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
@@ -973,7 +988,7 @@ fi
 if [ -n "$XBE_OUT" ]; then
 	XBE_EXE="$SCRATCH/xbe-build.exe"
 	# shellcheck disable=SC2086
-	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
+	"$NXDK_DIR/bin/nxdk-link" -errorlimit:0 -include:_automount_d_drive -force:unresolved \
 		-stack:"$XBOX_STACK_SIZE" \
 		-out:"$XBE_EXE" "@$RESPONSE" > "$SCRATCH/xbe-link.txt" 2>&1
 	XBE_LINK_STATUS=$?
@@ -991,10 +1006,11 @@ if [ -n "$XBE_OUT" ]; then
 		exit 1
 	fi
 
-	CXBE="deps/nxdk/tools/cxbe/cxbe"
+	# Built, untracked nxdk artifact - through NXDK_DIR (see the LIBS line above).
+	CXBE="$NXDK_DIR/tools/cxbe/cxbe"
 	if [ ! -x "$CXBE" ] && [ ! -f "${CXBE}.exe" ]; then
 		echo "link-check: $CXBE not found or not built." >&2
-		echo "  Run: make -C deps/nxdk/tools/cxbe" >&2
+		echo "  Point NXDK_DIR at a built nxdk (tools/xbox-env.sh), or build it there." >&2
 		exit 1
 	fi
 	if ! "$CXBE" -OUT:"$XBE_OUT" -TITLE:"Resonance3D" "$XBE_EXE" > "$SCRATCH/xbe-cxbe.txt" 2>&1; then

@@ -47,6 +47,13 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
+# A checkout may carry its nxdk location in .sweep/nxdk-dir (the agentic
+# loop's setup stage writes it into each worktree). docs/r3d/lessons.md's
+# entry on /c/msys64/usr/bin/bash shows an exported variable can be dropped
+# at that shell boundary with no error, so the checkout itself answers
+# when the environment does not. Unset and no file: the default below.
+[ -n "${NXDK_DIR:-}" ] || NXDK_DIR="$(cat "$REPO/.sweep/nxdk-dir" 2>/dev/null || true)"
+
 MSYS2_BIN="/c/msys64/mingw64/bin"
 if [ ! -d "$MSYS2_BIN" ]; then
 	echo "xbox-game-link-check: $MSYS2_BIN not found." >&2
@@ -440,7 +447,7 @@ fi
 # nxdk-link's own default cleanly.
 XBOX_STACK_SIZE=1048576
 
-deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
+"${NXDK_DIR:-deps/nxdk}/bin/nxdk-link" -errorlimit:0 -include:_automount_d_drive \
 	-stack:"$XBOX_STACK_SIZE" \
 	-out:"$OUT_EXE" "@$NEW_RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
@@ -595,7 +602,7 @@ if [ -n "$XBE_OUT" ]; then
 	# identical addresses but no identity a tool can check; section
 	# extents are not identity). The map lands next to the XBE below.
 	XBE_MAP="$SCRATCH/game-$TITLE/xbe-build.map"
-	deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive -force:unresolved \
+	"${NXDK_DIR:-deps/nxdk}/bin/nxdk-link" -errorlimit:0 -include:_automount_d_drive -force:unresolved \
 		-stack:"$XBOX_STACK_SIZE" -map:"$XBE_MAP" \
 		-out:"$XBE_EXE" "@$NEW_RESPONSE" > "$SCRATCH/game-$TITLE/xbe-link.txt" 2>&1
 	XBE_LINK_STATUS=$?
@@ -614,10 +621,13 @@ if [ -n "$XBE_OUT" ]; then
 		exit 1
 	fi
 
-	CXBE="deps/nxdk/tools/cxbe/cxbe"
+	# cxbe is a built, untracked nxdk artifact: resolve it through a caller's
+	# NXDK_DIR when set (a worktree pointed at the main checkout's built
+	# nxdk - see tools/xbox-link-check.sh's own NXDK_DIR line), else here.
+	CXBE="${NXDK_DIR:-deps/nxdk}/tools/cxbe/cxbe"
 	if [ ! -x "$CXBE" ] && [ ! -f "${CXBE}.exe" ]; then
 		echo "xbox-game-link-check: $CXBE not found or not built." >&2
-		echo "  Run: make -C deps/nxdk/tools/cxbe" >&2
+		echo "  Point NXDK_DIR at a built nxdk (tools/xbox-env.sh), or build it there." >&2
 		exit 1
 	fi
 	if ! "$CXBE" -OUT:"$XBE_OUT" -TITLE:"Resonance3D" "$XBE_EXE" > "$SCRATCH/game-$TITLE/xbe-cxbe.txt" 2>&1; then

@@ -582,6 +582,32 @@ the fix is not "concentrate harder," it's "look at the row you're
 citing," or better, let the totals do a sanity check the truncated view
 can't (a printed max/sum a human can cross-check against what got quoted).
 
+Second data point, 2026-09-26, the other end of the same mistake: a site
+inventory, not an extreme. `grep -n 'deps/nxdk\|NXDK_DIR\|cxbe' tools/*.sh
+| head -40` was read as the complete list of places the tools hardcode
+the nxdk path, five were changed, and the change was committed as
+"every site". The audit that followed found the `cxbe` assignment at
+`tools/xbox-link-check.sh:1003` and five `nxdk-link` invocations - all
+below the fortieth line of that grep. A `head` on an inventory is a
+claim that the inventory is short; count it (`| wc -l`) before believing
+it, and never `head` a list you are about to call complete.
+
+### NEVER chain a commit after an edit batch that can stop partway - check `git diff --stat` against the claim first
+
+An edit script that asserts each anchor and aborts on the first miss
+writes nothing for the files after the miss, while the `&&`-chained test
+and commit that follow still run on whatever did land. Twice in one
+session (2026-09-26) a commit message described a change its commit did
+not contain: `docs/r3d/agentic-loop.md` edits lost to a wrapped anchor,
+then the `wait-scene` fix in `tools/xemu-debug.py` (commit `956b38d0`
+claims it; `2d7532c7` carries it). The tests passed both times, because
+they tested the files that were written.
+
+Before committing a batch, compare `git diff --stat` with the list of
+files the message names; a file missing from the stat is a claim the
+commit does not support. Better, do not chain the commit at all: edit,
+look, then commit.
+
 ### `export FOO=1` in this dev shell does not survive an explicit `/c/msys64/usr/bin/bash` invocation, or any invocation whose PATH puts msys64 ahead of this shell's own `bash`
 
 `tools/xbox-cc.sh`'s `XBOX_DEDICATED`/`XBOX_ENGINE_TESTS`/`XBOX_CLIENT_MAIN`
@@ -1618,6 +1644,13 @@ older problem - that is a real finding to root-cause and document
 (`divergences.md` #101), not evidence the fix itself is wrong. See
 `docs/r3d/divergences.md` #101.
 
+Second data point, 2026-09-26: the agentic loop's first run (PR #148)
+passed two codex-review rounds and a QA pass and still shipped a 2D
+batch flushed under the NEXT draw's render mode - additive HUD sprites
+drew opaque on black boxes. One xemu screenshot found it. The loop now
+has a live stage that boots the build and reads the PNGs against the
+spec's own verification section, for exactly this class.
+
 ### xemu is not validation for NV2A register values - and "it's an xemu bug" needs the hardware to disagree first
 
 X9-K's textures looked wrong in xemu: smeared ground, misplaced patches,
@@ -1664,3 +1697,42 @@ Rules:
   missing bit was visible in PD-X's `0x0001122a` all along; comparing the
   whole word rather than the fields believed to matter would have found it
   on day one. See `divergences.md` #102.
+
+### NEVER treat a fresh git worktree as a build environment - it has a submodule's sources, never its built output
+
+Both runs of the agentic loop (PRs #148 and #149) created a worktree with
+`git worktree add` and `git submodule update --init --recursive`, which
+gave it `deps/nxdk`'s sources and none of what `make NXDK_ONLY=y` builds
+there: `lib/*.lib`, `tools/cxbe/cxbe`, `extract-xiso`
+(`tools/xbox-env.sh:7-9`; all untracked). Run 1's QA never completed the
+isolate or the link and reported green anyway; run 2 spent two docs
+commits escalating "this environment cannot produce a bootable Xbox
+target" while the main checkout, at the same pinned nxdk commit, had
+every built file (commit `dd057133`). Nothing failed loudly in either
+run: the missing output looked like a broken submodule, then like an
+unbuilt SDK, never like "this checkout was never meant to build".
+
+Point a worktree at the main checkout's built SDK (`NXDK_DIR`, which
+nxdk's own `activate` keeps when pre-set and every `tools/xbox-*.sh` site
+now honours) and **prove it with one compile before anything else runs**.
+A tree you did not build in is a tree to test, not to trust.
+
+### NEVER let the agent that ran a check decide whether it passed - compute the verdict from exit codes it must return by name
+
+The agentic loop's first QA stage returned `green: true` on PR #148 with
+`tools/xbox-ref-isolate.sh nv2a`, `tools/xbox-link-check.sh` and
+`tools/xbox-game-link-check.sh` all unrun ("did not complete in this
+worktree"), on code missing two includes that a ten-second isolate would
+have rejected (fixed by hand in `4150bd14`). The schema had a boolean the
+model filled in and free-text lists of what it ran; nothing tied the
+verdict to the checks the change actually required.
+
+The shape that works is the one `tools/xbox-sweep.sh`'s own history
+already taught for measuring tools, applied to the judge: the list of
+required checks is a function of what changed, a runner records each
+check's exit code without interpreting it (`tools/gate-chain.sh`), and
+the verdict is computed by matching that table against the list by name.
+A model can still misreport an exit code; it can no longer skip a check,
+narrow the list, or say "green". Ask of any judging stage what it would
+return if the checks had never run - if the answer can be "pass", it is
+not a gate.

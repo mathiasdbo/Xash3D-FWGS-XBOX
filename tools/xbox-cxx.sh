@@ -150,7 +150,18 @@ fi
 
 export PATH="/c/msys64/mingw64/bin:$PATH"
 
-eval "$("$REPO/deps/nxdk/bin/activate" -s)"
+# ${NXDK_DIR:-...}: a caller may point at another checkout's built nxdk
+# (nxdk's own activate keeps a pre-set NXDK_DIR, so this only changes
+# WHICH activate is read, not what it exports). A git worktree has no
+# built nxdk of its own; see tools/xbox-link-check.sh's NXDK_DIR line.
+# Unset, this is the checkout's own deps/nxdk, unchanged.
+# A checkout may carry its nxdk location in .sweep/nxdk-dir (the agentic
+# loop's setup stage writes it into each worktree). docs/r3d/lessons.md's
+# entry on /c/msys64/usr/bin/bash shows an exported variable can be dropped
+# at that shell boundary with no error, so the checkout itself answers
+# when the environment does not. Unset and no file: the default below.
+[ -n "${NXDK_DIR:-}" ] || NXDK_DIR="$(cat "$REPO/.sweep/nxdk-dir" 2>/dev/null || true)"
+eval "$("${NXDK_DIR:-$REPO/deps/nxdk}/bin/activate" -s)"
 
 SRC="${1:?usage: xbox-cxx.sh <file.cpp> [extra args]}"
 shift

@@ -753,3 +753,86 @@ class Cursor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaitSceneDecision(unittest.TestCase):
+    """scene_ready_poll() must count frames from the first READY read, and
+    every non-ready outcome must be a distinct verdict, never a pass."""
+
+    def _drive(self, states, frames=3, timeout=100):
+        it = iter(states)
+        clock = {"t": 0.0}
+        def read_state():
+            v = next(it)
+            if isinstance(v, Exception):
+                raise v
+            return v
+        def sleep(_s):
+            clock["t"] += 1.0
+        return xd.scene_ready_poll(read_state, frames, timeout, sleep=sleep, clock=lambda: clock["t"])
+
+    def test_frames_count_from_the_first_ready_read_not_from_boot(self):
+        # ticking on the plaque (ready=0) must not count
+        status, d = self._drive([(0, 10), (0, 20), (1, 30), (1, 31), (1, 33)], frames=3)
+        self.assertEqual(status, "ready")
+        self.assertEqual(d["frames"], 3)
+
+    def test_an_unload_after_the_first_ready_sample_restarts_the_count(self):
+        # ready, then unloaded (0) while the counter keeps ticking, then ready
+        # again: only frames after the SECOND ready sample may count.
+        status, d = self._drive([(1, 10), (1, 11), (0, 20), (0, 30), (1, 40), (1, 41), (1, 43)], frames=3)
+        self.assertEqual(status, "ready")
+        self.assertEqual(d["frames"], 3)
+        status, d = self._drive([(1, 10), (0, 20), (0, 30), (0, 40), (0, 50)], frames=3, timeout=4)
+        self.assertEqual(status, "timeout")
+        self.assertEqual(d["frames"], 0)
+
+    def test_never_ready_is_a_timeout_not_a_pass(self):
+        status, d = self._drive([(0, i) for i in range(50)], frames=3, timeout=5)
+        self.assertEqual(status, "timeout")
+        self.assertEqual(d["map_ready"], 0)
+        self.assertEqual(d["frames"], 0)
+
+    def test_ready_but_frames_not_advancing_is_a_timeout(self):
+        status, d = self._drive([(1, 7)] * 50, frames=3, timeout=5)
+        self.assertEqual(status, "timeout")
+        self.assertEqual(d["frames"], 0)
+
+    def test_a_read_failure_is_unreadable_not_a_pass(self):
+        status, d = self._drive([(0, 1), RuntimeError("E14")], frames=3)
+        self.assertEqual(status, "unreadable")
+        self.assertIn("E14", d["error"])
+
+    def test_isolate_candidates_cover_both_spellings(self):
+        self.assertEqual(xd.isolate_candidates("_nv2a_map_ready"), ["_nv2a_map_ready", "_nv2a_nv2a_map_ready"])
+        name, addr = xd.resolve_any({"_nv2a_nv2a_map_ready": 0x1234}, xd.isolate_candidates("_nv2a_map_ready"))
+        self.assertEqual((name, addr), ("_nv2a_nv2a_map_ready", 0x1234))
+        with self.assertRaises(KeyError):
+            xd.resolve_any({}, ["_absent"])
+
+
+class PpmDiff(unittest.TestCase):
+    def _ppm(self, w, h, px):
+        return b"P6\n%d %d\n255\n" % (w, h) + bytes(px)
+
+    def test_identical_images_differ_in_zero_pixels_with_no_bbox(self):
+        a = self._ppm(3, 2, [0, 0, 0] * 6)
+        self.assertEqual(xd.ppm_diff(a, a), (0, 6, None))
+
+    def test_differing_pixels_are_counted_and_bounded(self):
+        a = self._ppm(4, 3, [0, 0, 0] * 12)
+        px = [0, 0, 0] * 12
+        px[(1 * 4 + 1) * 3] = 255   # (1,1)
+        px[(2 * 4 + 3) * 3 + 2] = 9  # (3,2)
+        b = self._ppm(4, 3, px)
+        self.assertEqual(xd.ppm_diff(a, b), (2, 12, (1, 1, 3, 2)))
+
+    def test_size_mismatch_and_bad_header_are_errors_not_zero_diffs(self):
+        a = self._ppm(2, 2, [0] * 12)
+        b = self._ppm(3, 2, [0] * 18)
+        with self.assertRaises(ValueError):
+            xd.ppm_diff(a, b)
+        with self.assertRaises(ValueError):
+            xd.ppm_diff(b"P5\n2 2\n255\n" + bytes(4), b"P5\n2 2\n255\n" + bytes(4))
+        with self.assertRaises(ValueError):
+            xd.ppm_diff(self._ppm(2, 2, [0] * 12)[:-3], a)

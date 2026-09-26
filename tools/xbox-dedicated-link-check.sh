@@ -206,7 +206,16 @@ if ! tools/xbox-cc.sh "$REF_STUB_C" -o "$REF_STUB_OBJ" 2>"$STUB_DIR/stub-lasterr
 fi
 echo "xbox-dedicated-link-check: ref_null/ref_soft given empty stub tables (never reached - R_Init is #if !XASH_DEDICATED)." >&2
 
-NXDK_DIR="deps/nxdk"
+# ${NXDK_DIR:-...}: caller-overridable, for gates run from a git worktree
+# that has no built nxdk of its own - see tools/xbox-link-check.sh's own
+# NXDK_DIR line for the full reasoning.
+# A checkout may carry its nxdk location in .sweep/nxdk-dir (the agentic
+# loop's setup stage writes it into each worktree). docs/r3d/lessons.md's
+# entry on /c/msys64/usr/bin/bash shows an exported variable can be dropped
+# at that shell boundary with no error, so the checkout itself answers
+# when the environment does not. Unset and no file: the default below.
+[ -n "${NXDK_DIR:-}" ] || NXDK_DIR="$(cat "$REPO/.sweep/nxdk-dir" 2>/dev/null || true)"
+NXDK_DIR="${NXDK_DIR:-deps/nxdk}"
 LIBS=(
 	"$NXDK_DIR/lib/xboxkrnl/libxboxkrnl.lib" "$NXDK_DIR/lib/libpdclib.lib"
 	"$NXDK_DIR/lib/libwinapi.lib" "$NXDK_DIR/lib/libnxdk_hal.lib"
@@ -239,7 +248,7 @@ LINK_OUT="${XBE_OUT:-$SCRATCH/resonance3d-dedicated.exe}"
 # -> NET_QueuePacket) reaches the exact same 65535-byte stack buffer that
 # overflows a 64 KiB stack on the first frame.
 XBOX_STACK_SIZE=1048576
-deps/nxdk/bin/nxdk-link -errorlimit:0 -include:_automount_d_drive \
+"$NXDK_DIR/bin/nxdk-link" -errorlimit:0 -include:_automount_d_drive \
 	-stack:"$XBOX_STACK_SIZE" \
 	-out:"$LINK_OUT" "@$RESPONSE" > "$LOG" 2>&1
 LINK_STATUS=$?
@@ -274,10 +283,12 @@ fi
 # link is already fully resolved (0 undefined), so no -force:unresolved
 # re-link is needed first - $LINK_OUT itself is what gets converted.
 if [ -n "$XBE_OUT" ]; then
-	CXBE="deps/nxdk/tools/cxbe/cxbe"
+	# Built, untracked nxdk artifact - resolve through a caller's NXDK_DIR
+	# when set (see tools/xbox-link-check.sh's own NXDK_DIR line).
+	CXBE="${NXDK_DIR:-deps/nxdk}/tools/cxbe/cxbe"
 	if [ ! -x "$CXBE" ] && [ ! -f "${CXBE}.exe" ]; then
 		echo "xbox-dedicated-link-check: $CXBE not found or not built." >&2
-		echo "  Run: make -C deps/nxdk/tools/cxbe" >&2
+		echo "  Point NXDK_DIR at a built nxdk (tools/xbox-env.sh), or build it there." >&2
 		exit 1
 	fi
 	if ! "$CXBE" -OUT:"$XBE_OUT" -TITLE:"Resonance3D Dedicated" "$LINK_OUT" > "$SCRATCH/cxbe.txt" 2>&1; then

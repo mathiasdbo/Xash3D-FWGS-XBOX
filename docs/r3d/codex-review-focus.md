@@ -82,6 +82,22 @@ the single most recurring bug class in this codebase's own history:
   extraction pattern matched zero lines — the comparison loop simply never
   ran, and "nothing missing" looked identical to "nothing was checked."
 
+For an agent prompt or a Workflow script in the diff (`.claude/agents/`,
+`.claude/workflows/`): find where a pass/fail verdict is produced. If a
+model fills in a boolean, or the list of checks that "ran" is free text,
+that is the defect - the loop's first run reported green on a diff whose
+build gates never ran (PR #148). A verdict must be computed from recorded
+exit codes matched by name against a list derived from what changed. Any
+sentence that lets the agent choose which checks are relevant, skip one,
+or grade its own list is the defect, even when the verdict is computed
+elsewhere - the first loop's QA prompt said "skip any stage the change
+plainly doesn't touch" and "green only when every stage you judged
+relevant passed", and "judged relevant" was the hole. And
+for any checkout a script creates (`git worktree add`), ask whether the
+commands it will run there need built artifacts the checkout does not
+have: both real runs lost their gates to a worktree with nxdk's sources
+and none of its libraries.
+
 For ANY tool, script, or check in this diff: ask specifically what it
 would print if it were broken, unset, or fed empty input — and whether
 that output is distinguishable from a genuine pass. A check that can only

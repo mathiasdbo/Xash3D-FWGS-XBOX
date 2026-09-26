@@ -5,6 +5,60 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - the agentic loop computes its own build gate, spends review rounds only on code that builds, and looks at the screen
+
+Two real runs of the repo's agentic loop (PRs #148 and #149) showed the
+same holes: its QA stage could report "green" on code whose build gates
+had never run; the fresh worktree it creates per topic had nxdk's
+sources but none of its built libraries, so those gates could not run at
+all; and the one defect two review rounds missed was visible only on
+screen. An eight-lens adversarial audit of the loop against those runs
+drove this rewrite (`docs/r3d/agentic-loop.md`, "What two real runs
+taught").
+
+- The workflow derives the gates from the files a change touched, runs
+  them through `tools/gate-chain.sh` (a runner that records every exit
+  code and cannot report an empty pass; it has its own failure-path
+  self-test) and computes the verdict itself from the table, by name;
+  the runner's first row checks the plan's file list against the real
+  change set, it attests an all-green run with digests of the plan, the
+  table and the commit, and the publisher recomputes those digests and
+  the XBE's hash against its sidecar before opening a normal PR. A model
+  no longer decides, and build infrastructure (`tools/xbox-*.sh`, `patches/`, the
+  waf scripts) counts as Xbox code for the plan.
+- Every worktree carries the main checkout's nxdk path in
+  `.sweep/nxdk-dir`; every `tools/xbox-*.sh` site that resolves nxdk
+  (the compiler wrappers, the three link checks, `nxdk-link`, `cxbe`,
+  `extract-xiso`) honours `NXDK_DIR`, then that file, then its own
+  `deps/nxdk`. Setup proves the environment with a fixed plan - the
+  libraries, `cxbe`, one compile whose include search list must show
+  nxdk was reached, and with a live configuration the baseline build of
+  `origin/main` - before any research is paid. Gate commands are bare
+  invocations: `lessons.md` records the MSYS2 bash prefix dropping
+  exported variables.
+- Codex review runs only on a diff that passes the gates, against the
+  fork point's SHA rather than a stale local `main`, and a round counts
+  only with its thread id and a conclusive exit code; two inconclusive
+  runs block the PR. Round two runs only if the diff changed since round
+  one. Every finding is fixed, listed as justified, or blocks the PR as
+  unaddressed.
+- A live stage boots two discs in xemu, baseline and branch, on a real
+  map with the renderer selected (`tools/xbox-xiso.sh --overlay`), waits
+  for a defined frame (`tools/xemu-debug.py wait-scene`), diffs them
+  (`ppmdiff`) and reads the screenshots against the spec's own expected
+  list; it runs after the first green table and again whenever the XBE
+  changes, so a screen-found fix is still reviewed. A renderer change
+  without a live configuration is refused at setup.
+- A prompt naming one fork-plan step is one topic; a design note on disk
+  means no specialist consultation, a topic without one gets its domain
+  specialist and research writes the note the next run will find.
+- Each run writes a tracked record under `docs/r3d/reports/agentic-loop/`
+  whose measured sections are rendered by the script; the two earlier
+  runs are recorded there by hand. `node tools/test_agentic_loop.mjs`
+  checks the script's parse and its decision functions;
+  `tools/host-tests/run.sh` runs every host test with its documented
+  command.
+
 ### Added - the Xbox renderer's TriAPI now draws (X9-X step 4)
 
 The client DLL's triangle drawing API (`pTriAPI`) always existed as a

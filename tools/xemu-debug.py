@@ -113,6 +113,12 @@ wrong line. Read state; do not infer it. See docs/r3d/lessons.md.
                                  dashboard default). Wrong dims = a
                                  sheared image, not an error.
   screenshot <out.png>          Alias for fbdump.
+  wait-scene --map M --exe E    Block until the nv2a map-ready flag reads 1 and
+                                host.framecount has advanced --frames since;
+                                exit 0 ready / 1 timeout / 2 unreadable. Take
+                                a screenshot only after this says ready.
+  ppmdiff a.ppm b.ppm           Pixels differing between two fbdump .ppm files,
+                                with the bounding box. Exit 2 if not comparable.
   break <addr> [--steps N]      Software breakpoint, continue, single-step N
                                  (see the launch-timing caveat above).
   verify-image <exe> [--chunk N] Compare EVERY file-backed byte of the linked
@@ -1479,6 +1485,159 @@ def cmd_verify_image(a):
     print("verify-image: identity confirmed - every file-backed read-only byte matches.")
 
 
+# --- wait-scene / ppmdiff: the two readiness and comparison pieces the
+# agentic loop's live look needs so a screenshot has a defined frame
+# behind it (docs/r3d/agentic-loop.md). Both decision functions are pure,
+# so tools/test_xemu_debug.py drives them without an emulator.
+
+def resolve_any(syms, names):
+    """First of `names` present in the map, with the name that matched -
+    tools/xbox-ref-isolate.sh prefixes every symbol a renderer module
+    defines with <module>_, so a source-level name may appear either bare
+    or prefixed depending on which link produced the map."""
+    for n in names:
+        if n in syms:
+            return n, syms[n]
+    raise KeyError(f"none of {names} in the map")
+
+
+def isolate_candidates(name, module="nv2a"):
+    """`_foo` -> ['_foo', '_<module>_foo']: the two spellings a renderer
+    static can have in an lld map (bare from a plain link, prefixed from
+    tools/xbox-ref-isolate.sh's rename)."""
+    bare = name[1:] if name.startswith("_") else name
+    return [name, f"_{module}_{bare}"]
+
+
+def scene_ready_poll(read_state, frames_needed, timeout, sleep=time.sleep, clock=time.monotonic):
+    """Poll read_state() -> (map_ready:int, framecount:int) until the map
+    has been ready and the frame counter has advanced by frames_needed
+    since it first read ready. Returns (status, detail): status 'ready',
+    'timeout' or 'unreadable'. Frames are counted from the first READY
+    read, not from the first read, and the flag must hold for the whole
+    window: a counter that was already ticking on the loading plaque
+    proves nothing about the scene, and neither does one that kept
+    ticking after the scene unloaded."""
+    t0 = clock()
+    ready_fc = None
+    last = None
+    while True:
+        try:
+            ready, fc = read_state()
+        except Exception as e:  # noqa: BLE001 - any read failure is a verdict, not a crash
+            return "unreadable", {"error": str(e), "seconds": clock() - t0}
+        last = (ready, fc)
+        if ready != 1:
+            # A level unload after the first ready sample restarts the
+            # count: the flag must hold for the whole window, or the
+            # frames counted belong to a scene that is gone (Codex review
+            # of the agentic loop, round 2).
+            ready_fc = None
+        elif ready_fc is None:
+            ready_fc = fc
+        if ready_fc is not None and fc - ready_fc >= frames_needed:
+            return "ready", {"map_ready": ready, "frames": fc - ready_fc, "seconds": clock() - t0}
+        if clock() - t0 >= timeout:
+            return "timeout", {"map_ready": last[0], "frames": (fc - ready_fc) if ready_fc is not None else 0,
+                               "seconds": clock() - t0}
+        sleep(1.0)
+
+
+def cmd_wait_scene(a):
+    """Block until the nv2a scene is up: the module's map-ready flag reads 1
+    and host.framecount has advanced --frames since it did. Exit 0 ready,
+    1 timeout, 2 unreadable (identity or symbol failure). The agentic
+    loop screenshots only on exit 0 - a loading-plaque frame is not a
+    scene, and two frames taken at undefined moments do not diff."""
+    syms = load_map_symbols(a.map)
+    host_name, host = resolve_any(syms, ["_host"])
+    ready_name, ready_addr = resolve_any(syms, isolate_candidates(a.ready_symbol))
+    with open(a.exe, "rb") as f:
+        data = f.read()
+    off_fc = struct_offset("common.h", "host_parm_t", "framecount", 4)
+    with GdbRemote(a.host, a.port) as g:
+        check_identity(g, a, data, "wait-scene")
+
+    def read_state():
+        with GdbRemote(a.host, a.port) as g:
+            ready = struct.unpack("<I", g.read_mem(ready_addr, 4))[0]
+            fc = struct.unpack("<I", g.read_mem(host + off_fc, 4))[0]
+        return ready, fc
+
+    status, d = scene_ready_poll(read_state, a.frames, a.timeout)
+    if status == "ready":
+        print(f"scene ready: {ready_name}=1 frames=+{d['frames']} after {d['seconds']:.0f} s "
+              f"[{ready_name} @ {ready_addr:#010x}, {host_name}.framecount @ +{off_fc}]")
+        return
+    if status == "timeout":
+        print(f"wait-scene: TIMEOUT after {d['seconds']:.0f} s - {ready_name}={d['map_ready']}, "
+              f"frames since ready=+{d['frames']} (needed {a.frames})")
+        sys.exit(1)
+    print(f"wait-scene: unreadable after {d['seconds']:.0f} s: {d['error']}")
+    sys.exit(2)
+
+
+def parse_ppm(data):
+    """(width, height, pixels) of a binary P6 PPM with maxval 255, the
+    format cmd_fbdump writes. Raises ValueError on anything else."""
+    parts = data.split(maxsplit=4)
+    if len(parts) < 5 or parts[0] != b"P6":
+        raise ValueError("not a binary P6 PPM")
+    w, h, maxval = int(parts[1]), int(parts[2]), int(parts[3])
+    if maxval != 255:
+        raise ValueError(f"maxval {maxval}, expected 255")
+    # The pixel block starts after exactly one whitespace byte following maxval.
+    header_len = len(data) - len(parts[4]) if len(parts) == 5 else len(data)
+    pixels = data[header_len:header_len + w * h * 3]
+    if len(pixels) != w * h * 3:
+        raise ValueError(f"truncated: {len(pixels)} of {w * h * 3} pixel bytes")
+    return w, h, pixels
+
+
+def ppm_diff(a, b):
+    """(differing, total, bbox) between two same-sized P6 images; bbox is
+    (x0, y0, x1, y1) inclusive of every differing pixel, or None."""
+    wa, ha, pa = parse_ppm(a)
+    wb, hb, pb = parse_ppm(b)
+    if (wa, ha) != (wb, hb):
+        raise ValueError(f"size mismatch: {wa}x{ha} vs {wb}x{hb}")
+    differing = 0
+    x0 = y0 = None
+    x1 = y1 = None
+    stride = wa * 3
+    for y in range(ha):
+        ra = pa[y * stride:(y + 1) * stride]
+        rb = pb[y * stride:(y + 1) * stride]
+        if ra == rb:
+            continue
+        for x in range(wa):
+            i = x * 3
+            if ra[i:i + 3] != rb[i:i + 3]:
+                differing += 1
+                x0 = x if x0 is None or x < x0 else x0
+                x1 = x if x1 is None or x > x1 else x1
+                y0 = y if y0 is None else y0
+                y1 = y
+    bbox = None if differing == 0 else (x0, y0, x1, y1)
+    return differing, wa * ha, bbox
+
+
+def cmd_ppmdiff(a):
+    """Compare two fbdump .ppm files pixel for pixel. Prints the count and
+    the bounding box; exit 0 whenever the comparison could be made (the
+    count is the data), 2 when it could not."""
+    try:
+        with open(a.a, "rb") as f:
+            da = f.read()
+        with open(a.b, "rb") as f:
+            db = f.read()
+        differing, total, bbox = ppm_diff(da, db)
+    except (OSError, ValueError) as e:
+        print(f"ppmdiff: cannot compare: {e}")
+        sys.exit(2)
+    print(f"ppmdiff: {differing} of {total} pixels differ, bbox={bbox}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1523,6 +1682,10 @@ def main():
     s.add_argument("--seconds", type=float, default=30.0); s.set_defaults(func=cmd_fps)
     s = sub.add_parser("cursor"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
     s.set_defaults(func=cmd_cursor)
+    s = sub.add_parser("wait-scene"); s.add_argument("--map", required=True); s.add_argument("--exe", required=True)
+    s.add_argument("--timeout", type=float, default=120.0); s.add_argument("--frames", type=int, default=60)
+    s.add_argument("--ready-symbol", default="_nv2a_map_ready"); s.set_defaults(func=cmd_wait_scene)
+    s = sub.add_parser("ppmdiff"); s.add_argument("a"); s.add_argument("b"); s.set_defaults(func=cmd_ppmdiff)
 
     a = p.parse_args()
     try:

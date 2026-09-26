@@ -20,6 +20,14 @@
 #       --xbe .sweep/game-hl/default.xbe \
 #       --out .sweep-xiso/hl.iso
 #
+# --overlay <dir>: copied over the finished stage, last, before packing -
+# paths relative to the disc root (so <gamedir>/video.cfg, <gamedir>/
+# userconfig.d/00-live.cfg, <gamedir>/<map>.mpak). This is how the
+# agentic loop's live look gets a disc that boots ref_nv2a, loads a map
+# and carries its baked archive: the three things run 2 (PR #149) placed
+# on the disc by hand before its screenshots. Every file is cmp-verified
+# after the copy; an empty overlay is an error, not a no-op.
+#
 # Never copies retail content into the repo - none of it is ours to
 # redistribute. Staging happens under .sweep-xiso/<title>/ (gitignored,
 # same convention as every other .sweep* scratch directory), rebuilt clean
@@ -93,7 +101,17 @@ sha256_of() {
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
-EXTRACT_XISO="$REPO/deps/nxdk/tools/extract-xiso/build/extract-xiso.exe"
+# extract-xiso is a built, untracked nxdk artifact: a git worktree has
+# none, so honour a caller's NXDK_DIR (nxdk's own activate variable)
+# pointing at the main checkout's built nxdk - see
+# tools/xbox-link-check.sh's own NXDK_DIR line for the reasoning.
+# A checkout may carry its nxdk location in .sweep/nxdk-dir (the agentic
+# loop's setup stage writes it into each worktree). docs/r3d/lessons.md's
+# entry on /c/msys64/usr/bin/bash shows an exported variable can be dropped
+# at that shell boundary with no error, so the checkout itself answers
+# when the environment does not. Unset and no file: the default below.
+[ -n "${NXDK_DIR:-}" ] || NXDK_DIR="$(cat "$REPO/.sweep/nxdk-dir" 2>/dev/null || true)"
+EXTRACT_XISO="${NXDK_DIR:-$REPO/deps/nxdk}/tools/extract-xiso/build/extract-xiso.exe"
 if [ ! -f "$EXTRACT_XISO" ]; then
 	echo "xbox-xiso: $EXTRACT_XISO not found or not built." >&2
 	echo "  Build nxdk's extract-xiso tool first." >&2
@@ -138,6 +156,7 @@ MENU_BAKE=""
 DELTA_LST=""
 RESOURCE_DIR=""
 UI_LANGUAGE=""
+OVERLAY_DIR=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--steam) STEAM="$2"; shift 2 ;;
@@ -147,6 +166,7 @@ while [ $# -gt 0 ]; do
 		--delta-lst) DELTA_LST="$2"; shift 2 ;;
 		--resource-dir) RESOURCE_DIR="$2"; shift 2 ;;
 		--ui-language) UI_LANGUAGE="$2"; shift 2 ;;
+		--overlay) OVERLAY_DIR="$2"; shift 2 ;;
 		*) echo "xbox-xiso: unrecognised argument: $1" >&2; exit 1 ;;
 	esac
 done
@@ -1030,6 +1050,36 @@ fi
 if [ "$BASEDIR" != "$GAMEDIR" ] && ! sync_gameinfo_hl25_flags "$STAGE/$BASEDIR"; then
 	echo "xbox-xiso: syncing HL25 gameinfo flags for $BASEDIR failed." >&2
 	exit 1
+fi
+
+# --overlay: the caller's files over the finished stage, last, so nothing
+# above (retail copy, menu bake, dictionaries, gameinfo sync) can undo
+# them and a disc built without the flag is untouched. Same shape as the
+# --resource-dir copy: cp, then cmp, per file - a copy that "succeeds"
+# without the bytes arriving is the failure this script keeps finding.
+if [ -n "$OVERLAY_DIR" ]; then
+	[ -d "$OVERLAY_DIR" ] || { echo "xbox-xiso: --overlay does not exist: $OVERLAY_DIR" >&2; exit 1; }
+	overlay_count=0
+	while IFS= read -r -d '' src; do
+		rel="${src#"$OVERLAY_DIR"/}"
+		dst="$STAGE/$rel"
+		mkdir -p "$(dirname "$dst")" || { echo "xbox-xiso: cannot create $(dirname "$dst")" >&2; exit 1; }
+		if ! cp "$src" "$dst"; then
+			echo "xbox-xiso: copying overlay file $rel into the stage failed." >&2
+			exit 1
+		fi
+		if ! cmp -s "$src" "$dst"; then
+			echo "xbox-xiso: staged overlay file $rel differs from source - copy was incomplete." >&2
+			exit 1
+		fi
+		overlay_count=$((overlay_count + 1))
+		echo "xbox-xiso: overlay: $rel" >&2
+	done < <(find "$OVERLAY_DIR" -type f -print0)
+	if [ "$overlay_count" -eq 0 ]; then
+		echo "xbox-xiso: --overlay $OVERLAY_DIR contains no files - an empty overlay is a mistake, not a no-op." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: $overlay_count overlay file(s) staged and verified from $OVERLAY_DIR." >&2
 fi
 
 mkdir -p "$(dirname "$OUT")"
