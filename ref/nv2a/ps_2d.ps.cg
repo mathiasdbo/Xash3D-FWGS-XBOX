@@ -1,0 +1,23 @@
+/*
+ * X9-X 2D pixel shader: sample the bound stage-0 texture (linear
+ * A8B8G8R8, texel-unit addressed - see r_context.c's own "NEVER debug a
+ * wrong picture" caveat, divergences.md #100) and modulate by the
+ * per-vertex colour vs_2d.vs.cg passes through. Same struct/sampler
+ * shape as ps.ps.cg/ps_lit.ps.cg. Compiled with cgc -profile fp20 +
+ * fp20compiler; expected to compile to exactly one general combiner
+ * stage, A = tex0 (source 0x8) times B = COLOR0 (source 0x4), NOSHIFT,
+ * alpha likewise - confirmed by a scratch compile of this same source
+ * before it was committed (design doc's shader-facts section).
+ */
+struct vOut {
+	float4 col0 : COLOR0;
+	float2 tex0 : TEXCOORD0;
+};
+
+float4 main(
+	vOut              I,
+	uniform sampler2D diffuseMap
+	) : COLOR
+{
+	return tex2D(diffuseMap, I.tex0.xy) * I.col0;
+}

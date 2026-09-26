@@ -5,6 +5,26 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - the Xbox renderer can now draw textures and 2D: console, HUD, crosshair, fades and menus (X9-X)
+
+The Xbox renderer could draw the 3D world but nothing else - every texture
+call returned nothing, and every 2D drawing call was empty, so the console,
+HUD, crosshair, loading plaque and menus were all invisible. It now has a
+real texture manager (upload, update, free, all the way up from a raw file
+or buffer to GPU-resident memory) and a real 2D batching pass, so those all
+draw.
+
+World (`.mip`) textures still never reach the GPU: this renderer draws a
+map's own baked texture directory instead, so an Xbox map's worldspawn `wad`
+key is now dropped at bake time, matching what the renderer already does -
+the engine no longer decodes a texture from a WAD file only for the
+renderer to throw it away. Every archive needs rebaking.
+
+Known gaps, left for a later pass: no mipmaps, no compressed (DXT) 2D
+textures, no 16-bit formats, sprites and studio-model skins upload but do
+not draw yet, and the 2D viewport's pixel-centre offset is unverified on
+real hardware.
+
 ### Changed - the Xbox renderer draws the world where the engine asks for it (X9-X)
 
 The Xbox renderer used to draw everything at the very end of each frame,

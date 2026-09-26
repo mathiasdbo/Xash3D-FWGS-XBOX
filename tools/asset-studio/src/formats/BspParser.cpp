@@ -223,6 +223,95 @@ namespace formats {
         }
     }
 
+    // X9-X Part A, gap 1: on Xbox nv2a every world texture takes the
+    // WAD branch regardless of this baker's own miptex policy (#112 -
+    // the archive's directory offsets are already zero) because
+    // Mod_LoadTextureData falls back to a WAD lookup whenever offsets[0]
+    // is <= 0 (engine/common/mod_bmodel.c:2911-2922), and the Xbox disc
+    // stages the whole retail valve dir, WADs included
+    // (tools/xbox-xiso.sh:230). That WAD lookup only ever runs for a
+    // texture whose containing map's worldspawn "wad" key names a WAD on
+    // disk (Mod_LoadTextureFromWadList walks world.wadlist, itself built
+    // only from that key, mod_bmodel.c:2439-2491). Dropping the key here
+    // makes wadcount 0, so every world texture instead falls straight to
+    // R_GetBuiltinTexture(REF_DEFAULT_TEXTURE) (mod_bmodel.c:2946-2951)
+    // with nothing decoded or uploaded - ref/nv2a never draws a world
+    // texture this way regardless (it samples the archive's own DXT1
+    // atlas), so the engine doing real WAD decode work for a texture
+    // no renderer will ever sample was pure waste: median 2.73 MiB,
+    // max 13.23 MiB of RGBA32 decodes per map (measured over the retail
+    // WAD set and all 125 maps).
+    std::vector<uint8_t> stripWorldspawnWadKey(const std::vector<uint8_t>& entityData) {
+        std::string_view text(reinterpret_cast<const char*>(entityData.data()), entityData.size());
+
+        size_t openBrace = text.find_first_not_of(" \t\r\n");
+        if (openBrace == std::string_view::npos || text[openBrace] != '{')
+            return entityData; // malformed: no leading entity block
+
+        size_t closeBrace = text.find('}', openBrace + 1);
+        if (closeBrace == std::string_view::npos)
+            return entityData; // malformed: unterminated first block
+
+        // Byte ranges within the first block to drop, in the order found.
+        std::vector<std::pair<size_t, size_t>> removals;
+        size_t pos = openBrace + 1;
+
+        while (pos < closeBrace) {
+            size_t scan = text.find_first_not_of(" \t\r\n", pos);
+            if (scan == std::string_view::npos || scan >= closeBrace)
+                break; // only trailing whitespace left before the closing brace
+
+            if (text[scan] != '"')
+                return entityData; // malformed: expected a quoted key
+
+            const size_t keyStart = scan;
+            const size_t keyEnd = text.find('"', keyStart + 1);
+            if (keyEnd == std::string_view::npos || keyEnd >= closeBrace)
+                return entityData; // malformed: unterminated key
+
+            const size_t valScan = text.find_first_not_of(" \t\r\n", keyEnd + 1);
+            if (valScan == std::string_view::npos || valScan >= closeBrace || text[valScan] != '"')
+                return entityData; // malformed: expected a quoted value
+
+            const size_t valEnd = text.find('"', valScan + 1);
+            if (valEnd == std::string_view::npos || valEnd >= closeBrace)
+                return entityData; // malformed: unterminated value
+
+            const size_t pairEnd = valEnd + 1;
+            const std::string_view key = text.substr(keyStart + 1, keyEnd - keyStart - 1);
+            const bool isWad = key.size() == 3
+                && std::tolower(static_cast<unsigned char>(key[0])) == 'w'
+                && std::tolower(static_cast<unsigned char>(key[1])) == 'a'
+                && std::tolower(static_cast<unsigned char>(key[2])) == 'd';
+
+            if (isWad) {
+                size_t removeEnd = pairEnd;
+                // Absorb one trailing line break so the stripped line
+                // doesn't leave a blank one behind - cosmetic only, the
+                // engine's own parser (COM_ParseFile) skips whitespace
+                // freely either way.
+                if (removeEnd < text.size() && text[removeEnd] == '\r') ++removeEnd;
+                if (removeEnd < text.size() && text[removeEnd] == '\n') ++removeEnd;
+                removals.emplace_back(keyStart, removeEnd);
+            }
+
+            pos = pairEnd;
+        }
+
+        if (removals.empty())
+            return entityData;
+
+        std::vector<uint8_t> out;
+        out.reserve(entityData.size());
+        size_t cursor = 0;
+        for (const auto& [start, end] : removals) {
+            out.insert(out.end(), entityData.begin() + static_cast<long>(cursor), entityData.begin() + static_cast<long>(start));
+            cursor = end;
+        }
+        out.insert(out.end(), entityData.begin() + static_cast<long>(cursor), entityData.end());
+        return out;
+    }
+
     bool BspParser::load(const std::string& filePath) {
         std::ifstream file(filePath, std::ios::binary);
         if (!file.is_open()) {
@@ -998,7 +1087,15 @@ namespace formats {
         pak.setPlanesData(getLumpData(LUMP_PLANES));
         pak.setClipnodesData(getLumpData(LUMP_CLIPNODES));
         pak.setModelsData(getLumpData(LUMP_MODELS));
-        pak.setEntitiesData(getLumpData(LUMP_ENTITIES));
+        if (pak.isProfileNv2a() && pak.isXboxTarget()) {
+            // X9-X Part A: see stripWorldspawnWadKey's own comment - this
+            // is what makes the ENGINE take the no-pixels path too,
+            // instead of only ref/nv2a discarding what the engine already
+            // decoded from a WAD it never needed to open.
+            pak.setEntitiesData(stripWorldspawnWadKey(getLumpData(LUMP_ENTITIES)));
+        } else {
+            pak.setEntitiesData(getLumpData(LUMP_ENTITIES));
+        }
         pak.setTexinfoData(getLumpData(LUMP_TEXINFO));
 
         // v7 classic core (MpakHeader.h's v6 -> v7 note): the raw lumps the

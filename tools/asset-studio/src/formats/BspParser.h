@@ -33,6 +33,21 @@ namespace formats {
     void indexWadLumpsForCore(std::unordered_map<std::string, const WadLump*>& index,
                               const std::vector<WadLump>& lumps);
 
+    // X9-X Part A: strips every "wad" key/value pair from the FIRST
+    // entity block only (worldspawn) of a LUMP_ENTITIES buffer, matched
+    // case-insensitively - the same scope and the same comparison the
+    // engine's own parser uses (Mod_LoadEntities only ever reads "wad"
+    // from the first entity, returning right after that block; the key
+    // compare is Q_stricmp, engine/common/mod_bmodel.c:2439-2491,
+    // key match at :2462). Used only for the Xbox nv2a bake (see the
+    // definition's own comment for why). Leaves every other byte
+    // identical, including a later entity's own "wad" key if any, and
+    // returns the input completely unchanged for anything that is not a
+    // well-formed leading `{...}` block rather than guess at a partial
+    // strip. Public so it can be unit-tested against hand-built entity
+    // lumps without a retail install.
+    std::vector<uint8_t> stripWorldspawnWadKey(const std::vector<uint8_t>& entityData);
+
     enum BspLumpType {
         LUMP_ENTITIES = 0,
         LUMP_PLANES = 1,

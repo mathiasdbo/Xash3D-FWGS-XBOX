@@ -44,7 +44,24 @@ namespace formats {
     // run. Roadmap X9 item 12 measures transitions and the largest
     // contiguous run.
     constexpr uint64_t kMiB = 1024ull * 1024ull;
-    constexpr uint64_t kXboxFreeAtWorldLoadBytes = 36ull * kMiB + kMiB / 4; // 36.25 MiB, the lowest measured
+
+    // X9-X: ref/nv2a's R_Init now allocates its texture arena, its 2D
+    // vertex ring and its texture slot table ONCE, before any map, and
+    // keeps them resident for the whole session (D1, ref/nv2a/r_context.c
+    // - NV2A_TEXTURE_ARENA_BYTES, NV2A_2D_VERTEX_RING_BYTES and the
+    // NV2A_MAX_TEXTURES slot table + name hash table respectively). The
+    // 36.25 MiB calibration above (X9-U, 2026-09-25) was measured on a
+    // renderer that loaded no textures at all - that free-memory figure
+    // already includes bytes this build no longer has free, so they come
+    // out of it here rather than re-measuring (roadmap follow-up: redo
+    // the MmQueryStatistics probe on this build and replace the whole
+    // constant once that is available).
+    constexpr uint64_t kXboxTextureArenaBytes = 3ull * kMiB;         // NV2A_TEXTURE_ARENA_BYTES
+    constexpr uint64_t kXboxVertexRingBytes = 256ull * 1024ull;      // NV2A_2D_VERTEX_RING_BYTES
+    constexpr uint64_t kXboxTextureTableBytes = 512ull * 1024ull;    // NV2A_MAX_TEXTURES slots + name hash table (upper bound)
+    constexpr uint64_t kXboxRefNv2aResidentBytes = kXboxTextureArenaBytes + kXboxVertexRingBytes + kXboxTextureTableBytes;
+
+    constexpr uint64_t kXboxFreeAtWorldLoadBytes = 36ull * kMiB + kMiB / 4 - kXboxRefNv2aResidentBytes; // 36.25 MiB measured, minus what ref/nv2a now holds resident before any map
     constexpr uint64_t kXboxPrecacheBytes = 9ull * kMiB;                    // above the 8.1 MiB highest of the nine maps that load
     constexpr uint64_t kXboxLoadMarginBytes = 1ull * kMiB;                  // C1 headroom
     constexpr uint64_t kXboxSteadyMarginBytes = 3ull * kMiB / 2;            // C3 headroom: decals, sounds played later

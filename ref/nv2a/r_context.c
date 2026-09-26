@@ -50,9 +50,12 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include <string.h>
 #include "xash3d_types.h"
 #include "const.h"
+#include "com_strings.h" /* S_ERROR - not pulled in transitively here, unlike ref/soft/ref/gl's own r_local.h/gl_local.h */
 #include "entity_types.h" /* X9-M: ET_BEAM, for R_AddEntity */
 #include "cvardef.h"
 #include "ref_common.h"
+#include "nv2a_texture.h" /* X9-X: the texture manager's own table/entry points (r_image.c) */
+#include "nv2a_2d_util.h" /* X9-X: the 2D pass's pure-arithmetic pieces (nv2a_2d_util.c), host-tested */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -875,6 +878,13 @@ static CVAR_DEFINE_AUTO( nv2a_r_texturenearest, "0", 0, "ref_nv2a: point-filter 
 static CVAR_DEFINE_AUTO( nv2a_r_anisotropy, "2", 0, "ref_nv2a: anisotropic filtering for mipmapped textures: 1, 2, 4 or 8 (2 is hardware-proven)" );
 static CVAR_DEFINE_AUTO( nv2a_r_lodbias, "0", 0, "ref_nv2a: mip LOD bias, -3..3 (negative = sharper, later switch to smaller levels)" );
 
+/* X9-X, C5: the 2D viewport matrix's own M[3][0]/M[3][1] - unverified
+   live (design doc's own note). 0 until a real Xbox run judges the
+   TF_NEAREST console font against -0.5 (the classic "sample texel
+   centres" half-pixel offset some GPUs need for a point-filtered
+   blit) - see docs/r3d/x9-x-textures-and-2d.md's verification item 9. */
+static CVAR_DEFINE_AUTO( nv2a_r_2d_pixeloffset, "0", 0, "ref_nv2a: 2D viewport pixel-centre offset, unverified live" );
+
 /* The real, live camera eye position, captured once per real frame by
    GL_RenderFrame alongside nv2a_map_viewproj/nv2a_frustum - needed here
    because nv2a_draw_map_geometry() (called later the same frame, from
@@ -1148,6 +1158,19 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 	return true;
 }
 
+/* X9-X: the NV2A holds one resident vertex/pixel program at a time -
+   every function that loads a different one clears this so the 2D
+   pass's own nv2a_init_2d_shader() (defined with the rest of Part F,
+   below) knows to re-upload before its next flush. Declared this early
+   only because nv2a_init_shader() and nv2a_init_lit_shader() below both
+   need to clear it. */
+static qboolean nv2a_2d_shader_resident;
+
+/* X9-X D1: the 2D pass's own vertex ring - allocated in R_Init, freed in
+   R_Shutdown (both well above where the rest of Part F is defined
+   below), so its pointer needs to be declared this early too. */
+static void *nv2a_2d_ring;
+
 /* tools/x4-triangle/main.c's own init_shader(), unmodified in shape - the
    vp20 program upload loop plus the fp20 pixel-shader block, both
    pre-compiled headers copied from that same directory (ref/nv2a/vs.inl,
@@ -1157,6 +1180,8 @@ static void nv2a_init_shader( void )
 {
 	uint32_t *p;
 	int i;
+
+	nv2a_2d_shader_resident = false;
 
 	uint32_t vs_program[] =
 	{
@@ -1203,6 +1228,8 @@ static void nv2a_init_lit_shader( void )
 {
 	uint32_t *p;
 	int i;
+
+	nv2a_2d_shader_resident = false;
 
 	uint32_t vs_program[] =
 	{
@@ -2835,6 +2862,7 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_texturenearest );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_anisotropy );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lodbias );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_2d_pixeloffset );
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not
@@ -2913,6 +2941,33 @@ static qboolean R_Init( void )
 	}
 	memcpy( nv2a_vb, nv2a_test_verts, sizeof( nv2a_test_verts ));
 
+	/* X9-X D1: the texture manager's own arena/table, and the 2D pass's
+	   own vertex ring - both allocated once, here, before any map. */
+	nv2a_2d_ring = MmAllocateContiguousMemoryEx( NV2A_2D_VERTEX_RING_BYTES, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+	if( !nv2a_2d_ring )
+	{
+		debug_marker = 8;
+		pb_kill();
+		pb_initialized = false;
+		nv2a_free_resources();
+		Mem_FreePool( &r_temppool );
+		gEngfuncs.R_Free_Video();
+		return false;
+	}
+
+	if( !nv2a_tex_init())
+	{
+		debug_marker = 9;
+		pb_kill();
+		pb_initialized = false;
+		MmFreeContiguousMemory( nv2a_2d_ring );
+		nv2a_2d_ring = NULL;
+		nv2a_free_resources();
+		Mem_FreePool( &r_temppool );
+		gEngfuncs.R_Free_Video();
+		return false;
+	}
+
 	nv2a_matrix_viewport( nv2a_viewport, 0, 0, (float)nv2a_width, (float)nv2a_height, 0, 65536.0f );
 
 	debug_marker = 5;
@@ -2934,6 +2989,15 @@ static void R_Shutdown( void )
 	{
 		pb_kill();
 		pb_initialized = false;
+	}
+
+	/* X9-X D7: every texture slot, then the arena/table, after pb_kill -
+	   the GPU is idle by now, matching nv2a_tex_shutdown()'s own comment. */
+	nv2a_tex_shutdown();
+	if( nv2a_2d_ring )
+	{
+		MmFreeContiguousMemory( nv2a_2d_ring );
+		nv2a_2d_ring = NULL;
 	}
 
 	nv2a_free_resources();
@@ -3016,15 +3080,13 @@ static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned
 	}
 }
 
-static const byte *R_GetTextureOriginalBuffer( unsigned int idx )
-{
-	return NULL;
-}
-
-static int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags, qboolean update )
-{
-	return 0;
-}
+/* X9-X D3: R_GetTextureOriginalBuffer, GL_LoadTextureFromBuffer and every
+   other GL_*Texture* entry point are now real, implemented in r_image.c
+   and declared by nv2a_texture.h (included above) - gReffuncs assigns
+   them directly by that external name, nothing to do here. R_DrawStretchPic
+   and FillRGBA (C3/C4) are real too, defined below beside the rest of the
+   2D pass, so they can call its batching helpers without a forward
+   declaration for every one of them. */
 
 static void GL_ProcessTexture( int texnum, float gamma, int topColor, int bottomColor )
 {
@@ -3032,16 +3094,6 @@ static void GL_ProcessTexture( int texnum, float gamma, int topColor, int bottom
 }
 
 static void R_SetupSky( int *skytextures )
-{
-	;
-}
-
-static void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum )
-{
-	;
-}
-
-static void FillRGBA( int rendermode, float x, float y, float w, float h, byte r, byte g, byte b, byte a )
 {
 	;
 }
@@ -4174,52 +4226,48 @@ static void CL_DrawBeams( int fTrans, BEAM *beams )
 	;
 }
 
+/* D5: whole port of ref/soft's own GL_RefGetParm switch (r_context.c:124-199),
+   corrected where D5 says to - PARM_TEX_FILTERING answered locally
+   instead of the reference's own "ref_soft doesn't filter" 0, and
+   PARM_GET_STUDIO_HDR returns 0 (no studio-model support yet, out of
+   scope this phase) rather than calling R_StudioGetHeader(). */
 static intptr_t RefGetParm( int parm, int arg )
 {
-	if( parm == PARM_GL_CONTEXT_TYPE )
-		return CONTEXT_TYPE_SOFTWARE;
-
-	return 0;
-}
-
-static int GL_FindTexture( const char *name )
-{
-	return 0;
-}
-
-static const char *GL_TextureName( unsigned int texnum )
-{
-	return NULL;
-}
-
-static const byte *GL_TextureData( unsigned int texnum )
-{
-	return NULL;
-}
-
-static int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
-{
-	return 0;
-}
-
-static int GL_CreateTexture( const char *name, int width, int height, const void *buffer, texFlags_t flags )
-{
-	return 0;
-}
-
-static void R_OverrideTextureSourceSize( unsigned int textnum, unsigned int srcWidth, unsigned int srcHeight )
-{
-	;
-}
-
-static void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, const byte *buffer, pixformat_t fmt )
-{
-	;
-}
-
-static void GL_Bind( int tmu, unsigned int texnum )
-{
-	;
+	switch( parm )
+	{
+	case PARM_TEX_WIDTH:      return nv2a_tex_get((unsigned int)arg )->width;
+	case PARM_TEX_HEIGHT:     return nv2a_tex_get((unsigned int)arg )->height;
+	case PARM_TEX_SRC_WIDTH:  return nv2a_tex_get((unsigned int)arg )->srcWidth;
+	case PARM_TEX_SRC_HEIGHT: return nv2a_tex_get((unsigned int)arg )->srcHeight;
+	case PARM_TEX_MIPCOUNT:   return 1; /* D2: no mip chain this phase */
+	case PARM_TEX_DEPTH:      return 1;
+	case PARM_TEX_SKYBOX:     return 0;
+	case PARM_TEX_SKYTEXNUM:  return 0;
+	case PARM_TEX_LIGHTMAP:   return 0;
+	case PARM_TEX_TARGET:     return 0;
+	case PARM_TEX_TEXNUM:     return 0;
+	case PARM_TEX_GLFORMAT:   return 0;
+	case PARM_TEX_ENCODE:     return 0;
+	case PARM_TEX_FLAGS:      return nv2a_tex_get((unsigned int)arg )->flags;
+	case PARM_TEX_MEMORY:     return (intptr_t)nv2a_tex_memory();
+	case PARM_ACTIVE_TMU:     return 0;
+	case PARM_LIGHTSTYLEVALUE:
+		arg = bound( 0, arg, MAX_LIGHTSTYLES - 1 );
+		return g_lightstylevalue[arg];
+	case PARM_GL_CONTEXT_TYPE: return CONTEXT_TYPE_SOFTWARE;
+	case PARM_SKY_SPHERE:      return 0;
+	case PARM_GLES_WRAPPER:    return 0;
+	case PARM_STENCIL_ACTIVE:  return 0;
+	case PARM_MAX_IMAGE_UNITS: return 0;
+	case PARM_REBUILD_GAMMA:   return 0;
+	case PARM_GET_STUDIO_HDR:  return 0;
+	case PARM_TEX_FILTERING:
+		if( arg < 0 )
+			return !nv2a_r_texturenearest.value;
+		return nv2a_texture_filtering_enabled( nv2a_tex_get((unsigned int)arg ));
+	default:
+		return ENGINE_GET_PARM_( parm, arg );
+	}
 }
 
 /* X9-G: real PVS culling, closing the last half of #91/#95's own
@@ -4718,14 +4766,438 @@ static byte *Mod_GetCurrentVis( void )
 	return NULL;
 }
 
-static void Color4f( float r, float g, float b, float a )
+/*
+========================================================================
+X9-X Part F: the 2D pass. One packed 20-byte vertex (position, texel-unit
+texcoord, byte colour) batched through the 256 KiB vertex ring D1
+allocates in R_Init, flushed whenever the desired GPU-state shadow, the
+resolved texture-stage key or an explicit "dirty" flag changes from what
+was last actually pushed - see nv2a_2d_flush()'s own comment for the
+GPU-state re-entry sequence and citations.
+========================================================================
+*/
+
+typedef struct
 {
-	;
+	float x, y;
+	float u, v;
+	byte  rgba[4];
+} __attribute__(( packed )) nv2a_2d_vertex_t;
+
+/* The resolved GPU texture-stage parameters of the pending batch's own
+   texture - NOT its texnum (C1's own note): a same-frame slot reuse
+   (GL_UpdateTexture on a still-pending texnum) must not silently
+   redirect an already-queued batch to different pixels. */
+typedef struct
+{
+	uint32_t offset, pitch, width, height;
+	qboolean bilinear;
+} nv2a_2d_batch_key_t;
+
+typedef struct
+{
+	qboolean blend_enable;
+	uint32_t sfactor, dfactor;
+	qboolean alpha_test_enable;
+} nv2a_2d_shadow_t;
+
+static qboolean nv2a_in2d;
+static byte     nv2a_2d_color[4] = { 255, 255, 255, 255 }; /* current colour, shared with TriAPI */
+
+static nv2a_2d_shadow_t nv2a_2d_desired = { false, NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA, false };
+static nv2a_2d_shadow_t nv2a_2d_pushed;
+/* The render state the pending batch was appended under. A flush is
+   triggered by the NEXT quad's different state, by which time
+   nv2a_2d_desired already holds that next state - so the flush pushes
+   this snapshot, not nv2a_2d_desired. Found live in xemu (X9-X): the
+   engine brackets each HUD draw as GL_SetRenderMode(mode), draw,
+   GL_SetRenderMode(kRenderNormal) (cl_game.c pfnSPR_DrawAdditive), and
+   additive HUD sprites came out opaque on black boxes when flushed under
+   the following SPR_Draw's alpha-test mode. */
+static nv2a_2d_shadow_t nv2a_2d_batch_state;
+static qboolean nv2a_2d_pushed_valid;
+
+static nv2a_2d_batch_key_t nv2a_2d_batch_key;
+static qboolean nv2a_2d_dirty = true; /* forces a full GPU-state re-entry the first time the 2D pass ever flushes */
+/* nv2a_2d_shader_resident and nv2a_2d_ring are declared near
+   nv2a_init_shader() above - both are needed by code defined well
+   before this point in the file (R_Init/R_Shutdown, nv2a_init_shader()
+   itself). */
+
+static uint32_t nv2a_2d_ring_write_offset;
+static uint32_t nv2a_2d_ring_batch_base_offset;
+static uint32_t nv2a_2d_ring_pending_verts;
+
+/* Tracks the ring base offset the vertex attribute-array pointers were
+   last actually pointed at - INDEPENDENT of nv2a_2d_dirty, which only
+   covers the once-per-re-entry GPU state (shader/matrix/array-format/
+   alpha-test). A texture- or blend-only flush still starts a brand-new
+   batch at a brand-new ring offset (nv2a_2d_append_quad()'s own
+   comment), so the pointers must be checked against THIS on every
+   flush, not just the rare full re-entry - see nv2a_2d_flush(). */
+static uint32_t nv2a_2d_pushed_base_offset;
+static qboolean nv2a_2d_pushed_base_valid;
+
+/* D4/D6 accessors r_image.c's own texture manager needs from here. */
+qboolean nv2a_frame_is_open( void ) { return nv2a_frame_open; }
+uint32_t nv2a_current_frame_number( void ) { return debug_frame_count; }
+qboolean nv2a_global_texture_nearest( void ) { return nv2a_r_texturenearest.value != 0.0f; }
+
+/* X9-X: the same cgc/vp20compiler/fp20compiler pipeline vs.inl/vs_lit.inl
+   already went through - see vs_2d.vs.cg/ps_2d.ps.cg's own provenance
+   comments and docs/r3d/design/x9-x-textures-and-2d.md's shader-facts
+   section for the scratch compile that established the exact register
+   layout these two headers carry. Otherwise identical in shape to
+   nv2a_init_shader()/nv2a_init_lit_shader() above. */
+static void nv2a_init_2d_shader( void )
+{
+	uint32_t *p;
+	int i;
+
+	uint32_t vs_program[] =
+	{
+		#include "vs_2d.inl"
+	};
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
+	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
+		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
+		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
+	pb_end( p );
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
+	pb_end( p );
+
+	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); i++ )
+	{
+		p = pb_begin();
+		pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
+		memcpy( p, &vs_program[i * 4], 4 * 4 );
+		p += 4;
+		pb_end( p );
+	}
+
+	p = pb_begin();
+	#include "ps_2d.inl"
+	pb_end( p );
+}
+
+static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
+{
+	uint32_t phys, pitch, width, height;
+	qboolean bilinear;
+
+	if( !nv2a_tex_gpu_params( nv2a_tex_current(), &phys, &pitch, &width, &height, &bilinear ))
+		return false; /* GL_Bind already substitutes the default whenever a slot has no storage - defensive only */
+
+	key->offset = phys;
+	key->pitch = pitch;
+	key->width = width;
+	key->height = height;
+	key->bilinear = bilinear;
+	return true;
+}
+
+/* One DRAW_ARRAYS chunk, fully self-contained (its own BEGIN_END pair) -
+   mirrors nv2a_draw_index_range()'s own precedent above (multiple small
+   primitives, not one spanning several pushbuffer kicks), and trivially
+   respects the 128-dword-per-block limit
+   (deps/nxdk/lib/pbkit/pbkit_pushbuffer.h's own comment) either way. */
+static void nv2a_2d_emit_draw_arrays( uint32_t start, uint32_t count, void *ctx )
+{
+	uint32_t *p = pb_begin();
+
+	(void)ctx;
+	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_QUADS );
+	p = pb_push1( p, 0x40000000 | NV097_DRAW_ARRAYS,
+		MASK( NV097_DRAW_ARRAYS_COUNT, count - 1 )
+		| MASK( NV097_DRAW_ARRAYS_START_INDEX, start ));
+	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
+	pb_end( p );
+}
+
+/* Draws (and clears) the pending batch. */
+static void nv2a_2d_flush( void )
+{
+	if( nv2a_2d_ring_pending_verts == 0 )
+		return;
+
+	if( nv2a_2d_dirty )
+	{
+		uint32_t *p;
+		float m[4][4];
+		static const float vs_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+		int i;
+
+		if( !nv2a_2d_shader_resident )
+		{
+			nv2a_init_2d_shader();
+			nv2a_2d_shader_resident = true;
+		}
+
+		p = pb_begin();
+		p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 0 );
+		p = pb_push1( p, NV097_SET_DEPTH_MASK, 0 );
+		p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 0 );
+		pb_end( p );
+
+		/* C5: rebuilt every dirty entry from the engine's own reported 2D
+		   size against the real back buffer - NOT nv2a_matrix_viewport()'s
+		   NDC-to-screen construction, a different matrix for a different
+		   purpose. */
+		nv2a_2d_build_matrix( m, (float)nv2a_width, (float)nv2a_height,
+			(float)gpGlobals->width, (float)gpGlobals->height, nv2a_r_2d_pixeloffset.value );
+
+		p = pb_begin();
+		p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
+		pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
+		memcpy( p, m, 16 * 4 );
+		p += 16;
+		memcpy( p, vs_c4, sizeof( vs_c4 ));
+		p += 4;
+		pb_end( p );
+
+		p = pb_begin();
+		pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
+		for( i = 0; i < 16; i++ )
+			*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
+		pb_end( p );
+
+		p = pb_begin();
+		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
+		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
+		p = pb_push1( p, NV097_SET_ALPHA_REF, 0 );
+		pb_end( p );
+
+		nv2a_2d_pushed_base_valid = false; /* force the pointer/cache re-push below too, whatever base offset it last pointed at */
+		nv2a_2d_pushed_valid = false; /* force the shadow push below to run too, whatever it was last set to */
+		nv2a_2d_dirty = false;
+	}
+
+	/* QA round 1, finding 1: the array pointers must track the CURRENT
+	   batch's base offset on EVERY flush, not only a full "dirty"
+	   re-entry - nv2a_2d_append_quad() starts a new batch (and a new
+	   ring_batch_base_offset) on a texture- or blend-only flush too,
+	   without ever setting nv2a_2d_dirty. Left inside the `if( dirty )`
+	   block above, that flush would leave the pointers parked at the
+	   PREVIOUS batch's offset, and DRAW_ARRAYS's START_INDEX (relative to
+	   whatever address the pointers hold) would silently redraw the
+	   previous batch's vertices under the new texture/blend state.
+	   nv2a_bind_vertex_base() above is the same fix for the 3D path:
+	   re-push the pointers AND invalidate the vertex fetch cache
+	   whenever the bound address moves, not only on some coarser event. */
+	if( !nv2a_2d_pushed_base_valid || nv2a_2d_pushed_base_offset != nv2a_2d_ring_batch_base_offset )
+	{
+		byte *ring_batch = (byte *)nv2a_2d_ring + nv2a_2d_ring_batch_base_offset;
+		uint32_t *p;
+
+		nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_2d_vertex_t ), ring_batch );
+		nv2a_set_attrib_pointer( 3, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL, 4, sizeof( nv2a_2d_vertex_t ), ring_batch + 16 );
+		nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_2d_vertex_t ), ring_batch + 8 );
+
+		p = pb_begin();
+		p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
+		pb_end( p );
+
+		nv2a_2d_pushed_base_offset = nv2a_2d_ring_batch_base_offset;
+		nv2a_2d_pushed_base_valid = true;
+	}
+
+	if( !nv2a_2d_pushed_valid
+		|| nv2a_2d_pushed.blend_enable != nv2a_2d_batch_state.blend_enable
+		|| nv2a_2d_pushed.sfactor != nv2a_2d_batch_state.sfactor
+		|| nv2a_2d_pushed.dfactor != nv2a_2d_batch_state.dfactor
+		|| nv2a_2d_pushed.alpha_test_enable != nv2a_2d_batch_state.alpha_test_enable )
+	{
+		uint32_t *p = pb_begin();
+		p = pb_push1( p, NV097_SET_BLEND_ENABLE, nv2a_2d_batch_state.blend_enable ? 1 : 0 );
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, nv2a_2d_batch_state.sfactor );
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, nv2a_2d_batch_state.dfactor );
+		p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, nv2a_2d_batch_state.alpha_test_enable ? 1 : 0 );
+		pb_end( p );
+
+		nv2a_2d_pushed = nv2a_2d_batch_state;
+		nv2a_2d_pushed_valid = true;
+	}
+
+	/* Stage-0 texture block, exactly as the test triangle pushes it
+	   (r_context.c's own citation there) - LU_IMAGE_A8B8G8R8, not
+	   A8R8G8B8: PF_RGBA_32's own memory byte order (R,G,B,A per pixel)
+	   IS that format's bit layout read as a little-endian 32-bit word,
+	   so nv2a_tex_upload's plain memcpy needs no channel swap. */
+	{
+		uint32_t *p = pb_begin();
+		p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, nv2a_2d_batch_key.offset );
+		p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
+			MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+			| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
+			| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
+			| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8 )
+			| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
+		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, nv2a_2d_batch_key.pitch << 16 );
+		p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( nv2a_2d_batch_key.width << 16 ) | nv2a_2d_batch_key.height );
+		p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
+		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
+		/* D5/C4: NEVER a zero convolution-kernel field (divergences.md #102) - 0x01012000/0x02022000, same values nv2a_draw_map_geometry already proved. */
+		p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_2d_batch_key.bilinear ? 0x02022000 : 0x01012000 );
+		pb_end( p );
+	}
+
+	nv2a_2d_chunk_quads( nv2a_2d_ring_pending_verts, nv2a_2d_emit_draw_arrays, NULL );
+
+	nv2a_2d_ring_pending_verts = 0;
+}
+
+void nv2a_2d_flush_and_wait( void )
+{
+	nv2a_2d_flush();
+	while( pb_busy())
+		;
+}
+
+/* C4: appends one quad (4 vertices, texel-unit s/t already resolved by
+   the caller) to the pending batch - flushing first if the desired
+   state, the resolved texture key, or dirty changed since the last
+   flush, or if the ring has no room (in which case it also spins
+   pb_busy and resets the cursor - "the pointers get re-pushed with
+   BREAK_VERTEX_BUFFER_CACHE" next flush, via the dirty flag). Drops the
+   draw if the renderer or the frame isn't ready (C1's own rule). */
+static void nv2a_2d_append_quad( float x, float y, float w, float h, float s1, float t1, float s2, float t2 )
+{
+	nv2a_2d_vertex_t verts[4];
+	nv2a_2d_batch_key_t key;
+	int i;
+
+	if( !nv2a_ready || !nv2a_frame_open )
+		return;
+
+	if( !nv2a_2d_resolve_batch_key( &key ))
+		return;
+
+	if( nv2a_2d_ring_pending_verts > 0
+		&& ( nv2a_2d_dirty
+			|| memcmp( &key, &nv2a_2d_batch_key, sizeof( key )) != 0
+			|| nv2a_2d_batch_state.blend_enable != nv2a_2d_desired.blend_enable
+			|| nv2a_2d_batch_state.sfactor != nv2a_2d_desired.sfactor
+			|| nv2a_2d_batch_state.dfactor != nv2a_2d_desired.dfactor
+			|| nv2a_2d_batch_state.alpha_test_enable != nv2a_2d_desired.alpha_test_enable ))
+	{
+		nv2a_2d_flush();
+	}
+
+	nv2a_2d_batch_key = key;
+
+	if( nv2a_2d_ring_write_offset + 4 * sizeof( nv2a_2d_vertex_t ) > NV2A_2D_VERTEX_RING_BYTES )
+	{
+		nv2a_2d_flush();
+		while( pb_busy())
+			;
+		nv2a_2d_ring_write_offset = 0;
+		nv2a_2d_dirty = true;
+	}
+
+	if( nv2a_2d_ring_pending_verts == 0 )
+	{
+		nv2a_2d_ring_batch_base_offset = nv2a_2d_ring_write_offset;
+		nv2a_2d_batch_state = nv2a_2d_desired;
+	}
+
+	verts[0].x = x;     verts[0].y = y;     verts[0].u = s1; verts[0].v = t1;
+	verts[1].x = x + w; verts[1].y = y;     verts[1].u = s2; verts[1].v = t1;
+	verts[2].x = x + w; verts[2].y = y + h; verts[2].u = s2; verts[2].v = t2;
+	verts[3].x = x;     verts[3].y = y + h; verts[3].u = s1; verts[3].v = t2;
+	for( i = 0; i < 4; i++ )
+	{
+		verts[i].rgba[0] = nv2a_2d_color[0];
+		verts[i].rgba[1] = nv2a_2d_color[1];
+		verts[i].rgba[2] = nv2a_2d_color[2];
+		verts[i].rgba[3] = nv2a_2d_color[3];
+	}
+
+	memcpy( (byte *)nv2a_2d_ring + nv2a_2d_ring_write_offset, verts, sizeof( verts ));
+	nv2a_2d_ring_write_offset += sizeof( verts );
+	nv2a_2d_ring_pending_verts += 4;
+}
+
+/* C1. */
+static void R_Set2DMode( qboolean enable )
+{
+	if( enable )
+	{
+		if( nv2a_in2d )
+			return;
+
+		nv2a_in2d = true;
+		nv2a_2d_color[0] = nv2a_2d_color[1] = nv2a_2d_color[2] = nv2a_2d_color[3] = 255;
+		nv2a_2d_desired.alpha_test_enable = true;
+		nv2a_2d_dirty = true;
+	}
+	else
+	{
+		nv2a_2d_flush();
+		nv2a_in2d = false;
+		nv2a_2d_dirty = true; /* every 3D path sets its own state via nv2a_set_3d_state(); push nothing here */
+	}
+}
+
+/* C2: port of GL_SetRenderMode (ref/gl/gl_backend.c:424-461) - sets the
+   desired shadow only, applied lazily at the next flush. */
+static void GL_SetRenderMode( int renderMode )
+{
+	switch( renderMode )
+	{
+	default:
+	case kRenderNormal:
+		nv2a_2d_desired.blend_enable = false;
+		nv2a_2d_desired.alpha_test_enable = false;
+		break;
+	case kRenderTransColor:
+	case kRenderTransTexture:
+		nv2a_2d_desired.blend_enable = true;
+		nv2a_2d_desired.sfactor = NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA;
+		nv2a_2d_desired.dfactor = NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA;
+		nv2a_2d_desired.alpha_test_enable = false;
+		break;
+	case kRenderTransAlpha:
+		nv2a_2d_desired.blend_enable = false;
+		nv2a_2d_desired.alpha_test_enable = true;
+		break;
+	case kRenderGlow:
+	case kRenderTransAdd:
+		nv2a_2d_desired.blend_enable = true;
+		nv2a_2d_desired.sfactor = NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA;
+		nv2a_2d_desired.dfactor = NV097_SET_BLEND_FUNC_DFACTOR_V_ONE;
+		nv2a_2d_desired.alpha_test_enable = false;
+		break;
+	case kRenderScreenFadeModulate:
+		nv2a_2d_desired.blend_enable = true;
+		nv2a_2d_desired.sfactor = NV097_SET_BLEND_FUNC_SFACTOR_V_ZERO;
+		nv2a_2d_desired.dfactor = NV097_SET_BLEND_FUNC_DFACTOR_V_SRC_COLOR;
+		nv2a_2d_desired.alpha_test_enable = false;
+		break;
+	}
 }
 
 static void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a )
 {
-	;
+	nv2a_2d_color[0] = r;
+	nv2a_2d_color[1] = g;
+	nv2a_2d_color[2] = b;
+	nv2a_2d_color[3] = a;
+}
+
+/* C3. */
+static void Color4f( float r, float g, float b, float a )
+{
+	Color4ub(
+		(byte)( bound( 0.0f, r, 1.0f ) * 255 + 0.5f ),
+		(byte)( bound( 0.0f, g, 1.0f ) * 255 + 0.5f ),
+		(byte)( bound( 0.0f, b, 1.0f ) * 255 + 0.5f ),
+		(byte)( bound( 0.0f, a, 1.0f ) * 255 + 0.5f ));
 }
 
 static void Vertex3fv( const float *worldPnt )
@@ -4743,9 +5215,69 @@ static void CullFace( TRICULLSTYLE mode )
 	;
 }
 
+/* C2: port of VGUI_SetupDrawing (ref/gl/gl_context.c:360-375). */
 static void VGUI_SetupDrawing( qboolean rect )
 {
-	;
+	nv2a_2d_desired.blend_enable = true;
+	nv2a_2d_desired.sfactor = NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA;
+	nv2a_2d_desired.dfactor = NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA;
+	nv2a_2d_desired.alpha_test_enable = !rect;
+}
+
+/* C3: port of FillRGBA (ref/gl/gl_context.c:49-68), corrected per D2/D6's
+   own design note - binds the engine's own *white slot (GL_CreateTexture
+   records it, D1) rather than disabling texturing outright, which this
+   shader-only renderer has no equivalent of. */
+static void FillRGBA( int rendermode, float x, float y, float w, float h, byte r, byte g, byte b, byte a )
+{
+	GL_Bind( 0, nv2a_tex_white());
+
+	nv2a_2d_desired.blend_enable = true;
+	nv2a_2d_desired.sfactor = NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA;
+	nv2a_2d_desired.dfactor = ( rendermode == kRenderTransAdd )
+		? NV097_SET_BLEND_FUNC_DFACTOR_V_ONE
+		: NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA;
+
+	Color4ub( r, g, b, a );
+
+	nv2a_2d_append_quad( x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f );
+
+	nv2a_2d_desired.blend_enable = false; /* alpha test is left untouched, matching the reference */
+}
+
+/* C4/C6: port of R_DrawStretchPic (ref/gl/gl_draw.c:36-53). Texel
+   coordinates (linear textures address in texels, divergences.md #100);
+   a slot without TF_CLAMP whose s/t fall outside [0,1] is split into
+   per-integer-cell quads on the CPU first (C6) - this renderer has no
+   hardware wrap-addressing mode for a linear/unswizzled texture. */
+static void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum )
+{
+	const nv2a_texture_t *tex;
+
+	GL_Bind( 0, (unsigned int)texnum );
+	tex = nv2a_tex_get( nv2a_tex_current());
+
+	if( !FBitSet( tex->flags, TF_CLAMP )
+		&& ( s1 < 0.0f || s1 > 1.0f || s2 < 0.0f || s2 > 1.0f || t1 < 0.0f || t1 > 1.0f || t2 < 0.0f || t2 > 1.0f ))
+	{
+		static nv2a_2d_tile_t tiles[256];
+		uint32_t n, i;
+		int clamped = 0;
+
+		n = nv2a_2d_tile_split( x, y, w, h, s1, t1, s2, t2, tiles, ARRAYSIZE( tiles ), &clamped );
+		if( clamped )
+			gEngfuncs.Con_DPrintf( S_ERROR "ref_nv2a: %s: wrap span too large, drawing clamped\n", tex->name );
+
+		for( i = 0; i < n; i++ )
+		{
+			nv2a_2d_append_quad( tiles[i].x, tiles[i].y, tiles[i].w, tiles[i].h,
+				tiles[i].s1 * tex->width, tiles[i].t1 * tex->height,
+				tiles[i].s2 * tex->width, tiles[i].t2 * tex->height );
+		}
+		return;
+	}
+
+	nv2a_2d_append_quad( x, y, w, h, s1 * tex->width, t1 * tex->height, s2 * tex->width, t2 * tex->height );
 }
 
 /* X9-X: the frame, in the engine's own order (cl_view.c):
@@ -4789,6 +5321,15 @@ static void R_BeginFrame( qboolean clearScene )
 		;
 
 	nv2a_frame_open = true;
+
+	/* X9-X: releases whatever GL_FreeTexture/GL_UpdateTexture queued last
+	   frame (D4 - safe now, the pb_busy wait above proves the GPU is
+	   idle), then resets the 2D vertex ring and re-enters 2D mode, as
+	   ref/gl's own R_BeginFrame does (gl_rmain.c:1045). */
+	nv2a_tex_begin_frame();
+	nv2a_2d_ring_write_offset = 0;
+	nv2a_2d_ring_pending_verts = 0;
+	R_Set2DMode( true );
 }
 
 static void R_EndFrame( void )
@@ -4796,6 +5337,11 @@ static void R_EndFrame( void )
 	if( !nv2a_ready || !nv2a_frame_open )
 		return;
 	nv2a_frame_open = false;
+
+	/* X9-X: flushes the 2D pass's own pending batch first, as ref/gl's
+	   own R_EndFrame does (gl_rmain.c:1125), before the diagnostic
+	   fallback below can draw over it. */
+	R_Set2DMode( false );
 
 	/* Diagnostic, kept from bring-up: in a game (not the menu or the
 	   console) with no world drawn this frame, ref/nv2a has no map ready -
@@ -4898,7 +5444,7 @@ const ref_interface_t gReffuncs =
 
 	.R_ClearScreen    = R_SimpleStub,
 	.R_AllowFog       = R_SimpleStubBool,
-	.GL_SetRenderMode = R_SimpleStubInt,
+	.GL_SetRenderMode = GL_SetRenderMode,
 
 	.R_AddEntity      = R_AddEntity,
 	.R_ProcessEntData = R_ProcessEntData,
@@ -4910,7 +5456,7 @@ const ref_interface_t gReffuncs =
 	.GL_ProcessTexture          = GL_ProcessTexture,
 	.R_SetupSky                 = R_SetupSky,
 
-	.R_Set2DMode      = R_SimpleStubBool,
+	.R_Set2DMode      = R_Set2DMode,
 	.R_DrawStretchPic = R_DrawStretchPic,
 	.FillRGBA         = FillRGBA,
 	.WorldToScreen    = WorldToScreen,
@@ -4957,7 +5503,7 @@ const ref_interface_t gReffuncs =
 	.GL_TextureName  = GL_TextureName,
 	.GL_TextureData  = GL_TextureData,
 	.GL_LoadTexture  = GL_LoadTexture,
-	.GL_FreeTexture  = R_SimpleStubUInt,
+	.GL_FreeTexture  = GL_FreeTexture,
 	.R_OverrideTextureSourceSize = R_OverrideTextureSourceSize,
 
 	.GL_UpdateTexture = GL_UpdateTexture,

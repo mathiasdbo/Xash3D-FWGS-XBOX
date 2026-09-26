@@ -1,0 +1,39 @@
+/*
+ * X9-X 2D vertex shader: transforms an already-screen-space 2D vertex
+ * (x,y plus a per-vertex colour and a texel-unit texture coordinate)
+ * through the 2D viewport matrix nv2a_matrix_viewport() builds every
+ * time R_Set2DMode(true) (re-)enters 2D state (C5, ref/nv2a/r_context.c).
+ * Same shape as vs.vs.cg/vs_lit.vs.cg: one row-vector matrix multiply, no
+ * perspective divide - w is always 1 out of that matrix (its own comment
+ * explains why), matching the design's "pos = mul(float4(position.xy, 0,
+ * 1), m_viewport)". Compiled with cgc -profile vp20 + vp20compiler; see
+ * docs/r3d/design/x9-x-textures-and-2d.md's shader-facts section for the
+ * scratch compile that first established COLOR0 -> ATTR3 and TEXCOORD0
+ * -> hardware v[9] (confirmed again for this exact source below).
+ */
+struct vIn {
+	float4 position : POSITION;
+	float4 color0    : COLOR0;
+	float4 texcoord0 : TEXCOORD0;
+};
+
+struct vOut {
+	float4 pos  : POSITION;
+	float4 col0 : COLOR0;
+	float4 tex0 : TEXCOORD0;
+};
+
+vOut main(
+	vIn              I,
+	uniform float4x4 m_viewport
+	)
+{
+	vOut result;
+
+	result.pos  = mul(float4(I.position.xy, 0.0f, 1.0f), m_viewport);
+	result.col0 = I.color0;
+	/* Write the whole texcoord, q = 1, matching vs_lit.vs.cg's own
+	   reasoning: ps_2d's stage 0 is 2D_PROJECTIVE and samples (s/q, t/q). */
+	result.tex0 = float4(I.texcoord0.xy, 0.0f, 1.0f);
+	return result;
+}

@@ -8986,16 +8986,37 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        world from `GL_RenderFrame` as `R_RenderFrame` does
        (`gl_rmain.c:1076`), leave `R_EndFrame` to present; remove the
        `pb_print` overlay.
-    2. *Texture manager.* Every `GL_*Texture` entry returns 0 today; the
-       console font, HUD sprites, menu pictures, the engine's built-in
-       textures, decals and the skybox all need it. `RefGetParm` must
-       answer `PARM_TEX_*` and fall through to `ENGINE_GET_PARM_`. Model
-       it on `ref/soft/r_image.c`; formats and swizzling are the
-       nv2a-xbox-specialist's call. Fix XB's DXT1 swizzle bug
-       (`UiPacker.cpp:379`) on the way; nothing reads `menu_bg.mpak` yet.
-    3. *2D:* `R_Set2DMode`, `R_DrawStretchPic`, `FillRGBA`,
-       `GL_SetRenderMode` (all five modes), `Color4ub`/`Color4f` - brings
-       up the console, HUD, crosshair, fades, loading plaque and menus.
+    2. *Texture manager* (done, X9-X, 2026-09-26). A real table (D1-D7,
+       `ref/nv2a/r_image.c`, modelled on `ref/soft/r_image.c` as planned):
+       `GL_LoadTexture`, `GL_LoadTextureFromBuffer`, `GL_CreateTexture`,
+       `GL_FindTexture`, `GL_FreeTexture`, `GL_UpdateTexture`, `GL_Bind`,
+       `GL_TextureName`/`GL_TextureData`/`R_GetTextureOriginalBuffer`/
+       `R_OverrideTextureSourceSize`. `RefGetParm` answers every `PARM_TEX_*`
+       and falls through to `ENGINE_GET_PARM_`, as planned. Format this
+       phase: flat A8B8G8R8 (RGBA32) only, uploaded into a shared 3 MiB
+       arena (a first-fit sub-allocator, `nv2a_arena.c`, host-tested) with
+       a per-texture fallback allocation when it has no room. No mipmaps,
+       no compressed (DXT) input and no swizzling yet - a linear upload
+       covers the console font, HUD sprites, menu pictures and the
+       engine's five built-in textures; decals and the skybox still need
+       their own draw paths (items 10 and 12). World (`.mip`) textures
+       never reach this manager at all: the Xbox nv2a bake now drops the
+       worldspawn `wad` key (Part A of the same change), so the engine
+       takes its own no-pixels path instead of decoding a texture this
+       renderer would only discard. XB's DXT1 swizzle bug
+       (`UiPacker.cpp:379`) and `menu_bg.mpak` are still untouched -
+       nothing reads a compressed 2D texture yet.
+    3. *2D* (done, X9-X, 2026-09-26): `R_Set2DMode`, `R_DrawStretchPic`,
+       `FillRGBA`, `GL_SetRenderMode` (all five modes plus
+       `ScreenFadeModulate`), `VGUI_SetupDrawing`, `Color4ub`/`Color4f` -
+       brings up the console, HUD, crosshair, fades, loading plaque and
+       menus. Batched through a 256 KiB vertex ring, flushed on a state,
+       texture or dirty-flag change; a linear texture's wrap addressing
+       (tiled draws past `[0,1]`) is split into per-cell quads on the CPU,
+       since this renderer has no hardware wrap mode for it. Not yet
+       verified on real hardware (owner-side, post-PR): the 2D pixel-
+       centre offset cvar, and whether the console/HUD/menu actually look
+       right rather than merely draw something.
     4. *TriAPI*, with `R_FillTriAPI` filling `GetMatrix` and `TexCoord2f`:
        the HL client's particleman calls `GetMatrix` every time
        `HUD_DrawTransparentTriangles` runs (`CFrustum.cpp:41`), a NULL
