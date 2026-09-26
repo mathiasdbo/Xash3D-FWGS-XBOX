@@ -5,6 +5,16 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - the Xbox renderer draws the world where the engine asks for it (X9-X)
+
+The Xbox renderer used to draw everything at the very end of each frame,
+after the engine had already issued the HUD, console and menu, so there was
+no way to draw those on top of the world. It now opens the frame when the
+engine starts it, draws the world when the engine renders the view, and only
+presents at the end, the same order the PC renderers use. This is the first
+step towards the HUD, console and menus on the Xbox renderer. The debug text
+over the game is gone. Nothing else looks different.
+
 ### Added - an Xbox can host multiplayer on the large maps: the PHS is baked offline (X9-W)
 
 A game hosting multiplayer builds each map's PHS (which parts of the map can

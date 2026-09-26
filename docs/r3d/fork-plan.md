@@ -8927,15 +8927,22 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
       edict slots with its weapons, the bake reports: `pool_party` and
       `disposal` 3 players, `contamination` 4, `boot_camp` 8, the other
       deathmatch maps 10-12 (`rocket_frenzy` is refused outright).
-    - *Found: a hosted `changelevel` stalls on the Xbox.* The server
-      moves to the next map, but the local client stays in `ca_connected`
-      waiting for `svc_serverdata` and never reaches `R_NewMap` (ref/nv2a
-      then draws its test triangle). Seen crossfire -> bounce -> crossfire
-      at `maxplayers 2`, and identically with archives stripped of their
-      PHS (the upstream `Mod_CalcPHS` path), so it is not the baked PHS;
-      single-player `changelevel` works (item 12). Probably the
-      multiplayer reconnect over the Xbox's stubbed network layer
-      (`NET_Config` opens sockets when `maxclients` > 1) - its own item.
+    - *Found: a hosted `changelevel` stalls on the Xbox - it predates
+      X9-W; deferred (multiplayer is not the priority).* With `maxplayers
+      2` the first level change works (the client reaches `ca_active`) and
+      the second does not: the server moves to the next map, the local
+      client stays in `ca_connected` waiting for `svc_serverdata` and
+      never reaches `R_NewMap` (ref/nv2a then draws its test triangle).
+      Measured in xemu on bounce -> datacore -> boot_camp from loose maps:
+      identical on the X9-W build and on the build before it (main at
+      e1fe5b04), and the same with archives stripped of their PHS; with
+      `maxplayers 1` the same chain works on both. Also seen once with
+      archives, multiplayer only: after the first change the client was
+      active but ref/nv2a's map never became ready (not yet checked on the
+      older build). Next step when it is picked up: breakpoints on the
+      reconnect path (the client's `new`, `SV_New_f`, and
+      `SV_SendResources`, which a multiplayer server sends only once per
+      client, `sv_client.c:1976`).
       Until it is fixed, a hosted game cannot change level, and the
       fragmentation check across a hosted map cycle (largest contiguous
       block, as item 12 did for single-player) cannot run: only cold
@@ -8963,6 +8970,75 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
     (the Xbox archives' `LUMP_TEXTURES` differs, so `CRC32_MapFile` does),
     and whether `XASH_LOW_MEMORY=1`'s 64-entity client frames can follow a
     busy PC server.
+
+14. **Finish `ref/nv2a`: everything a single-player campaign draws
+    (priority, 2026-09-25).** Today ref/nv2a draws the world and brush
+    entities only; the hardware frame times of item 12 were measured
+    without models, HUD or effects, so every feature below costs frame
+    time and item 12's four ~30 fps maps are profiled alongside (X11).
+    Inventory (reference-renderer-specialist, against `ref/gl` and
+    `ref/soft`, 2026-09-25) and order - each a phase, each ending on
+    xemu and on hardware (item 7):
+    1. *Frame structure.* Every nv2a draw happens inside `R_EndFrame`,
+       but the engine issues the HUD, console and menu before it
+       (`V_PostRender`, `cl_view.c:529-573`), so nothing is open to draw
+       2D into. Open and clear the pushbuffer in `R_BeginFrame`, draw the
+       world from `GL_RenderFrame` as `R_RenderFrame` does
+       (`gl_rmain.c:1076`), leave `R_EndFrame` to present; remove the
+       `pb_print` overlay.
+    2. *Texture manager.* Every `GL_*Texture` entry returns 0 today; the
+       console font, HUD sprites, menu pictures, the engine's built-in
+       textures, decals and the skybox all need it. `RefGetParm` must
+       answer `PARM_TEX_*` and fall through to `ENGINE_GET_PARM_`. Model
+       it on `ref/soft/r_image.c`; formats and swizzling are the
+       nv2a-xbox-specialist's call. Fix XB's DXT1 swizzle bug
+       (`UiPacker.cpp:379`) on the way; nothing reads `menu_bg.mpak` yet.
+    3. *2D:* `R_Set2DMode`, `R_DrawStretchPic`, `FillRGBA`,
+       `GL_SetRenderMode` (all five modes), `Color4ub`/`Color4f` - brings
+       up the console, HUD, crosshair, fades, loading plaque and menus.
+    4. *TriAPI*, with `R_FillTriAPI` filling `GetMatrix` and `TexCoord2f`:
+       the HL client's particleman calls `GetMatrix` every time
+       `HUD_DrawTransparentTriangles` runs (`CFrustum.cpp:41`), a NULL
+       call today, safe only because nv2a never calls that hook.
+    5. *Studio models* (NPCs, items, the view model with its own depth
+       range): fill the ~30 `engine_studio_api_t` callbacks (the HL
+       client sets up bones itself), `R_StudioDrawPoints`, skins, render
+       modes, chrome, lighting from `ref/common` (`R_LightVec`,
+       `R_EntityDynamicLight`), client events and attachments - without
+       them there are no muzzle flashes, sparks or model-event sounds
+       (`HUD_StudioEvent`). `R_StudioEstimateFrame`/`LerpMovement` are
+       CPU-only and copy as-is. The largest block; matrix-palette VP20
+       skinning is the performance route (X9 notes above).
+    6. *Sprites* and sprite temp-entities (explosions, glows).
+    7. *Effects:* the `CL_DrawEFX` and `pfnDraw*Triangles` hooks, beams
+       (and `ET_BEAM` entities), particles, tracers.
+    8. *Animated lightstyles and dynamic lights:* one mechanism - rebuild
+       a face's lightmap from `msurface_t->samples` (every style is in the
+       classic prefix's `LUMP_LIGHTING`) times `g_lightstylevalue`, plus
+       `R_AddDynamicLights`, written into the atlas (`R_CheckLightMap`,
+       `gl_rsurf.c:1400`); models take dlights through
+       `R_EntityDynamicLight`.
+    9. *Animated textures* (`+0..+9`, `-0..-9`; the engine builds the
+       chains, `mod_bmodel.c:3043`); check that frames no face references
+       reach the texture directory.
+    10. *Sky* (skybox from `R_SetupSky`; check the images are on the disc).
+    11. *Water warp* (`!` textures: `GL_SubdivideSurface` and the per-vertex
+        sin-table texture coordinates of `EmitWaterPolys`) and underwater
+        fog (`R_CheckFog`).
+    12. `kRenderTransColor` on brush entities; decals; screenshots (the
+        save-game thumbnail); `Mod_GetCurrentVis`.
+
+15. **Optional: reflective water (enhancement, off by default).** Once
+    item 14's water warp is in and X11's profiling shows frame time to
+    spare: a cube map baked per map or per water area by the baker,
+    sampled per pixel through the NV2A texture shader's reflection mode,
+    with a bump map for ripples and a Fresnel term in the register
+    combiners - one more texture stage on water pixels, no extra scene
+    pass. Behind a cvar, off by default: it changes the original look.
+    Not real-time planar reflection (a second scene pass per view with
+    water, which the ~30 fps maps cannot afford). Unprototyped: first
+    confirm which texture-shader modes pbkit exposes and the cube-map
+    formats.
 
 X9-T load-memory model for every retail map, baked at v12. It uses the
 engine's world structures from lump counts, with 32-bit struct sizes and

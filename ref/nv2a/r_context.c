@@ -370,6 +370,12 @@ static qboolean  nv2a_view_valid; /* X9-E: true only once GL_RenderFrame has
                                       since a one-frame-stale-but-real
                                       matrix across a level transition is
                                       harmless. */
+/* X9-X: the frame R_BeginFrame opened (cleared, pushbuffer reset) and
+   R_EndFrame presents; whether GL_RenderFrame drew the world into it; and
+   whether it is an in-game frame (R_BeginFrame's clearScene). */
+static qboolean  nv2a_frame_open;
+static qboolean  nv2a_world_drawn_this_frame;
+static qboolean  nv2a_frame_in_game;
 static qboolean  nv2a_view_captured_this_frame; /* X9-E, codex review, real
                                       finding: V_RenderView's own do/while
                                       loop (engine/client/cl_view.c) can
@@ -1272,11 +1278,30 @@ static void nv2a_set_attrib_pointer( unsigned int index, unsigned int format, un
 	pb_end( p );
 }
 
+/* X9-X: the 3D state the world and the test triangle expect. pbkit
+   re-pushes depth-test enable only when the depth/stencil target changes
+   (pbkit.c:1680-1707), so R_BeginFrame's pb_target_back_buffer does not
+   restore it, and a frame's 2D pass (depth off, cull off, blending) would
+   otherwise carry into the next frame's world draw. Menu and console-only
+   frames never call R_Set2DMode(false), so every 3D draw sets this itself
+   (nv2a-xbox-specialist, X9-X design). */
+static void nv2a_set_3d_state( void )
+{
+	uint32_t *p = pb_begin();
+	p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
+	p = pb_push1( p, NV097_SET_DEPTH_MASK, 1 );
+	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 1 );
+	p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
+	pb_end( p );
+}
+
 static void nv2a_draw_test_triangle( void )
 {
 	uint32_t *p;
 	uint32_t tex_phys;
 	int i;
+
+	nv2a_set_3d_state();
 
 	/* X9-C: the NV2A only holds one resident vertex/pixel program at a
 	   time, and nv2a_draw_map_geometry() may have uploaded its own
@@ -2302,6 +2327,8 @@ static void nv2a_draw_map_geometry( void )
 	   other optional cull test in this function. */
 	const model_t *world = gp_cl->models[1];
 
+	nv2a_set_3d_state();
+
 	if( world != nv2a_map_owner )
 		world = NULL;
 
@@ -2634,9 +2661,6 @@ static void nv2a_draw_map_geometry( void )
 	}
 
 	nv2a_draw_brush_entities( world );
-
-	pb_print( "ref_nv2a: real baked geometry\n" );
-	pb_draw_text_screen();
 }
 
 /*
@@ -4667,6 +4691,16 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	}
 
 	nv2a_view_valid = true;
+
+	/* X9-X: the world is drawn here, where the engine asks for it
+	   (V_RenderView), as ref/gl's R_RenderFrame does (gl_rmain.c:1076) -
+	   not in R_EndFrame, which runs after the engine's 2D (HUD, console,
+	   menu: V_PostRender, cl_view.c:529-573) and would draw over it. */
+	if( nv2a_frame_open && nv2a_map_ready )
+	{
+		nv2a_draw_map_geometry();
+		nv2a_world_drawn_this_frame = true;
+	}
 }
 
 static void GL_OrthoBounds( const float *mins, const float *maxs )
@@ -4714,13 +4748,18 @@ static void VGUI_SetupDrawing( qboolean rect )
 	;
 }
 
-/* The one real per-frame entry point: draws and presents the fixed test
-   triangle every frame, at the same point ref/soft's own R_EndFrame does
-   its real work (R_BlitScreen) - see this file's header comment for why
-   R_BeginFrame/R_RenderScene stay no-ops for this bring-up. */
+/* X9-X: the frame, in the engine's own order (cl_view.c):
+   R_BeginFrame (V_PreRender) opens and clears the back buffer;
+   GL_RenderFrame (V_RenderView) draws the world; the engine's 2D calls
+   (V_PostRender: HUD, console, menu) draw on top; R_EndFrame presents.
+   ref/gl splits it the same way (gl_rmain.c:1033, :1076, :1116). The
+   engine calls R_BeginFrame and R_EndFrame as a pair - neither runs
+   while the loading plaque disables the screen (V_PreRender returns
+   early) - but R_EndFrame still refuses to present a frame that was
+   never opened. */
 static void nv2a_try_pending_upload( void );
 
-static void R_EndFrame( void )
+static void R_BeginFrame( qboolean clearScene )
 {
 	if( !nv2a_ready )
 		return;
@@ -4732,12 +4771,11 @@ static void R_EndFrame( void )
 
 	debug_frame_count++;
 
-	/* X9-E, codex review: R_EndFrame runs LAST in a frame, after every
-	   GL_RenderFrame call this same frame was ever going to get - so
-	   resetting nv2a_view_captured_this_frame here re-arms it for the
-	   NEXT frame's own first real world pass, without affecting anything
-	   about the frame that just finished. */
+	/* X9-E, codex review: re-armed per frame so GL_RenderFrame keeps only
+	   this frame's first real world pass. */
 	nv2a_view_captured_this_frame = false;
+	nv2a_world_drawn_this_frame = false;
+	nv2a_frame_in_game = clearScene; /* !paused && ca_active */
 
 	pb_wait_for_vbl();
 	pb_reset();
@@ -4750,16 +4788,21 @@ static void R_EndFrame( void )
 	while( pb_busy())
 		;
 
-	/* X9-E: nv2a_map_viewproj is now written by GL_RenderFrame's own
-	   real per-frame camera, not computed once at map-load time - a map
-	   loaded before the engine has ever called GL_RenderFrame with a
-	   real world pass (loading/plaque frames) must not draw with
-	   whatever that matrix defaults to (all-zero BSS - a divide by zero
-	   in the vertex shader's own w-divide), so this falls back to the
-	   already-proven test triangle until nv2a_view_valid is real. */
-	if( nv2a_map_ready && nv2a_view_valid )
-		nv2a_draw_map_geometry();
-	else
+	nv2a_frame_open = true;
+}
+
+static void R_EndFrame( void )
+{
+	if( !nv2a_ready || !nv2a_frame_open )
+		return;
+	nv2a_frame_open = false;
+
+	/* Diagnostic, kept from bring-up: in a game (not the menu or the
+	   console) with no world drawn this frame, ref/nv2a has no map ready -
+	   show the test triangle rather than a black screen that looks like a
+	   hang. X9-E: a camera that was never set (all-zero matrix) is the
+	   same case. */
+	if( nv2a_frame_in_game && !nv2a_world_drawn_this_frame )
 		nv2a_draw_test_triangle();
 
 	while( pb_busy())
@@ -4845,7 +4888,7 @@ const ref_interface_t gReffuncs =
 	.GL_ClearExtensions = R_SimpleStub,
 
 	.R_GammaChanged       = R_SimpleStubBool,
-	.R_BeginFrame         = R_SimpleStubBool,
+	.R_BeginFrame         = R_BeginFrame,
 	.R_RenderScene        = R_SimpleStub,
 	.R_EndFrame           = R_EndFrame,
 	.R_PushScene          = R_SimpleStub,
