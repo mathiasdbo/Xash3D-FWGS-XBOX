@@ -84,7 +84,13 @@ while [ $# -gt 0 ]; do
 done
 
 SCRATCH="${SCRATCH:-$REPO/.sweep}"
-mkdir -p "$SCRATCH/3p" || { echo "xbox-link-check: cannot create $SCRATCH/3p" >&2; exit 1; }
+mkdir -p "$SCRATCH/3p" "$SCRATCH/gen" || { echo "xbox-link-check: cannot create $SCRATCH/3p" >&2; exit 1; }
+# The generated_lib_*_exports.c sources are written by tools/xbox-cc.sh,
+# which always uses $REPO/.sweep/gen (xbox-cc.sh's GEN_DIR) whatever
+# SCRATCH is. Objects compiled from them still go under $SCRATCH/gen. With
+# SCRATCH pointing elsewhere (the agentic loop's baseline build), reading
+# the sources from $SCRATCH/gen found nothing.
+GEN_SRC_DIR="$REPO/.sweep/gen"
 
 ENGINE_OBJS=$(ls "$SCRATCH"/*.obj 2>/dev/null \
 	| grep -vE '_platform_(android|apple|dos|ios|irix|linux|nswitch|posix|psvita|sdl1|sdl3|stub|win32)_' \
@@ -177,13 +183,21 @@ fi
 echo "xbox-link-check: every engine object is vouched for by the sweep manifest and newer than its source and driver." >&2
 
 if [ "$CLIENT_MAIN" -eq 1 ]; then
-	LAUNCHER_OBJ="$SCRATCH/engine_common_launcher.obj"
-	if [ ! -f "$LAUNCHER_OBJ" ]; then
-		echo "xbox-link-check: --client-main given but $LAUNCHER_OBJ does not exist." >&2
-		echo "  Compile it first: XBOX_CLIENT_MAIN=1 tools/xbox-cc.sh" >&2
-		echo "  engine/common/launcher.c -o $LAUNCHER_OBJ" >&2
-		exit 1
+	# The sweep compiles launcher.c WITHOUT XBOX_CLIENT_MAIN (no main()),
+	# so a link after a plain sweep had _main undefined unless someone
+	# recompiled it by hand. Compiled here every time instead, into its own
+	# directory so the $SCRATCH/*.obj glob never sees two launchers. `env`
+	# passes the opt-in: an exported variable does not survive the msys64
+	# bash this script may run under (docs/r3d/lessons.md).
+	mkdir -p "$SCRATCH/client-main"
+	LAUNCHER_OBJ="$SCRATCH/client-main/engine_common_launcher.obj"
+	if ! env XBOX_CLIENT_MAIN=1 tools/xbox-cc.sh engine/common/launcher.c -o "$LAUNCHER_OBJ" 2>"$SCRATCH/client-main/lasterr.txt"; then
+		echo "xbox-link-check: --client-main: engine/common/launcher.c failed to compile with XBOX_CLIENT_MAIN=1:" >&2
+		cat "$SCRATCH/client-main/lasterr.txt" >&2
+		exit 2
 	fi
+	ENGINE_OBJS="$(echo "$ENGINE_OBJS" | grep -v '/engine_common_launcher\.obj$')
+$LAUNCHER_OBJ"
 	# xbox_main.obj's own placeholder main() (X1, divergence #23) would
 	# collide with launcher.obj's real one at link time - both define
 	# `_main` once XBOX_CLIENT_MAIN=1 makes XASH_ENABLE_MAIN real.
@@ -535,11 +549,11 @@ if [ -d "$MAINUI_DIR" ]; then
 	# empty would introduce undefined symbols for a module that was never
 	# linked in, breaking the "measure engine+third-party only" case this
 	# script's own mainui-optionality exists to support.
-	MENU_EXPORTS_C="$SCRATCH/gen/generated_lib_menu_exports.c"
+	MENU_EXPORTS_C="$GEN_SRC_DIR/generated_lib_menu_exports.c"
 	if [ ! -f "$MENU_EXPORTS_C" ]; then
 		echo "xbox-link-check: $MENU_EXPORTS_C does not exist." >&2
 		echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
-		echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+		echo "  it generates $GEN_SRC_DIR/generated_lib_*_exports.c as a side effect." >&2
 		exit 1
 	fi
 	MENU_EXPORTS_OBJ="$SCRATCH/gen/generated_lib_menu_exports.obj"
@@ -605,11 +619,11 @@ fi
 # unconditionally: unlike menu, FS_Init runs on every boot regardless of
 # dedicated/client.
 STUB_GAME_OBJS=""
-FS_EXPORTS_C="$SCRATCH/gen/generated_lib_filesystem_stdio_exports.c"
+FS_EXPORTS_C="$GEN_SRC_DIR/generated_lib_filesystem_stdio_exports.c"
 if [ ! -f "$FS_EXPORTS_C" ]; then
 	echo "xbox-link-check: $FS_EXPORTS_C does not exist." >&2
 	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
-	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	echo "  it generates $GEN_SRC_DIR/generated_lib_*_exports.c as a side effect." >&2
 	exit 1
 fi
 FS_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$FS_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
@@ -637,11 +651,11 @@ echo "xbox-link-check: filesystem_stdio registered in the static library table (
 # R_Init() itself, upstream's own designated renderer-choice mechanism -
 # no engine code changes needed for selection), not compiled in as the
 # default.
-REF_NULL_EXPORTS_C="$SCRATCH/gen/generated_lib_ref_null_exports.c"
+REF_NULL_EXPORTS_C="$GEN_SRC_DIR/generated_lib_ref_null_exports.c"
 if [ ! -f "$REF_NULL_EXPORTS_C" ]; then
 	echo "xbox-link-check: $REF_NULL_EXPORTS_C does not exist." >&2
 	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
-	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	echo "  it generates $GEN_SRC_DIR/generated_lib_*_exports.c as a side effect." >&2
 	exit 1
 fi
 REF_NULL_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$REF_NULL_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
@@ -671,11 +685,11 @@ echo "xbox-link-check: ref_null registered in the static library table (real Get
 # video.cfg with `r_refdll ""` selects it without any config edit, and
 # ref_null stays what it always was: the last resort after every real
 # option, never the default.
-REF_SOFT_EXPORTS_C="$SCRATCH/gen/generated_lib_ref_soft_exports.c"
+REF_SOFT_EXPORTS_C="$GEN_SRC_DIR/generated_lib_ref_soft_exports.c"
 if [ ! -f "$REF_SOFT_EXPORTS_C" ]; then
 	echo "xbox-link-check: $REF_SOFT_EXPORTS_C does not exist." >&2
 	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
-	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	echo "  it generates $GEN_SRC_DIR/generated_lib_*_exports.c as a side effect." >&2
 	exit 1
 fi
 REF_SOFT_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$REF_SOFT_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
@@ -719,11 +733,11 @@ echo "xbox-link-check: ref_soft registered in the static library table (real, is
 # XASH_REF_NV2A_ENABLED=1 - but selected explicitly via `r_refdll "nv2a"`
 # in a disc's video.cfg for this bring-up, so it never silently displaces
 # the already-working ref_soft in the auto-try order.
-REF_NV2A_EXPORTS_C="$SCRATCH/gen/generated_lib_ref_nv2a_exports.c"
+REF_NV2A_EXPORTS_C="$GEN_SRC_DIR/generated_lib_ref_nv2a_exports.c"
 if [ ! -f "$REF_NV2A_EXPORTS_C" ]; then
 	echo "xbox-link-check: $REF_NV2A_EXPORTS_C does not exist." >&2
 	echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
-	echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+	echo "  it generates $GEN_SRC_DIR/generated_lib_*_exports.c as a side effect." >&2
 	exit 1
 fi
 REF_NV2A_EXPORTS_OBJ="$SCRATCH/gen/$(echo "$REF_NV2A_EXPORTS_C" | tr '/' '_' | sed 's/\.c$/.obj/')"
@@ -743,11 +757,11 @@ done
 STUB_GAME_OBJS="$STUB_GAME_OBJS $REF_NV2A_OBJS"
 echo "xbox-link-check: ref_nv2a registered in the static library table (real, isolated GetRefAPI)." >&2
 
-for f in stub_game/server/server_stub.c "$SCRATCH/gen/generated_lib_server_exports.c" "$SCRATCH/gen/generated_lib_client_exports.c"; do
+for f in stub_game/server/server_stub.c "$GEN_SRC_DIR/generated_lib_server_exports.c" "$GEN_SRC_DIR/generated_lib_client_exports.c"; do
 	if [ ! -f "$f" ]; then
 		echo "xbox-link-check: $f does not exist." >&2
 		echo "  Run tools/xbox-sweep.sh (or any tools/xbox-cc.sh compile) first -" >&2
-		echo "  it generates $SCRATCH/gen/generated_lib_*_exports.c as a side effect." >&2
+		echo "  it generates $GEN_SRC_DIR/generated_lib_*_exports.c as a side effect." >&2
 		exit 1
 	fi
 	obj="$SCRATCH/gen/$(echo "$f" | tr '/' '_' | sed 's/\.c$/.obj/')"

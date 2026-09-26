@@ -5,6 +5,33 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - the Xbox link scripts work under a SCRATCH other than `.sweep`, and link straight after a sweep
+
+The agentic loop's first run after #150 stopped at setup: its baseline
+link (a sweep and a link under a `SCRATCH` in the main checkout, keyed by
+the `origin/main` commit) failed before any research. Three causes, each
+of which also hits a by-hand link:
+
+- `tools/xbox-game-link-check.sh` puts `/c/msys64/usr/bin` first on PATH,
+  and that bash does not forward exported variables (`docs/r3d/lessons.md`).
+  The caller's `SCRATCH` never reached `tools/xbox-link-check.sh`, the game
+  isolates or the freevgui sweep, which looked under the checkout's own
+  `.sweep` instead. They now get it through `env`.
+- `tools/xbox-link-check.sh` read the `generated_lib_*_exports.c` sources
+  from `$SCRATCH/gen`, but `tools/xbox-cc.sh` always writes them to
+  `$REPO/.sweep/gen`. They are now read from there; the objects built from
+  them stay under `$SCRATCH/gen`.
+- `--client-main` linked the sweep's `launcher.c` object, which the sweep
+  compiles without `XBOX_CLIENT_MAIN`, so `_main` was undefined after any
+  plain sweep (every fresh worktree) unless someone recompiled it by hand.
+  The script now compiles the client-main launcher itself, into its own
+  directory, and links that one.
+
+Verified: the loop's baseline build (sweep, then
+`xbox-game-link-check.sh hl --include-client --include-freevgui`) under
+`SCRATCH=.sweep/agentic-loop-baseline/<commit>` links with 0 undefined
+and writes a valid XBE plus its `.identity` sidecar.
+
 ### Changed - the agentic loop computes its own build gate, spends review rounds only on code that builds, and looks at the screen
 
 Two real runs of the repo's agentic loop (PRs #148 and #149) showed the

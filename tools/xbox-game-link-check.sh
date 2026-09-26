@@ -131,7 +131,7 @@ fi
 # stale, not a regression). If this doesn't pass, building the real
 # server module on top of it would tell us nothing about OUR change.
 echo "xbox-game-link-check: verifying the baseline link is clean first..." >&2
-if ! bash tools/xbox-link-check.sh --client-main --xbe "$SCRATCH/game-$TITLE-baseline.xbe" --expect-undefined 0; then
+if ! env SCRATCH="$SCRATCH" bash tools/xbox-link-check.sh --client-main --xbe "$SCRATCH/game-$TITLE-baseline.xbe" --expect-undefined 0; then
 	echo "xbox-game-link-check: the baseline (stub game module) link is not" >&2
 	echo "  clean - refusing to build the real server module on top of a" >&2
 	echo "  foundation that isn't itself known-good." >&2
@@ -152,7 +152,7 @@ fi
 # compile regression is caught at THIS step, with a clear cause, not
 # discovered later as a confusing pile of undefined symbols.
 echo "xbox-game-link-check: isolating the $TITLE server module..." >&2
-if ! bash tools/xbox-game-isolate.sh "$TITLE" server --expect-fail 0 --expect-total 107; then
+if ! env SCRATCH="$SCRATCH" bash tools/xbox-game-isolate.sh "$TITLE" server --expect-fail 0 --expect-total 107; then
 	echo "xbox-game-link-check: $TITLE server isolation did not certify a" >&2
 	echo "  complete object set - refusing to attempt a real link against a" >&2
 	echo "  set already known to be partial or regressed." >&2
@@ -202,7 +202,7 @@ CLIENT_ISO_OBJS=()
 CLIENT_EXPORTS_TXT=""
 if [ -n "$INCLUDE_CLIENT" ]; then
 	echo "xbox-game-link-check: isolating the $TITLE client module..." >&2
-	if ! bash tools/xbox-game-isolate.sh "$TITLE" client --expect-fail 0 --expect-total 85; then
+	if ! env SCRATCH="$SCRATCH" bash tools/xbox-game-isolate.sh "$TITLE" client --expect-fail 0 --expect-total 85; then
 		echo "xbox-game-link-check: $TITLE client isolation did not certify a" >&2
 		echo "  complete object set - refusing to attempt a real link against a" >&2
 		echo "  set already known to be partial or regressed." >&2
@@ -256,7 +256,7 @@ fi
 FREEVGUI_OBJS=()
 if [ -n "$INCLUDE_FREEVGUI" ]; then
 	echo "xbox-game-link-check: sweeping freevgui..." >&2
-	if ! bash tools/xbox-freevgui-sweep.sh --expect-fail 0 --expect-total 39; then
+	if ! env SCRATCH="$SCRATCH" bash tools/xbox-freevgui-sweep.sh --expect-fail 0 --expect-total 39; then
 		echo "xbox-game-link-check: freevgui did not sweep clean - refusing to" >&2
 		echo "  link against a source set already known to be broken." >&2
 		exit 1
