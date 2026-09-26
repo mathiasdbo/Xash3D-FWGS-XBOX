@@ -53,9 +53,11 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "com_strings.h" /* S_ERROR - not pulled in transitively here, unlike ref/soft/ref/gl's own r_local.h/gl_local.h */
 #include "entity_types.h" /* X9-M: ET_BEAM, for R_AddEntity */
 #include "cvardef.h"
+#include "pmove.h" /* X9-X step 4 Part E: the real movevars_s definition (gp_movevars->zmax) - ref_common.h only forward-declares it */
 #include "ref_common.h"
 #include "nv2a_texture.h" /* X9-X: the texture manager's own table/entry points (r_image.c) */
 #include "nv2a_2d_util.h" /* X9-X: the 2D pass's pure-arithmetic pieces (nv2a_2d_util.c), host-tested */
+#include "nv2a_tri_util.h" /* X9-X step 4: the TriAPI's primitive assembler (nv2a_tri_util.c), host-tested */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -360,6 +362,40 @@ static void     *nv2a_map_lightmap;     /* GPU-visible, RGBA8, no format convers
                                             X9-J, docs/r3d/divergences.md #100. */
 static uint32_t  nv2a_map_lightmap_width, nv2a_map_lightmap_height, nv2a_map_lightmap_pitch;
 static float     nv2a_map_viewproj[4][4];
+/* X9-X step 4 Part E: the SAME camera as nv2a_map_viewproj above, but built
+   with ref/common's own Matrix4x4_* helpers (M*v, column-vector convention)
+   instead of nv2a_matrix_multiply()'s row-vector one - GetMatrix/
+   WorldToScreen/ScreenToWorld port ref/gl's own functions verbatim
+   (gl_rmain.c:137-186,369-425), which read exactly this representation.
+   Filled in GL_RenderFrame, reset to identity in R_Init only - same reset
+   discipline as nv2a_view_valid below, which still gates every use of all
+   three (GL_RenderFrame runs before any of GetMatrix/WorldToScreen/
+   ScreenToWorld can be called with real data). Do NOT derive these by
+   transposing nv2a_map_viewproj - it is a different convention (row-vector
+   vs column-vector), not one matrix read two ways.
+   The projection's zNear/zFar are now the SAME 1/8192 nv2a_map_viewproj
+   itself renders with, not ref/gl's own R_GetFarClip-derived values - see
+   this matrix's own construction, below, for why (codex review, real
+   finding: CFrustum::CalculateFrustum genuinely reads GetMatrix's near/far
+   planes for particle culling, divergences.md #119 point 2). */
+static matrix4x4 nv2a_gl_worldview;
+static matrix4x4 nv2a_gl_projection;
+static matrix4x4 nv2a_gl_worldviewproj;
+
+/* Tentative (no-initializer) forward declarations - the real ones, each
+   WITH its initializer, are Part C's own (the 2D/TriAPI immediate-mode
+   pass, defined well below GL_RenderFrame in this file); a tentative
+   declaration and its later real definition name the same object in C.
+   Needed here only because GL_RenderFrame (X9-X step 4 Part F) now
+   flushes/dirties/resets this pass's own state right after the world
+   draw, and nv2a_draw_test_triangle() (X9-C) does the same on its own
+   fallback path - both defined above Part C itself. */
+static qboolean nv2a_2d_dirty;
+static byte     nv2a_2d_color[4];
+static qboolean nv2a_in2d;
+static void     nv2a_2d_flush( void );
+static void     nv2a_2d_reset_shadow_for_3d( void );
+
 static qboolean  nv2a_view_valid; /* X9-E: true only once GL_RenderFrame has
                                       processed a real world pass this
                                       session - R_EndFrame must not draw
@@ -1159,12 +1195,22 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
 }
 
 /* X9-X: the NV2A holds one resident vertex/pixel program at a time -
-   every function that loads a different one clears this so the 2D
-   pass's own nv2a_init_2d_shader() (defined with the rest of Part F,
-   below) knows to re-upload before its next flush. Declared this early
-   only because nv2a_init_shader() and nv2a_init_lit_shader() below both
-   need to clear it. */
-static qboolean nv2a_2d_shader_resident;
+   every function that loads a different one clears this so the 2D/TriAPI
+   pass's own nv2a_init_2d_shader()/nv2a_init_tri_shader() (defined with
+   the rest of Part F, below) knows to re-upload before its next flush.
+   One enum rather than a bool per program (X9-X step 4 Part B): the 2D
+   pass now shares its own upload-on-demand discipline with the TriAPI's
+   own vertex program, and each must invalidate the OTHER's residency, not
+   just its own. Declared this early only because nv2a_init_shader() and
+   nv2a_init_lit_shader() below both need to clear it. */
+typedef enum
+{
+	NV2A_RESIDENT_NONE,
+	NV2A_RESIDENT_2D,
+	NV2A_RESIDENT_TRI
+} nv2a_resident_program_t;
+
+static nv2a_resident_program_t nv2a_resident_program;
 
 /* X9-X D1: the 2D pass's own vertex ring - allocated in R_Init, freed in
    R_Shutdown (both well above where the rest of Part F is defined
@@ -1181,7 +1227,7 @@ static void nv2a_init_shader( void )
 	uint32_t *p;
 	int i;
 
-	nv2a_2d_shader_resident = false;
+	nv2a_resident_program = NV2A_RESIDENT_NONE;
 
 	uint32_t vs_program[] =
 	{
@@ -1229,7 +1275,7 @@ static void nv2a_init_lit_shader( void )
 	uint32_t *p;
 	int i;
 
-	nv2a_2d_shader_resident = false;
+	nv2a_resident_program = NV2A_RESIDENT_NONE;
 
 	uint32_t vs_program[] =
 	{
@@ -1329,6 +1375,13 @@ static void nv2a_draw_test_triangle( void )
 	int i;
 
 	nv2a_set_3d_state();
+
+	/* X9-X step 4: this path also pushes its own program/constants/array
+	   formats directly (never through nv2a_2d_desired/append) - the 2D/
+	   TriAPI pass must fully re-enter the GPU state before its own next
+	   flush, same reasoning as GL_RenderFrame's own post-world-draw
+	   nv2a_2d_dirty = true (Part F). */
+	nv2a_2d_dirty = true;
 
 	/* X9-C: the NV2A only holds one resident vertex/pixel program at a
 	   time, and nv2a_draw_map_geometry() may have uploaded its own
@@ -2743,9 +2796,32 @@ static void R_FillRenderAPI( render_api_t *api )
 	;
 }
 
+/* Defined later in the file, alongside the rest of X9-X step 4 Part E -
+   forward-declared here only so R_FillTriAPI (used well before that point
+   by nothing else, but kept at its own long-established spot in the
+   ref_interface_t stub group) can reference them. */
+static void TexCoord2f( float u, float v );
+static void Fog( float flFogColor[3], float flStart, float flEnd, int bOn );
+static void ScreenToWorld( const float *screen, float *world );
+static void GetMatrix( const int pname, float *matrix );
+static void FogParams( float flDensity, int iFogSkybox );
+
+/* X9-X step 4 Part E: R_FillTriAPI fills the 5 slots ref/gl's own does
+   (gl_context.c:466-473) - Begin/End/Vertex3f/Vertex3fv/RenderMode/
+   Color4f/Color4ub/CullFace/SpriteTexture/WorldToScreen/BoxInPVS/
+   LightAtPoint/Color4fRendermode are either the ENGINE's own
+   (CL_FillTriAPI, ref_common.c:473-492) or wired straight from
+   gReffuncs by that same function - not this one's job. */
 static void R_FillTriAPI( triangleapi_t *api )
 {
-	;
+	if( !api )
+		return;
+
+	api->TexCoord2f    = TexCoord2f;
+	api->Fog           = Fog;
+	api->ScreenToWorld = ScreenToWorld;
+	api->GetMatrix     = GetMatrix;
+	api->FogParams     = FogParams;
 }
 
 /* Bring-up diagnostic only - not part of the ref_interface_t contract.
@@ -2853,6 +2929,12 @@ static qboolean R_Init( void )
 
 	debug_marker = 1;
 	nv2a_view_valid = false; /* X9-E: no real GL_RenderFrame call yet this init */
+	/* X9-X step 4 Part E: GL's own initial matrix-stack state (identity on
+	   both stacks) until the first real GL_RenderFrame fills these for
+	   real - matches nv2a_view_valid's own reset discipline above. */
+	Matrix4x4_LoadIdentity( nv2a_gl_worldview );
+	Matrix4x4_LoadIdentity( nv2a_gl_projection );
+	Matrix4x4_LoadIdentity( nv2a_gl_worldviewproj );
 
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_nocull );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_novis );
@@ -3098,10 +3180,121 @@ static void R_SetupSky( int *skytextures )
 	;
 }
 
+/* GL enums TriGetMatrix/GetMatrix read (gl_export.h:63-64) - the one
+   deliberate exception to "no new literal NV097 value outside nv_regs.h":
+   these are not NV097 registers at all, they are the GL enum values the
+   SDK client passes to pTriAPI->GetMatrix, cited here instead. */
+#define NV2A_GL_MODELVIEW_MATRIX  0x0BA6
+#define NV2A_GL_PROJECTION_MATRIX 0x0BA7
+
+/* X9-X step 4 Part E: port of R_WorldToScreen (gl_rmain.c:137-163 /
+   ref/soft's own r_main.c:214-235, byte-for-byte identical) onto
+   nv2a_gl_worldviewproj - NDC x,y with no viewport and no y flip,
+   screen[2]=0, exactly as the reference leaves it (TriWorldToScreen,
+   gl_triapi.c:223-233, is a DIFFERENT, pixel-space function for ref/gl's
+   own internal beam drawing - not ported here, out of scope per the
+   spec). This single function serves BOTH ref_interface_t's own
+   WorldToScreen (autoaim/cl_showents, cl_game.c:841/cl_scrn.c:184) and,
+   through the engine's own passthrough wrapper (cl_game.c's
+   TriWorldToScreen calling ref.dllFuncs.WorldToScreen directly), the
+   TriAPI's own WorldToScreen slot - CL_FillTriAPI never calls this
+   module's R_FillTriAPI for that slot, it wires the engine's own
+   TriWorldToScreen wrapper there instead (ref_common.c:473-492's own
+   TriAPI table), which in turn does nothing but call this. */
 static int WorldToScreen( const vec3_t world, vec3_t screen )
 {
-	VectorClear( screen );
-	return 0;
+	float w;
+
+	if( !world || !screen )
+		return true;
+
+	screen[0] = nv2a_gl_worldviewproj[0][0] * world[0] + nv2a_gl_worldviewproj[0][1] * world[1] + nv2a_gl_worldviewproj[0][2] * world[2] + nv2a_gl_worldviewproj[0][3];
+	screen[1] = nv2a_gl_worldviewproj[1][0] * world[0] + nv2a_gl_worldviewproj[1][1] * world[1] + nv2a_gl_worldviewproj[1][2] * world[2] + nv2a_gl_worldviewproj[1][3];
+	w         = nv2a_gl_worldviewproj[3][0] * world[0] + nv2a_gl_worldviewproj[3][1] * world[1] + nv2a_gl_worldviewproj[3][2] * world[2] + nv2a_gl_worldviewproj[3][3];
+	screen[2] = 0.0f;
+
+	if( w < 0.001f )
+		return true;
+
+	screen[0] /= w;
+	screen[1] /= w;
+	return false;
+}
+
+/* X9-X step 4 Part E: port of R_ScreenToWorld (gl_rmain.c:172-186), same
+   in both real refs. triangleapi_t's own field, not ref_interface_t's -
+   only CL_DrawEFX/particleman-adjacent SDK code would call it; nothing
+   in this fork's own client build does yet. */
+static void ScreenToWorld( const float *screen, float *world )
+{
+	matrix4x4 inv;
+	float w;
+
+	if( !world || !screen )
+		return;
+
+	Matrix4x4_Invert_Full( inv, nv2a_gl_worldviewproj );
+
+	world[0] = screen[0] * inv[0][0] + screen[1] * inv[0][1] + screen[2] * inv[0][2] + inv[0][3];
+	world[1] = screen[0] * inv[1][0] + screen[1] * inv[1][1] + screen[2] * inv[1][2] + inv[1][3];
+	world[2] = screen[0] * inv[2][0] + screen[1] * inv[2][1] + screen[2] * inv[2][2] + inv[2][3];
+	w        = screen[0] * inv[3][0] + screen[1] * inv[3][1] + screen[2] * inv[3][2] + inv[3][3];
+
+	if( w != 0.0f )
+	{
+		world[0] /= w;
+		world[1] /= w;
+		world[2] /= w;
+	}
+}
+
+/* X9-X step 4 Part E: port of TriGetMatrix (gl_triapi.c:305-309, a thin
+   pglGetFloatv), returning what the CURRENT matrix stack would hold - the
+   2D ortho/identity pair R_Set2DMode(true) itself loads (gl_draw.c:
+   152-168) while nv2a_in2d, or the real 3D worldview/projection
+   GL_RenderFrame filled otherwise. Any other pname leaves `matrix`
+   untouched, as glGetFloatv does for an invalid enum. */
+static void GetMatrix( const int pname, float *matrix )
+{
+	matrix4x4 m;
+
+	if( !matrix )
+		return;
+
+	if( nv2a_in2d )
+	{
+		if( pname == NV2A_GL_PROJECTION_MATRIX )
+		{
+			Matrix4x4_CreateOrtho( m, 0.0f, (float)gpGlobals->width, (float)gpGlobals->height, 0.0f, -99999.0f, 99999.0f );
+			Matrix4x4_ToArrayFloatGL( m, matrix );
+		}
+		else if( pname == NV2A_GL_MODELVIEW_MATRIX )
+		{
+			Matrix4x4_LoadIdentity( m );
+			Matrix4x4_ToArrayFloatGL( m, matrix );
+		}
+		return;
+	}
+
+	if( pname == NV2A_GL_MODELVIEW_MATRIX )
+		Matrix4x4_ToArrayFloatGL( nv2a_gl_worldview, matrix );
+	else if( pname == NV2A_GL_PROJECTION_MATRIX )
+		Matrix4x4_ToArrayFloatGL( nv2a_gl_projection, matrix );
+}
+
+/* X9-X step 4 Part E: Fog/FogParams are documented no-ops - nv2a has no
+   fog yet (fork-plan item 14.11 is the exit), same precedent ref/soft
+   itself uses (r_triapi.c:307-340). TriRenderMode's own R_AllowFog is
+   likewise a no-op (D). Divergence #119; nothing in this fork's own SDK
+   client build calls either yet. */
+static void Fog( float flFogColor[3], float flStart, float flEnd, int bOn )
+{
+	(void)flFogColor; (void)flStart; (void)flEnd; (void)bOn;
+}
+
+static void FogParams( float flDensity, int iFogSkybox )
+{
+	(void)flDensity; (void)iFogSkybox;
 }
 
 static qboolean VID_ScreenShot( const char *filename, int shot_type )
@@ -4738,7 +4931,63 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		}
 	}
 
+	/* X9-X step 4 Part E: the SAME camera as nv2a_map_viewproj above, in
+	   ref/common's own convention - see nv2a_gl_worldviewproj's own
+	   declaration comment for why this is a second, independent build
+	   rather than a transposed reuse. Port of ref/soft's own
+	   R_SetupModelviewMatrix/R_SetupProjectionMatrix (r_main.c:379-438),
+	   but with the SAME zNear=1/zFar=8192 the TriAPI draw path actually
+	   renders with (nv2a_matrix_perspective( proj, xscale, yscale, 1.0f,
+	   8192.0f ) above, this same function), NOT ref/gl's own
+	   R_GetFarClip-derived zNear=4/zFar=max(256,farclip) (r_main.c:
+	   379-384; byte-for-byte identical in gl_rmain.c:332-337,369-425).
+	   codex review, real finding (divergences.md #119 point 2): the two
+	   z-ranges used to disagree, and CFrustum::CalculateFrustum
+	   (particleman/CFrustum.cpp:38-104) genuinely reads GetMatrix's
+	   reported projection to extract real FRONT/BACK culling planes for
+	   CBaseParticle::CheckVisibility (particleman/CBaseParticle.cpp:
+	   106-146) - the earlier claim that "nothing reads the mismatch" was
+	   false. Reporting the world's own actual clip volume instead fixes
+	   the culling planes without touching the shared depth buffer this
+	   was built for; only the FRONT/BACK planes move, since LEFT/RIGHT/
+	   TOP/BOTTOM depend only on fov_x/fov_y, not on zNear/zFar. */
+	{
+		matrix4x4 worldview, projection, wvp;
+		float zNear, zFar, yMax, xMax;
+
+		zNear = 1.0f;
+		zFar = 8192.0f;
+
+		yMax = zNear * tanf((float)( DEG2RAD( rvp->fov_y ) * 0.5 ));
+		xMax = zNear * tanf((float)( DEG2RAD( rvp->fov_x ) * 0.5 ));
+
+		Matrix4x4_CreateProjection( projection, xMax, -xMax, yMax, -yMax, zNear, zFar );
+
+		Matrix4x4_CreateModelview( worldview );
+		Matrix4x4_ConcatRotate( worldview, -rvp->viewangles[2], 1, 0, 0 );
+		Matrix4x4_ConcatRotate( worldview, -rvp->viewangles[0], 0, 1, 0 );
+		Matrix4x4_ConcatRotate( worldview, -rvp->viewangles[1], 0, 0, 1 );
+		Matrix4x4_ConcatTranslate( worldview, -rvp->vieworigin[0], -rvp->vieworigin[1], -rvp->vieworigin[2] );
+
+		Matrix4x4_Concat( wvp, projection, worldview );
+
+		Matrix4x4_Copy( nv2a_gl_worldview, worldview );
+		Matrix4x4_Copy( nv2a_gl_projection, projection );
+		Matrix4x4_Copy( nv2a_gl_worldviewproj, wvp );
+	}
+
 	nv2a_view_valid = true;
+
+	/* X9-X step 4 Part F: flush whatever the 2D pass had pending (a HUD
+	   draw from a previous frame's tail, or - defensively - anything from
+	   earlier this same frame) and reset the shadow to R_SetupGL's own
+	   tail state (gl_rmain.c:568-572) before the world draw, which never
+	   goes through nv2a_2d_desired/nv2a_2d_append() at all (it pushes its
+	   own GPU state directly, nv2a_set_3d_state()) - the NEXT 2D or
+	   TriAPI batch must not inherit a stale shadow left over from before
+	   the world's own draw ran. */
+	nv2a_2d_flush();
+	nv2a_2d_reset_shadow_for_3d();
 
 	/* X9-X: the world is drawn here, where the engine asks for it
 	   (V_RenderView), as ref/gl's R_RenderFrame does (gl_rmain.c:1076) -
@@ -4748,6 +4997,31 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	{
 		nv2a_draw_map_geometry();
 		nv2a_world_drawn_this_frame = true;
+	}
+
+	/* X9-X step 4 Part F: only once nv2a_frame_open (R_BeginFrame already
+	   ran, R_EndFrame has not) - the menu preview call this function also
+	   receives (this function's own header comment) returns before this
+	   point (no RF_DRAW_WORLD), so it never reaches here. */
+	if( nv2a_frame_open )
+	{
+		/* The world draw above pushed its own program, constants, array
+		   formats, alpha func and stage 1 directly (nv2a_draw_map_geometry,
+		   not through nv2a_2d_desired/append at all) - the 2D/TriAPI pass
+		   must fully re-enter the GPU state before its own next flush. */
+		nv2a_2d_dirty = true;
+
+		if( nv2a_world_drawn_this_frame )
+			gEngfuncs.R_DrawWorldHull(); /* port of R_DrawWorld's own tail, gl_rsurf.c:3728 */
+
+		gEngfuncs.pfnDrawNormalTriangles();
+		gEngfuncs.pfnDrawTransparentTriangles(); /* no translucent entities to draw between the two yet - out of scope, see spec */
+
+		/* Ends the frame with nothing queued - the SDK's own tri hooks
+		   above may have batched TriAPI primitives that would otherwise
+		   sit pending until the engine's own 2D pass (V_PostRender)
+		   happens to trigger a flush. */
+		nv2a_2d_flush();
 	}
 }
 
@@ -4768,12 +5042,16 @@ static byte *Mod_GetCurrentVis( void )
 
 /*
 ========================================================================
-X9-X Part F: the 2D pass. One packed 20-byte vertex (position, texel-unit
-texcoord, byte colour) batched through the 256 KiB vertex ring D1
-allocates in R_Init, flushed whenever the desired GPU-state shadow, the
-resolved texture-stage key or an explicit "dirty" flag changes from what
-was last actually pushed - see nv2a_2d_flush()'s own comment for the
-GPU-state re-entry sequence and citations.
+X9-X Part F, generalised in step 4 Part C into one immediate-mode pass
+with two spaces: 2D (R_DrawStretchPic/FillRGBA/the console/HUD/menu) and
+3D (the TriAPI, D below). One packed vertex per space (2D: 20 bytes,
+position/texel-unit texcoord/byte colour; 3D: 24 bytes, adding z) batched
+through the SAME 256 KiB vertex ring D1 allocates in R_Init (both strides
+are multiples of 4), flushed whenever the desired GPU-state shadow, the
+resolved texture-stage key, the space, the primitive op, or an explicit
+"dirty" flag changes from what was last actually pushed - see
+nv2a_2d_flush()'s own comment for the GPU-state re-entry sequence and
+citations.
 ========================================================================
 */
 
@@ -4783,6 +5061,22 @@ typedef struct
 	float u, v;
 	byte  rgba[4];
 } __attribute__(( packed )) nv2a_2d_vertex_t;
+
+/* X9-X step 4 Part C: the TriAPI's own 3D vertex - IDENTICAL layout to
+   nv2a_tri_util.h's own nv2a_tri_vert_t (the assembler's staged-vertex
+   type), so a completed primitive from that host-tested assembler is
+   already this wire format with no repacking. Kept as a distinct name
+   here only because this file also needs sizeof() for the ring's stride
+   math, same as nv2a_2d_vertex_t above. */
+typedef nv2a_tri_vert_t nv2a_tri_vertex_t;
+
+/* Which of the two immediate-mode spaces a batch belongs to - see this
+   block's own header comment. */
+typedef enum
+{
+	NV2A_IMM_SPACE_2D,
+	NV2A_IMM_SPACE_3D
+} nv2a_imm_space_t;
 
 /* The resolved GPU texture-stage parameters of the pending batch's own
    texture - NOT its texnum (C1's own note): a same-frame slot reuse
@@ -4794,17 +5088,51 @@ typedef struct
 	qboolean bilinear;
 } nv2a_2d_batch_key_t;
 
+/* X9-X step 4 Part C: nv2a_2d_desired is now the single GL-like current
+   state GL_SetRenderMode/VGUI_SetupDrawing/FillRGBA/TriRenderMode all
+   write (ref/gl shares one GL state machine across all four too) -
+   depth_mask/cull_enable added for the TriAPI's own CullFace/
+   TriRenderMode. The SAME struct is also used for nv2a_2d_pushed/
+   nv2a_2d_batch_state, where depth_mask/cull_enable instead hold the
+   EFFECTIVE (post 2D-forcing) values - see the append path's own
+   comment. */
 typedef struct
 {
 	qboolean blend_enable;
 	uint32_t sfactor, dfactor;
 	qboolean alpha_test_enable;
+	qboolean depth_mask;
+	qboolean cull_enable;
+	/* Only meaningful in nv2a_2d_batch_state/nv2a_2d_pushed (never in
+	   nv2a_2d_desired, which has no draw of its own yet): which space
+	   this batch is in and which hardware BEGIN_END op its vertices
+	   are drawn with. */
+	nv2a_imm_space_t space;
+	uint32_t op;
 } nv2a_2d_shadow_t;
 
 static qboolean nv2a_in2d;
 static byte     nv2a_2d_color[4] = { 255, 255, 255, 255 }; /* current colour, shared with TriAPI */
 
-static nv2a_2d_shadow_t nv2a_2d_desired = { false, NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA, false };
+static nv2a_2d_shadow_t nv2a_2d_desired = {
+	false, NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA, false,
+	true, true, /* depth_mask/cull_enable: R_SetupGL's own 3D defaults (gl_rmain.c:568-572) until R_Set2DMode(true) first forces them off */
+	NV2A_IMM_SPACE_2D, NV097_SET_BEGIN_END_OP_QUADS
+};
+
+/* X9-X step 4 Part F: called by GL_RenderFrame right after the world
+   draw (nv2a_draw_map_geometry pushes its own GPU state directly, never
+   through nv2a_2d_desired) - R_SetupGL's own tail state (gl_rmain.c:
+   568-572): cull on, blend off, alpha test off, colour 255x4. depth_mask
+   is deliberately untouched (not part of R_SetupGL's own reset). */
+static void nv2a_2d_reset_shadow_for_3d( void )
+{
+	nv2a_2d_desired.blend_enable = false;
+	nv2a_2d_desired.alpha_test_enable = false;
+	nv2a_2d_desired.cull_enable = true;
+	nv2a_2d_color[0] = nv2a_2d_color[1] = nv2a_2d_color[2] = nv2a_2d_color[3] = 255;
+}
+
 static nv2a_2d_shadow_t nv2a_2d_pushed;
 /* The render state the pending batch was appended under. A flush is
    triggered by the NEXT quad's different state, by which time
@@ -4819,7 +5147,7 @@ static qboolean nv2a_2d_pushed_valid;
 
 static nv2a_2d_batch_key_t nv2a_2d_batch_key;
 static qboolean nv2a_2d_dirty = true; /* forces a full GPU-state re-entry the first time the 2D pass ever flushes */
-/* nv2a_2d_shader_resident and nv2a_2d_ring are declared near
+/* nv2a_resident_program and nv2a_2d_ring are declared near
    nv2a_init_shader() above - both are needed by code defined well
    before this point in the file (R_Init/R_Shutdown, nv2a_init_shader()
    itself). */
@@ -4885,6 +5213,49 @@ static void nv2a_init_2d_shader( void )
 	pb_end( p );
 }
 
+/* X9-X step 4 Part B: the TriAPI's own vertex program (vs_tri.vs.cg/
+   vs_tri.inl - same cgc/vp20compiler pipeline as vs_2d, reproduced
+   byte-for-byte before being committed). The pixel program is ps_2d.inl
+   REUSED verbatim (tex0 x col0 modulate) - ref/gl's own TriRenderMode
+   forces GL_MODULATE (gl_triapi.c:42) and ps_2d already is one, so no
+   third fp20 program is needed. Otherwise identical in shape to
+   nv2a_init_2d_shader() above. */
+static void nv2a_init_tri_shader( void )
+{
+	uint32_t *p;
+	int i;
+
+	uint32_t vs_program[] =
+	{
+		#include "vs_tri.inl"
+	};
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
+	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
+		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
+		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
+	pb_end( p );
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
+	pb_end( p );
+
+	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); i++ )
+	{
+		p = pb_begin();
+		pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
+		memcpy( p, &vs_program[i * 4], 4 * 4 );
+		p += 4;
+		pb_end( p );
+	}
+
+	p = pb_begin();
+	#include "ps_2d.inl"
+	pb_end( p );
+}
+
 static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
 {
 	uint32_t phys, pitch, width, height;
@@ -4901,17 +5272,41 @@ static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
 	return true;
 }
 
+/* The number of vertices ONE output primitive of a given hardware
+   BEGIN_END op needs - the reverse of nv2a_tri_verts_per_output_prim()
+   (which maps a TOPOLOGY, not an op, and lives in the pbkit-free
+   nv2a_tri_util.c). Every op nv2a_2d_batch_state.op is ever set to is one
+   of these four (2D append_quad's own QUADS, or Begin()'s own
+   nv2a_tri_topology_op() mapping) - no default case needed, but one kept
+   defensively rather than reading past this switch. */
+static uint32_t nv2a_2d_op_verts_per_prim( uint32_t op )
+{
+	switch( op )
+	{
+	case NV097_SET_BEGIN_END_OP_POINTS:    return 1;
+	case NV097_SET_BEGIN_END_OP_LINES:     return 2;
+	case NV097_SET_BEGIN_END_OP_TRIANGLES: return 3;
+	case NV097_SET_BEGIN_END_OP_QUADS:     return 4;
+	default:                               return 4;
+	}
+}
+
+typedef struct { uint32_t op; } nv2a_2d_draw_ctx_t;
+
 /* One DRAW_ARRAYS chunk, fully self-contained (its own BEGIN_END pair) -
    mirrors nv2a_draw_index_range()'s own precedent above (multiple small
    primitives, not one spanning several pushbuffer kicks), and trivially
    respects the 128-dword-per-block limit
-   (deps/nxdk/lib/pbkit/pbkit_pushbuffer.h's own comment) either way. */
+   (deps/nxdk/lib/pbkit/pbkit_pushbuffer.h's own comment) either way. The
+   op is now the CALLER's own (X9-X step 4 Part C: 2D always draws QUADS,
+   the TriAPI draws whatever Begin()'s primitive maps to) rather than a
+   hardcoded QUADS. */
 static void nv2a_2d_emit_draw_arrays( uint32_t start, uint32_t count, void *ctx )
 {
+	uint32_t op = ((nv2a_2d_draw_ctx_t *)ctx)->op;
 	uint32_t *p = pb_begin();
 
-	(void)ctx;
-	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_QUADS );
+	p = pb_push1( p, NV097_SET_BEGIN_END, op );
 	p = pb_push1( p, 0x40000000 | NV097_DRAW_ARRAYS,
 		MASK( NV097_DRAW_ARRAYS_COUNT, count - 1 )
 		| MASK( NV097_DRAW_ARRAYS_START_INDEX, start ));
@@ -4919,45 +5314,51 @@ static void nv2a_2d_emit_draw_arrays( uint32_t start, uint32_t count, void *ctx 
 	pb_end( p );
 }
 
+/* Which space nv2a_2d_flush() last actually re-entered the GPU state for -
+   INDEPENDENT of nv2a_2d_dirty (X9-X step 4 Part C): the common re-entry
+   below must also run whenever the batch's own space differs from this,
+   since the two spaces need different shaders, depth-test enable and
+   transform constants even when nothing else went "dirty". */
+static nv2a_imm_space_t nv2a_2d_last_reentry_space = NV2A_IMM_SPACE_2D;
+
+/* Tracks which space the vertex-attribute pointers were last pushed for -
+   same reasoning as nv2a_2d_pushed_base_offset below: a same-offset,
+   different-space batch (unlikely but not impossible once the ring
+   wraps) must still re-push the pointers with the OTHER stride. */
+static nv2a_imm_space_t nv2a_2d_pushed_base_space = NV2A_IMM_SPACE_2D;
+
 /* Draws (and clears) the pending batch. */
 static void nv2a_2d_flush( void )
 {
 	if( nv2a_2d_ring_pending_verts == 0 )
 		return;
 
-	if( nv2a_2d_dirty )
+	if( nv2a_2d_dirty || nv2a_2d_last_reentry_space != nv2a_2d_batch_state.space )
 	{
 		uint32_t *p;
-		float m[4][4];
-		static const float vs_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
 		int i;
+		nv2a_resident_program_t want = ( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_2D ) ? NV2A_RESIDENT_2D : NV2A_RESIDENT_TRI;
 
-		if( !nv2a_2d_shader_resident )
+		if( nv2a_resident_program != want )
 		{
-			nv2a_init_2d_shader();
-			nv2a_2d_shader_resident = true;
+			if( want == NV2A_RESIDENT_2D )
+				nv2a_init_2d_shader();
+			else
+				nv2a_init_tri_shader();
+			nv2a_resident_program = want;
 		}
 
+		/* Common to both spaces (X9-X step 4 Part C): stage 1 off, alpha
+		   func GREATER ref 0 (ref/gl's own DEFAULT_ALPHATEST 0.0f -
+		   gl_local.h:71 - the world path leaves GEQUAL 0x80 behind), every
+		   array format reset. DEPTH_MASK/CULL_FACE_ENABLE moved OUT of
+		   this block (were 2D-only, forced 0 unconditionally) into the
+		   per-flush shadow diff below, which now pushes them from the
+		   snapshot's own EFFECTIVE values for either space. */
 		p = pb_begin();
-		p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 0 );
-		p = pb_push1( p, NV097_SET_DEPTH_MASK, 0 );
-		p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 0 );
-		pb_end( p );
-
-		/* C5: rebuilt every dirty entry from the engine's own reported 2D
-		   size against the real back buffer - NOT nv2a_matrix_viewport()'s
-		   NDC-to-screen construction, a different matrix for a different
-		   purpose. */
-		nv2a_2d_build_matrix( m, (float)nv2a_width, (float)nv2a_height,
-			(float)gpGlobals->width, (float)gpGlobals->height, nv2a_r_2d_pixeloffset.value );
-
-		p = pb_begin();
-		p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
-		pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
-		memcpy( p, m, 16 * 4 );
-		p += 16;
-		memcpy( p, vs_c4, sizeof( vs_c4 ));
-		p += 4;
+		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
+		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
+		p = pb_push1( p, NV097_SET_ALPHA_REF, 0 );
 		pb_end( p );
 
 		p = pb_begin();
@@ -4966,43 +5367,106 @@ static void nv2a_2d_flush( void )
 			*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
 		pb_end( p );
 
-		p = pb_begin();
-		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
-		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
-		p = pb_push1( p, NV097_SET_ALPHA_REF, 0 );
-		pb_end( p );
+		if( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_2D )
+		{
+			float m[4][4];
+			static const float vs_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+
+			p = pb_begin();
+			p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 0 );
+			pb_end( p );
+
+			/* C5: rebuilt every re-entry from the engine's own reported 2D
+			   size against the real back buffer - NOT
+			   nv2a_matrix_viewport()'s NDC-to-screen construction, a
+			   different matrix for a different purpose. */
+			nv2a_2d_build_matrix( m, (float)nv2a_width, (float)nv2a_height,
+				(float)gpGlobals->width, (float)gpGlobals->height, nv2a_r_2d_pixeloffset.value );
+
+			p = pb_begin();
+			p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
+			pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
+			memcpy( p, m, 16 * 4 );
+			p += 16;
+			memcpy( p, vs_c4, sizeof( vs_c4 ));
+			p += 4;
+			pb_end( p );
+		}
+		else
+		{
+			static const float vs_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+
+			/* The TriAPI gets the SAME matrix and the SAME shader divide
+			   as the world (X9-X step 4 Part C): DEPTH_TEST_ENABLE 1, the
+			   world's own nv2a_map_viewproj at TRANSFORM_CONSTANT_LOAD 96,
+			   exactly as the world's own constant push does (this file's
+			   world constant block). The depth FUNC is left at pbkit's
+			   own default LEQUAL (pbkit.c:3161) - nothing here reprograms
+			   it - so the TriAPI's depth values are directly comparable
+			   with the world's own depth buffer. */
+			p = pb_begin();
+			p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
+			pb_end( p );
+
+			p = pb_begin();
+			p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
+			pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
+			memcpy( p, nv2a_map_viewproj, 16 * 4 );
+			p += 16;
+			memcpy( p, vs_c4, sizeof( vs_c4 ));
+			p += 4;
+			pb_end( p );
+		}
 
 		nv2a_2d_pushed_base_valid = false; /* force the pointer/cache re-push below too, whatever base offset it last pointed at */
 		nv2a_2d_pushed_valid = false; /* force the shadow push below to run too, whatever it was last set to */
+		nv2a_2d_last_reentry_space = nv2a_2d_batch_state.space;
 		nv2a_2d_dirty = false;
 	}
 
 	/* QA round 1, finding 1: the array pointers must track the CURRENT
-	   batch's base offset on EVERY flush, not only a full "dirty"
-	   re-entry - nv2a_2d_append_quad() starts a new batch (and a new
-	   ring_batch_base_offset) on a texture- or blend-only flush too,
-	   without ever setting nv2a_2d_dirty. Left inside the `if( dirty )`
-	   block above, that flush would leave the pointers parked at the
-	   PREVIOUS batch's offset, and DRAW_ARRAYS's START_INDEX (relative to
-	   whatever address the pointers hold) would silently redraw the
-	   previous batch's vertices under the new texture/blend state.
-	   nv2a_bind_vertex_base() above is the same fix for the 3D path:
-	   re-push the pointers AND invalidate the vertex fetch cache
-	   whenever the bound address moves, not only on some coarser event. */
-	if( !nv2a_2d_pushed_base_valid || nv2a_2d_pushed_base_offset != nv2a_2d_ring_batch_base_offset )
+	   batch's base offset (and now space - X9-X step 4 Part C) on EVERY
+	   flush, not only a full re-entry - nv2a_2d_append() starts a new
+	   batch (and a new ring_batch_base_offset) on a texture-, blend- or
+	   space-only flush too, without necessarily changing nv2a_2d_dirty or
+	   nv2a_2d_last_reentry_space. Left inside the re-entry block above,
+	   that flush would leave the pointers parked at the PREVIOUS batch's
+	   offset/format, and DRAW_ARRAYS's START_INDEX (relative to whatever
+	   address the pointers hold) would silently redraw the previous
+	   batch's vertices, at the WRONG stride, under the new texture/blend/
+	   space state. nv2a_bind_vertex_base() above is the same fix for the
+	   world's own 3D path: re-push the pointers AND invalidate the vertex
+	   fetch cache whenever the bound address (or here, format) moves, not
+	   only on some coarser event. */
+	if( !nv2a_2d_pushed_base_valid
+		|| nv2a_2d_pushed_base_offset != nv2a_2d_ring_batch_base_offset
+		|| nv2a_2d_pushed_base_space != nv2a_2d_batch_state.space )
 	{
 		byte *ring_batch = (byte *)nv2a_2d_ring + nv2a_2d_ring_batch_base_offset;
 		uint32_t *p;
 
-		nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_2d_vertex_t ), ring_batch );
-		nv2a_set_attrib_pointer( 3, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL, 4, sizeof( nv2a_2d_vertex_t ), ring_batch + 16 );
-		nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_2d_vertex_t ), ring_batch + 8 );
+		if( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_2D )
+		{
+			nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_2d_vertex_t ), ring_batch );
+			nv2a_set_attrib_pointer( 3, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL, 4, sizeof( nv2a_2d_vertex_t ), ring_batch + 16 );
+			nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_2d_vertex_t ), ring_batch + 8 );
+		}
+		else
+		{
+			/* X9-X step 4 Part C's own vertex format table: 0 = F, size 3,
+			   +0 (position); 9 = F, size 2, +12 (texcoord); 3 = UB_OGL,
+			   size 4, +20 (colour). */
+			nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_tri_vertex_t ), ring_batch );
+			nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_tri_vertex_t ), ring_batch + 12 );
+			nv2a_set_attrib_pointer( 3, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL, 4, sizeof( nv2a_tri_vertex_t ), ring_batch + 20 );
+		}
 
 		p = pb_begin();
 		p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
 		pb_end( p );
 
 		nv2a_2d_pushed_base_offset = nv2a_2d_ring_batch_base_offset;
+		nv2a_2d_pushed_base_space = nv2a_2d_batch_state.space;
 		nv2a_2d_pushed_base_valid = true;
 	}
 
@@ -5010,7 +5474,9 @@ static void nv2a_2d_flush( void )
 		|| nv2a_2d_pushed.blend_enable != nv2a_2d_batch_state.blend_enable
 		|| nv2a_2d_pushed.sfactor != nv2a_2d_batch_state.sfactor
 		|| nv2a_2d_pushed.dfactor != nv2a_2d_batch_state.dfactor
-		|| nv2a_2d_pushed.alpha_test_enable != nv2a_2d_batch_state.alpha_test_enable )
+		|| nv2a_2d_pushed.alpha_test_enable != nv2a_2d_batch_state.alpha_test_enable
+		|| nv2a_2d_pushed.depth_mask != nv2a_2d_batch_state.depth_mask
+		|| nv2a_2d_pushed.cull_enable != nv2a_2d_batch_state.cull_enable )
 	{
 		uint32_t *p = pb_begin();
 		p = pb_push1( p, NV097_SET_BLEND_ENABLE, nv2a_2d_batch_state.blend_enable ? 1 : 0 );
@@ -5018,6 +5484,8 @@ static void nv2a_2d_flush( void )
 		p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, nv2a_2d_batch_state.dfactor );
 		p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
 		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, nv2a_2d_batch_state.alpha_test_enable ? 1 : 0 );
+		p = pb_push1( p, NV097_SET_DEPTH_MASK, nv2a_2d_batch_state.depth_mask ? 1 : 0 );
+		p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, nv2a_2d_batch_state.cull_enable ? 1 : 0 );
 		pb_end( p );
 
 		nv2a_2d_pushed = nv2a_2d_batch_state;
@@ -5047,7 +5515,11 @@ static void nv2a_2d_flush( void )
 		pb_end( p );
 	}
 
-	nv2a_2d_chunk_quads( nv2a_2d_ring_pending_verts, nv2a_2d_emit_draw_arrays, NULL );
+	{
+		nv2a_2d_draw_ctx_t ctx;
+		ctx.op = nv2a_2d_batch_state.op;
+		nv2a_tri_chunk( nv2a_2d_ring_pending_verts, nv2a_2d_op_verts_per_prim( ctx.op ), nv2a_2d_emit_draw_arrays, &ctx );
+	}
 
 	nv2a_2d_ring_pending_verts = 0;
 }
@@ -5059,18 +5531,23 @@ void nv2a_2d_flush_and_wait( void )
 		;
 }
 
-/* C4: appends one quad (4 vertices, texel-unit s/t already resolved by
-   the caller) to the pending batch - flushing first if the desired
-   state, the resolved texture key, or dirty changed since the last
-   flush, or if the ring has no room (in which case it also spins
-   pb_busy and resets the cursor - "the pointers get re-pushed with
-   BREAK_VERTEX_BUFFER_CACHE" next flush, via the dirty flag). Drops the
-   draw if the renderer or the frame isn't ready (C1's own rule). */
-static void nv2a_2d_append_quad( float x, float y, float w, float h, float s1, float t1, float s2, float t2 )
+/* X9-X step 4 Part C: the one append path both spaces share - refactored
+   out of the old nv2a_2d_append_quad() (kept below as a thin wrapper for
+   R_DrawStretchPic/FillRGBA, unchanged). Flushes first if the desired
+   state, the resolved texture key, the space, the op, or dirty changed
+   since the last flush, or if the ring has no room for all `n` vertices
+   (in which case it also spins pb_busy and resets the cursor - "the
+   pointers get re-pushed with BREAK_VERTEX_BUFFER_CACHE" next flush, via
+   the dirty flag). Drops the draw if the renderer or the frame isn't
+   ready (C1's own rule). `verts` must already be in the wire format for
+   `space` (nv2a_2d_vertex_t for 2D, nv2a_tri_vertex_t for 3D) - the one
+   primitive it carries is appended atomically: room is checked for all
+   `n` vertices together, never split across a flush. */
+static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *verts, uint32_t n )
 {
-	nv2a_2d_vertex_t verts[4];
 	nv2a_2d_batch_key_t key;
-	int i;
+	uint32_t vertex_size = ( space == NV2A_IMM_SPACE_2D ) ? sizeof( nv2a_2d_vertex_t ) : sizeof( nv2a_tri_vertex_t );
+	uint32_t bytes = vertex_size * n;
 
 	if( !nv2a_ready || !nv2a_frame_open )
 		return;
@@ -5081,17 +5558,21 @@ static void nv2a_2d_append_quad( float x, float y, float w, float h, float s1, f
 	if( nv2a_2d_ring_pending_verts > 0
 		&& ( nv2a_2d_dirty
 			|| memcmp( &key, &nv2a_2d_batch_key, sizeof( key )) != 0
+			|| nv2a_2d_batch_state.space != space
+			|| nv2a_2d_batch_state.op != op
 			|| nv2a_2d_batch_state.blend_enable != nv2a_2d_desired.blend_enable
 			|| nv2a_2d_batch_state.sfactor != nv2a_2d_desired.sfactor
 			|| nv2a_2d_batch_state.dfactor != nv2a_2d_desired.dfactor
-			|| nv2a_2d_batch_state.alpha_test_enable != nv2a_2d_desired.alpha_test_enable ))
+			|| nv2a_2d_batch_state.alpha_test_enable != nv2a_2d_desired.alpha_test_enable
+			|| nv2a_2d_batch_state.depth_mask != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.depth_mask )
+			|| nv2a_2d_batch_state.cull_enable != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.cull_enable )))
 	{
 		nv2a_2d_flush();
 	}
 
 	nv2a_2d_batch_key = key;
 
-	if( nv2a_2d_ring_write_offset + 4 * sizeof( nv2a_2d_vertex_t ) > NV2A_2D_VERTEX_RING_BYTES )
+	if( nv2a_2d_ring_write_offset + bytes > NV2A_2D_VERTEX_RING_BYTES )
 	{
 		nv2a_2d_flush();
 		while( pb_busy())
@@ -5104,7 +5585,30 @@ static void nv2a_2d_append_quad( float x, float y, float w, float h, float s1, f
 	{
 		nv2a_2d_ring_batch_base_offset = nv2a_2d_ring_write_offset;
 		nv2a_2d_batch_state = nv2a_2d_desired;
+		nv2a_2d_batch_state.space = space;
+		nv2a_2d_batch_state.op = op;
+		if( space == NV2A_IMM_SPACE_2D )
+		{
+			/* Effective, not desired: 2D always draws with both forced
+			   off, matching GL's effective behaviour with the depth test
+			   off and R_Set2DMode(true)'s GL_Cull(NONE). */
+			nv2a_2d_batch_state.depth_mask = false;
+			nv2a_2d_batch_state.cull_enable = false;
+		}
 	}
+
+	memcpy( (byte *)nv2a_2d_ring + nv2a_2d_ring_write_offset, verts, bytes );
+	nv2a_2d_ring_write_offset += bytes;
+	nv2a_2d_ring_pending_verts += n;
+}
+
+/* C4: appends one quad (4 vertices, texel-unit s/t already resolved by
+   the caller) to the pending 2D batch - unchanged behaviour, now on top
+   of the generic nv2a_2d_append() above. */
+static void nv2a_2d_append_quad( float x, float y, float w, float h, float s1, float t1, float s2, float t2 )
+{
+	nv2a_2d_vertex_t verts[4];
+	int i;
 
 	verts[0].x = x;     verts[0].y = y;     verts[0].u = s1; verts[0].v = t1;
 	verts[1].x = x + w; verts[1].y = y;     verts[1].u = s2; verts[1].v = t1;
@@ -5118,9 +5622,7 @@ static void nv2a_2d_append_quad( float x, float y, float w, float h, float s1, f
 		verts[i].rgba[3] = nv2a_2d_color[3];
 	}
 
-	memcpy( (byte *)nv2a_2d_ring + nv2a_2d_ring_write_offset, verts, sizeof( verts ));
-	nv2a_2d_ring_write_offset += sizeof( verts );
-	nv2a_2d_ring_pending_verts += 4;
+	nv2a_2d_append( NV2A_IMM_SPACE_2D, NV097_SET_BEGIN_END_OP_QUADS, verts, 4 );
 }
 
 /* C1. */
@@ -5134,12 +5636,18 @@ static void R_Set2DMode( qboolean enable )
 		nv2a_in2d = true;
 		nv2a_2d_color[0] = nv2a_2d_color[1] = nv2a_2d_color[2] = nv2a_2d_color[3] = 255;
 		nv2a_2d_desired.alpha_test_enable = true;
+		/* X9-X step 4 Part F: gl_draw.c's own R_Set2DMode(true) - GL_Cull(NONE), pglDepthMask(GL_FALSE). */
+		nv2a_2d_desired.depth_mask = false;
+		nv2a_2d_desired.cull_enable = false;
 		nv2a_2d_dirty = true;
 	}
 	else
 	{
 		nv2a_2d_flush();
 		nv2a_in2d = false;
+		/* X9-X step 4 Part F: gl_draw.c's own R_Set2DMode(false) - pglEnable(GL_DEPTH_TEST)/pglDepthMask(GL_TRUE), GL_Cull(GL_FRONT). Matches nv2a_set_3d_state()'s own values, which every 3D draw path still pushes for itself. */
+		nv2a_2d_desired.depth_mask = true;
+		nv2a_2d_desired.cull_enable = true;
 		nv2a_2d_dirty = true; /* every 3D path sets its own state via nv2a_set_3d_state(); push nothing here */
 	}
 }
@@ -5200,19 +5708,221 @@ static void Color4f( float r, float g, float b, float a )
 		(byte)( bound( 0.0f, a, 1.0f ) * 255 + 0.5f ));
 }
 
-static void Vertex3fv( const float *worldPnt )
+/*
+========================================================================
+X9-X step 4 Part D: the TriAPI entry points - Begin/Vertex3f(v)/End stage
+into nv2a_tri_util.c's own host-tested assembler (Part A), which emits
+complete list primitives through nv2a_2d_append() (Part C) in either
+space; TriRenderMode/CullFace write the same nv2a_2d_desired shadow
+GL_SetRenderMode/VGUI_SetupDrawing/FillRGBA already share.
+========================================================================
+*/
+
+/* Latched state, persisting across Begin/End like GL's own current
+   state - TexCoord2f (normalized, initially 0,0) and nv2a_2d_color
+   (declared with the 2D pass above, C3). */
+static float nv2a_tri_texcoord[2];
+
+/* D: TriRenderMode (gl_triapi.c:40-72), ported onto nv2a_2d_desired -
+   R_AllowFog is a no-op (nv2a has no fog), and neither alpha test nor the
+   depth TEST are ever touched here (only depth_mask). No default case,
+   same as the reference. */
+static void TriRenderMode( int mode )
 {
-	;
+	switch( mode )
+	{
+	case kRenderNormal:
+		nv2a_2d_desired.blend_enable = false;
+		nv2a_2d_desired.depth_mask = true;
+		break;
+	case kRenderTransAlpha:
+		nv2a_2d_desired.blend_enable = true;
+		nv2a_2d_desired.sfactor = NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA;
+		nv2a_2d_desired.dfactor = NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA;
+		nv2a_2d_desired.depth_mask = false;
+		break;
+	case kRenderTransColor:
+	case kRenderTransTexture:
+		nv2a_2d_desired.blend_enable = true;
+		nv2a_2d_desired.sfactor = NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA;
+		nv2a_2d_desired.dfactor = NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA;
+		/* depth_mask UNCHANGED, matching the reference exactly. */
+		break;
+	case kRenderGlow:
+	case kRenderTransAdd:
+		nv2a_2d_desired.blend_enable = true;
+		nv2a_2d_desired.sfactor = NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA;
+		nv2a_2d_desired.dfactor = NV097_SET_BLEND_FUNC_DFACTOR_V_ONE;
+		nv2a_2d_desired.depth_mask = false;
+		break;
+	}
 }
 
+static qboolean       nv2a_tri_open;    /* inside a Begin/End pair */
+static qboolean       nv2a_tri_dropped; /* this Begin was ignored - Vertex3f/End must no-op quietly, not warn again */
+static nv2a_imm_space_t nv2a_tri_space;
+static uint32_t       nv2a_tri_op;      /* the hardware BEGIN_END op this Begin's primitive maps to */
+static float          nv2a_tri_tex_w = 1.0f, nv2a_tri_tex_h = 1.0f; /* the bound texture's own size, captured at Begin (D6: texel units) */
+static nv2a_tri_asm_t nv2a_tri_asm;
+
+/* nv2a_tri_util.h's own topology -> this file's own hardware BEGIN_END op
+   (pbkit constants nv2a_tri_util.c cannot name itself, D's own note). */
+static uint32_t nv2a_tri_topology_op( nv2a_tri_topology_t topo )
+{
+	switch( topo )
+	{
+	case NV2A_TRI_LIST_POINTS:    return NV097_SET_BEGIN_END_OP_POINTS;
+	case NV2A_TRI_LIST_LINES:     return NV097_SET_BEGIN_END_OP_LINES;
+	case NV2A_TRI_LIST_QUADS:
+	case NV2A_TRI_QUAD_STRIP:     return NV097_SET_BEGIN_END_OP_QUADS;
+	case NV2A_TRI_LIST_TRIANGLES:
+	case NV2A_TRI_FAN:
+	case NV2A_TRI_STRIP:
+	default:                      return NV097_SET_BEGIN_END_OP_TRIANGLES;
+	}
+}
+
+/* The assembler's own emit callback (nv2a_tri_util.h's nv2a_tri_emit_fn) -
+   converts to the 20-byte 2D wire format (dropping z) in 2D space, or
+   appends the 24-byte 3D format as-is (nv2a_tri_vert_t IS
+   nv2a_tri_vertex_t, Part C's own note) in 3D space. */
+static void nv2a_tri_emit_primitive( const nv2a_tri_vert_t *v, uint32_t n, void *ctx )
+{
+	(void)ctx;
+
+	if( nv2a_tri_space == NV2A_IMM_SPACE_2D )
+	{
+		nv2a_2d_vertex_t verts2d[4];
+		uint32_t i;
+
+		for( i = 0; i < n; i++ )
+		{
+			verts2d[i].x = v[i].x;
+			verts2d[i].y = v[i].y;
+			verts2d[i].u = v[i].u;
+			verts2d[i].v = v[i].v;
+			memcpy( verts2d[i].rgba, v[i].rgba, 4 );
+		}
+		nv2a_2d_append( NV2A_IMM_SPACE_2D, nv2a_tri_op, verts2d, n );
+	}
+	else
+	{
+		nv2a_2d_append( NV2A_IMM_SPACE_3D, nv2a_tri_op, v, n );
+	}
+}
+
+/* D3: TriTexCoord2f (gl_triapi.c:180) - latches, does not emit. */
+static void TexCoord2f( float u, float v )
+{
+	nv2a_tri_texcoord[0] = u;
+	nv2a_tri_texcoord[1] = v;
+}
+
+/* D: TriBegin (gl_triapi.c:81-113) - maps TRI_* to A's topology (any
+   unknown mode falls to POLYGON/FAN, same as the reference's own
+   default), resolves the drawing space from R_Set2DMode's own flag
+   (cl_view.c:401 calls R_Set2DMode(false) before GL_RenderFrame, so it is
+   reliable here), and captures the bound texture's own size for D6's
+   texel-unit scaling. Drops the whole primitive rather than staging
+   anything when the renderer/frame isn't ready, or when 3D and the
+   camera has no valid matrix yet (nv2a_view_valid) - Vertex3f/End then
+   quietly no-op via nv2a_tri_dropped, same as a GL context with nothing
+   bound would draw nothing rather than crash. A nested Begin is ignored,
+   as GL itself does (INVALID_OPERATION), logged once here. */
+static void Begin( int primitiveCode )
+{
+	nv2a_tri_topology_t topo;
+	const nv2a_texture_t *tex;
+
+	if( nv2a_tri_open )
+	{
+		gEngfuncs.Con_DPrintf( S_ERROR "ref_nv2a: TriBegin called while already inside Begin/End - ignored\n" );
+		return;
+	}
+
+	switch( primitiveCode )
+	{
+	case TRI_TRIANGLES:      topo = NV2A_TRI_LIST_TRIANGLES; break;
+	case TRI_TRIANGLE_FAN:   topo = NV2A_TRI_FAN;             break;
+	case TRI_QUADS:          topo = NV2A_TRI_LIST_QUADS;      break;
+	case TRI_LINES:          topo = NV2A_TRI_LIST_LINES;      break;
+	case TRI_TRIANGLE_STRIP: topo = NV2A_TRI_STRIP;           break;
+	case TRI_QUAD_STRIP:     topo = NV2A_TRI_QUAD_STRIP;      break;
+	case TRI_POINTS:         topo = NV2A_TRI_LIST_POINTS;     break;
+	case TRI_POLYGON:
+	default:                 topo = NV2A_TRI_FAN;             break;
+	}
+
+	nv2a_tri_open = true;
+	nv2a_tri_space = nv2a_in2d ? NV2A_IMM_SPACE_2D : NV2A_IMM_SPACE_3D;
+	nv2a_tri_dropped = !nv2a_ready || !nv2a_frame_open || ( nv2a_tri_space == NV2A_IMM_SPACE_3D && !nv2a_view_valid );
+
+	if( nv2a_tri_dropped )
+		return;
+
+	nv2a_tri_op = nv2a_tri_topology_op( topo );
+
+	tex = nv2a_tex_get( nv2a_tex_current());
+	nv2a_tri_tex_w = tex ? (float)tex->width : 1.0f;
+	nv2a_tri_tex_h = tex ? (float)tex->height : 1.0f;
+
+	nv2a_tri_begin( &nv2a_tri_asm, topo, nv2a_tri_emit_primitive, NULL );
+}
+
+/* D: TriVertex3f/3fv (gl_triapi.c:200-214) - outside Begin/End, or on a
+   dropped primitive, these are ignored, same as GL with nothing bound.
+   Texel units (D6/divergences #100): u/v scaled by the bound texture's
+   own width/height captured at Begin. In 2D space z is ignored (dropped
+   at nv2a_tri_emit_primitive) and x,y are 2D screen coordinates, the
+   same as R_DrawStretchPic's. */
 static void Vertex3f( float x, float y, float z )
 {
-	;
+	nv2a_tri_vert_t v;
+
+	if( !nv2a_tri_open || nv2a_tri_dropped )
+		return;
+
+	v.x = x;
+	v.y = y;
+	v.z = z;
+	v.u = nv2a_tri_texcoord[0] * nv2a_tri_tex_w;
+	v.v = nv2a_tri_texcoord[1] * nv2a_tri_tex_h;
+	v.rgba[0] = nv2a_2d_color[0];
+	v.rgba[1] = nv2a_2d_color[1];
+	v.rgba[2] = nv2a_2d_color[2];
+	v.rgba[3] = nv2a_2d_color[3];
+
+	nv2a_tri_push( &nv2a_tri_asm, &v );
 }
 
+static void Vertex3fv( const float *worldPnt )
+{
+	if( !worldPnt )
+		return;
+	Vertex3f( worldPnt[0], worldPnt[1], worldPnt[2] );
+}
+
+/* D: TriEnd (gl_triapi.c:117-123) - finishes the assembler (drops any
+   incomplete trailing primitive, A's own rule) without flushing, so
+   consecutive same-state Begin/Ends keep batching together. */
+static void End( void )
+{
+	if( !nv2a_tri_open )
+		return;
+	if( !nv2a_tri_dropped )
+		nv2a_tri_end( &nv2a_tri_asm );
+	nv2a_tri_open = false;
+}
+
+/* D: TriCullFace (gl_triapi.c:340-355) - TRI_FRONT means CULL_FACE_ENABLE
+   1 with pbkit's own CW-front/cull-back (pbkit.c:3196-3198); anything
+   else means 0. NV097_SET_CULL_FACE/FRONT_FACE are never written - both
+   spaces share the world's own CW-front/cull-back convention already
+   set up by pbkit, matching ref/gl's world draw (GL_Cull(GL_FRONT) =
+   TriCullFace(TRI_FRONT), gl_rmain.c:568 / gl_triapi.c:340-355). */
 static void CullFace( TRICULLSTYLE mode )
 {
-	;
+	nv2a_2d_desired.cull_enable = ( mode == TRI_FRONT );
 }
 
 /* C2: port of VGUI_SetupDrawing (ref/gl/gl_context.c:360-375). */
@@ -5517,9 +6227,9 @@ const ref_interface_t gReffuncs =
 	.R_NewMap          = R_NewMap,
 	.R_ClearScene      = R_ClearScene,
 
-	.TriRenderMode = R_SimpleStubInt,
-	.Begin         = R_SimpleStubInt,
-	.End           = R_SimpleStub,
+	.TriRenderMode = TriRenderMode,
+	.Begin         = Begin,
+	.End           = End,
 	.Color4f       = Color4f,
 	.Color4ub      = Color4ub,
 	.Vertex3fv     = Vertex3fv,

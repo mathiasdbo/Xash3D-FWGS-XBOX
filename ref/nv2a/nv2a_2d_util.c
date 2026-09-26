@@ -7,28 +7,11 @@ nv2a_2d_util.c - see nv2a_2d_util.h for the contract of each function.
 
 void nv2a_2d_chunk_quads( uint32_t vertex_count, nv2a_2d_chunk_emit_fn emit, void *ctx )
 {
-	uint32_t start = 0;
-
-	if( !emit )
-		return;
-
-	while( start < vertex_count )
-	{
-		uint32_t remaining = vertex_count - start;
-		uint32_t count = remaining > NV2A_2D_MAX_DRAW_VERTS ? NV2A_2D_MAX_DRAW_VERTS : remaining;
-
-		/* NV2A_2D_MAX_DRAW_VERTS (256) is itself a multiple of 4, so only
-		   a REMAINDER chunk can end up not being one - round it down; a
-		   vertex_count that wasn't a whole number of quads to begin with
-		   is a bug upstream of this function (a partial quad was
-		   appended), not something to paper over by emitting one. */
-		count -= count % 4;
-		if( count == 0 )
-			break;
-
-		emit( start, count, ctx );
-		start += count;
-	}
+	/* X9-X step 4 Part A: re-expressed as the generic assembler's own
+	   chunk() with verts_per_prim=4 - NV2A_2D_MAX_DRAW_VERTS (256) is
+	   itself a multiple of 4, so this chunks identically to the
+	   hand-written loop it replaces. */
+	nv2a_tri_chunk( vertex_count, 4, emit, ctx );
 }
 
 /* Internal cap on how many boundary crossings one axis scan will ever

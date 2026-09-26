@@ -9,17 +9,13 @@ tools/host-tests/nv2a_arena_host_test.c. The register pushes themselves
 #define NV2A_2D_UTIL_H
 
 #include <stdint.h>
+#include "nv2a_tri_util.h" /* NV2A_2D_MAX_DRAW_VERTS, nv2a_tri_chunk() - nv2a_2d_chunk_quads is now that generalisation with verts_per_prim=4 (X9-X step 4 Part A) */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* A single NV097_DRAW_ARRAYS instruction can express at most 256
-   vertices (the COUNT field is 8 bits, MASK(COUNT, n-1) - nv_regs.h's
-   own NV097_DRAW_ARRAYS_COUNT). */
-#define NV2A_2D_MAX_DRAW_VERTS 256u
-
-typedef void (*nv2a_2d_chunk_emit_fn)( uint32_t start, uint32_t count, void *ctx );
+typedef nv2a_tri_chunk_emit_fn nv2a_2d_chunk_emit_fn;
 
 /* Splits `vertex_count` vertices (already whole quads - a multiple of
    4) into chunks of at most NV2A_2D_MAX_DRAW_VERTS, each itself a

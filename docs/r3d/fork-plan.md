@@ -9017,10 +9017,90 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        verified on real hardware (owner-side, post-PR): the 2D pixel-
        centre offset cvar, and whether the console/HUD/menu actually look
        right rather than merely draw something.
-    4. *TriAPI*, with `R_FillTriAPI` filling `GetMatrix` and `TexCoord2f`:
-       the HL client's particleman calls `GetMatrix` every time
-       `HUD_DrawTransparentTriangles` runs (`CFrustum.cpp:41`), a NULL
-       call today, safe only because nv2a never calls that hook.
+    4. *TriAPI* (code complete, xemu-verified live, X9-X, 2026-09-26):
+       `R_FillTriAPI` fills `GetMatrix`,
+       `TexCoord2f`, `Fog`, `ScreenToWorld` and `FogParams`; the HL
+       client's particleman calls `GetMatrix` every time
+       `HUD_DrawTransparentTriangles` runs (`CFrustum.cpp:41`), a NULL call
+       before this step, safe only because nv2a never called that hook.
+       `TriRenderMode`/`Begin`/`Vertex3f(v)`/`End`/`CullFace` now draw for
+       real, in either 2D or 3D space, sharing the 2D pass's own batching
+       ring and flush logic (generalised, X9-X step 4 Part C) and a new
+       host-tested primitive assembler (`nv2a_tri_util.c`) that decomposes
+       every TRI_* primitive (points, lines, triangles, quads, fans,
+       strips, quad-strips, polygons) into the flat lists the hardware
+       draws, with GL's own winding. The engine now also calls
+       `gEngfuncs.R_DrawWorldHull()`/`pfnDrawNormalTriangles()`/
+       `pfnDrawTransparentTriangles()` once per frame from `GL_RenderFrame`
+       (previously never called at all). Fog is a documented no-op
+       (divergence #119); translucent entities between the two triangle
+       hooks are still out of scope (studio models/sprites, steps 5-6).
+
+       The earlier "no `.xbe` producible" escalation was wrong: main's
+       checkout of `deps/nxdk` (same submodule commit, `29638d0b`) already
+       has every prebuilt `.lib`/`cxbe`/`extract-xiso` this needs, built
+       2026-09-05/09-15 - they were just never copied into this topic's
+       worktree. Copying them in (gitignored build outputs, read-only from
+       main, never rebuilt) let `tools/xbox-game-link-check.sh hl
+       --include-client --include-freevgui` produce two real,
+       `server+client+freevgui`, 0-duplicate/0-undefined XBEs: one from
+       `e7086f40` (pre-TriAPI baseline) and one from this branch.
+
+       Both booted live in xemu (2026-09-26, map `crossfire`, `-dvd_path`
+       pointing at freshly-packed ISOs, `verify-image` confirming
+       "identity confirmed" before every check):
+       - **(a) crash-free + hooks:** the post-change build ran well past
+         60 s past `_nv2a_map_ready` with no halt. A real breakpoint on
+         `GetMatrix` hit every frame (particleman's own
+         `HUD_DrawTransparentTriangles` -> `CFrustum::CalculateFrustum`
+         call, confirmed via `pname=0x0BA7`) and read back a genuine
+         perspective matrix: `M[1][1]=1.33333` (`1/tan(fovy/2)`),
+         `M[2][2]=-1.000244`, `M[3][2]=-2.000244` - exactly
+         `-(zFar+zNear)/(zFar-zNear)` and `-2*zFar*zNear/(zFar-zNear)` for
+         zNear=1, zFar=8192, matching `r_context.c:4865` and confirming
+         divergence #119 point 2 live, not just in source. `Begin` did
+         NOT hit during this idle, no-cvar spawn (nothing draws through
+         the TriAPI on a fresh crossfire spawn with no active particles
+         and `r_showhull 0` - `CBaseParticle`'s own Draw only runs with
+         particles alive, and `R_DrawWorldHull` early-returns at
+         `r_showhull.value <= 0`, `mod_dbghulls.c:723`), so `Begin`'s hook
+         evidence was captured on a second, `r_showhull 1` boot instead
+         (see (b)): a real breakpoint on nv2a's `Begin` hit there.
+       - **(b) `r_showhull 1`:** the captured frame shows the expected
+         random flat-coloured hull polygons, correctly depth-occluded
+         (nearer polygons hide farther ones) and back-face culled (no
+         inverted/see-through faces), following the same room silhouette
+         visible in the `r_showhull 0` frame from the same spawn point.
+       - **(c) `net_graph 1`:** NOT achieved, and not a TriAPI bug. A
+         breakpoint confirmed `SCR_DrawNetGraph` runs every frame, and
+         `net_graph`'s cvar struct in memory reads `value=1.0`, but the
+         function's own first gate, `if( !host.allow_console ) return;`
+         (`cl_netgraph.c:650`), fires before reaching
+         `ref.dllFuncs.Begin`, confirmed by single-stepping from entry to
+         its early `ret`. `host.allow_console` never becomes true here
+         because `common/defaults.h` gives `DEFAULT_ALLOWCONSOLE 1` only
+         to `XASH_NSWITCH`/`XASH_PSVITA` (`defaults.h:145,151`; `0` for
+         every other platform including Xbox, `defaults.h:186`), and the
+         one unconditional runtime override,
+         `host.allow_console = host.allow_console_init = true`
+         (`cl_gameui.c:30`), only runs once GameUI actually initializes -
+         this game-link build's own menu module is an empty stub
+         ("mainui not swept"), so that never happens. This is a
+         pre-existing, separate gap (the menu/mainui sweep, not this
+         TriAPI work) tracked on its own; it blocks `net_graph`
+         specifically, not the TriAPI plumbing net_graph would have
+         exercised (already covered live by (a)/(b) on the 3D side).
+       - **(d) no debug cvars, baseline vs post-change:** pixel-diff of
+         the two builds' `crossfire` spawn frames (identical userconfig,
+         `r_refdll "nv2a"`, no other cvars) is **0 differing pixels of
+         307200** (640x480) - `bbox=None`. The TriAPI change is fully
+         invisible to the world's static draw when nothing exercises it,
+         exactly as required.
+       - c1a0 was not repeated (optional per spec, skipped for time).
+       - XMEX: skipped, no local clone found (`which xmex` and
+         `import xmex` both fail here).
+
+       Real hardware verification is still owner-side, post-PR.
     5. *Studio models* (NPCs, items, the view model with its own depth
        range): fill the ~30 `engine_studio_api_t` callbacks (the HL
        client sets up bones itself), `R_StudioDrawPoints`, skins, render
@@ -9031,8 +9111,9 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        CPU-only and copy as-is. The largest block; matrix-palette VP20
        skinning is the performance route (X9 notes above).
     6. *Sprites* and sprite temp-entities (explosions, glows).
-    7. *Effects:* the `CL_DrawEFX` and `pfnDraw*Triangles` hooks, beams
-       (and `ET_BEAM` entities), particles, tracers.
+    7. *Effects:* the `CL_DrawEFX` hook (still unimplemented), beams
+       (and `ET_BEAM` entities), particles, tracers - the `pfnDraw*Triangles`
+       hooks themselves are done, step 4 above.
     8. *Animated lightstyles and dynamic lights:* one mechanism - rebuild
        a face's lightmap from `msurface_t->samples` (every style is in the
        classic prefix's `LUMP_LIGHTING`) times `g_lightstylevalue`, plus

@@ -5,6 +5,41 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - the Xbox renderer's TriAPI now draws (X9-X step 4)
+
+The client DLL's triangle drawing API (`pTriAPI`) always existed as a
+table of function pointers, but five of them - `TexCoord2f`, `Fog`,
+`ScreenToWorld`, `GetMatrix` and `FogParams` - were never filled in, and
+the engine never called the two hooks (`pfnDrawNormalTriangles`/
+`pfnDrawTransparentTriangles`) that let the client DLL draw triangles at
+all. Both gaps were silent: nothing crashed, the client's own particle
+code just never ran, and neither did the debug tools (`r_showhull`,
+`net_graph`'s fills, `r_showtree`) that already called `Begin`/`Vertex3f`/
+`End` and simply drew nothing back.
+
+The renderer now fills all five slots, calls both hooks once per frame,
+and draws every primitive shape the API supports (points, lines,
+triangles, quads, fans, strips, quad-strips, polygons), in either 2D or
+3D space, sharing the same batching pass 2D drawing already uses. 3D
+TriAPI draws share the world's own camera and depth buffer, so they are
+correctly occluded by and cull against world geometry.
+
+Known gaps, left for later: no fog (the client's fog calls are no-ops),
+translucent entities between the two triangle hooks, and the texture-wrap
+clamp linear textures already had for 2D.
+
+Verified live in xemu (2026-09-26, map `crossfire`): a real breakpoint on
+`GetMatrix` hit every frame through particleman's own frustum-culling call
+and read back a genuine zNear=1/zFar=8192 projection matrix, matching what
+the same draw path actually renders and clips with; `r_showhull 1` showed
+correctly depth-occluded, back-face-culled hull polygons; and a
+pixel-diff against a pre-change baseline build, with no debug cvars, came
+back 0 differing pixels - the change is fully invisible until something
+exercises it. `net_graph 1` could not be exercised (a pre-existing,
+unrelated gap: this build's menu module is an empty stub, so the engine's
+own `host.allow_console` gate for it never opens). Real hardware
+verification is still owner-side, post-PR.
+
 ### Added - the Xbox renderer can now draw textures and 2D: console, HUD, crosshair, fades and menus (X9-X)
 
 The Xbox renderer could draw the 3D world but nothing else - every texture

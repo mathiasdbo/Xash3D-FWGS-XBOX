@@ -1,13 +1,14 @@
 /*
-nv2a_arena_host_test.c - host test for ref/nv2a/nv2a_arena.c and
-ref/nv2a/nv2a_2d_util.c (X9-X Part C): both are deliberately free of
-pbkit/xboxkrnl/engine includes, so they build and are checked here on the
-host rather than only ever exercised for the first time on real hardware.
-Not part of any Xbox build; run it on the host from the repository root,
-in the MSYS2 MinGW-64 shell:
+nv2a_arena_host_test.c - host test for ref/nv2a/nv2a_arena.c,
+ref/nv2a/nv2a_2d_util.c and ref/nv2a/nv2a_tri_util.c (X9-X Part C and
+step 4 Part A): all three are deliberately free of pbkit/xboxkrnl/engine
+includes, so they build and are checked here on the host rather than
+only ever exercised for the first time on real hardware. Not part of any
+Xbox build; run it on the host from the repository root, in the MSYS2
+MinGW-64 shell:
 
   gcc -O1 -Wall -std=c99 -Iref/nv2a \
-      tools/host-tests/nv2a_arena_host_test.c ref/nv2a/nv2a_arena.c ref/nv2a/nv2a_2d_util.c \
+      tools/host-tests/nv2a_arena_host_test.c ref/nv2a/nv2a_arena.c ref/nv2a/nv2a_2d_util.c ref/nv2a/nv2a_tri_util.c \
       -lm -o /tmp/nv2a_arena_test && /tmp/nv2a_arena_test
 
 Exit status is nonzero iff any check failed (the failure count is also
@@ -15,8 +16,10 @@ printed), matching tools/host-tests/printf_host_test.c's own convention.
 */
 #include "nv2a_arena.h"
 #include "nv2a_2d_util.h"
+#include "nv2a_tri_util.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h> /* dup, dup2, close, fileno - used only by the CHECK self-test below */
 
 static int fails, total;
 
@@ -274,8 +277,240 @@ static void test_2d_matrix( void )
 	CHECK( m[0][0] == 0.0f, "matrix: a zero engine width never divides by zero (all-zero matrix instead)" );
 }
 
+/* ---- nv2a_tri_util (X9-X step 4 Part A) ---- */
+
+/* Captures each emitted list primitive by the PUSH INDEX (0,1,2,...)
+   staged into vertex.x, rather than by value - lets every topology test
+   below assert the exact vertex ordering the spec calls out (e.g. fan's
+   (0,2,3)) instead of just a triangle count. */
+typedef struct
+{
+	int      idx[8][4];
+	uint32_t n_per_prim[8];
+	int      n;
+} tri_capture_t;
+
+static void capture_tri( const nv2a_tri_vert_t *v, uint32_t n, void *ctx )
+{
+	tri_capture_t *cap = (tri_capture_t *)ctx;
+	uint32_t i;
+
+	if( cap->n >= 8 )
+		return;
+
+	for( i = 0; i < n; i++ )
+		cap->idx[cap->n][i] = (int)v[i].x;
+	cap->n_per_prim[cap->n] = n;
+	cap->n++;
+}
+
+static void push_indexed( nv2a_tri_asm_t *a, int count )
+{
+	int i;
+
+	for( i = 0; i < count; i++ )
+	{
+		nv2a_tri_vert_t v;
+		memset( &v, 0, sizeof( v ));
+		v.x = (float)i;
+		nv2a_tri_push( a, &v );
+	}
+}
+
+static void test_tri_fan( void )
+{
+	nv2a_tri_asm_t a;
+	tri_capture_t cap;
+
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_begin( &a, NV2A_TRI_FAN, capture_tri, &cap );
+	push_indexed( &a, 5 );
+	nv2a_tri_end( &a );
+
+	CHECK( cap.n == 3, "fan: 5 vertices give 3 triangles" );
+	CHECK( cap.n_per_prim[0] == 3 && cap.idx[0][0] == 0 && cap.idx[0][1] == 1 && cap.idx[0][2] == 2, "fan: triangle 0 is (0,1,2)" );
+	CHECK( cap.idx[1][0] == 0 && cap.idx[1][1] == 2 && cap.idx[1][2] == 3, "fan: triangle 1 is (0,2,3)" );
+	CHECK( cap.idx[2][0] == 0 && cap.idx[2][1] == 3 && cap.idx[2][2] == 4, "fan: triangle 2 is (0,3,4)" );
+	CHECK( nv2a_tri_verts_per_output_prim( NV2A_TRI_FAN ) == 3, "fan: outputs TRIANGLES (3 verts/prim)" );
+}
+
+static void test_tri_strip( void )
+{
+	nv2a_tri_asm_t a;
+	tri_capture_t cap;
+
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_begin( &a, NV2A_TRI_STRIP, capture_tri, &cap );
+	push_indexed( &a, 5 );
+	nv2a_tri_end( &a );
+
+	CHECK( cap.n == 3, "strip: 5 vertices give 3 triangles" );
+	CHECK( cap.idx[0][0] == 0 && cap.idx[0][1] == 1 && cap.idx[0][2] == 2, "strip: triangle 0 is (0,1,2)" );
+	CHECK( cap.idx[1][0] == 2 && cap.idx[1][1] == 1 && cap.idx[1][2] == 3, "strip: triangle 1 is (2,1,3) (odd winding swap)" );
+	CHECK( cap.idx[2][0] == 2 && cap.idx[2][1] == 3 && cap.idx[2][2] == 4, "strip: triangle 2 is (2,3,4)" );
+}
+
+static void test_tri_quad_strip( void )
+{
+	nv2a_tri_asm_t a;
+	tri_capture_t cap;
+
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_begin( &a, NV2A_TRI_QUAD_STRIP, capture_tri, &cap );
+	push_indexed( &a, 6 );
+	nv2a_tri_end( &a );
+
+	CHECK( cap.n == 2, "quad-strip: 6 vertices give 2 quads" );
+	CHECK( cap.n_per_prim[0] == 4 && cap.idx[0][0] == 0 && cap.idx[0][1] == 1 && cap.idx[0][2] == 3 && cap.idx[0][3] == 2,
+		"quad-strip: quad 0 is (0,1,3,2)" );
+	CHECK( cap.idx[1][0] == 2 && cap.idx[1][1] == 3 && cap.idx[1][2] == 5 && cap.idx[1][3] == 4,
+		"quad-strip: quad 1 is (2,3,5,4)" );
+	CHECK( nv2a_tri_verts_per_output_prim( NV2A_TRI_QUAD_STRIP ) == 4, "quad-strip: outputs QUADS (4 verts/prim)" );
+}
+
+static void test_tri_list_quads_drops_trailing( void )
+{
+	nv2a_tri_asm_t a;
+	tri_capture_t cap;
+
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_begin( &a, NV2A_TRI_LIST_QUADS, capture_tri, &cap );
+	push_indexed( &a, 5 ); /* one whole quad plus one trailing, dropped vertex */
+	nv2a_tri_end( &a );
+
+	CHECK( cap.n == 1, "quads: 5 vertices give exactly 1 quad, the trailing vertex is dropped" );
+	CHECK( cap.idx[0][0] == 0 && cap.idx[0][1] == 1 && cap.idx[0][2] == 2 && cap.idx[0][3] == 3, "quads: the one quad is (0,1,2,3)" );
+}
+
+static void test_tri_list_triangles_drops_trailing( void )
+{
+	nv2a_tri_asm_t a;
+	tri_capture_t cap;
+
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_begin( &a, NV2A_TRI_LIST_TRIANGLES, capture_tri, &cap );
+	push_indexed( &a, 4 );
+	nv2a_tri_end( &a );
+
+	CHECK( cap.n == 1, "triangles: 4 vertices give exactly 1 triangle" );
+	CHECK( cap.idx[0][0] == 0 && cap.idx[0][1] == 1 && cap.idx[0][2] == 2, "triangles: the one triangle is (0,1,2)" );
+}
+
+static void test_tri_list_lines_drops_trailing( void )
+{
+	nv2a_tri_asm_t a;
+	tri_capture_t cap;
+
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_begin( &a, NV2A_TRI_LIST_LINES, capture_tri, &cap );
+	push_indexed( &a, 3 );
+	nv2a_tri_end( &a );
+
+	CHECK( cap.n == 1, "lines: 3 vertices give exactly 1 line" );
+	CHECK( cap.idx[0][0] == 0 && cap.idx[0][1] == 1, "lines: the one line is (0,1)" );
+}
+
+static void test_tri_fan_and_strip_too_short( void )
+{
+	nv2a_tri_asm_t a;
+	tri_capture_t cap;
+	int n;
+
+	for( n = 0; n <= 2; n++ )
+	{
+		memset( &cap, 0, sizeof( cap ));
+		nv2a_tri_begin( &a, NV2A_TRI_FAN, capture_tri, &cap );
+		push_indexed( &a, n );
+		nv2a_tri_end( &a );
+		CHECK( cap.n == 0, "fan: fewer than 3 vertices emits nothing" );
+
+		memset( &cap, 0, sizeof( cap ));
+		nv2a_tri_begin( &a, NV2A_TRI_STRIP, capture_tri, &cap );
+		push_indexed( &a, n );
+		nv2a_tri_end( &a );
+		CHECK( cap.n == 0, "strip: fewer than 3 vertices emits nothing" );
+	}
+}
+
+static void test_tri_chunk( void )
+{
+	chunk_capture_t cap;
+
+	/* 300 triangle vertices: 256 is not a multiple of 3, so the cap is
+	   255 (85 whole triangles) then the 45-vertex (15 triangle) remainder. */
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_chunk( 300, 3, capture_chunk, &cap );
+	CHECK( cap.n == 2, "tri chunk: 300 triangle vertices split into 2 draws" );
+	CHECK( cap.starts[0] == 0 && cap.counts[0] == 255, "tri chunk: first draw is 255 (a multiple of 3)" );
+	CHECK( cap.starts[1] == 255 && cap.counts[1] == 45, "tri chunk: remainder draw is 45" );
+
+	/* 256 quad vertices: 256 IS a multiple of 4, so it fits in one draw. */
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_chunk( 256, 4, capture_chunk, &cap );
+	CHECK( cap.n == 1 && cap.starts[0] == 0 && cap.counts[0] == 256, "tri chunk: 256 quad vertices is one draw" );
+
+	/* 257 point vertices: 256 + 1. */
+	memset( &cap, 0, sizeof( cap ));
+	nv2a_tri_chunk( 257, 1, capture_chunk, &cap );
+	CHECK( cap.n == 2, "tri chunk: 257 point vertices split into 2 draws" );
+	CHECK( cap.starts[0] == 0 && cap.counts[0] == 256, "tri chunk: first draw is 256 points" );
+	CHECK( cap.starts[1] == 256 && cap.counts[1] == 1, "tri chunk: remainder draw is 1 point" );
+}
+
+/* Per the lesson "NEVER trust a new tool's exit code without testing its
+   failure path too" (docs/r3d/lessons.md): prove CHECK's own failure path
+   actually runs - increments `fails` and `total`, prints FAIL - rather
+   than being a no-op that would make every check above pass regardless
+   of what it tested. The deliberate failure is undone ONLY once it has
+   actually been observed; if CHECK's failure path turns out to be
+   broken, `fails` is left nonzero so main()'s exit code still reports
+   it, instead of an unconditional decrement papering over exactly the
+   breakage this self-test exists to catch. CHECK's own printf is
+   suppressed for the deliberate failure (stdout redirected to the null
+   device for the duration of the call) so a healthy run does not also
+   emit a "FAIL:" line that would make log-based failure scanning
+   ambiguous. */
+static void test_check_macro_failure_path( void )
+{
+	int before_fails = fails;
+	int before_total = total;
+	int saved_stdout_fd;
+
+	fflush( stdout );
+	saved_stdout_fd = dup( fileno( stdout ) );
+	freopen( "NUL", "w", stdout ); /* this is a Windows target (MinGW-w64); "/dev/null" is not a valid path here */
+
+	CHECK( 0, "self-test: this failure is EXPECTED - verified below, then undone" );
+
+	fflush( stdout );
+	dup2( saved_stdout_fd, fileno( stdout ) );
+	close( saved_stdout_fd );
+
+	if( fails == before_fails + 1 && total == before_total + 1 )
+	{
+		/* CHECK's failure path is proven to work: undo the deliberate,
+		   proven-detected failure so it doesn't fail the whole suite. */
+		fails = before_fails;
+		total = before_total;
+	}
+	else
+	{
+		/* CHECK did NOT increment fails/total by exactly 1 - the
+		   assertion mechanism itself is broken. Leave the counts as
+		   CHECK left them (plus this note) so main()'s exit code
+		   reflects the real breakage instead of silently returning
+		   success. */
+		fails++;
+		total++;
+		printf( "FAIL: self-test: CHECK's failure path did not increment fails/total by exactly 1 (fails %d, expected %d; total %d, expected %d)\n",
+			fails - 1, before_fails + 1, total - 1, before_total + 1 );
+	}
+}
+
 int main( void )
 {
+	test_check_macro_failure_path();
+
 	test_arena_alignment();
 	test_arena_exact_fit();
 	test_arena_full();
@@ -292,6 +527,15 @@ int main( void )
 	test_tile_split_wrap();
 	test_tile_split_cap();
 	test_2d_matrix();
+
+	test_tri_fan();
+	test_tri_strip();
+	test_tri_quad_strip();
+	test_tri_list_quads_drops_trailing();
+	test_tri_list_triangles_drops_trailing();
+	test_tri_list_lines_drops_trailing();
+	test_tri_fan_and_strip_too_short();
+	test_tri_chunk();
 
 	printf( "%d checks, %d failures\n", total, fails );
 	return fails != 0;

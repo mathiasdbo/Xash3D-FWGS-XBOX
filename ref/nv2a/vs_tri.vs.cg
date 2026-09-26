@@ -1,0 +1,42 @@
+/*
+ * X9-X step 4 vertex shader: the TriAPI's world/2D-space vertex program.
+ * Same single-matrix transform as vs_lit.vs.cg (the per-vertex divide by
+ * w - the world's own convention, so TriAPI and world geometry share
+ * exactly one depth-buffer meaning, C's own "SAME matrix and the SAME
+ * shader divide as the world" requirement), but with vs_2d.vs.cg's
+ * vertex layout (position, per-vertex COLOR0, one TEXCOORD0) since the
+ * TriAPI carries its colour per vertex (Color4f/Color4ub) rather than
+ * sampling it from a second texture. Compiled with cgc -profile vp20 +
+ * vp20compiler, the same pipeline vs_2d.inl went through - see that
+ * file's own header for the reproduction check this one repeats.
+ */
+struct vIn {
+	float4 position : POSITION;
+	float4 color0    : COLOR0;
+	float4 texcoord0 : TEXCOORD0;
+};
+
+struct vOut {
+	float4 pos  : POSITION;
+	float4 col0 : COLOR0;
+	float4 tex0 : TEXCOORD0;
+};
+
+vOut main(
+	vIn              I,
+	uniform float4x4 m
+	)
+{
+	vOut   result;
+	float4 position;
+
+	position     = mul(float4(I.position.xyz, 1.0f), m);
+	position.xyz = position.xyz / position.w;
+
+	result.pos  = position;
+	result.col0 = I.color0;
+	/* ps_2d (reused, D) is 2D_PROJECTIVE and samples (s/q, t/q) - write
+	   the whole texcoord with q=1, exactly as vs_2d.vs.cg does. */
+	result.tex0 = float4(I.texcoord0.xy, 0.0f, 1.0f);
+	return result;
+}
