@@ -31,8 +31,13 @@ Ported from, in order of how closely each piece is followed:
 #include "crclib.h" /* COM_HashKey, as ref/soft/r_image.c uses */
 #include "ref_common.h"
 
+#include "studio.h" /* mstudiotexture_t, the header Image_LoadMDL reads (studio skin upload) */
+#include "enginefeatures.h" /* ENGINE_LINEAR_GAMMA_SPACE, the TextureToGamma switch */
+
 #include "nv2a_texture.h"
 #include "nv2a_arena.h"
+#include "nv2a_skin_cache.h"
+#include "nv2a_studio_util.h" /* NV2A_STUDIO_NF_MASKED, pinned to studio.h in r_studio.c */
 
 /* ------------------------------------------------------------------ */
 /* Table storage.                                                      */
@@ -66,10 +71,45 @@ typedef struct
 	qboolean has_arena_storage;
 	size_t   gpu_offset;
 	void    *fallback;
+	qboolean skin_storage; /* gpu_offset is into the studio skin cache span instead */
 } nv2a_deferred_free_t;
 
 static nv2a_deferred_free_t nv2a_deferred_frees[NV2A_TEX_MAX_DEFERRED_FREES];
 static uint32_t nv2a_deferred_free_count;
+
+/* Studio skin cache (nv2a_texture.h's NV2A_STUDIO_SKIN_CACHE_BYTES): the
+   bookkeeping (nv2a_skin_cache.c) plus the real contiguous chunks it
+   hands out offsets within, each backed on demand (nv2a_skin_grow) and
+   given back when a flush empties it (nv2a_skin_release). NULL cache ==
+   the bookkeeping could not be allocated; every studio skin then draws
+   untextured (white) rather than failing the renderer. */
+#define NV2A_SKIN_MAX_CHUNKS ( NV2A_STUDIO_SKIN_CACHE_BYTES / NV2A_STUDIO_SKIN_CHUNK_BYTES )
+STATIC_ASSERT( NV2A_SKIN_MAX_CHUNKS >= 1, "the skin cache budget must hold at least one chunk" );
+static nv2a_skin_cache_t *nv2a_skin_cache;
+static void              *nv2a_skin_chunk_mem[NV2A_SKIN_MAX_CHUNKS];
+
+/* Rate-limited "cache full" reporting: at most one line per this many
+   frames, carrying how many binds drew untextured in between. */
+#define NV2A_SKIN_LOG_INTERVAL_FRAMES 300u
+static qboolean nv2a_skin_logged_once;
+static uint32_t nv2a_skin_log_frame;
+static uint32_t nv2a_skin_missed_binds;
+
+/* The source of one lazily uploaded studio skin (nv2a_texture_t::skin).
+   The pixels are NOT kept in RAM: with XASH_LOW_MEMORY (tools/xbox-cc.sh)
+   the engine truncates every studio model's texture data right after
+   Mod_StudioLoadTextures (engine/common/mod_studio.c:1105-1116
+   Mod_MaybeTruncateStudioTextureData), and a T.mdl's pixels live in a
+   buffer freed at :1175. So an upload re-reads them from the model file. */
+typedef struct nv2a_skin_source_s
+{
+	char     path[MAX_QPATH];
+	uint32_t file_length;
+	uint32_t pixel_offset;  /* width*height indices, then the 768-byte palette */
+	int      studio_flags;  /* mstudiotexture_t::flags at registration (STUDIO_NF_*) */
+	word     width, height; /* mstudiotexture_t::width/height - the SOURCE size */
+	qboolean failed;        /* permanent: file gone/changed or undecodable - never retried */
+} nv2a_skin_source_t;
 
 /* ------------------------------------------------------------------ */
 /* Small helpers.                                                      */
@@ -173,8 +213,11 @@ static nv2a_texture_t *nv2a_tex_alloc_slot( const char *name, texFlags_t flags )
    both a plain memset() that truncates the hash chain at this slot), an
    upload failure here unlinks first - a named divergence, cheap to do
    properly since GL_FreeTexture already needs the same unlink. */
+static void nv2a_tex_drop_skin( nv2a_texture_t *tex );
+
 static void nv2a_tex_fail_slot( nv2a_texture_t *tex )
 {
+	nv2a_tex_drop_skin( tex );
 	nv2a_tex_unlink_hash( tex );
 
 	if( tex->original )
@@ -235,11 +278,16 @@ static void nv2a_tex_free_storage_now( qboolean has_arena_storage, size_t gpu_of
 	}
 }
 
-static void nv2a_tex_queue_free( qboolean has_arena_storage, size_t gpu_offset, void *fallback )
+static void nv2a_tex_release_entry_now( const nv2a_deferred_free_t *e )
 {
-	if( !has_arena_storage && !fallback )
-		return; /* no storage to release */
+	if( e->skin_storage )
+		nv2a_skin_cache_free_offset( nv2a_skin_cache, e->gpu_offset );
+	else
+		nv2a_tex_free_storage_now( e->has_arena_storage, e->gpu_offset, e->fallback );
+}
 
+static void nv2a_tex_queue_entry( const nv2a_deferred_free_t *entry )
+{
 	if( nv2a_deferred_free_count >= NV2A_TEX_MAX_DEFERRED_FREES )
 	{
 		/* QA round 2, finding 3: a CPU-side array filling up says nothing
@@ -262,14 +310,40 @@ static void nv2a_tex_queue_free( qboolean has_arena_storage, size_t gpu_offset, 
 		gEngfuncs.Con_Printf( S_ERROR "ref_nv2a: texture free queue full, flushing and waiting before draining\n" );
 		nv2a_2d_flush_and_wait();
 		nv2a_tex_begin_frame();
-		nv2a_tex_free_storage_now( has_arena_storage, gpu_offset, fallback );
+		nv2a_tex_release_entry_now( entry );
 		return;
 	}
 
-	nv2a_deferred_frees[nv2a_deferred_free_count].has_arena_storage = has_arena_storage;
-	nv2a_deferred_frees[nv2a_deferred_free_count].gpu_offset = gpu_offset;
-	nv2a_deferred_frees[nv2a_deferred_free_count].fallback = fallback;
+	nv2a_deferred_frees[nv2a_deferred_free_count] = *entry;
 	nv2a_deferred_free_count++;
+}
+
+static void nv2a_tex_queue_free( qboolean has_arena_storage, size_t gpu_offset, void *fallback )
+{
+	nv2a_deferred_free_t entry;
+
+	if( !has_arena_storage && !fallback )
+		return; /* no storage to release */
+
+	entry.has_arena_storage = has_arena_storage;
+	entry.gpu_offset = gpu_offset;
+	entry.fallback = fallback;
+	entry.skin_storage = false;
+	nv2a_tex_queue_entry( &entry );
+}
+
+/* Same D4 discipline for a skin cache offset: GL_FreeTexture of a skin
+   drawn earlier THIS frame must not hand its bytes to the next upload
+   while the GPU may still be reading them. */
+static void nv2a_tex_queue_free_skin( size_t skin_offset )
+{
+	nv2a_deferred_free_t entry;
+
+	entry.has_arena_storage = false;
+	entry.gpu_offset = skin_offset;
+	entry.fallback = NULL;
+	entry.skin_storage = true;
+	nv2a_tex_queue_entry( &entry );
 }
 
 void nv2a_tex_begin_frame( void )
@@ -277,8 +351,7 @@ void nv2a_tex_begin_frame( void )
 	uint32_t i;
 
 	for( i = 0; i < nv2a_deferred_free_count; i++ )
-		nv2a_tex_free_storage_now( nv2a_deferred_frees[i].has_arena_storage,
-			nv2a_deferred_frees[i].gpu_offset, nv2a_deferred_frees[i].fallback );
+		nv2a_tex_release_entry_now( &nv2a_deferred_frees[i] );
 
 	nv2a_deferred_free_count = 0;
 }
@@ -459,6 +532,7 @@ static qboolean nv2a_tex_upload( nv2a_texture_t *tex, rgbdata_t *pic )
 	if( !nv2a_tex_alloc_storage( tex, (size_t)pitch * tex->height ))
 		return false;
 	tex->pitch = pitch;
+	tex->color_format = NV2A_TEX_COLOR_LU_A8B8G8R8;
 
 	if( tex->gpu_size == 0 )
 		return true;
@@ -471,6 +545,421 @@ static qboolean nv2a_tex_upload( nv2a_texture_t *tex, rgbdata_t *pic )
 		memcpy( dst + (size_t)y * pitch, src + (size_t)y * tex->width * 4, (size_t)tex->width * 4 );
 
 	return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Studio skins: lazy, 16 bpp, cached under a fixed budget             */
+/* (divergences.md, lazy studio skins; nv2a_texture.h's constants).    */
+/* ------------------------------------------------------------------ */
+
+static unsigned int nv2a_tex_index( const nv2a_texture_t *tex )
+{
+	return (unsigned int)( tex - nv2a_textures );
+}
+
+/* A skin cache offset (chunk index * chunk bytes + offset within it,
+   nv2a_skin_cache.h) to its address in that chunk's memory. */
+static byte *nv2a_skin_addr( size_t offset )
+{
+	return (byte *)nv2a_skin_chunk_mem[offset / NV2A_STUDIO_SKIN_CHUNK_BYTES] + offset % NV2A_STUDIO_SKIN_CHUNK_BYTES;
+}
+
+/* nv2a_skin_cache's chunk backing: one physically contiguous,
+   write-combined allocation per chunk, same flags and ceiling as every
+   other texture allocation here. */
+static int nv2a_skin_grow( void *ctx, uint32_t index )
+{
+	(void)ctx;
+	if( index >= NV2A_SKIN_MAX_CHUNKS )
+		return 0;
+	nv2a_skin_chunk_mem[index] = MmAllocateContiguousMemoryEx( NV2A_STUDIO_SKIN_CHUNK_BYTES, 0, NV2A_TEXTURE_MAXRAM, 0,
+		PAGE_READWRITE | PAGE_WRITECOMBINE );
+	return nv2a_skin_chunk_mem[index] != NULL;
+}
+
+static void nv2a_skin_release( void *ctx, uint32_t index )
+{
+	(void)ctx;
+	if( index < NV2A_SKIN_MAX_CHUNKS && nv2a_skin_chunk_mem[index] )
+	{
+		MmFreeContiguousMemory( nv2a_skin_chunk_mem[index] );
+		nv2a_skin_chunk_mem[index] = NULL;
+	}
+}
+
+static byte *nv2a_tex_skin_base( const nv2a_texture_t *tex )
+{
+	return nv2a_skin_addr( tex->gpu_offset );
+}
+
+static void nv2a_tex_clear_skin_storage( nv2a_texture_t *tex )
+{
+	tex->has_skin_storage = false;
+	tex->gpu_offset = 0;
+	tex->gpu_size = 0;
+	tex->pitch = 0;
+	tex->color_format = 0;
+}
+
+/* nv2a_skin_cache_acquire's eviction callback: the victim's slot goes
+   back to "not uploaded" (name, size and source kept) before the cache
+   releases its bytes. Only skins at least NV2A_STUDIO_SKIN_EVICT_MIN_AGE
+   frames old are ever passed here, so the GPU is not reading them. */
+static void nv2a_tex_skin_evicted( void *ctx, uint32_t id )
+{
+	(void)ctx;
+	if( id >= NV2A_MAX_TEXTURES )
+		return;
+	nv2a_tex_clear_skin_storage( &nv2a_textures[id] );
+
+	/* Still the bound texture (nothing re-bound it for two frames): a
+	   draw appended without a new GL_Bind would otherwise resolve a slot
+	   with no storage and be dropped (nv2a_2d_resolve_batch_key) - bind
+	   the same white placeholder a not-yet-uploaded skin draws with
+	   instead; the next GL_Bind of this skin re-uploads it. */
+	if( nv2a_bound_texture_tmu0 == id )
+		nv2a_bound_texture_tmu0 = nv2a_texnum_white;
+}
+
+/* Turns a studio skin slot back into a plain one with no storage: its
+   cache entry is detached and the bytes released at the next safe point
+   (D4 - the skin may have been drawn this frame), and its source record
+   freed. Used by GL_FreeTexture, and by the update paths should the
+   engine ever write new pixels into a skin's texnum (it does not today:
+   cl_remap.c updates its own per-entity copies, never the model's slot),
+   so they then behave exactly as for any other texture. */
+static void nv2a_tex_drop_skin( nv2a_texture_t *tex )
+{
+	size_t offset;
+
+	if( !tex->skin )
+		return;
+
+	if( tex->has_skin_storage && nv2a_skin_cache_detach( nv2a_skin_cache, nv2a_tex_index( tex ), &offset ))
+	{
+		if( nv2a_frame_is_open())
+			nv2a_tex_queue_free_skin( offset );
+		else
+			nv2a_skin_cache_free_offset( nv2a_skin_cache, offset );
+	}
+	nv2a_tex_clear_skin_storage( tex );
+
+	free( tex->skin );
+	tex->skin = NULL;
+}
+
+static void nv2a_tex_skin_report_miss( void )
+{
+	uint32_t frame = nv2a_current_frame_number();
+
+	nv2a_skin_missed_binds++;
+	if( nv2a_skin_logged_once && (uint32_t)( frame - nv2a_skin_log_frame ) < NV2A_SKIN_LOG_INTERVAL_FRAMES )
+		return;
+
+	gEngfuncs.Con_DPrintf( "ref_nv2a: studio skin cache full (%u of %u KiB, %u evictions), %u skin bind(s) drew untextured\n",
+		(unsigned int)( nv2a_skin_cache_backed( nv2a_skin_cache ) >> 10 ),
+		(unsigned int)( nv2a_skin_cache_capacity( nv2a_skin_cache ) >> 10 ),
+		nv2a_skin_cache_eviction_count( nv2a_skin_cache ), nv2a_skin_missed_binds );
+	nv2a_skin_logged_once = true;
+	nv2a_skin_log_frame = frame;
+	nv2a_skin_missed_binds = 0;
+}
+
+/* Reads the skin's raw 8-bit data (width*height indices, then the
+   768-byte palette) back from its model file into `buf`, which must hold
+   src->width * src->height + 768 bytes. False on any failure, including
+   a file whose length is no longer the one registered. */
+static qboolean nv2a_tex_skin_read_raw( const nv2a_skin_source_t *src, byte *buf )
+{
+	size_t data_bytes = (size_t)src->width * src->height + 768;
+	file_t *f;
+	qboolean ok;
+
+	f = gEngfuncs.fsapi->Open( src->path, "rb", false );
+	if( !f )
+		return false;
+
+	ok = gEngfuncs.fsapi->FileLength( f ) == (fs_offset_t)src->file_length
+		&& gEngfuncs.fsapi->Seek( f, (fs_offset_t)src->pixel_offset, SEEK_SET ) == 0
+		&& gEngfuncs.fsapi->Read( f, buf, data_bytes ) == (fs_offset_t)data_bytes;
+	gEngfuncs.fsapi->Close( f );
+	return ok;
+}
+
+/* The rare path: a skin larger than 1024 on a side, which
+   nv2a_tex_set_dimensions shrank, so it needs the engine's resampler.
+   Decodes through the engine's own studio image loader - the same
+   FS_LoadImage(texname, mstudiotexture_t + pixels + palette) call
+   R_StudioLoadTexture made at precache (gl_studio.c R_StudioLoadTexture;
+   Image_LoadMDL reads only flags/width/height from the header,
+   img_wad.c:195-200, and the pixels through Image_SetMDLPointer) - then
+   nv2a_tex_upload's own RGBA32 + resample steps, and packs to `format`.
+   Unlike the direct path this allocates from the engine's image pool,
+   whose exhaustion is a Sys_Error (zone.c); no retail skin takes it.
+   `raw` is the nv2a_tex_skin_read_raw buffer, preceded by room for the
+   header. */
+static qboolean nv2a_tex_skin_decode_resampled( nv2a_texture_t *tex, byte *raw_with_header, uint32_t format, byte *dst, uint32_t pitch )
+{
+	const nv2a_skin_source_t *src = tex->skin;
+	size_t total = sizeof( mstudiotexture_t ) + (size_t)src->width * src->height + 768;
+	mstudiotexture_t *header = (mstudiotexture_t *)raw_with_header;
+	rgbdata_t *pic;
+	uint32_t y;
+
+	memset( header, 0, sizeof( *header ));
+	header->flags = src->studio_flags;
+	header->width = src->width;
+	header->height = src->height;
+
+	/* GL_LoadTexture's own sequence: force flags, then load. No
+	   TF_KEEP_SOURCE skin ever gets here (R_StudioLoadTexture keeps those
+	   on the eager path), so no IL_KEEP_8BIT. */
+	gEngfuncs.Image_SetForceFlags( 0 );
+	gEngfuncs.Image_SetMDLPointer( raw_with_header + sizeof( mstudiotexture_t ));
+	pic = gEngfuncs.FS_LoadImage( tex->name, raw_with_header, total );
+	if( !pic )
+		return false;
+
+	nv2a_tex_process_image( tex, pic );
+	if( !nv2a_tex_convert_to_rgba32( tex, pic )
+		|| (( pic->width != tex->width || pic->height != tex->height )
+			&& !gEngfuncs.Image_Process( &pic, tex->width, tex->height, IMAGE_RESAMPLE, 0.0f ))
+		|| !pic->buffer || pic->type != PF_RGBA_32 )
+	{
+		gEngfuncs.FS_FreeImage( pic );
+		return false;
+	}
+
+	for( y = 0; y < (uint32_t)tex->height; y++ )
+	{
+		const uint8_t *row = pic->buffer + (size_t)y * tex->width * 4;
+		uint16_t *out = (uint16_t *)( dst + (size_t)y * pitch );
+
+		if( format == NV2A_TEX_COLOR_LU_A1R5G5B5 )
+			nv2a_pack_a1r5g5b5( row, out, tex->width );
+		else
+			nv2a_pack_r5g6b5( row, out, tex->width );
+	}
+
+	gEngfuncs.FS_FreeImage( pic );
+	return true;
+}
+
+/* Uploads one studio skin into the cache at 16 bpp. On anything but
+   success the slot is left with no storage; `permanent` says whether it
+   is worth trying again on a later bind.
+
+   The normal path decodes the 8-bit data itself, through a 256-entry
+   16 bpp table (nv2a_skin_build_lut) that reproduces Image_LoadMDL's
+   palette exactly: LUMP_TEXGAMMA through the engine's own texture gamma
+   table for an ordinary skin, LUMP_MASKED (raw colours, index 255
+   transparent) for STUDIO_NF_MASKED (img_wad.c:212-221,
+   img_utils.c:284-310). The only allocation is one malloc of the raw
+   bytes - never the engine's image pool, whose exhaustion is a Sys_Error
+   (zone.c) that a mid-game upload on a tight map must not risk (NV2A
+   specialist review) - and there is no RGBA intermediate. What
+   nv2a_tex_process_image would do to such a skin at precache is
+   flag bookkeeping only (TF_HAS_ALPHA, set at registration). */
+static qboolean nv2a_tex_upload_skin( nv2a_texture_t *tex, qboolean *permanent )
+{
+	nv2a_skin_source_t *src = tex->skin;
+	unsigned int texnum = nv2a_tex_index( tex );
+	qboolean masked = FBitSet( src->studio_flags, NV2A_STUDIO_NF_MASKED ) ? true : false;
+	qboolean resampled = ( tex->width != src->width || tex->height != src->height );
+	size_t header_room = resampled ? sizeof( mstudiotexture_t ) : 0;
+	uint32_t pitch, y, format;
+	nv2a_skin_status_t status;
+	size_t offset;
+	byte *buf, *dst;
+	qboolean ok;
+
+	*permanent = false;
+
+	pitch = ALIGN((uint32_t)tex->width * 2, 64 ); /* same 64-byte LU_IMAGE row alignment as nv2a_tex_upload's RGBA32 rows */
+
+	/* A1R5G5B5 keeps a masked skin's one alpha bit (Image_LoadMDL sets
+	   IMAGE_HAS_ALPHA|IMAGE_ONEBIT_ALPHA only for STUDIO_NF_MASKED,
+	   img_wad.c:216-221); every other skin is opaque, and R5G6B5 gives
+	   green the spare bit instead. */
+	format = masked ? NV2A_TEX_COLOR_LU_A1R5G5B5 : NV2A_TEX_COLOR_LU_R5G6B5;
+
+	/* The raw bytes first, so a malloc failure costs no eviction.
+	   malloc, not a zone pool: failure here is survivable (retry later). */
+	buf = (byte *)malloc( header_room + (size_t)src->width * src->height + 768 );
+	if( !buf )
+	{
+		nv2a_tex_skin_report_miss();
+		return false;
+	}
+
+	status = nv2a_skin_cache_acquire( nv2a_skin_cache, texnum, (size_t)pitch * tex->height,
+		nv2a_current_frame_number(), &offset, nv2a_tex_skin_evicted, NULL );
+
+	switch( status )
+	{
+	case NV2A_SKIN_OK:
+		break;
+	case NV2A_SKIN_FRAME_CAP:
+		free( buf );
+		return false; /* expected at a scene change; the next frame gets it */
+	case NV2A_SKIN_NO_ROOM:
+		free( buf );
+		nv2a_tex_skin_report_miss();
+		return false;
+	default: /* TOO_BIG / BAD_ID: can never succeed */
+		free( buf );
+		gEngfuncs.Con_Printf( S_ERROR "ref_nv2a: studio skin %s (%ux%u) is larger than one %u KiB skin cache chunk, drawn untextured\n",
+			tex->name, tex->width, tex->height, (unsigned int)( nv2a_skin_cache_chunk_bytes( nv2a_skin_cache ) >> 10 ));
+		*permanent = true;
+		return false;
+	}
+
+	/* The destination is a freshly acquired range: either never used, or
+	   an evicted skin's that has not been drawn for at least
+	   NV2A_STUDIO_SKIN_EVICT_MIN_AGE frames - no GPU hazard in writing it
+	   now, mid-frame. Sequential 16-bit stores, no read-back: the right
+	   pattern for write-combined memory. */
+	dst = nv2a_skin_addr( offset );
+
+	ok = nv2a_tex_skin_read_raw( src, buf + header_room );
+	if( ok && resampled )
+	{
+		ok = nv2a_tex_skin_decode_resampled( tex, buf, format, dst, pitch );
+	}
+	else if( ok )
+	{
+		const byte *indices = buf;
+		const byte *palette = buf + (size_t)src->width * src->height;
+		const byte *texgamma = FBitSet( gp_host->features, ENGINE_LINEAR_GAMMA_SPACE )
+			? NULL : (const byte *)ENGINE_GET_PARM( PARM_GET_TEXGAMMATABLE_PTR ); /* TextureToGamma, gamma.c:175-181 / gl_local.h:655-658 */
+		uint16_t lut[256];
+
+		nv2a_skin_build_lut( palette, texgamma, masked, lut );
+		for( y = 0; y < (uint32_t)tex->height; y++ )
+			nv2a_skin_expand_indexed( indices + (size_t)y * src->width, lut, (uint16_t *)( dst + (size_t)y * pitch ), tex->width );
+	}
+	free( buf );
+
+	if( !ok )
+	{
+		/* The victims evicted for this range stay evicted: they re-upload
+		   on their next bind like any evicted skin (bounded, rare). */
+		nv2a_skin_cache_abandon( nv2a_skin_cache, texnum );
+		gEngfuncs.Con_Printf( S_ERROR "ref_nv2a: could not re-read studio skin %s from %s, drawn untextured\n",
+			tex->name, src->path );
+		*permanent = true;
+		return false;
+	}
+
+	tex->has_skin_storage = true;
+	tex->has_arena_storage = false;
+	tex->fallback = NULL;
+	tex->gpu_offset = offset;
+	tex->gpu_size = (size_t)pitch * tex->height;
+	tex->pitch = pitch;
+	tex->color_format = format;
+
+	SetBits( tex->flags, TF_IMG_UPLOADED );
+	return true;
+}
+
+/* GL_Bind's studio skin step: returns the texnum to actually bind -
+   `texnum` itself once its skin is resident (marked used this frame),
+   otherwise the white texture as the placeholder for this bind. White,
+   not the default checkerboard: the mesh still gets its lighting, so a
+   skin arriving a frame or two late reads as a brief flat shade rather
+   than a flash of debug pattern. */
+static unsigned int nv2a_tex_resolve_skin( unsigned int texnum )
+{
+	nv2a_texture_t *tex = &nv2a_textures[texnum];
+	qboolean permanent;
+
+	if( tex->has_skin_storage )
+	{
+		nv2a_skin_cache_touch( nv2a_skin_cache, texnum, nv2a_current_frame_number());
+		return texnum;
+	}
+
+	if( !nv2a_skin_cache || tex->skin->failed )
+		return nv2a_texnum_white;
+
+	if( nv2a_tex_upload_skin( tex, &permanent ))
+		return texnum;
+
+	if( permanent )
+		tex->skin->failed = true;
+	return nv2a_texnum_white;
+}
+
+int nv2a_tex_register_studio_skin( const char *texname, texFlags_t flags, const char *path, uint32_t file_length,
+	uint32_t pixel_offset, int studio_flags, int width, int height )
+{
+	nv2a_skin_source_t *src;
+	nv2a_texture_t *tex;
+	uint64_t data_end;
+
+	if( !nv2a_tex_check_name( texname ) || COM_StringEmptyOrNULL( path ))
+		return 0;
+
+	if(( tex = nv2a_tex_for_name( texname )))
+		return (int)nv2a_tex_index( tex ); /* GL_LoadTexture's own early-out for an already loaded name */
+
+	/* Everything the upload will read must be inside the file as it is
+	   now; Image_LoadMDL's own size check (img_wad.c:207-209) is the
+	   same w*h+768. */
+	data_end = (uint64_t)pixel_offset + (uint64_t)width * (uint64_t)height + 768u;
+	if( width <= 0 || height <= 0 || width > 0xFFFF || height > 0xFFFF
+		|| data_end > file_length || Q_strlen( path ) >= (int)sizeof( src->path ))
+		return 0;
+
+	src = (nv2a_skin_source_t *)calloc( 1, sizeof( *src ));
+	if( !src )
+		return 0;
+
+	Q_strncpy( src->path, path, sizeof( src->path ));
+	src->file_length = file_length;
+	src->pixel_offset = pixel_offset;
+	src->studio_flags = studio_flags;
+	src->width = (word)width;
+	src->height = (word)height;
+
+	tex = nv2a_tex_alloc_slot( texname, flags );
+	tex->skin = src;
+	nv2a_tex_set_dimensions( tex, width, height );
+
+	/* What nv2a_tex_process_image would set from Image_LoadMDL's
+	   IMAGE_HAS_ALPHA (img_wad.c:216-221), so the slot's flags already
+	   read the same before the first upload as after it. */
+	if( FBitSet( studio_flags, NV2A_STUDIO_NF_MASKED ))
+		SetBits( tex->flags, TF_HAS_ALPHA );
+
+	return (int)nv2a_tex_index( tex );
+}
+
+void nv2a_tex_mark_used( unsigned int texnum )
+{
+	nv2a_texture_t *tex;
+
+	if( texnum >= NV2A_MAX_TEXTURES || !nv2a_textures )
+		return;
+
+	tex = &nv2a_textures[texnum];
+	tex->last_used_frame = nv2a_current_frame_number();
+	if( tex->has_skin_storage )
+		nv2a_skin_cache_touch( nv2a_skin_cache, texnum, tex->last_used_frame );
+}
+
+void nv2a_tex_flush_skin_cache( void )
+{
+	/* Only between frames: R_EndFrame's pb_busy spin (r_context.c) has
+	   then retired every draw that could read a skin, which is what makes
+	   draining the D4 queue and releasing chunks safe here. Inside a frame
+	   this is a no-op rather than a hazard. */
+	if( !nv2a_skin_cache || nv2a_frame_is_open())
+		return;
+
+	nv2a_tex_begin_frame(); /* skin bytes waiting in the D4 queue keep their chunk backed */
+	nv2a_skin_cache_flush( nv2a_skin_cache, nv2a_tex_skin_evicted, NULL );
 }
 
 /* ------------------------------------------------------------------ */
@@ -546,6 +1035,7 @@ int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags
 	{
 		if( !tex )
 			gEngfuncs.Host_Error( "%s: couldn't find texture %s for update\n", __func__, name );
+		nv2a_tex_drop_skin( tex ); /* a studio skin written to becomes a plain texture (nv2a_tex_drop_skin) */
 		SetBits( tex->flags, flags );
 	}
 	else
@@ -677,6 +1167,10 @@ void GL_FreeTexture( unsigned int texnum )
 		tex->original = NULL;
 	}
 
+	/* Studio skin: detach from the cache (bytes deferred like below) and
+	   free the source record - nothing of it outlives the slot. */
+	nv2a_tex_drop_skin( tex );
+
 	/* D4: metadata clears immediately either way; only the GPU storage
 	   itself may need to wait for a safe point. */
 	if( nv2a_frame_is_open())
@@ -741,6 +1235,8 @@ void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, co
 	tex = &nv2a_textures[texnum];
 	if( !tex->name[0] )
 		return;
+
+	nv2a_tex_drop_skin( tex ); /* a studio skin written to becomes a plain texture (nv2a_tex_drop_skin) */
 
 	memset( &wrapper, 0, sizeof( wrapper ));
 	wrapper.width = (word)cols;
@@ -825,6 +1321,7 @@ void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, co
 			return;
 		}
 		tex->pitch = pitch;
+		tex->color_format = NV2A_TEX_COLOR_LU_A8B8G8R8;
 
 		dstBase = tex->has_arena_storage ? (byte *)nv2a_texture_arena_mem + tex->gpu_offset : tex->fallback;
 		dst = (byte *)dstBase;
@@ -853,6 +1350,11 @@ void GL_Bind( int tmu, unsigned int texnum )
 		texnum = nv2a_texnum_default;
 	}
 
+	/* Studio skin: uploaded on first bind, placeholder (white) while it
+	   is not resident - see nv2a_tex_resolve_skin. */
+	if( nv2a_textures[texnum].skin )
+		texnum = nv2a_tex_resolve_skin( texnum );
+
 	tex = &nv2a_textures[texnum];
 
 	if( tex->gpu_size == 0 )
@@ -879,7 +1381,7 @@ unsigned int nv2a_tex_current( void )
 }
 
 qboolean nv2a_tex_gpu_params( unsigned int texnum, uint32_t *phys_offset, uint32_t *pitch,
-	uint32_t *width, uint32_t *height, qboolean *bilinear )
+	uint32_t *width, uint32_t *height, qboolean *bilinear, uint32_t *color_format )
 {
 	const nv2a_texture_t *tex = nv2a_tex_get( texnum );
 
@@ -888,15 +1390,18 @@ qboolean nv2a_tex_gpu_params( unsigned int texnum, uint32_t *phys_offset, uint32
 
 	if( phys_offset )
 	{
-		uint32_t base = tex->has_arena_storage
-			? (uint32_t)((byte *)nv2a_texture_arena_mem + tex->gpu_offset)
-			: (uint32_t)(uintptr_t)tex->fallback;
+		uint32_t base = tex->has_skin_storage
+			? (uint32_t)(uintptr_t)nv2a_tex_skin_base( tex )
+			: tex->has_arena_storage
+				? (uint32_t)((byte *)nv2a_texture_arena_mem + tex->gpu_offset)
+				: (uint32_t)(uintptr_t)tex->fallback;
 		*phys_offset = base & 0x03ffffff;
 	}
 	if( pitch )     *pitch = tex->pitch;
 	if( width )     *width = tex->width;
 	if( height )    *height = tex->height;
 	if( bilinear )  *bilinear = nv2a_texture_filtering_enabled( tex );
+	if( color_format ) *color_format = tex->color_format ? tex->color_format : NV2A_TEX_COLOR_LU_A8B8G8R8;
 
 	return true;
 }
@@ -978,6 +1483,10 @@ void R_TextureList_f( void )
 	nv2a_tex_arena_stats( &used, &free_bytes, &largest_free, &fallback );
 	gEngfuncs.Con_Printf( "arena: %s used, %s free, %s largest free block, %u standalone fallback(s)\n",
 		Q_memprint((float)used ), Q_memprint((float)free_bytes ), Q_memprint((float)largest_free ), fallback );
+	gEngfuncs.Con_Printf( "studio skin cache: %s used in %s backed, budget %s, %u skin(s) resident at 16 bpp, %u eviction(s)\n",
+		Q_memprint((float)nv2a_skin_cache_used( nv2a_skin_cache )), Q_memprint((float)nv2a_skin_cache_backed( nv2a_skin_cache )),
+		Q_memprint((float)nv2a_skin_cache_capacity( nv2a_skin_cache )),
+		nv2a_skin_cache_resident_count( nv2a_skin_cache ), nv2a_skin_cache_eviction_count( nv2a_skin_cache ));
 	gEngfuncs.Con_Printf( "\n" );
 }
 
@@ -1018,6 +1527,19 @@ qboolean nv2a_tex_init( void )
 		return false;
 	}
 
+	/* The studio skin cache's bookkeeping only - no chunk is backed until
+	   a skin is first bound (nv2a_skin_grow), so nothing is taken before
+	   the map's own GPU upload. Not fatal if it fails: studio skins then
+	   draw untextured, everything else is unaffected. */
+	nv2a_skin_logged_once = false;
+	nv2a_skin_missed_binds = 0;
+	memset( nv2a_skin_chunk_mem, 0, sizeof( nv2a_skin_chunk_mem ));
+	nv2a_skin_cache = nv2a_skin_cache_init( NV2A_STUDIO_SKIN_CACHE_BYTES, NV2A_STUDIO_SKIN_CHUNK_BYTES, NV2A_MAX_TEXTURES,
+		NV2A_STUDIO_SKIN_UPLOADS_PER_FRAME, NV2A_STUDIO_SKIN_BYTES_PER_FRAME, NV2A_STUDIO_SKIN_EVICT_MIN_AGE,
+		nv2a_skin_grow, nv2a_skin_release, NULL );
+	if( !nv2a_skin_cache )
+		gEngfuncs.Con_Printf( S_ERROR "ref_nv2a: could not set up the studio skin cache, studio models draw untextured\n" );
+
 	/* Slot 0: a hashed "*unused*" entry (ref/soft's R_InitImages, r_image.c:941-959). */
 	Q_strncpy( nv2a_textures[0].name, "*unused*", sizeof( nv2a_textures[0].name ));
 	nv2a_textures[0].hashValue = COM_HashKey( nv2a_textures[0].name, NV2A_TEXTURES_HASH_SIZE );
@@ -1048,6 +1570,15 @@ void nv2a_tex_shutdown( void )
 	   shutdown, but this stays a real no-op rather than an assumption)
 	   before tearing down the arena itself is safe. */
 	nv2a_tex_begin_frame();
+
+	/* Every skin slot was just dropped by GL_FreeTexture above and the
+	   drain released its bytes, so nothing points into a chunk now;
+	   destroy hands every backed chunk back through nv2a_skin_release. */
+	if( nv2a_skin_cache )
+	{
+		nv2a_skin_cache_destroy( nv2a_skin_cache );
+		nv2a_skin_cache = NULL;
+	}
 
 	if( nv2a_texture_arena )
 	{

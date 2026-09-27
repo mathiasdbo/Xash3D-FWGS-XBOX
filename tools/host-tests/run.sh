@@ -44,10 +44,18 @@ run_test() {
 # tools/host-tests/nv2a_arena_host_test.c, header.
 nv2a_arena() {
 	gcc -O1 -Wall -std=c99 -Iref/nv2a \
-		tools/host-tests/nv2a_arena_host_test.c ref/nv2a/nv2a_arena.c ref/nv2a/nv2a_2d_util.c ref/nv2a/nv2a_tri_util.c \
+		tools/host-tests/nv2a_arena_host_test.c ref/nv2a/nv2a_arena.c ref/nv2a/nv2a_2d_util.c ref/nv2a/nv2a_tri_util.c ref/nv2a/nv2a_studio_util.c \
 		-lm -o "$OUT/nv2a_arena_test" && "$OUT/nv2a_arena_test"
 }
 run_test nv2a_arena nv2a_arena
+
+# tools/host-tests/nv2a_skin_cache_host_test.c, header.
+nv2a_skin_cache() {
+	gcc -O1 -Wall -std=c99 -Iref/nv2a \
+		tools/host-tests/nv2a_skin_cache_host_test.c ref/nv2a/nv2a_skin_cache.c ref/nv2a/nv2a_arena.c \
+		-o "$OUT/nv2a_skin_cache_test" && "$OUT/nv2a_skin_cache_test"
+}
+run_test nv2a_skin_cache nv2a_skin_cache
 
 # tools/host-tests/printf_host_test.c, header.
 printf_test() {

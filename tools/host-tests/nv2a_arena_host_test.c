@@ -1,14 +1,15 @@
 /*
 nv2a_arena_host_test.c - host test for ref/nv2a/nv2a_arena.c,
-ref/nv2a/nv2a_2d_util.c and ref/nv2a/nv2a_tri_util.c (X9-X Part C and
-step 4 Part A): all three are deliberately free of pbkit/xboxkrnl/engine
-includes, so they build and are checked here on the host rather than
-only ever exercised for the first time on real hardware. Not part of any
-Xbox build; run it on the host from the repository root, in the MSYS2
+ref/nv2a/nv2a_2d_util.c, ref/nv2a/nv2a_tri_util.c and
+ref/nv2a/nv2a_studio_util.c (X9-X Part C, step 4 Part A and step 5 Part
+C): all four are deliberately free of pbkit/xboxkrnl/engine includes, so
+they build and are checked here on the host rather than only ever
+exercised for the first time on real hardware. Not part of any Xbox
+build; run it on the host from the repository root, in the MSYS2
 MinGW-64 shell:
 
   gcc -O1 -Wall -std=c99 -Iref/nv2a \
-      tools/host-tests/nv2a_arena_host_test.c ref/nv2a/nv2a_arena.c ref/nv2a/nv2a_2d_util.c ref/nv2a/nv2a_tri_util.c \
+      tools/host-tests/nv2a_arena_host_test.c ref/nv2a/nv2a_arena.c ref/nv2a/nv2a_2d_util.c ref/nv2a/nv2a_tri_util.c ref/nv2a/nv2a_studio_util.c \
       -lm -o /tmp/nv2a_arena_test && /tmp/nv2a_arena_test
 
 Exit status is nonzero iff any check failed (the failure count is also
@@ -17,6 +18,7 @@ printed), matching tools/host-tests/printf_host_test.c's own convention.
 #include "nv2a_arena.h"
 #include "nv2a_2d_util.h"
 #include "nv2a_tri_util.h"
+#include "nv2a_studio_util.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h> /* dup, dup2, close, fileno - used only by the CHECK self-test below */
@@ -457,6 +459,67 @@ static void test_tri_chunk( void )
 	CHECK( cap.starts[1] == 256 && cap.counts[1] == 1, "tri chunk: remainder draw is 1 point" );
 }
 
+/* ---- nv2a_studio_util (X9-X step 5 Part C) ---- */
+
+static nv2a_studio_mesh_state_t base_state( void )
+{
+	nv2a_studio_mesh_state_t s;
+	s.alpha_test_enable = 0;
+	s.alpha_ref = 0;
+	s.blend_enable = 0;
+	s.sfactor = 0;
+	s.dfactor = 0;
+	s.depth_mask = 1;
+	return s;
+}
+
+static void test_studio_mesh_state_masked( void )
+{
+	nv2a_studio_mesh_state_t out = nv2a_studio_mesh_state( NV2A_STUDIO_NF_MASKED, 1, base_state());
+
+	CHECK( out.alpha_test_enable == 1, "masked: alpha test on" );
+	CHECK( out.alpha_ref == NV2A_STUDIO_ALPHA_REF_MASKED, "masked: ref 0x7F" );
+	CHECK( out.depth_mask == 1, "masked: depth mask on" );
+	CHECK( out.blend_enable == 0, "masked: blend untouched" );
+}
+
+static void test_studio_mesh_state_additive_opaque( void )
+{
+	nv2a_studio_mesh_state_t out = nv2a_studio_mesh_state( NV2A_STUDIO_NF_ADDITIVE, 1, base_state());
+
+	CHECK( out.blend_enable == 1, "additive opaque: blend on" );
+	CHECK( out.sfactor == NV2A_STUDIO_SFACTOR_ONE, "additive opaque: sfactor ONE" );
+	CHECK( out.dfactor == NV2A_STUDIO_DFACTOR_ONE, "additive opaque: dfactor ONE" );
+	CHECK( out.depth_mask == 0, "additive opaque: depth mask off" );
+}
+
+static void test_studio_mesh_state_additive_translucent( void )
+{
+	nv2a_studio_mesh_state_t out = nv2a_studio_mesh_state( NV2A_STUDIO_NF_ADDITIVE, 0, base_state());
+
+	CHECK( out.blend_enable == 1, "additive translucent: blend on" );
+	CHECK( out.sfactor == NV2A_STUDIO_SFACTOR_SRC_ALPHA, "additive translucent: sfactor SRC_ALPHA" );
+	CHECK( out.dfactor == NV2A_STUDIO_DFACTOR_ONE, "additive translucent: dfactor ONE" );
+	CHECK( out.depth_mask == 1, "additive translucent: depth mask untouched (still the base state's)" );
+}
+
+static void test_studio_mesh_state_plain( void )
+{
+	nv2a_studio_mesh_state_t in = base_state();
+	nv2a_studio_mesh_state_t out = nv2a_studio_mesh_state( 0, 1, in );
+
+	CHECK( memcmp( &in, &out, sizeof( in )) == 0, "plain mesh: state left completely unchanged" );
+}
+
+static void test_studio_viewmodel_zrange( void )
+{
+	float z_min = -1.0f, z_max = -1.0f;
+
+	nv2a_studio_viewmodel_zrange( &z_min, &z_max );
+	CHECK( z_min == 0.0f, "viewmodel z range: near plane is 0" );
+	CHECK( z_max == 0.3f * 65536.0f, "viewmodel z range: far plane is 0.3 x 65536" );
+}
+
 /* Per the lesson "NEVER trust a new tool's exit code without testing its
    failure path too" (docs/r3d/lessons.md): prove CHECK's own failure path
    actually runs - increments `fails` and `total`, prints FAIL - rather
@@ -536,6 +599,12 @@ int main( void )
 	test_tri_list_lines_drops_trailing();
 	test_tri_fan_and_strip_too_short();
 	test_tri_chunk();
+
+	test_studio_mesh_state_masked();
+	test_studio_mesh_state_additive_opaque();
+	test_studio_mesh_state_additive_translucent();
+	test_studio_mesh_state_plain();
+	test_studio_viewmodel_zrange();
 
 	printf( "%d checks, %d failures\n", total, fails );
 	return fails != 0;

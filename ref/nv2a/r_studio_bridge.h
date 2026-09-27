@@ -1,0 +1,110 @@
+/*
+r_studio_bridge.h - X9-X step 5: the narrow, private glue between
+r_context.c (the TriAPI internals, the batch-state shadow and the frame's
+own entity lists - all file-scope statics there) and the new r_studio.c
+(the CPU-skinning studio-model port, docs/r3d/design/x9-x-studio-models.md).
+Not an engine-facing header (unlike nv2a_texture.h/nv2a_2d_util.h/
+nv2a_tri_util.h) and not host-tested - both sides already need pbkit's
+own types transitively (ref_common.h's chain), so there is nothing to gain
+by keeping this pure. r_context.c #includes this near its own top (so the
+extended nv2a_2d_shadow_t below is the ONE definition both files use);
+r_studio.c includes it for the TriAPI entry points and the small set of
+r_context.c-owned globals it needs to read/write.
+*/
+#ifndef R_STUDIO_BRIDGE_H
+#define R_STUDIO_BRIDGE_H
+
+#include "xash3d_types.h"
+#include "triangleapi.h" /* TRICULLSTYLE */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Per-list entity cap (X9-M), shared now that R_AddEntity accepts
+   mod_studio into the SAME two lists as brush entities (X9-X step 5 Part
+   B) - a HL map plus its NPCs/items still sends far fewer than this. */
+#define NV2A_MAX_ENTITIES 512
+
+extern cl_entity_t *nv2a_solid_entities[NV2A_MAX_ENTITIES];
+extern cl_entity_t *nv2a_trans_entities[NV2A_MAX_ENTITIES];
+extern int          nv2a_num_solid_entities;
+extern int          nv2a_num_trans_entities;
+
+/* X9-X step 4 Part C's own nv2a_2d_shadow_t, moved here (from r_context.c)
+   so r_studio.c's per-mesh state changes (design note section 6) write
+   the SAME shadow the flush (r_context.c) actually pushes - exactly as
+   ref/gl's GL_StudioSetRenderMode and gl_rsurf.c's R_SetRenderMode share
+   ONE GL state machine. Two fields added this step: `alpha_ref` (the
+   flush used to push a hardcoded ALPHA_REF 0 at every re-entry; studio's
+   own MASKED meshes need 0x7F - design note section 6) and
+   `viewmodel_depthrange` (section 2: which of the two z-ranged
+   view-projection matrices the 3D re-entry pushes at constant 96). */
+typedef struct
+{
+	qboolean blend_enable;
+	uint32_t sfactor, dfactor;
+	qboolean alpha_test_enable;
+	uint32_t alpha_ref;
+	qboolean depth_mask;
+	qboolean cull_enable;
+	qboolean viewmodel_depthrange;
+	/* Only meaningful in nv2a_2d_batch_state/nv2a_2d_pushed (never in
+	   nv2a_2d_desired, which has no draw of its own yet) - r_context.c's
+	   own comment on this struct, unchanged by this move. */
+	int      space; /* nv2a_imm_space_t, kept as a plain int here so this
+	                    header does not need r_context.c's own enum */
+	uint32_t op;
+} nv2a_2d_shadow_t;
+
+extern nv2a_2d_shadow_t nv2a_2d_desired;
+
+/* r_context.c's own TriAPI internals (X9-X step 4 Part D) - exposed
+   (no longer static) so r_studio.c can call them directly, exactly as
+   ref/soft/r_studio.c calls TriBegin/TriTexCoord2f/TriColor4ub/
+   TriVertex3fv/TriEnd/TriCullFace/TriRenderMode. Same names except for
+   the "Tri" prefix, which r_context.c already dropped from everything
+   but TriRenderMode (X9-X step 4 Part D's own naming). */
+void Begin( int primitiveCode );
+void End( void );
+void Vertex3f( float x, float y, float z );
+void Vertex3fv( const float *worldPnt );
+void TexCoord2f( float u, float v );
+void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a );
+void Color4f( float r, float g, float b, float a );
+void CullFace( TRICULLSTYLE mode );
+void TriRenderMode( int mode );
+
+/* r_context.c's own R_CullBox equivalent (X9-F), needed by
+   R_StudioComputeBBox (R_CullModel, ref/gl/gl_cull.c:43). */
+qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs );
+
+/* r_context.c's own CL_FxBlend port (ref/gl's gl_rmain.c:1161), reused by
+   r_studio.c instead of a second copy - R_StudioSetRenderamt needs it. */
+int nv2a_fx_blend( cl_entity_t *e );
+
+/* r_context.c's own stored copy of the frame's entity array (from
+   R_ProcessEntData) - CL_GetEntityByIndex's own bounds-checked slot
+   (ref/soft/r_local.h:513), needed by R_StudioClientEvents/
+   R_FindParentEntity/R_DrawStudioModel. */
+cl_entity_t *nv2a_get_entity_by_index( int index );
+
+/* X9-X step 5 Part C: applies nv2a_studio_mesh_state() (nv2a_studio_util.h)
+   to nv2a_2d_desired on top of whatever GL_StudioSetRenderMode /
+   R_StudioSetupRenderer already set, and restores it afterwards -
+   R_StudioDrawPoints's own per-mesh MASKED/ADDITIVE block
+   (gl_studio.c:2090-2123). `entity_opaque` is R_ModelOpaque() of the
+   CURRENT entity's rendermode, computed by the caller (r_studio.c). */
+void nv2a_studio_apply_mesh_state( int face_flags, int entity_opaque );
+void nv2a_studio_restore_mesh_state( void );
+
+/* Design note section 2: forces a flush/re-entry (r_context.c's own
+   nv2a_2d_flush) whenever this changes, so the 3D branch's constant-96
+   push picks the view-model z-ranged matrix instead of the world's. */
+void nv2a_studio_set_viewmodel_depthrange( int on );
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* R_STUDIO_BRIDGE_H */

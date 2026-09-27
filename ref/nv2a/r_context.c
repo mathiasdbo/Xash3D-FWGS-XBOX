@@ -58,6 +58,9 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "nv2a_texture.h" /* X9-X: the texture manager's own table/entry points (r_image.c) */
 #include "nv2a_2d_util.h" /* X9-X: the 2D pass's pure-arithmetic pieces (nv2a_2d_util.c), host-tested */
 #include "nv2a_tri_util.h" /* X9-X step 4: the TriAPI's primitive assembler (nv2a_tri_util.c), host-tested */
+#include "nv2a_studio_util.h" /* X9-X step 5 Part C: the studio batch-state mapping (nv2a_studio_util.c), host-tested */
+#include "r_studio_bridge.h" /* X9-X step 5: the private glue with r_studio.c - nv2a_2d_shadow_t now lives here */
+#include "r_studio.h" /* X9-X step 5: r_studio.c's own entry points */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -362,6 +365,12 @@ static void     *nv2a_map_lightmap;     /* GPU-visible, RGBA8, no format convers
                                             X9-J, docs/r3d/divergences.md #100. */
 static uint32_t  nv2a_map_lightmap_width, nv2a_map_lightmap_height, nv2a_map_lightmap_pitch;
 static float     nv2a_map_viewproj[4][4];
+/* X9-X step 5 Part C: view*proj WITHOUT the viewport (GL_RenderFrame's own
+   `combined`, persisted) - the view-model depth-range matrix
+   (nv2a_2d_flush) re-combines this with a viewport whose z range is
+   [0, 0.3*65536] instead of the world's own [0, 65536], rather than
+   rebuilding the camera from scratch. */
+static float     nv2a_view_proj_combined[4][4];
 /* X9-X step 4 Part E: the SAME camera as nv2a_map_viewproj above, but built
    with ref/common's own Matrix4x4_* helpers (M*v, column-vector convention)
    instead of nv2a_matrix_multiply()'s row-vector one - GetMatrix/
@@ -519,7 +528,7 @@ static inline uint32_t nv2a_face_vertex_base( const nv2a_map_face_t *face )
 }
 
 /* nv2a_frustum_cull_box takes float bounds. */
-static qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs );
+qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs ); /* X9-X step 5: exposed for r_studio.c (R_CullModel), r_studio_bridge.h */
 static inline qboolean nv2a_frustum_cull_face( const nv2a_map_face_t *face )
 {
 	const vec3_t mins = { face->mins[0], face->mins[1], face->mins[2] };
@@ -1493,7 +1502,7 @@ static void nv2a_draw_test_triangle( void )
    so every face is tested against all 5 planes; see docs/r3d/fork-plan.md's
    X9-F entry for why that is the right scope for this slice). Returns true
    if the box is entirely outside at least one plane. */
-static qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs )
+qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs )
 {
 	int i;
 
@@ -1767,7 +1776,8 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 
 /*
 ========================================================================
-X9-M: brush entities (func_door, func_wall, func_illusionary, ladders...)
+X9-M/X9-X step 5: brush AND studio entities (func_door, func_wall,
+func_illusionary, ladders, NPCs, items, the view model...)
 
 Every face the baker writes comes from LUMP_FACES, which holds the world
 model's faces AND every submodel's (the `*N` brush entities). Before X9-M
@@ -1776,27 +1786,29 @@ submodel faces were never marked visible (no world leaf lists them - the
 PVS walk is not where they come from), so doors, ladders, fences and
 chargers vanished; with PVS off they drew frozen at their compile-time
 position, triggers included. This is the entity half ref/gl has and this
-file did not: R_AddEntity/R_ClearScene keep the frame's brush-entity list
-(gl_rmain.c:217,234), and nv2a_draw_brush_entities() walks it after the
-world, solid list first, then the translucent list sorted like
+file did not: R_AddEntity/R_ClearScene keep the frame's entity lists
+(gl_rmain.c:217,234), and nv2a_draw_entity_list() (X9-X step 5, replacing
+the brush-only nv2a_draw_brush_entities()) walks them after the world,
+solid list first, then the translucent list sorted like
 R_TransEntityCompare (gl_rmain.c:86) - R_DrawEntitiesOnList's order
-(gl_rmain.c). Each entity draws with its own transform
+(gl_rmain.c). Each brush entity draws with its own transform
 (R_RotateForEntity/R_TranslateForEntity, gl_rmain.c:448,474) and render
-mode (R_SetRenderMode, gl_rsurf.c:1717). Studio models, sprites and beams
-are accepted by R_AddEntity but not drawn yet - this renderer has no
-studio or sprite path.
+mode (R_SetRenderMode, gl_rsurf.c:1717); each studio entity draws through
+R_DrawStudioModel (r_studio.c). Sprites and beams are still accepted by
+R_AddEntity but not drawn (step 6, out of scope).
 ========================================================================
 */
-#define NV2A_MAX_BRUSH_ENTITIES 512 /* per list, per frame; a HL map sends far fewer brush entities */
+/* NV2A_MAX_ENTITIES itself now lives in r_studio_bridge.h (included
+   above), shared with r_studio.c's own R_FindParentEntity. */
 #define NV2A_SURF_DRAWTURB BIT( 4 ) /* common/bspfile.h:55's SURF_DRAWTURB - same "mirror the one engine
                                        msurface flag this file reads" pattern as NV2A_SURF_PLANEBACK */
 
 #define NV2A_UNLIT_PAGE_SIZE 16 /* texels per side; pitch 64 bytes, LU_IMAGE's own alignment */
 
-static cl_entity_t *nv2a_solid_brush_entities[NV2A_MAX_BRUSH_ENTITIES];
-static cl_entity_t *nv2a_trans_brush_entities[NV2A_MAX_BRUSH_ENTITIES];
-static int          nv2a_num_solid_brush_entities;
-static int          nv2a_num_trans_brush_entities;
+cl_entity_t *nv2a_solid_entities[NV2A_MAX_ENTITIES]; /* X9-X step 5: exposed, r_studio_bridge.h (R_FindParentEntity) */
+cl_entity_t *nv2a_trans_entities[NV2A_MAX_ENTITIES];
+int          nv2a_num_solid_entities;
+int          nv2a_num_trans_entities;
 static vec3_t       nv2a_eye_forward; /* GL_RenderFrame's own AngleVectors forward, for CL_FxBlend's hologram fade */
 static uint32_t    *nv2a_unlit_page;  /* 16x16 texels of 0x80 grey: ps_lit's lightmap x 2 then
                                          multiplies by 1.0, i.e. an unlit draw. Allocated once,
@@ -1883,20 +1895,16 @@ static qboolean nv2a_map_face_is_world( const model_t *world, uint32_t sorted )
 		&& orig < (uint32_t)world->firstmodelsurface + (uint32_t)world->nummodelsurfaces;
 }
 
-/* ref/gl's R_GetEntityRenderMode (gl_studio.c:2384), brush-model branch
-   only - the only model type this list ever holds. A normal-rendermode
-   brush model with '{' textures (MODEL_TRANSPARENT) sorts as TransAlpha. */
-static int nv2a_brush_entity_render_mode( const cl_entity_t *ent )
-{
-	if( ent->curstate.rendermode == kRenderNormal && ent->model && FBitSet( ent->model->flags, MODEL_TRANSPARENT ))
-		return kRenderTransAlpha;
-	return ent->curstate.rendermode;
-}
+/* X9-X step 5: nv2a_brush_entity_render_mode (the brush-only branch of
+   ref/gl's R_GetEntityRenderMode, gl_studio.c:2384) is gone - both callers
+   below now use the whole function (r_studio.c, includes the brush branch
+   verbatim plus the studio one), since this list holds mod_studio entities
+   too as of this step. */
 
 /* ref/gl's R_OpaqueEntity (gl_rmain.c:63). */
-static qboolean nv2a_opaque_entity( const cl_entity_t *ent )
+static qboolean nv2a_opaque_entity( cl_entity_t *ent )
 {
-	if( nv2a_brush_entity_render_mode( ent ) == kRenderNormal )
+	if( R_GetEntityRenderMode( ent ) == kRenderNormal )
 	{
 		switch( ent->curstate.renderfx )
 		{
@@ -1912,7 +1920,7 @@ static qboolean nv2a_opaque_entity( const cl_entity_t *ent )
 
 /* ref/gl's CL_FxBlend (gl_rmain.c:1161), whole function. This renderer
    never draws cubemaps, so the RF_DRAW_CUBEMAP guards are always open. */
-static int nv2a_fx_blend( cl_entity_t *e )
+int nv2a_fx_blend( cl_entity_t *e ) /* X9-X step 5: exposed, r_studio_bridge.h (R_StudioSetRenderamt) */
 {
 	int blend = 0;
 	float offset = ((int)e->index ) * 363.0f; // Use ent index to de-sync these fx
@@ -2036,13 +2044,16 @@ static int nv2a_trans_entity_compare( const void *a, const void *b )
 {
 	cl_entity_t *ent1 = *(cl_entity_t **)a;
 	cl_entity_t *ent2 = *(cl_entity_t **)b;
-	int rendermode1 = nv2a_brush_entity_render_mode( ent1 );
-	int rendermode2 = nv2a_brush_entity_render_mode( ent2 );
+	int rendermode1 = R_GetEntityRenderMode( ent1 );
+	int rendermode2 = R_GetEntityRenderMode( ent2 );
 	vec3_t vecLen, org;
 	float dist1, dist2;
 
-	// sort by distance
-	if( rendermode1 != kRenderTransAlpha )
+	/* gl_rmain.c:97,105: a studio entity is always sorted by distance
+	   (`model->type != mod_brush ||`) - only a mod_brush entity in
+	   TransAlpha skips the distance sort (it draws back-to-front by its
+	   own face order instead). */
+	if( ent1->model->type != mod_brush || rendermode1 != kRenderTransAlpha )
 	{
 		VectorAverage( ent1->model->mins, ent1->model->maxs, org );
 		VectorAdd( ent1->origin, org, org );
@@ -2051,7 +2062,7 @@ static int nv2a_trans_entity_compare( const void *a, const void *b )
 	}
 	else dist1 = 1000000000;
 
-	if( rendermode2 != kRenderTransAlpha )
+	if( ent2->model->type != mod_brush || rendermode2 != kRenderTransAlpha )
 	{
 		VectorAverage( ent2->model->mins, ent2->model->maxs, org );
 		VectorAdd( ent2->origin, org, org );
@@ -2317,30 +2328,81 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 		nv2a_bind_lightmap_stage1( true );
 }
 
-/* ref/gl's R_DrawEntitiesOnList (gl_rmain.c), brush-model cases only:
-   solid entities after the world, then translucent ones sorted by
-   R_TransEntityCompare, each with tr.blend = CL_FxBlend/255 unless its
-   rendermode is kRenderNormal ("draw as solid but sorted by distance").
-   Restores the world view-projection afterwards. */
-static void nv2a_draw_brush_entities( const model_t *world )
+/* Brush's own direct constant-96 push (nv2a_draw_brush_entity) leaves the
+   TriAPI/world's shared transform constant pointed at that ENTITY's own
+   matrix - restores it to the world's (ref/gl's own equivalent restore,
+   this function's previous single-block form). Only needed once a brush
+   entity actually drew (a studio-only frame never touches constant 96 by
+   this path at all - R_DrawStudioModel's own pushes go through the
+   TriAPI's nv2a_2d_flush, keyed off nv2a_map_viewproj/the view-model
+   matrix already, never this one). */
+static void nv2a_restore_world_constant96( void )
 {
-	uint32_t *p;
+	uint32_t *p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
+	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 16 );
+	memcpy( p, nv2a_map_viewproj, 16 * 4 );
+	p += 16;
+	pb_end( p );
+}
+
+/* ref/gl's R_DrawEntitiesOnList (gl_rmain.c), the solid-entity half:
+   brush entities draw directly (their own GPU state push,
+   nv2a_draw_brush_entity - flushed/marked dirty around it per spec Part B
+   item 4, so a studio entity sharing the SAME TriAPI ring never inherits
+   a stale batch), studio entities through R_DrawStudioModel (r_studio.c).
+   Called from GL_RenderFrame BEFORE pfnDrawNormalTriangles, matching
+   gl_rmain.c:797-830's own order (X9-X step 5 - was brush-only,
+   nv2a_draw_brush_entities, called from inside nv2a_draw_map_geometry;
+   moved here per spec Part B item 1). */
+static void nv2a_draw_solid_entities( const model_t *world )
+{
+	qboolean can_draw_brush = ( world != NULL && nv2a_map_faces != NULL && nv2a_map_face_remap != NULL && nv2a_map_face_orig != NULL );
+	qboolean drew_brush = false;
 	int i;
 
-	if( !world || !nv2a_map_faces || !nv2a_map_face_remap || !nv2a_map_face_orig )
-		return;
-
-	if( nv2a_num_solid_brush_entities == 0 && nv2a_num_trans_brush_entities == 0 )
-		return;
-
-	for( i = 0; i < nv2a_num_solid_brush_entities; i++ )
-		nv2a_draw_brush_entity( world, nv2a_solid_brush_entities[i], 1.0f );
-
-	qsort( nv2a_trans_brush_entities, nv2a_num_trans_brush_entities, sizeof( cl_entity_t * ), nv2a_trans_entity_compare );
-
-	for( i = 0; i < nv2a_num_trans_brush_entities; i++ )
+	for( i = 0; i < nv2a_num_solid_entities; i++ )
 	{
-		cl_entity_t *e = nv2a_trans_brush_entities[i];
+		cl_entity_t *e = nv2a_solid_entities[i];
+
+		if( e->model->type == mod_studio )
+		{
+			nv2a_studio_set_blend( 1.0f );
+			nv2a_studio_begin_entity( e );
+			R_DrawStudioModel( e );
+		}
+		else if( can_draw_brush )
+		{
+			nv2a_2d_flush();
+			nv2a_draw_brush_entity( world, e, 1.0f );
+			nv2a_2d_dirty = true;
+			drew_brush = true;
+		}
+	}
+
+	if( drew_brush )
+		nv2a_restore_world_constant96();
+}
+
+/* The translucent half of the same reference function, sorted by
+   R_TransEntityCompare, each with blend = CL_FxBlend/255 unless its
+   rendermode is kRenderNormal ("draw as solid but sorted by distance").
+   Called from GL_RenderFrame AFTER pfnDrawNormalTriangles, BEFORE
+   pfnDrawTransparentTriangles (gl_rmain.c:865-912's own order). */
+static void nv2a_draw_trans_entities( const model_t *world )
+{
+	qboolean can_draw_brush = ( world != NULL && nv2a_map_faces != NULL && nv2a_map_face_remap != NULL && nv2a_map_face_orig != NULL );
+	qboolean drew_brush = false;
+	int i;
+
+	if( nv2a_num_trans_entities == 0 )
+		return;
+
+	qsort( nv2a_trans_entities, nv2a_num_trans_entities, sizeof( cl_entity_t * ), nv2a_trans_entity_compare );
+
+	for( i = 0; i < nv2a_num_trans_entities; i++ )
+	{
+		cl_entity_t *e = nv2a_trans_entities[i];
 		float blend;
 
 		if( e->curstate.rendermode != kRenderNormal )
@@ -2350,15 +2412,23 @@ static void nv2a_draw_brush_entities( const model_t *world )
 		if( blend <= 0.0f )
 			continue;
 
-		nv2a_draw_brush_entity( world, e, blend );
+		if( e->model->type == mod_studio )
+		{
+			nv2a_studio_set_blend( blend );
+			nv2a_studio_begin_entity( e );
+			R_DrawStudioModel( e );
+		}
+		else if( can_draw_brush )
+		{
+			nv2a_2d_flush();
+			nv2a_draw_brush_entity( world, e, blend );
+			nv2a_2d_dirty = true;
+			drew_brush = true;
+		}
 	}
 
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
-	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 16 );
-	memcpy( p, nv2a_map_viewproj, 16 * 4 );
-	p += 16;
-	pb_end( p );
+	if( drew_brush )
+		nv2a_restore_world_constant96();
 }
 
 /* X9-B: the real geometry path - same VP20 transform shader and the same
@@ -2740,7 +2810,11 @@ static void nv2a_draw_map_geometry( void )
 		}
 	}
 
-	nv2a_draw_brush_entities( world );
+	/* X9-X step 5, spec Part B item 1: brush/studio entities no longer
+	   draw from inside this function - GL_RenderFrame now calls
+	   nv2a_draw_solid_entities/nv2a_draw_trans_entities itself, at the
+	   points in its own draw order gl_rmain.c's R_DrawEntitiesOnList
+	   actually calls them (before/after pfnDrawNormalTriangles). */
 }
 
 /*
@@ -2770,15 +2844,9 @@ static void R_SimpleStubBool( qboolean unused )
 	;
 }
 
-static qboolean R_StudioFillAPI( struct engine_studio_api_s *api, struct r_studio_interface_s *pDefaultDraw )
-{
-	return false;
-}
-
-static void R_StudioSetDrawInterface( struct r_studio_interface_s *pDraw )
-{
-	;
-}
+/* X9-X step 5: R_StudioFillAPI/R_StudioSetDrawInterface are now real,
+   implemented in r_studio.c and declared by r_studio.h (included above) -
+   assigned into gReffuncs by name below, nothing to do here. */
 
 static void R_GetDetailScaleForTexture( int texture, float *xScale, float *yScale )
 {
@@ -2800,7 +2868,7 @@ static void R_FillRenderAPI( render_api_t *api )
    forward-declared here only so R_FillTriAPI (used well before that point
    by nothing else, but kept at its own long-established spot in the
    ref_interface_t stub group) can reference them. */
-static void TexCoord2f( float u, float v );
+void TexCoord2f( float u, float v ); /* X9-X step 5: TriAPI internals below exposed for r_studio.c - r_studio_bridge.h */
 static void Fog( float flFogColor[3], float flStart, float flEnd, int bOn );
 static void ScreenToWorld( const float *screen, float *world );
 static void GetMatrix( const int pname, float *matrix );
@@ -2875,8 +2943,8 @@ static void nv2a_free_map_resources( void )
 	   map change frees (CL_FreeEdicts) while loading-plaque frames can
 	   still reach R_EndFrame - never carry them past the map they came
 	   from. */
-	nv2a_num_solid_brush_entities = 0;
-	nv2a_num_trans_brush_entities = 0;
+	nv2a_num_solid_entities = 0;
+	nv2a_num_trans_entities = 0;
 	nv2a_pending_upload.pending = false; /* X9-T */
 	nv2a_map_ready = false;
 	nv2a_map_owner = NULL;
@@ -3050,6 +3118,24 @@ static qboolean R_Init( void )
 		return false;
 	}
 
+	/* X9-X step 5, design note section 5: the studio state (heap-allocated,
+	   R_AllocStudioStatics pattern) - allocated last, right before success,
+	   so every earlier failure path above is unaffected. */
+	if( !R_StudioAllocStatics())
+	{
+		debug_marker = 10;
+		pb_kill();
+		pb_initialized = false;
+		nv2a_tex_shutdown();
+		MmFreeContiguousMemory( nv2a_2d_ring );
+		nv2a_2d_ring = NULL;
+		nv2a_free_resources();
+		Mem_FreePool( &r_temppool );
+		gEngfuncs.R_Free_Video();
+		return false;
+	}
+	R_StudioInit();
+
 	nv2a_matrix_viewport( nv2a_viewport, 0, 0, (float)nv2a_width, (float)nv2a_height, 0, 65536.0f );
 
 	debug_marker = 5;
@@ -3060,6 +3146,8 @@ static qboolean R_Init( void )
 static void R_Shutdown( void )
 {
 	nv2a_ready = false;
+
+	R_StudioFreeStatics();
 
 	/* pb_kill() FIRST: it starts the pushbuffer queue and waits for the
 	   GPU to go idle before returning (deps/nxdk/lib/pbkit/pbkit.c's own
@@ -3104,11 +3192,12 @@ static void GL_SetupAttributes( int safegl )
 	;
 }
 
-/* X9-M: ref/gl's R_AddEntity (gl_rmain.c:234). Only brush models are
-   kept - this renderer draws nothing else yet - but the accept/reject
-   rules (r_drawentities, EF_NODRAW, fully faded translucents) and the
-   solid/translucent split are the reference's, so the lists hold exactly
-   what ref/gl's would for brush entities. */
+/* X9-M/X9-X step 5: ref/gl's R_AddEntity (gl_rmain.c:234). Brush and
+   studio models are kept (this renderer's own two draw paths); sprites
+   and alias models are still accepted but not drawn (step 6 and out of
+   scope respectively) - the accept/reject rules (r_drawentities,
+   EF_NODRAW, fully faded translucents) and the solid/translucent split
+   are the reference's own, unconditional on model type. */
 static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 {
 	if( !r_drawentities->value )
@@ -3120,20 +3209,20 @@ static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 	if( clent->curstate.rendermode != kRenderNormal && nv2a_fx_blend( clent ) <= 0 )
 		return true; // invisible
 
-	if( type == ET_BEAM || !clent->model || clent->model->type != mod_brush )
-		return true; // accepted, but this renderer has no path for it yet
+	if( type == ET_BEAM || !clent->model || ( clent->model->type != mod_brush && clent->model->type != mod_studio ))
+		return true; // accepted, but this renderer has no draw path for it yet (sprites, alias)
 
 	if( nv2a_opaque_entity( clent ))
 	{
-		if( nv2a_num_solid_brush_entities >= NV2A_MAX_BRUSH_ENTITIES )
+		if( nv2a_num_solid_entities >= NV2A_MAX_ENTITIES )
 			return false;
-		nv2a_solid_brush_entities[nv2a_num_solid_brush_entities++] = clent;
+		nv2a_solid_entities[nv2a_num_solid_entities++] = clent;
 	}
 	else
 	{
-		if( nv2a_num_trans_brush_entities >= NV2A_MAX_BRUSH_ENTITIES )
+		if( nv2a_num_trans_entities >= NV2A_MAX_ENTITIES )
 			return false;
-		nv2a_trans_brush_entities[nv2a_num_trans_brush_entities++] = clent;
+		nv2a_trans_entities[nv2a_num_trans_entities++] = clent;
 	}
 
 	return true;
@@ -3142,12 +3231,80 @@ static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 /* X9-M: ref/gl's R_ClearScene (gl_rmain.c:217). */
 static void R_ClearScene( void )
 {
-	nv2a_num_solid_brush_entities = 0;
-	nv2a_num_trans_brush_entities = 0;
+	nv2a_num_solid_entities = 0;
+	nv2a_num_trans_entities = 0;
 
 	// clear the scene befor start new frame
 	if( gEngfuncs.drawFuncs->R_ClearScene != NULL )
 		gEngfuncs.drawFuncs->R_ClearScene();
+}
+
+/* X9-X step 5: ref/soft's own CL_GetEntityByIndex (r_local.h:513) reads
+   tr.entities/tr.max_entities, filled here the same way ref/soft's own
+   R_ProcessEntData does - R_StudioClientEvents/R_FindParentEntity/
+   R_DrawStudioModel need the bounds-checked lookup. */
+static cl_entity_t *nv2a_entities;
+static unsigned int nv2a_max_entities;
+
+cl_entity_t *nv2a_get_entity_by_index( int index )
+{
+	if( unlikely( index < 0 || (unsigned int)index >= nv2a_max_entities || !nv2a_entities ))
+		return NULL;
+	return &nv2a_entities[index];
+}
+
+/* X9-X step 5 Part C: applies/restores nv2a_studio_mesh_state()
+   (nv2a_studio_util.h, host-tested) on nv2a_2d_desired - r_studio.c's own
+   R_StudioDrawPoints calls these around every mesh (design note section
+   6). Saving the pre-mesh snapshot (rather than hand-restoring individual
+   fields) keeps this a plain apply/restore pair regardless of which
+   fields nv2a_studio_mesh_state() happens to touch. */
+/* nv2a_studio_util.h's own mirrors of nv_regs.h (kept host-buildable
+   without pbkit) pinned against the real macros - this file DOES have
+   nv_regs.h (pbkit.h, included above). */
+STATIC_ASSERT( NV2A_STUDIO_SFACTOR_ONE == NV097_SET_BLEND_FUNC_SFACTOR_V_ONE, "NV2A_STUDIO_SFACTOR_ONE drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_STUDIO_SFACTOR_SRC_ALPHA == NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA, "NV2A_STUDIO_SFACTOR_SRC_ALPHA drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_STUDIO_DFACTOR_ONE == NV097_SET_BLEND_FUNC_DFACTOR_V_ONE, "NV2A_STUDIO_DFACTOR_ONE drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_STUDIO_DFACTOR_ONE_MINUS_SRC_ALPHA == NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA, "NV2A_STUDIO_DFACTOR_ONE_MINUS_SRC_ALPHA drifted from nv_regs.h" );
+/* nv2a_texture.h's per-slot colour formats (r_image.c has no pbkit include). */
+STATIC_ASSERT( NV2A_TEX_COLOR_LU_A1R5G5B5 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5, "NV2A_TEX_COLOR_LU_A1R5G5B5 drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_TEX_COLOR_LU_R5G6B5 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5, "NV2A_TEX_COLOR_LU_R5G6B5 drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_TEX_COLOR_LU_A8B8G8R8 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8, "NV2A_TEX_COLOR_LU_A8B8G8R8 drifted from nv_regs.h" );
+
+static nv2a_2d_shadow_t nv2a_studio_pre_mesh_state;
+
+void nv2a_studio_apply_mesh_state( int face_flags, int entity_opaque )
+{
+	nv2a_studio_mesh_state_t base, out;
+
+	nv2a_studio_pre_mesh_state = nv2a_2d_desired;
+
+	base.alpha_test_enable = nv2a_2d_desired.alpha_test_enable;
+	base.alpha_ref         = nv2a_2d_desired.alpha_ref;
+	base.blend_enable      = nv2a_2d_desired.blend_enable;
+	base.sfactor           = nv2a_2d_desired.sfactor;
+	base.dfactor           = nv2a_2d_desired.dfactor;
+	base.depth_mask        = nv2a_2d_desired.depth_mask;
+
+	out = nv2a_studio_mesh_state( face_flags, entity_opaque, base );
+
+	nv2a_2d_desired.alpha_test_enable = out.alpha_test_enable;
+	nv2a_2d_desired.alpha_ref         = out.alpha_ref;
+	nv2a_2d_desired.blend_enable      = out.blend_enable;
+	nv2a_2d_desired.sfactor           = out.sfactor;
+	nv2a_2d_desired.dfactor           = out.dfactor;
+	nv2a_2d_desired.depth_mask        = out.depth_mask;
+}
+
+void nv2a_studio_restore_mesh_state( void )
+{
+	nv2a_2d_desired = nv2a_studio_pre_mesh_state;
+}
+
+/* X9-X step 5 Part C / design note section 2. */
+void nv2a_studio_set_viewmodel_depthrange( int on )
+{
+	nv2a_2d_desired.viewmodel_depthrange = on ? true : false;
 }
 
 static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned int max_entities )
@@ -3155,10 +3312,17 @@ static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned
 	/* X9-M: CL_FreeEdicts (cl_game.c) calls this with allocate = false
 	   right before freeing the edict array the entity lists point into;
 	   R_ClearScene does not run again until the next active frame. */
-	if( !allocate )
+	if( allocate )
 	{
-		nv2a_num_solid_brush_entities = 0;
-		nv2a_num_trans_brush_entities = 0;
+		nv2a_entities = entities;
+		nv2a_max_entities = max_entities;
+	}
+	else
+	{
+		nv2a_num_solid_entities = 0;
+		nv2a_num_trans_entities = 0;
+		nv2a_entities = NULL;
+		nv2a_max_entities = 0;
 	}
 }
 
@@ -3317,15 +3481,9 @@ static int R_CreateDecalList( struct decallist_s *pList )
 	return 0;
 }
 
-static float R_StudioEstimateFrame( cl_entity_t *e, mstudioseqdesc_t *pseqdesc, double time )
-{
-	return 0.0f;
-}
-
-static void R_StudioLerpMovement( cl_entity_t *e, double time, vec3_t origin, vec3_t angles )
-{
-	;
-}
+/* X9-X step 5: R_StudioEstimateFrame/R_StudioLerpMovement are now real,
+   implemented in r_studio.c (whole-function ports of gl_studio.c:561,498)
+   and declared by r_studio.h. */
 
 static void R_SetSkyCloudsTextures( int solidskyTexture, int alphaskyTexture )
 {
@@ -4363,6 +4521,12 @@ static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte
 	{
 		if( mod == nv2a_map_owner )
 			nv2a_free_map_resources();
+		/* X9-X step 5 / gl_context.c:106-111,131-136: the OTHER unload this
+		   callback owns, unconditional on nv2a_map_owner - every studio
+		   model's own skins, freed here besides the map-owner check above
+		   (which only ever applies to the world). */
+		if( mod->type == mod_studio )
+			Mod_StudioUnloadTextures( mod->cache.data );
 		return true;
 	}
 
@@ -4399,10 +4563,8 @@ static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte
 	                the world already set up untouched */
 }
 
-static void Mod_StudioLoadTextures( model_t *mod, void *data )
-{
-	;
-}
+/* X9-X step 5: Mod_StudioLoadTextures/Mod_StudioUnloadTextures are now
+   real, implemented in r_studio.c and declared by r_studio.h. */
 
 static void CL_DrawParticles( double frametime, particle_t *particles, float partsize )
 {
@@ -4421,9 +4583,9 @@ static void CL_DrawBeams( int fTrans, BEAM *beams )
 
 /* D5: whole port of ref/soft's own GL_RefGetParm switch (r_context.c:124-199),
    corrected where D5 says to - PARM_TEX_FILTERING answered locally
-   instead of the reference's own "ref_soft doesn't filter" 0, and
-   PARM_GET_STUDIO_HDR returns 0 (no studio-model support yet, out of
-   scope this phase) rather than calling R_StudioGetHeader(). */
+   instead of the reference's own "ref_soft doesn't filter" 0.
+   PARM_GET_STUDIO_HDR now calls R_StudioGetHeader() (X9-X step 5,
+   gl_context.c:218), r_studio.c's own m_pStudioHeader accessor. */
 static intptr_t RefGetParm( int parm, int arg )
 {
 	switch( parm )
@@ -4453,7 +4615,7 @@ static intptr_t RefGetParm( int parm, int arg )
 	case PARM_STENCIL_ACTIVE:  return 0;
 	case PARM_MAX_IMAGE_UNITS: return 0;
 	case PARM_REBUILD_GAMMA:   return 0;
-	case PARM_GET_STUDIO_HDR:  return 0;
+	case PARM_GET_STUDIO_HDR:  return (intptr_t)R_StudioGetHeader();
 	case PARM_TEX_FILTERING:
 		if( arg < 0 )
 			return !nv2a_r_texturenearest.value;
@@ -4867,6 +5029,9 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 
 	nv2a_matrix_multiply( combined, view, proj );
 	nv2a_matrix_multiply( nv2a_map_viewproj, combined, ndc_to_screen );
+	/* X9-X step 5 Part C: kept without the viewport, for the view model's
+	   own z-ranged re-combination (nv2a_2d_flush). */
+	memcpy( nv2a_view_proj_combined, combined, sizeof( combined ));
 
 	/* X9-F: the view frustum, from the SAME forward/right/up/eye the view
 	   matrix above was just built from - so the cull and the projection
@@ -4978,6 +5143,16 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 
 	nv2a_view_valid = true;
 
+	/* X9-X step 5: the studio path's own per-frame context (r_studio.c
+	   keeps this private instead of a shared RI/tr - r_studio.h's own
+	   comment). R_RunViewmodelEvents runs here, before the world,
+	   matching gl_rmain.c:1103 - it only computes the view model's own
+	   bones/attachments and processes its client events (elights, model
+	   sounds), no GPU state touched, so the ordering relative to the
+	   flush/shadow-reset just below does not matter. */
+	nv2a_studio_set_frame_context( rvp->flags, rvp->vieworigin, forward, right, up );
+	R_RunViewmodelEvents();
+
 	/* X9-X step 4 Part F: flush whatever the 2D pass had pending (a HUD
 	   draw from a previous frame's tail, or - defensively - anything from
 	   earlier this same frame) and reset the shadow to R_SetupGL's own
@@ -5005,6 +5180,14 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   point (no RF_DRAW_WORLD), so it never reaches here. */
 	if( nv2a_frame_open )
 	{
+		/* X9-X step 5: the same world model_t nv2a_draw_map_geometry()
+		   itself computes (nv2a_map_owner-gated) - the entity passes below
+		   need it too, for their own brush-entity draws. */
+		const model_t *world = gp_cl->models[1];
+
+		if( world != nv2a_map_owner )
+			world = NULL;
+
 		/* The world draw above pushed its own program, constants, array
 		   formats, alpha func and stage 1 directly (nv2a_draw_map_geometry,
 		   not through nv2a_2d_desired/append at all) - the 2D/TriAPI pass
@@ -5014,8 +5197,16 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		if( nv2a_world_drawn_this_frame )
 			gEngfuncs.R_DrawWorldHull(); /* port of R_DrawWorld's own tail, gl_rsurf.c:3728 */
 
+		/* X9-X step 5, gl_rmain.c:797-935's own order: solid entities
+		   (brush direct, studio through R_DrawStudioModel), then
+		   pfnDrawNormalTriangles, then translucent entities sorted, then
+		   pfnDrawTransparentTriangles, then the view model. */
+		nv2a_draw_solid_entities( world );
 		gEngfuncs.pfnDrawNormalTriangles();
-		gEngfuncs.pfnDrawTransparentTriangles(); /* no translucent entities to draw between the two yet - out of scope, see spec */
+		nv2a_draw_trans_entities( world );
+		gEngfuncs.pfnDrawTransparentTriangles();
+
+		R_DrawViewModel();
 
 		/* Ends the frame with nothing queued - the SDK's own tri hooks
 		   above may have batched TriAPI primitives that would otherwise
@@ -5086,6 +5277,7 @@ typedef struct
 {
 	uint32_t offset, pitch, width, height;
 	qboolean bilinear;
+	uint32_t color_format; /* NV2A_TEX_COLOR_* - studio skins are 16 bpp, everything else A8B8G8R8 */
 } nv2a_2d_batch_key_t;
 
 /* X9-X step 4 Part C: nv2a_2d_desired is now the single GL-like current
@@ -5095,28 +5287,21 @@ typedef struct
    TriRenderMode. The SAME struct is also used for nv2a_2d_pushed/
    nv2a_2d_batch_state, where depth_mask/cull_enable instead hold the
    EFFECTIVE (post 2D-forcing) values - see the append path's own
-   comment. */
-typedef struct
-{
-	qboolean blend_enable;
-	uint32_t sfactor, dfactor;
-	qboolean alpha_test_enable;
-	qboolean depth_mask;
-	qboolean cull_enable;
-	/* Only meaningful in nv2a_2d_batch_state/nv2a_2d_pushed (never in
-	   nv2a_2d_desired, which has no draw of its own yet): which space
-	   this batch is in and which hardware BEGIN_END op its vertices
-	   are drawn with. */
-	nv2a_imm_space_t space;
-	uint32_t op;
-} nv2a_2d_shadow_t;
+   comment.
+
+   X9-X step 5: the struct itself (with two new fields, alpha_ref and
+   viewmodel_depthrange) now lives in r_studio_bridge.h, included above,
+   so r_studio.c's own per-mesh state changes write the SAME shadow this
+   file's flush pushes - see that header's own comment. */
 
 static qboolean nv2a_in2d;
 static byte     nv2a_2d_color[4] = { 255, 255, 255, 255 }; /* current colour, shared with TriAPI */
 
-static nv2a_2d_shadow_t nv2a_2d_desired = {
+nv2a_2d_shadow_t nv2a_2d_desired = {
 	false, NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA, false,
+	0, /* alpha_ref: DEFAULT_ALPHATEST 0, same as the flush's own re-entry push previously hardcoded */
 	true, true, /* depth_mask/cull_enable: R_SetupGL's own 3D defaults (gl_rmain.c:568-572) until R_Set2DMode(true) first forces them off */
+	false, /* viewmodel_depthrange: off until R_DrawViewModel (r_studio.c) turns it on */
 	NV2A_IMM_SPACE_2D, NV097_SET_BEGIN_END_OP_QUADS
 };
 
@@ -5260,15 +5445,23 @@ static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
 {
 	uint32_t phys, pitch, width, height;
 	qboolean bilinear;
+	uint32_t color_format;
 
-	if( !nv2a_tex_gpu_params( nv2a_tex_current(), &phys, &pitch, &width, &height, &bilinear ))
+	if( !nv2a_tex_gpu_params( nv2a_tex_current(), &phys, &pitch, &width, &height, &bilinear, &color_format ))
 		return false; /* GL_Bind already substitutes the default whenever a slot has no storage - defensive only */
+
+	/* Every primitive queued against a texture counts as a use THIS
+	   frame, not only the GL_Bind that selected it (which may have been
+	   frames ago): the studio skin cache must never evict, and hand to
+	   the next upload, bytes a draw queued this frame still reads. */
+	nv2a_tex_mark_used( nv2a_tex_current());
 
 	key->offset = phys;
 	key->pitch = pitch;
 	key->width = width;
 	key->height = height;
 	key->bilinear = bilinear;
+	key->color_format = color_format;
 	return true;
 }
 
@@ -5321,6 +5514,12 @@ static void nv2a_2d_emit_draw_arrays( uint32_t start, uint32_t count, void *ctx 
    transform constants even when nothing else went "dirty". */
 static nv2a_imm_space_t nv2a_2d_last_reentry_space = NV2A_IMM_SPACE_2D;
 
+/* X9-X step 5 Part C: same reasoning as nv2a_2d_last_reentry_space above,
+   for the view-model depth-range flag - a change must force the common
+   re-entry block below too, since that is the only place the constant-96
+   matrix is (re)pushed. */
+static qboolean nv2a_2d_last_reentry_viewmodel;
+
 /* Tracks which space the vertex-attribute pointers were last pushed for -
    same reasoning as nv2a_2d_pushed_base_offset below: a same-offset,
    different-space batch (unlikely but not impossible once the ring
@@ -5333,7 +5532,8 @@ static void nv2a_2d_flush( void )
 	if( nv2a_2d_ring_pending_verts == 0 )
 		return;
 
-	if( nv2a_2d_dirty || nv2a_2d_last_reentry_space != nv2a_2d_batch_state.space )
+	if( nv2a_2d_dirty || nv2a_2d_last_reentry_space != nv2a_2d_batch_state.space
+		|| ( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_3D && nv2a_2d_last_reentry_viewmodel != nv2a_2d_batch_state.viewmodel_depthrange ))
 	{
 		uint32_t *p;
 		int i;
@@ -5358,7 +5558,11 @@ static void nv2a_2d_flush( void )
 		p = pb_begin();
 		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
 		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
-		p = pb_push1( p, NV097_SET_ALPHA_REF, 0 );
+		/* X9-X step 5: was a hardcoded 0 (DEFAULT_ALPHATEST) - now the
+		   batch's own alpha_ref, so a studio MASKED mesh's 0x7F
+		   (NV2A_STUDIO_ALPHA_REF_MASKED) survives a re-entry. Every other
+		   caller still leaves this at its own default of 0. */
+		p = pb_push1( p, NV097_SET_ALPHA_REF, nv2a_2d_batch_state.alpha_ref );
 		pb_end( p );
 
 		p = pb_begin();
@@ -5403,7 +5607,19 @@ static void nv2a_2d_flush( void )
 			   world constant block). The depth FUNC is left at pbkit's
 			   own default LEQUAL (pbkit.c:3161) - nothing here reprograms
 			   it - so the TriAPI's depth values are directly comparable
-			   with the world's own depth buffer. */
+			   with the world's own depth buffer.
+
+			   X9-X step 5 / design note section 2: when the batch is the
+			   view model's own (viewmodel_depthrange), push a SECOND
+			   matrix instead - the same view*proj this frame's own
+			   GL_RenderFrame built, but re-combined with a viewport whose
+			   z range is [0, 0.3*65536] rather than the world's own
+			   [0, 65536] - the exact glDepthRange(gldepthmin, gldepthmin +
+			   0.3*(gldepthmax-gldepthmin)) remap for this renderer's own
+			   baked-in-the-matrix z range (gl_studio.c:3348/3363). NV097_
+			   SET_CLIP_MIN/MAX are deliberately never written: the new
+			   range is a sub-range of the world's own, which already
+			   renders on hardware (item 12's frame times). */
 			p = pb_begin();
 			p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
 			pb_end( p );
@@ -5411,7 +5627,21 @@ static void nv2a_2d_flush( void )
 			p = pb_begin();
 			p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
 			pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
-			memcpy( p, nv2a_map_viewproj, 16 * 4 );
+			if( nv2a_2d_batch_state.viewmodel_depthrange )
+			{
+				float viewmodel_viewport[4][4];
+				float viewmodel_viewproj[4][4];
+				float z_min, z_max;
+
+				nv2a_studio_viewmodel_zrange( &z_min, &z_max );
+				nv2a_matrix_viewport( viewmodel_viewport, 0, 0, (float)nv2a_width, (float)nv2a_height, z_min, z_max );
+				nv2a_matrix_multiply( viewmodel_viewproj, nv2a_view_proj_combined, viewmodel_viewport );
+				memcpy( p, viewmodel_viewproj, 16 * 4 );
+			}
+			else
+			{
+				memcpy( p, nv2a_map_viewproj, 16 * 4 );
+			}
 			p += 16;
 			memcpy( p, vs_c4, sizeof( vs_c4 ));
 			p += 4;
@@ -5421,6 +5651,7 @@ static void nv2a_2d_flush( void )
 		nv2a_2d_pushed_base_valid = false; /* force the pointer/cache re-push below too, whatever base offset it last pointed at */
 		nv2a_2d_pushed_valid = false; /* force the shadow push below to run too, whatever it was last set to */
 		nv2a_2d_last_reentry_space = nv2a_2d_batch_state.space;
+		nv2a_2d_last_reentry_viewmodel = nv2a_2d_batch_state.viewmodel_depthrange;
 		nv2a_2d_dirty = false;
 	}
 
@@ -5496,7 +5727,11 @@ static void nv2a_2d_flush( void )
 	   (r_context.c's own citation there) - LU_IMAGE_A8B8G8R8, not
 	   A8R8G8B8: PF_RGBA_32's own memory byte order (R,G,B,A per pixel)
 	   IS that format's bit layout read as a little-endian 32-bit word,
-	   so nv2a_tex_upload's plain memcpy needs no channel swap. */
+	   so nv2a_tex_upload's plain memcpy needs no channel swap. The colour
+	   format now comes from the batch key: studio skins are uploaded at
+	   16 bpp (LU_IMAGE_R5G6B5 / A1R5G5B5, r_image.c nv2a_tex_upload_skin),
+	   and the key is resolved when the batch was APPENDED, so it is the
+	   format of the pixels this batch was queued against. */
 	{
 		uint32_t *p = pb_begin();
 		p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, nv2a_2d_batch_key.offset );
@@ -5504,7 +5739,7 @@ static void nv2a_2d_flush( void )
 			MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
 			| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
 			| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
-			| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8 )
+			| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, nv2a_2d_batch_key.color_format )
 			| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
 		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, nv2a_2d_batch_key.pitch << 16 );
 		p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( nv2a_2d_batch_key.width << 16 ) | nv2a_2d_batch_key.height );
@@ -5564,8 +5799,10 @@ static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *ver
 			|| nv2a_2d_batch_state.sfactor != nv2a_2d_desired.sfactor
 			|| nv2a_2d_batch_state.dfactor != nv2a_2d_desired.dfactor
 			|| nv2a_2d_batch_state.alpha_test_enable != nv2a_2d_desired.alpha_test_enable
+			|| nv2a_2d_batch_state.alpha_ref != nv2a_2d_desired.alpha_ref
 			|| nv2a_2d_batch_state.depth_mask != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.depth_mask )
-			|| nv2a_2d_batch_state.cull_enable != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.cull_enable )))
+			|| nv2a_2d_batch_state.cull_enable != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.cull_enable )
+			|| ( space == NV2A_IMM_SPACE_3D && nv2a_2d_batch_state.viewmodel_depthrange != nv2a_2d_desired.viewmodel_depthrange )))
 	{
 		nv2a_2d_flush();
 	}
@@ -5591,9 +5828,12 @@ static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *ver
 		{
 			/* Effective, not desired: 2D always draws with both forced
 			   off, matching GL's effective behaviour with the depth test
-			   off and R_Set2DMode(true)'s GL_Cull(NONE). */
+			   off and R_Set2DMode(true)'s GL_Cull(NONE). viewmodel_depthrange
+			   is 3D-only (X9-X step 5); forced off here so it never affects
+			   the 2D dirty-check above. */
 			nv2a_2d_batch_state.depth_mask = false;
 			nv2a_2d_batch_state.cull_enable = false;
+			nv2a_2d_batch_state.viewmodel_depthrange = false;
 		}
 	}
 
@@ -5690,7 +5930,7 @@ static void GL_SetRenderMode( int renderMode )
 	}
 }
 
-static void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a )
+void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a )
 {
 	nv2a_2d_color[0] = r;
 	nv2a_2d_color[1] = g;
@@ -5699,7 +5939,7 @@ static void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigne
 }
 
 /* C3. */
-static void Color4f( float r, float g, float b, float a )
+void Color4f( float r, float g, float b, float a )
 {
 	Color4ub(
 		(byte)( bound( 0.0f, r, 1.0f ) * 255 + 0.5f ),
@@ -5727,7 +5967,7 @@ static float nv2a_tri_texcoord[2];
    R_AllowFog is a no-op (nv2a has no fog), and neither alpha test nor the
    depth TEST are ever touched here (only depth_mask). No default case,
    same as the reference. */
-static void TriRenderMode( int mode )
+void TriRenderMode( int mode )
 {
 	switch( mode )
 	{
@@ -5812,7 +6052,7 @@ static void nv2a_tri_emit_primitive( const nv2a_tri_vert_t *v, uint32_t n, void 
 }
 
 /* D3: TriTexCoord2f (gl_triapi.c:180) - latches, does not emit. */
-static void TexCoord2f( float u, float v )
+void TexCoord2f( float u, float v )
 {
 	nv2a_tri_texcoord[0] = u;
 	nv2a_tri_texcoord[1] = v;
@@ -5829,7 +6069,7 @@ static void TexCoord2f( float u, float v )
    quietly no-op via nv2a_tri_dropped, same as a GL context with nothing
    bound would draw nothing rather than crash. A nested Begin is ignored,
    as GL itself does (INVALID_OPERATION), logged once here. */
-static void Begin( int primitiveCode )
+void Begin( int primitiveCode )
 {
 	nv2a_tri_topology_t topo;
 	const nv2a_texture_t *tex;
@@ -5875,7 +6115,7 @@ static void Begin( int primitiveCode )
    own width/height captured at Begin. In 2D space z is ignored (dropped
    at nv2a_tri_emit_primitive) and x,y are 2D screen coordinates, the
    same as R_DrawStretchPic's. */
-static void Vertex3f( float x, float y, float z )
+void Vertex3f( float x, float y, float z )
 {
 	nv2a_tri_vert_t v;
 
@@ -5895,7 +6135,7 @@ static void Vertex3f( float x, float y, float z )
 	nv2a_tri_push( &nv2a_tri_asm, &v );
 }
 
-static void Vertex3fv( const float *worldPnt )
+void Vertex3fv( const float *worldPnt )
 {
 	if( !worldPnt )
 		return;
@@ -5905,7 +6145,7 @@ static void Vertex3fv( const float *worldPnt )
 /* D: TriEnd (gl_triapi.c:117-123) - finishes the assembler (drops any
    incomplete trailing primitive, A's own rule) without flushing, so
    consecutive same-state Begin/Ends keep batching together. */
-static void End( void )
+void End( void )
 {
 	if( !nv2a_tri_open )
 		return;
@@ -5920,7 +6160,7 @@ static void End( void )
    spaces share the world's own CW-front/cull-back convention already
    set up by pbkit, matching ref/gl's world draw (GL_Cull(GL_FRONT) =
    TriCullFace(TRI_FRONT), gl_rmain.c:568 / gl_triapi.c:340-355). */
-static void CullFace( TRICULLSTYLE mode )
+void CullFace( TRICULLSTYLE mode )
 {
 	nv2a_2d_desired.cull_enable = ( mode == TRI_FRONT );
 }
@@ -6075,6 +6315,12 @@ static void R_EndFrame( void )
    keeps the tables for one retry, unless it was the retry. */
 static void nv2a_try_pending_upload( void )
 {
+	/* X9-X step 5 follow-up: the world's buffers get the memory before
+	   studio skins do - they re-upload lazily on their next bind. Both
+	   callers run between frames (R_NewMap during the load, R_BeginFrame
+	   before it opens the frame), after R_EndFrame's pb_busy spin. */
+	nv2a_tex_flush_skin_cache();
+
 	/* X9-U: the tables first. R_NewMap runs before the client frees the
 	   previous map's unused models (Mod_FreeUnused, cl_parse.c), so a
 	   table build that runs out of memory gets the same one retry from
@@ -6130,6 +6376,11 @@ static void R_NewMap( void )
 {
 	if( nv2a_pending_upload.pending )
 		nv2a_try_pending_upload();
+
+	/* X9-X step 5, gl_context.c:405: forget every cached per-client player
+	   model on a map change - the client index<->model_t mapping is only
+	   valid for the map that built it. */
+	R_StudioResetPlayerModels();
 }
 
 const ref_interface_t gReffuncs =

@@ -9102,14 +9102,32 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
 
        Real hardware verification is still owner-side, post-PR.
     5. *Studio models* (NPCs, items, the view model with its own depth
-       range): fill the ~30 `engine_studio_api_t` callbacks (the HL
-       client sets up bones itself), `R_StudioDrawPoints`, skins, render
-       modes, chrome, lighting from `ref/common` (`R_LightVec`,
-       `R_EntityDynamicLight`), client events and attachments - without
-       them there are no muzzle flashes, sparks or model-event sounds
-       (`HUD_StudioEvent`). `R_StudioEstimateFrame`/`LerpMovement` are
-       CPU-only and copy as-is. The largest block; matrix-palette VP20
-       skinning is the performance route (X9 notes above).
+       range): **landed, X9-X step 5, 2026-09-26** - new `ref/nv2a/r_studio.c`,
+       a whole-function port of `gl_studio.c` routed through the TriAPI
+       internals (`Begin`/`TexCoord2f`/`Color4ub`/`Vertex3fv`/`End`/
+       `CullFace`/`TriRenderMode`, `r_context.c`), the same way `ref/soft`
+       already ported it. Landed: the full `engine_studio_api_t`/
+       `r_studio_interface_t` table, CPU skinning (`R_StudioDrawPoints`),
+       skins (`Mod_StudioLoadTextures`/`Unload`), render modes, chrome,
+       lighting from `ref/common` (`R_LightVec`, `R_EntityDynamicLight`),
+       client events and attachments (muzzle-flash elights and
+       `HUD_StudioEvent` model sounds do run), the glow shell (tinted by
+       `rendercolor`, not the real chrome sprite - #121), the view model
+       with a real depth-range remap (a second view-projection matrix at
+       the same viewport-z convention the world already uses, not a
+       hardware depth-range register - design note section 2),
+       `R_StudioEstimateFrame`/`LerpMovement` (CPU-only, copied as-is),
+       and `R_AddEntity`/`R_GetEntityRenderMode`/the translucent sort
+       upgraded to accept `mod_studio` alongside brush entities. Not
+       landed (see `docs/r3d/divergences.md` #120-125 and the spec's own
+       outOfScope list): matrix-palette VP20 skinning (still the
+       performance route, gated on a compiled constant layout, X9 notes
+       above), player colour remap (`GL_ProcessTexture` stays a stub),
+       stencil shadows, repeat addressing/mips on skins, and sprites
+       (glow-shell chrome sprite, muzzle-flash sprite - step 6 below).
+       Verification: host tests only (the per-mesh render-state mapping
+       and the view-model z range) - the picture itself needs a live
+       xemu look and real hardware, not run as part of landing this step.
     6. *Sprites* and sprite temp-entities (explosions, glows).
     7. *Effects:* the `CL_DrawEFX` hook (still unimplemented), beams
        (and `ET_BEAM` entities), particles, tracers - the `pfnDraw*Triangles`

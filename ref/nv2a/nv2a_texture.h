@@ -15,6 +15,14 @@ World (.mip) textures never reach this manager at all in the Xbox nv2a
 bake (X9-X Part A drops the worldspawn "wad" key, so the engine's own
 Mod_LoadTextureData never calls GL_LoadTexture for one) - only 2D/HUD/
 sprite/menu art does.
+
+X9-X step 5 follow-up: studio model skins are the one exception - lazy,
+16 bpp and cached under a fixed budget (NV2A_STUDIO_SKIN_CACHE_BYTES
+below, nv2a_skin_cache.h). Player colour-remap copies
+(engine/client/cl_remap.c CL_DuplicateTexture) still come through the
+plain GL_LoadTexture path at RGBA32: they are per-entity copies whose
+palette is only valid during that one call, so they cannot be re-read
+later.
 */
 #ifndef NV2A_TEXTURE_H
 #define NV2A_TEXTURE_H
@@ -43,6 +51,67 @@ extern "C" {
 #define NV2A_TEXTURE_ARENA_BYTES ( 3u * 1024u * 1024u )
 #define NV2A_2D_VERTEX_RING_BYTES ( 256u * 1024u )
 
+/* Studio skin cache (docs/r3d/divergences.md #126;
+   docs/r3d/design/x9-x-studio-models.md "Memory"). ref/gl uploads every
+   skin of every precached model at load (gl_studio.c R_StudioLoadTexture);
+   measured in xemu with that behaviour at RGBA32, the skins alone took
+   14.5 MiB on c1a0 and c4a3 failed to load. Here a skin is uploaded the
+   first time it is bound, at 16 bpp, into a cache of at most this many
+   bytes - the term the bake-time fit check charges
+   (tools/asset-studio/src/formats/Nv2aMapFit.h,
+   kXboxStudioSkinCacheBytes).
+
+   Sized from xemu measurements on c1a0 (the texture table read live over
+   the debugger): EVERY skin the map precaches (458, weapons, gibs and
+   NPCs included) is 4.11 MiB at 16 bpp, the opening view draws 48 of
+   them in 0.37 MiB, and the largest single skin is 132 KiB. 2 MiB holds
+   half of every skin the map could ever show, over five times the
+   opening view; evictions beyond that are LRU and cost a re-read, not a
+   failure. Tune from `texturelist`'s eviction count, not by guessing. */
+#define NV2A_STUDIO_SKIN_CACHE_BYTES ( 2u * 1024u * 1024u )
+
+/* The cache is backed in chunks of this size, each one physically
+   contiguous allocation made only when the chunks already backed have no
+   room (nv2a_skin_cache.h) - NOT reserved at R_Init: a reservation there
+   sat mostly unused (0.37 MiB used of 4 MiB on c1a0's opening view)
+   while taking memory the map's own GPU upload needed first (disposal's
+   world upload failed with it). A map load flushes the whole cache and
+   gives its chunks back (nv2a_tex_flush_skin_cache) before that upload.
+   512 KiB fits a 512x512 skin at 16 bpp (pitch 1024, the largest a chunk
+   holds; larger ones draw untextured) with room to spare over the 132 KiB
+   retail maximum measured above. */
+#define NV2A_STUDIO_SKIN_CHUNK_BYTES ( 512u * 1024u )
+
+/* A skin is evictable once it has gone this many frames without being
+   bound or drawn. 1 is the correctness floor: R_BeginFrame spins pb_busy
+   before it opens a frame (r_context.c), so nothing drawn in an earlier
+   frame is still being read by the GPU, and a skin used THIS frame may
+   still be. The second frame is thrash avoidance, not safety: a skin
+   drawn last frame is almost certainly on screen again this frame, just
+   not reached yet by this frame's studio pass. */
+#define NV2A_STUDIO_SKIN_EVICT_MIN_AGE 2u
+
+/* Per-frame upload allowance. An upload re-reads the skin's 8-bit data
+   from the model file (an open, a seek and a read - a cold HDD seek is
+   ~10-15 ms and a DVD one can pass 100 ms, NV2A specialist review; not
+   yet measured on the console, and xemu does not model it) and expands
+   it through a palette table into the cache. So a scene that suddenly
+   shows many new skins (a map start, a view model switch) spreads them
+   over a few frames (drawn untextured until then) instead of hitching
+   one frame by all of them. The first upload of a frame always goes,
+   whatever its size. Tune from console measurements. */
+#define NV2A_STUDIO_SKIN_UPLOADS_PER_FRAME 2u
+#define NV2A_STUDIO_SKIN_BYTES_PER_FRAME   ( 256u * 1024u )
+
+/* NV097_SET_TEXTURE_FORMAT_COLOR_* values a texture slot can carry
+   (deps/nxdk/lib/pbkit/nv_regs.h:550-551, :577) - mirrored here so
+   r_image.c needs no pbkit include; r_context.c STATIC_ASSERTs each
+   against nv_regs.h. Studio skins are 16 bpp (A1R5G5B5 when masked,
+   R5G6B5 otherwise); everything else stays A8B8G8R8. */
+#define NV2A_TEX_COLOR_LU_A1R5G5B5 0x10u
+#define NV2A_TEX_COLOR_LU_R5G6B5   0x11u
+#define NV2A_TEX_COLOR_LU_A8B8G8R8 0x3Fu
+
 typedef struct nv2a_texture_s
 {
 	char       name[256];  /* ref/soft image_t::name's own size (r_local.h:303) */
@@ -60,6 +129,24 @@ typedef struct nv2a_texture_s
 	size_t     gpu_size;     /* bytes actually resident; 0 if neither of the above */
 
 	uint32_t   last_used_frame; /* D4/GL_UpdateTexture: same-frame write hazard */
+
+	/* NV2A_TEX_COLOR_* of whatever storage exists (0 is treated as
+	   A8B8G8R8, the format of every upload path but the studio skin one). */
+	uint32_t   color_format;
+
+	/* A THIRD storage kind: gpu_offset is into the studio skin cache span
+	   (NV2A_STUDIO_SKIN_CACHE_BYTES), owned by the skin cache, never the
+	   shared arena or a fallback. Only ever set on a slot with `skin`. */
+	qboolean   has_skin_storage;
+
+	/* Non-NULL: a lazily uploaded studio skin (nv2a_tex_register_studio_skin).
+	   The slot keeps its name, size and flags from registration on - the
+	   engine reads mstudiotexture_t::index as a live, named texnum
+	   (engine/client/cl_remap.c CL_DuplicateTexture/CL_UpdateStudioTexture/
+	   CL_CmpStudioTextures) - and only its GPU storage comes and goes:
+	   uploaded on first GL_Bind, evicted by the cache, re-uploaded on the
+	   next bind. has_skin_storage false == "not uploaded". */
+	struct nv2a_skin_source_s *skin;
 
 	rgbdata_t *original; /* kept source, TF_KEEP_SOURCE only (D2) */
 
@@ -122,7 +209,32 @@ unsigned int nv2a_tex_current( void );
    a slot with no storage - GL_Bind already substitutes the default
    texture in that case, so this is a defensive case, not a normal one. */
 qboolean nv2a_tex_gpu_params( unsigned int texnum, uint32_t *phys_offset, uint32_t *pitch,
-	uint32_t *width, uint32_t *height, qboolean *bilinear );
+	uint32_t *width, uint32_t *height, qboolean *bilinear, uint32_t *color_format );
+
+/* Marks `texnum` used this frame. The 2D/TriAPI append path calls it for
+   every primitive it queues: a texture can stay bound across frames with
+   no new GL_Bind, and the skin cache must never evict (and overwrite)
+   storage that a draw queued THIS frame still points at. */
+void nv2a_tex_mark_used( unsigned int texnum );
+
+/* Registers a lazily uploaded studio skin (see nv2a_texture_t::skin):
+   a named slot with no storage, whose 8-bit pixels (width*height
+   indices, then the 768-byte palette) are read back from `path` at
+   `pixel_offset` on first bind. `file_length` is `path`'s size at
+   registration - a mismatch at upload time means the file changed, and
+   the skin stays untextured rather than reading the wrong bytes. An
+   existing slot of the same name is returned as is, like GL_LoadTexture.
+   Returns 0 (caller falls back to the eager GL_LoadTexture path) if the
+   arguments do not describe a readable skin or no slot is free. */
+int nv2a_tex_register_studio_skin( const char *texname, texFlags_t flags, const char *path, uint32_t file_length,
+	uint32_t pixel_offset, int studio_flags, int width, int height );
+
+/* Evicts every studio skin and gives the cache's chunks back, so the
+   next map's world GPU upload gets that memory first; the skins still
+   wanted re-upload on their next bind. Called by r_context.c right before
+   a map's GPU upload. A no-op inside a frame (the GPU may still be
+   reading skins then). */
+void nv2a_tex_flush_skin_cache( void );
 
 /* The builtins GL_CreateTexture records (D1) - used by FillRGBA (r_context.c,
    C3: binds *white) and by GL_Bind's own fallback. */

@@ -5,6 +5,47 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox studio model skins upload on first use, at 16 bpp, under a 2 MiB cache (X9-X step 5)
+
+Studio models in ref/nv2a first uploaded every skin of every precached
+model at load, at 32 bits per texel, as `ref/gl` does. Half-Life
+precaches every weapon's view, player and world models on every map, so
+that measured (xemu, `tools/xemu-debug.py memstats`, free memory after
+the map loads, main vs that build): c1a0 21.2 -> 6.7 MiB (14.5 MiB of
+skins), c1a4 19.1 -> 5.0, c2a5 17.2 -> 1.6, and c4a3 (13.1 on main) and
+disposal (1.7 on main) failed to load. The bake-time fit check approved
+them all: its precache term was measured before skins loaded at all.
+
+- A skin is now uploaded the first time it is bound, re-read from the
+  model file (the engine does not keep the 8-bit data in memory on the
+  Xbox) and expanded through its palette with the same gamma and
+  transparency rules as the engine's loader, so it looks as before. The
+  expansion needs no engine memory, so a late upload on a full map can
+  only fall back to untextured, never stop the game.
+- It is uploaded at 16 bits per texel: `R5G6B5`, or `A1R5G5B5` for
+  masked skins. HUD, menus and sprites stay 32-bit.
+- Skins live in a cache of at most 2 MiB, taken in 512 KiB pieces only
+  as skins are actually drawn, and handed back before each map loads so
+  the level itself gets the memory first. When it is full, the least
+  recently used skin not drawn in the last two frames makes room. A
+  skin that is not in yet draws white for a frame or two, and at most
+  two skins are uploaded per frame, so a scene change does not hitch.
+  `texturelist` reports the cache's use and evictions.
+- The bake-time fit check (`Nv2aMapFit.h`) charges the 2 MiB, so a map
+  is judged against the real bound.
+- The link script's identity sidecar now records whether the menu
+  module was linked (`mainui=`): the "main" build behind the numbers
+  above had no menu, the branch build did, and the menu's own fonts and
+  background (4.6 MiB) plus its code and heap were being counted as the
+  cost of studio models. The eager-upload numbers above are likely
+  inflated by the same ~5.8 MiB.
+
+Free memory after the map loads (xemu), main and this change both
+without the menu: c1a0 21.2 -> 20.3 MiB, c1a4 19.5 -> 19.1, c2a5 17.5 ->
+16.6, c4a3 13.2 -> 12.3, disposal 8.1 -> 7.2 - all five load. With the
+menu linked: 14.5, 13.3, 10.6, 5.9 and 1.3 MiB, all five load; the
+menu's resident fonts and background are what make disposal tight.
+
 ### Fixed - the Xbox link scripts work under a SCRATCH other than `.sweep`, and link straight after a sweep
 
 The agentic loop's first run after #150 stopped at setup: its baseline

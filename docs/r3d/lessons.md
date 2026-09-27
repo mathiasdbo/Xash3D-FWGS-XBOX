@@ -1329,6 +1329,17 @@ milestone for that same boot shape actually used - a link summary line
 away and settles in seconds what hours of live instrumentation would
 otherwise "discover" as a false engine defect.** See divergences.md #93.
 
+It recurred for a memory comparison (X9-X step 5, 2026-09-26): a "main"
+XBE linked without the menu module and a branch XBE linked with it -
+both identity sidecars said `modules=server+client+freevgui`, because
+mainui joins the link whenever `$SCRATCH/mainui` holds a clean sweep
+and no flag records it - and the menu's fonts and background (4.6 MiB
+contiguous) plus its heap and code were chased as a 10 MiB studio-model
+regression. The check that settled it was one grep: count `mainui`
+symbols in both linker maps (0 vs 3292). **For a before/after
+measurement, compare the two linker maps' object lists, not the labels;
+the sidecar now carries `mainui=` for this reason.**
+
 ### A script's own self-check can be silently, permanently wrong - when a "flaky" tool fails identically every time, stop calling it flaky and diff its check against ground truth
 
 `tools/xbox-ref-isolate.sh`'s leak-check (`0 leaked` required before a
@@ -1736,3 +1747,18 @@ A model can still misreport an exit code; it can no longer skip a check,
 narrow the list, or say "green". Ask of any judging stage what it would
 return if the checks had never run - if the answer can be "pass", it is
 not a gate.
+
+### NEVER design around "the engine keeps this data in memory" without reading the XASH_LOW_MEMORY branch of its loader
+
+The lazy studio skin design (X9-X step 5) was specified as "the 8-bit
+indices and palette stay in the model's own data, which the engine keeps
+resident". True of a PC build, false of this one: `tools/xbox-cc.sh`
+builds with `XASH_LOW_MEMORY=1`, and `Mod_MaybeTruncateStudioTextureData`
+(`engine/common/mod_studio.c:1105-1116`) reallocs every studio model down
+to `texturedataindex` right after `Mod_StudioLoadTextures`; a T.mdl's
+pixels were never in `cache.data` at all (freed at `:1175`). Code built
+on the premise would have read freed or truncated memory on first draw.
+Upstream's low-memory modes discard exactly the kind of data a
+memory-saving design wants to keep, so the console build's `#if
+XASH_LOW_MEMORY` branches are the ones to read first, not the default
+path a desktop reading of the loader shows.

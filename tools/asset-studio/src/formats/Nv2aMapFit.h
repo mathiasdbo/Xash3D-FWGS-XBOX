@@ -59,7 +59,38 @@ namespace formats {
     constexpr uint64_t kXboxTextureArenaBytes = 3ull * kMiB;         // NV2A_TEXTURE_ARENA_BYTES
     constexpr uint64_t kXboxVertexRingBytes = 256ull * 1024ull;      // NV2A_2D_VERTEX_RING_BYTES
     constexpr uint64_t kXboxTextureTableBytes = 512ull * 1024ull;    // NV2A_MAX_TEXTURES slots + name hash table (upper bound)
-    constexpr uint64_t kXboxRefNv2aResidentBytes = kXboxTextureArenaBytes + kXboxVertexRingBytes + kXboxTextureTableBytes;
+
+    // X9-X step 5: R_Init now also heap-allocates the studio model
+    // renderer's own state (ref/nv2a/r_studio.c's studio_draw_state_t,
+    // R_StudioAllocStatics, design note section 5 - same
+    // R_AllocStudioStatics pattern ref/soft already uses, divergences.md
+    // #114), resident for the whole session alongside the texture arena,
+    // the vertex ring and the texture table above. Pinned from C by a
+    // STATIC_ASSERT on sizeof(studio_draw_state_t) in r_studio.c itself.
+    constexpr uint64_t kXboxStudioStateBytes = 384ull * 1024ull;     // studio_draw_state_t upper bound (MAXSTUDIOVERTS 2048)
+
+    // X9-X step 5 follow-up: studio model skins. Uploaded eagerly at
+    // RGBA32 (ref/gl's behaviour), they were NOT covered by
+    // kXboxPrecacheBytes below - that was measured while skin loading was
+    // still a no-op - and xemu measured them at 14.5 MiB on c1a0 (21.2 ->
+    // 6.7 MiB free after load), 1.6 MiB left on c2a5, c4a3 and disposal
+    // failing to load, with this check approving all of them. ref/nv2a now
+    // uploads skins lazily, at 16 bpp, into a cache that never holds more
+    // than NV2A_STUDIO_SKIN_CACHE_BYTES (ref/nv2a/nv2a_texture.h) and that
+    // no skin ever spills out of, so the whole cost of every map's skins
+    // is bounded by this one term, correct by construction whatever the
+    // map precaches. Change the two together. The cache is backed on
+    // demand during play and flushed before each map's GPU upload, so
+    // charging it here, as if resident before the world loads, is the
+    // conservative side: it is only ever that large once the level runs
+    // (C3), never during the load (C1). What a skin still costs outside
+    // the cache - one source record (~90 bytes: path, offset, size) per
+    // precached skin - is inside kXboxPrecacheBytes' margin over the
+    // measured maximum.
+    constexpr uint64_t kXboxStudioSkinCacheBytes = 2ull * kMiB;      // NV2A_STUDIO_SKIN_CACHE_BYTES
+
+    constexpr uint64_t kXboxRefNv2aResidentBytes = kXboxTextureArenaBytes + kXboxVertexRingBytes + kXboxTextureTableBytes + kXboxStudioStateBytes
+        + kXboxStudioSkinCacheBytes;
 
     constexpr uint64_t kXboxFreeAtWorldLoadBytes = 36ull * kMiB + kMiB / 4 - kXboxRefNv2aResidentBytes; // 36.25 MiB measured, minus what ref/nv2a now holds resident before any map
     constexpr uint64_t kXboxPrecacheBytes = 9ull * kMiB;                    // above the 8.1 MiB highest of the nine maps that load

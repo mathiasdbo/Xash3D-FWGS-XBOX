@@ -700,9 +700,21 @@ if [ -n "$XBE_OUT" ]; then
 		echo "xbox-game-link-check: could not compute a valid sha256 of $XBE_OUT - refusing to write a sidecar tools/xbox-xiso.sh would trust." >&2
 		exit 1
 	fi
-	printf 'title=%s\nmodules=%s\nsha256_xbe=%s\n' \
-		"$TITLE" "$MODULE_LABEL" "$XBE_SHA_OUT" \
+	# mainui= (X9-X step 5 memory investigation): the menu module is linked
+	# whenever $SCRATCH/mainui holds a clean tools/xbox-mainui-sweep.sh
+	# output (tools/xbox-link-check.sh), which no command-line flag - and
+	# so nothing in modules= - records. Two XBEs both saying
+	# modules=server+client+freevgui, one with the menu and one without,
+	# were compared as main vs a branch: the menu's own fonts and
+	# background (4.6 MiB contiguous) and code read as a regression in the
+	# branch. Read from this link's own map, not inferred from the
+	# directory, and kept out of modules= so tools/xbox-xiso.sh's exact
+	# match on that line is unchanged.
+	if grep -q '3rdparty_mainui_' "$XBE_MAP"; then XBE_MAINUI=1; else XBE_MAINUI=0; fi
+	printf 'title=%s\nmodules=%s\nmainui=%s\nsha256_xbe=%s\n' \
+		"$TITLE" "$MODULE_LABEL" "$XBE_MAINUI" "$XBE_SHA_OUT" \
 		> "$XBE_OUT.identity" || exit 1
+	echo "xbox-game-link-check: menu module (mainui) linked: $XBE_MAINUI (recorded in $XBE_OUT.identity)" >&2
 fi
 
 # Found in Codex review round 1, 2026-09-12: this script was printing

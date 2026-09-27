@@ -33,6 +33,17 @@ int main() {
     CHECK(peak("{\"classname\" \"env_message\" \"message\" \"a } b {\"}{\"classname\" \"func_wall\"}") == base + 2,
           "braces inside a quoted value do not end or start a block");
 
+    // --- ref/nv2a's session-resident allocations come out of the measured free memory ---
+    // The studio skin cache is the one bound on every map's skin memory
+    // (Nv2aMapFit.h, kXboxStudioSkinCacheBytes); dropping it from the
+    // resident sum is exactly the bug that approved c4a3 and disposal.
+    CHECK(kXboxStudioSkinCacheBytes == 2ull * kMiB, "skin cache term mirrors NV2A_STUDIO_SKIN_CACHE_BYTES (2 MiB)");
+    CHECK(kXboxRefNv2aResidentBytes == kXboxTextureArenaBytes + kXboxVertexRingBytes + kXboxTextureTableBytes
+                                           + kXboxStudioStateBytes + kXboxStudioSkinCacheBytes,
+          "every resident term, including the skin cache, is in the resident sum");
+    CHECK(kXboxFreeAtWorldLoadBytes == 36ull * kMiB + kMiB / 4 - kXboxRefNv2aResidentBytes,
+          "free-at-world-load is the 36.25 MiB measurement minus everything resident");
+
     // --- per-allocation overhead: 24-byte header + sentinel, dlmalloc chunk ---
     CHECK(nv2aZoneChunk(0) == 32, "an empty allocation still costs a header and a chunk");
     CHECK(nv2aZoneChunk(100) == 136, "100 bytes -> 100 + 29, rounded up to 8");
