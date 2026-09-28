@@ -29,6 +29,13 @@ directly if the change looks safe.
 
 ## The specific traps that have already cost real bugs here
 
+**Menu asset residency:** trace the actual engine export behind a menu
+predicate; `ClientInGame` is not interchangeable with similarly named
+functions. Every first-use font metric must restore released fonts, not
+only glyph drawing. A failed background restore must not block processing
+a changed preference. Treat an idle CPU as insufficient evidence of a
+texture-free deadlock; require image identity and the last engine error.
+
 **POSIX layer** (relevant when the diff touches `compat/xbox/` or
 `filesystem/`): partial reads and writes; `lseek` past EOF and return
 values indistinguishable from an error; 64-bit offsets truncated;

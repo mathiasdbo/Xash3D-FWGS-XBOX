@@ -5,6 +5,28 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - low-memory menu asset restoration (X9-X follow-up)
+
+Low-memory builds release menu fonts, font-file data and background
+textures when a map starts, and restore them when the menu needs them.
+The menu module itself stays linked into the executable. Reopening Pause
+restores fonts; resuming retains them until the next map load.
+
+The first text measurement after release now restores fonts before
+measuring the ellipsis. Background preference changes are processed before
+restoring released art, so a failed reload no longer prevents selecting a
+different available background.
+
+The earlier claim that both release paths deadlocked inside ref/nv2a was
+not established. The subsequent investigation caught an out-of-memory
+fatal error, and discovered the emulator was booting an older disc.
+Release was re-enabled in mainui 1825481 without a renderer change.
+That investigation recorded image-verified c1a0 and disposal loads with
+19.68 and 6.55 MiB free respectively. Those are historical measurements,
+not measurements of this follow-up build. See divergence #127 and
+docs/r3d/reports/menu-loading-fix.md for current verification.
+
+
 ### Changed - Xbox studio model skins upload on first use, at 16 bpp, under a 2 MiB cache (X9-X step 5)
 
 Studio models in ref/nv2a first uploaded every skin of every precached

@@ -29,6 +29,14 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### ALWAYS bind a boot test to the disc actually selected by the emulator
+
+PR #153's investigation repacked `hl.iso` while xemu's configuration still
+selected `agentic-x9-x-menu-texture-unload-fix4.iso`; its later fatal-error
+trace found only nine free pages, not a demonstrated texture-free deadlock
+(`reports/menu-loading-fix.md`). Pass the disc path explicitly and verify
+the running image before using its symbols or attributing a regression.
+
 ### NEVER diagnose a boot "hang" from the halted CPU alone - find the last event the engine itself emitted
 
 A disc that sat on the nxdk splash showed `EIP` in the kernel's `sti; nop;

@@ -9128,6 +9128,13 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        Verification: host tests only (the per-mesh render-state mapping
        and the view-model z range) - the picture itself needs a live
        xemu look and real hardware, not run as part of landing this step.
+       Follow-up: release the menu's fonts and background on low-memory
+       map loads, then restore them on demand (divergence #127).
+       The earlier claimed texture-free deadlock was not established;
+       the later investigation found an OOM on a stale disc and restored
+       both release calls without changing ref/nv2a. Font measurement
+       and background preference restoration are corrected on the fix
+       branch. See `reports/menu-loading-fix.md` for verification.
     6. *Sprites* and sprite temp-entities (explosions, glows).
     7. *Effects:* the `CL_DrawEFX` hook (still unimplemented), beams
        (and `ET_BEAM` entities), particles, tracers - the `pfnDraw*Triangles`

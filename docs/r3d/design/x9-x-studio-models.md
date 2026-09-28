@@ -235,7 +235,13 @@ constant re-push.
   `studio_draw_state_t`, the skin source records and cache entries),
   image +0.07 MiB (code) = 0.99 MiB. The menu, not studio models, is
   what leaves disposal with 1.34 MiB: its fonts and background stay
-  resident during play (follow-up, outside this step).
+  resident during play in that measurement. The X9-X follow-up now
+  releases fonts and background on low-memory map loads and restores
+  them on demand (divergence #127). The earlier renderer-deadlock
+  diagnosis was unproven; a later investigation found an OOM while
+  booting a stale disc. Pause restores fonts, which remain resident
+  after resume until another map loads. Code and other menu allocations
+  remain resident. Current checks: `reports/menu-loading-fix.md`.
 - **Unload.** `ref/gl`'s `Mod_ProcessRenderData( create = false )` calls
   `Mod_UnloadTextures` -> `Mod_StudioUnloadTextures` (`gl_context.c:111,127`);
   ref/nv2a's `Mod_ProcessRenderData` must do the same for `mod_studio`, or
