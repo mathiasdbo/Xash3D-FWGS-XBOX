@@ -16,6 +16,7 @@ to ship, worth its own file so it does not get lost among the Win32 shims.
 */
 
 #include <stdlib.h>
+#include <time.h>
 
 /*
 ====================
@@ -142,4 +143,34 @@ double atof( const char *nptr )
 	}
 
 	return sign * result;
+}
+
+/*
+====================
+localtime
+
+Found live, 2026-09-28: opening the main menu's Save/Load screen bugchecks
+the Xbox kernel with STATUS_ACCESS_VIOLATION inside strftime, faulting on a
+NULL `timeptr`. SV_SaveGameComment (engine/server/sv_save.c:2505) calls
+`localtime( &fileTime )` and passes the result straight to strftime two
+lines later (sv_save.c:2513) with no NULL check - correct, because every
+platform's libc is expected to hand back a real `struct tm *`. pdclib's own
+localtime() does not: `functions/time/localtime.c:13` is
+`struct tm * localtime( const time_t * timer ) { return NULL; }`, one more
+declared-but-absent function in the same family as the already-documented
+`atof`/`strtod` gaps above.
+
+The Xbox kernel's own time source (`time.c`'s `KeQuerySystemTime`, used by
+pdclib's xbox-specific time()) exposes no timezone offset or TZ database at
+all - there is no console-side "set your timezone" concept the way there is
+on PC. So unlike a real libc, where localtime() and gmtime() differ by a
+timezone/DST offset, on this platform they cannot differ: local time IS UTC
+here. gmtime() itself is fully implemented (functions/time/gmtime.c) and
+already used correctly elsewhere in this codebase; this just forwards to it
+rather than duplicating its date-math.
+====================
+*/
+struct tm *localtime( const time_t *timer )
+{
+	return gmtime( timer );
 }

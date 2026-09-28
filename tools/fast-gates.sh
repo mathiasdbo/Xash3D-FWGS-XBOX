@@ -210,9 +210,19 @@ if [ "$XBOX" = 1 ] && [ "$TIER_OF_PLAN" = "cheap" ]; then
 	cc=""
 	while IFS= read -r f; do
 		[ -f "$f" ] || [ -n "$FILES_IN" ] || continue   # a deleted file has nothing to compile
-		cc="$cc tools/xbox-cc.sh $(q "$f") -o .sweep/fast-gates-probe.obj &&"
+		# A subdirectory, not .sweep/ itself (Codex review, saveload-strftime-
+		# fix, fix round 1): $SCRATCH defaults to .sweep, and xbox-link-check.sh
+		# globs it non-recursively (`ls "$SCRATCH"/*.obj`) to build its
+		# ENGINE_OBJS list. A probe object written straight into .sweep/ by
+		# this cheap-tier compile survives into a later full-tier run in the
+		# same worktree, gets picked up by that glob, and is (correctly)
+		# rejected as not-listed-OK-in-the-sweep-manifest - failing
+		# game-link-check over a file the link was never asked to check.
+		# One directory level hides it from that glob without hiding it from
+		# anything that matters: nothing else reads .sweep/fast-gates-probe/.
+		cc="$cc tools/xbox-cc.sh $(q "$f") -o .sweep/fast-gates-probe/probe.obj &&"
 	done < <(matching "$ENGINE_DIRS" | grep -E '\.c$')
-	[ -n "$cc" ] && add changed-compile "mkdir -p .sweep &&${cc} true"
+	[ -n "$cc" ] && add changed-compile "mkdir -p .sweep/fast-gates-probe &&${cc} true"
 	for m in soft nv2a; do
 		touched "^ref/($m|common)/" && add "ref-isolate-$m" "tools/xbox-ref-isolate.sh $m"
 	done

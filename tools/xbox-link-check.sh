@@ -146,8 +146,22 @@ STALE=0
 # (OK or FAIL) and every manifest source to still exist.
 SWEEP_DIRS="engine filesystem public common compat 3rdparty/library_suffix/src"
 # shellcheck disable=SC2086
-CURRENT_SRCS="$(find $SWEEP_DIRS \( -name '*.c' -o -name '*.cpp' \) 2>/dev/null | sort)"
-MANIFEST_SRCS="$(awk '$1 == "OK" || $1 == "FAIL" { print $2 }' "$MANIFEST" | sort)"
+# sort -u on both sides, not plain sort (found in review, saveload-strftime-
+# fix, fix round 2, verify-2/game-link-check.log): xbox-sweep.sh's own
+# manifest comment above (MANIFEST=...) says "a later single-directory
+# refresh" is expected to append a second OK/FAIL line for a source the
+# canonical sweep already recorded, via XBOX_SWEEP_APPEND_MANIFEST=1 - but
+# `comm` requires each input already free of duplicate lines to report set
+# membership correctly; fed a sorted list with the SAME source appearing
+# twice, `comm -13` pairs the first occurrence against CURRENT_SRCS's one
+# copy and reports the second, still-real occurrence as "only in the
+# manifest" - REMOVED, an orphan - even though the file was never removed
+# at all. Fifteen genuinely-present sources (a prior per-directory refresh
+# of compat + 3rdparty/library_suffix/src + part of public, each appended
+# rather than replacing) failed this check exactly that way. Deduplicating
+# both sides first restores the set semantics `comm` already assumes.
+CURRENT_SRCS="$(find $SWEEP_DIRS \( -name '*.c' -o -name '*.cpp' \) 2>/dev/null | sort -u)"
+MANIFEST_SRCS="$(awk '$1 == "OK" || $1 == "FAIL" { print $2 }' "$MANIFEST" | sort -u)"
 ADDED="$(comm -23 <(printf '%s\n' "$CURRENT_SRCS") <(printf '%s\n' "$MANIFEST_SRCS"))"
 REMOVED="$(comm -13 <(printf '%s\n' "$CURRENT_SRCS") <(printf '%s\n' "$MANIFEST_SRCS"))"
 if [ -n "$ADDED" ]; then
