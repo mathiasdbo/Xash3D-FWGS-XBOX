@@ -51,6 +51,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "xash3d_types.h"
 #include "const.h"
 #include "com_strings.h" /* S_ERROR - not pulled in transitively here, unlike ref/soft/ref/gl's own r_local.h/gl_local.h */
+#include "protocol.h" /* PROTOCOL_VERSION, for the no-world backdrop's version string (ref/gl's gl_local.h includes it too) */
 #include "entity_types.h" /* X9-M: ET_BEAM, for R_AddEntity */
 #include "cvardef.h"
 #include "pmove.h" /* X9-X step 4 Part E: the real movevars_s definition (gp_movevars->zmax) - ref_common.h only forward-declares it */
@@ -99,23 +100,14 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 
 /*
 ========================================================================
-Bring-up render state: one fixed textured triangle, tools/x4-triangle's
-own vertex layout, checkerboard texture and vp20/fp20 shader pair.
+Render state
 ========================================================================
 */
 
-typedef struct
-{
-	float pos[3];
-	float uv[2];
-} __attribute__(( packed )) nv2a_test_vertex_t;
-
-/* X9-C: the real map-geometry vertex format, adding a second UV pair for
-   the lightmap stage. Position + diffuse UV stay first and in the SAME
-   layout as nv2a_test_vertex_t on purpose - attribute slots 0 (position)
-   and 9 (diffuse UV) are set up identically for both vertex formats, only
-   the new slot 10 (lightmap UV, ref/nv2a/vs_lit.vs.cg's own TEXCOORD1 -
-   confirmed by a real vp20compiler run to map there, not assumed) is new. */
+/* X9-C: the real map-geometry vertex format: position (attribute slot 0),
+   diffuse UV (slot 9) and lightmap UV (slot 10, ref/nv2a/vs_lit.vs.cg's own
+   TEXCOORD1 - confirmed by a real vp20compiler run to map there, not
+   assumed). */
 typedef struct
 {
 	float pos[3];
@@ -123,52 +115,16 @@ typedef struct
 	float uv1[2];
 } __attribute__(( packed )) nv2a_lit_vertex_t;
 
-#define NV2A_TEST_TEX_SIZE_LOG2 3
-#define NV2A_TEST_TEX_SIZE ( 1 << NV2A_TEST_TEX_SIZE_LOG2 ) /* 8x8 */
 #define NV2A_TEST_MAXRAM 0x03FFAFFF
-
-/* Same triangle and checkerboard as tools/x4-triangle/main.c, but with UVs
-   in TEXEL units: the texture is bound LINEAR (LU_IMAGE_A8R8G8B8,
-   nv2a_draw_test_triangle), and NV2A addresses linear textures
-   unnormalized, 0..width x 0..height, like a GL rectangle texture (see the
-   lightmap remap in nv2a_load_map_geometry for the evidence). X4's 0..1
-   UVs (main.c:60-65) only ever covered texels (0..1, 0..1), so every
-   screenshot of that triangle showed a smooth orange-to-white gradient - a
-   bilinear blend of two texels - which X4/X9-A misread as "renders
-   correctly". With texel-unit UVs and the mesh sample's own convolution
-   filter constant or a plain-bilinear one, this triangle, booted live,
-   no longer shows that 0..1-UV gradient - but still rendered as a smooth
-   orange/white blend rather than a crisp 8x8 checkerboard, under both
-   filters. Booted a third time with the bring-up-only NEAREST filter
-   nv2a_draw_test_triangle() now sets (see its own FILTER comment), it
-   renders a real, crisp 8x8 checkerboard (`.sweep/triangle_nearest.png`):
-   the blend was bilinear/tent filtering a single-texel-period pattern,
-   not a remaining UV bug. This triangle is the regression indicator for
-   the texel-unit convention: any checker squares merging, or a return to
-   a smooth gradient covering the WHOLE triangle, means linear-texture
-   coordinates are broken again (the same bug that blacked out every map
-   from X9-B to X9-I, docs/r3d/divergences.md #100).
-   vs.inl (X4's own shader, tools/x4-triangle/vs.vs.cg:28 `result.tex0 =
-   I.texcoord.xy;`) passes TEXCOORD0 through unscaled, so no shader change
-   is involved. */
-static const nv2a_test_vertex_t nv2a_test_verts[] =
-{
-	//  X     Y     Z       U                            V
-	{{ -1.0f, -1.0f, 1.0f }, { 0.0f,                       (float)NV2A_TEST_TEX_SIZE }},
-	{{  0.0f,  1.0f, 1.0f }, { 0.5f * NV2A_TEST_TEX_SIZE,  0.0f }},
-	{{  1.0f, -1.0f, 1.0f }, { (float)NV2A_TEST_TEX_SIZE,  (float)NV2A_TEST_TEX_SIZE }},
-};
 
 #define MASK( mask, val ) ( ( ( val ) << ( __builtin_ffs( mask ) - 1 ) ) & ( mask ) )
 
 static qboolean  nv2a_ready;
-static uint32_t *nv2a_vb;
-static void     *nv2a_tex;
-static float     nv2a_viewport[4][4];
 static int       nv2a_width, nv2a_height;
 
 /* X9-B/C drew one hard-coded real face from a real baked map, instead of
-   the fixed test triangle, once a map's own .mpak data was loaded. X9-D
+   the fixed bring-up test triangle (since removed), once a map's own .mpak
+   data was loaded. X9-D
    scales this to the whole map's own real geometry - the baked index
    buffer is already one flat, contiguous list of every face's own
    triangles concatenated in bake order (confirmed reading
@@ -184,7 +140,7 @@ static const model_t *nv2a_map_owner; /* which model_t's own Mod_ProcessRenderDa
                                           this, the first studio/sprite model loaded right after
                                           the world would wipe it on its own unrelated unload
                                           (codex review, real finding). */
-static uint32_t *nv2a_map_vb;                       /* GPU-visible, nv2a_test_vertex_t[nv2a_map_vert_count] */
+static uint32_t *nv2a_map_vb;                       /* GPU-visible, nv2a_lit_vertex_t[nv2a_map_vert_count] */
 static uint32_t  nv2a_map_vert_count;
 /* pbkit's own indexed-draw method (deps/nxdk/samples/mesh/main.c's
    draw_indices()) pushes index values inline into the pushbuffer as
@@ -397,8 +353,7 @@ static matrix4x4 nv2a_gl_worldviewproj;
    declaration and its later real definition name the same object in C.
    Needed here only because GL_RenderFrame (X9-X step 4 Part F) now
    flushes/dirties/resets this pass's own state right after the world
-   draw, and nv2a_draw_test_triangle() (X9-C) does the same on its own
-   fallback path - both defined above Part C itself. */
+   draw - defined above Part C itself. */
 static qboolean nv2a_2d_dirty;
 static byte     nv2a_2d_color[4];
 static qboolean nv2a_in2d;
@@ -420,10 +375,11 @@ static qboolean  nv2a_view_valid; /* X9-E: true only once GL_RenderFrame has
                                       harmless. */
 /* X9-X: the frame R_BeginFrame opened (cleared, pushbuffer reset) and
    R_EndFrame presents; whether GL_RenderFrame drew the world into it; and
-   whether it is an in-game frame (R_BeginFrame's clearScene). */
+   whether the no-world backdrop (nv2a_draw_no_world_backdrop) is still
+   owed to this frame. */
 static qboolean  nv2a_frame_open;
 static qboolean  nv2a_world_drawn_this_frame;
-static qboolean  nv2a_frame_in_game;
+static qboolean  nv2a_no_world_backdrop_pending;
 static qboolean  nv2a_view_captured_this_frame; /* X9-E, codex review, real
                                       finding: V_RenderView's own do/while
                                       loop (engine/client/cl_view.c) can
@@ -1210,8 +1166,8 @@ static qboolean nv2a_compute_mpak_layout( const mpak_header_t *header, fs_offset
    One enum rather than a bool per program (X9-X step 4 Part B): the 2D
    pass now shares its own upload-on-demand discipline with the TriAPI's
    own vertex program, and each must invalidate the OTHER's residency, not
-   just its own. Declared this early only because nv2a_init_shader() and
-   nv2a_init_lit_shader() below both need to clear it. */
+   just its own. Declared this early only because nv2a_init_lit_shader()
+   below needs to clear it. */
 typedef enum
 {
 	NV2A_RESIDENT_NONE,
@@ -1226,49 +1182,6 @@ static nv2a_resident_program_t nv2a_resident_program;
    below), so its pointer needs to be declared this early too. */
 static void *nv2a_2d_ring;
 
-/* tools/x4-triangle/main.c's own init_shader(), unmodified in shape - the
-   vp20 program upload loop plus the fp20 pixel-shader block, both
-   pre-compiled headers copied from that same directory (ref/nv2a/vs.inl,
-   ref/nv2a/ps.inl - see those files for the cgc/vp20compiler/fp20compiler
-   provenance). */
-static void nv2a_init_shader( void )
-{
-	uint32_t *p;
-	int i;
-
-	nv2a_resident_program = NV2A_RESIDENT_NONE;
-
-	uint32_t vs_program[] =
-	{
-		#include "vs.inl"
-	};
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
-	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
-		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
-		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
-	pb_end( p );
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
-	pb_end( p );
-
-	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); i++ )
-	{
-		p = pb_begin();
-		pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
-		memcpy( p, &vs_program[i * 4], 4 * 4 );
-		p += 4;
-		pb_end( p );
-	}
-
-	p = pb_begin();
-	#include "ps.inl"
-	pb_end( p );
-}
-
 /* X9-C: the diffuse x lightmap x 2 program pair (ref/nv2a/vs_lit.vs.cg,
    ps_lit.ps.cg - both real, freshly-authored Cg sources compiled through
    the same cgc/vp20compiler/fp20compiler pipeline vs.inl/ps.inl already
@@ -1277,8 +1190,8 @@ static void nv2a_init_shader( void )
    runs this frame re-uploads its OWN program right before drawing rather
    than both programs staying resident together - simple and correct for
    a bring-up slice with only two draw paths, at the cost of a small,
-   irrelevant-for-correctness re-upload every frame. Otherwise identical
-   in shape to nv2a_init_shader() above. */
+   irrelevant-for-correctness re-upload every frame. Same shape as
+   tools/x4-triangle/main.c's own init_shader(). */
 static void nv2a_init_lit_shader( void )
 {
 	uint32_t *p;
@@ -1317,38 +1230,6 @@ static void nv2a_init_lit_shader( void )
 	pb_end( p );
 }
 
-/* tools/x4-triangle/main.c's own init_texture(), LINEAR PATH ONLY - no
-   swizzled copy, since that path is X4's own open, unresolved defect (see
-   this file's header comment - and note that X4's linear path was never a
-   correct baseline either: fed 0..1 UVs, a LINEAR texture only ever shows
-   its texels (0..1, 0..1), which is why nv2a_test_verts above carries
-   texel-unit UVs). Returns false (leaving nv2a_tex NULL)
-   on allocation failure - a 64 MiB unified-memory console can genuinely
-   run out of contiguous pages, and this must fail R_Init cleanly rather
-   than memcpy into a null pointer (found in codex review). */
-static qboolean nv2a_init_texture( void )
-{
-	uint32_t linear[NV2A_TEST_TEX_SIZE * NV2A_TEST_TEX_SIZE];
-	int x, y;
-
-	for( y = 0; y < NV2A_TEST_TEX_SIZE; y++ )
-	{
-		for( x = 0; x < NV2A_TEST_TEX_SIZE; x++ )
-		{
-			int checker = ( x ^ y ) & 1;
-			/* A8R8G8B8: opaque white / opaque HEV orange */
-			linear[y * NV2A_TEST_TEX_SIZE + x] = checker ? 0xFFFFFFFFu : 0xFFFF8000u;
-		}
-	}
-
-	nv2a_tex = MmAllocateContiguousMemoryEx( sizeof( linear ), 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
-	if( !nv2a_tex )
-		return false;
-
-	memcpy( nv2a_tex, linear, sizeof( linear ));
-	return true;
-}
-
 static void nv2a_set_attrib_pointer( unsigned int index, unsigned int format, unsigned int size, unsigned int stride, const void *data )
 {
 	uint32_t *p = pb_begin();
@@ -1360,7 +1241,7 @@ static void nv2a_set_attrib_pointer( unsigned int index, unsigned int format, un
 	pb_end( p );
 }
 
-/* X9-X: the 3D state the world and the test triangle expect. pbkit
+/* X9-X: the 3D state the world and the brush entities expect. pbkit
    re-pushes depth-test enable only when the depth/stencil target changes
    (pbkit.c:1680-1707), so R_BeginFrame's pb_target_back_buffer does not
    restore it, and a frame's 2D pass (depth off, cull off, blending) would
@@ -1375,125 +1256,6 @@ static void nv2a_set_3d_state( void )
 	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 1 );
 	p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
 	pb_end( p );
-}
-
-static void nv2a_draw_test_triangle( void )
-{
-	uint32_t *p;
-	uint32_t tex_phys;
-	int i;
-
-	nv2a_set_3d_state();
-
-	/* X9-X step 4: this path also pushes its own program/constants/array
-	   formats directly (never through nv2a_2d_desired/append) - the 2D/
-	   TriAPI pass must fully re-enter the GPU state before its own next
-	   flush, same reasoning as GL_RenderFrame's own post-world-draw
-	   nv2a_2d_dirty = true (Part F). */
-	nv2a_2d_dirty = true;
-
-	/* X9-C: the NV2A only holds one resident vertex/pixel program at a
-	   time, and nv2a_draw_map_geometry() may have uploaded its own
-	   two-texcoord/two-texture program since this path last ran - re-load
-	   this path's own single-texture program every time it draws, matching
-	   the same on-demand-upload discipline the lit path uses. */
-	nv2a_init_shader();
-
-	/* Texture stage 0: 8x8 A8R8G8B8, clamped, bilinear, LINEAR unswizzled
-	   (LU_IMAGE_A8R8G8B8) - see tools/x4-triangle/main.c's own citations
-	   for where each register value below comes from. */
-	p = pb_begin();
-	tex_phys = (uint32_t)nv2a_tex & 0x03ffffff;
-	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, tex_phys );
-	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
-		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR ) /* see nv2a_bind_map_texture_stage0 */
-		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8R8G8B8 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, ( NV2A_TEST_TEX_SIZE * 4 ) << 16 );
-	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( NV2A_TEST_TEX_SIZE << 16 ) | NV2A_TEST_TEX_SIZE );
-	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
-	/* MIN=NEAREST(1)/MAG=NEAREST(1), point-sampled, deliberately NOT the
-	   mesh sample's 0x04074000 (a convolution filter; the map stages
-	   use plain bilinear 0x02022000 since X9-L, divergences.md #102 -
-	   this filter choice is local to the bring-up canary only). With
-	   texel-unit UVs (above) and EITHER the convolution-kernel enum or a
-	   plain-bilinear one (0x02020000), this triangle rendered as a smooth
-	   orange/white blend, not a checkerboard - live-tested both ways.
-	   Booted with NEAREST instead, it renders a crisp 8x8 checkerboard
-	   (`.sweep/triangle_nearest.png`): the blend was bilinear/tent
-	   filtering doing exactly what it does to a single-texel-period
-	   pattern (every sample point between texel centers interpolates two
-	   or four alternating colours), not a remaining UV bug, and a
-	   point-sampled checkerboard is a far more sensitive regression
-	   indicator for the texel-unit-addressing convention than a blended
-	   one - any squares merging or a return to a two-texel gradient means
-	   this convention broke again. */
-	/* Real NV2A rejects a zero convolution-kernel field (bits 13-15)
-	   with an invalid-data halt; xemu does not. */
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x01012000 );
-	/* X9-P: this path samples stage 0 only (ps.inl: stage 1 PROGRAM_NONE),
-	   but a map frame leaves stage 1 enabled on the lightmap. Disable it,
-	   as Perfect Dark X's gfx_nv2a.cpp does for every unused stage
-	   (TEXTURE_CONTROL0 = 0); nv2a_draw_map_geometry re-enables it. */
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
-	pb_end( p );
-
-	/* X9-I: this path shares the GPU with nv2a_draw_map_geometry(), which
-	   conditionally enables NV097_SET_ALPHA_TEST_ENABLE (see
-	   nv2a_r_noalphatest's own declaration comment) - a per-draw-call
-	   GPU register, not per-function state, so R_EndFrame's fallback to
-	   THIS function on a not-yet-ready/mid-transition frame (its own
-	   comment names this a real, exercised case, not a hypothetical)
-	   would otherwise inherit whatever alpha-test state the previous
-	   frame's map draw left behind. Explicitly disabled here so this
-	   path never depends on the other one's state, the same "read fresh
-	   every call" discipline nv2a_draw_map_geometry() already applies to
-	   itself. Harmless today either way (this checkerboard's own two
-	   texel values, 0xFFFFFFFF and 0xFFFF8000, both line 846, are fully
-	   opaque - alpha=0xFF either way, passes any GEQUAL-128 test
-	   regardless), but correctness here shouldn't depend on that
-	   coincidence. */
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
-	pb_end( p );
-
-	/* Shader constants: the same fixed viewport transform every frame. */
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
-	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
-	memcpy( p, nv2a_viewport, 16 * 4 );
-	p += 16;
-	{
-		/* X9-P: c[4] = (0, 1, 0, 0), vs.inl's own `#const c[4] = 0 1` -
-		   the q = 1 it writes for ps.inl's 2D_PROJECTIVE stage 0. */
-		static const float vs_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
-		memcpy( p, vs_c4, sizeof( vs_c4 ));
-		p += 4;
-	}
-	pb_end( p );
-
-	p = pb_begin();
-	pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
-	for( i = 0; i < 16; i++ )
-		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
-	pb_end( p );
-
-	nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_test_vertex_t ), &nv2a_vb[0] );
-	nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_test_vertex_t ), &nv2a_vb[3] );
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLES );
-	p = pb_push1( p, 0x40000000 | NV097_DRAW_ARRAYS,
-		MASK( NV097_DRAW_ARRAYS_COUNT, ( ARRAYSIZE( nv2a_test_verts ) - 1 ))
-		| MASK( NV097_DRAW_ARRAYS_START_INDEX, 0 ));
-	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
-	pb_end( p );
-
-	pb_print( "ref_nv2a bring-up\n" );
-	pb_draw_text_screen();
 }
 
 /* X9-F: port of ref/gl/gl_frustum.c's own GL_FrustumCullBox - the same
@@ -1569,6 +1331,14 @@ static void nv2a_draw_index_range( uint32_t begin, uint32_t end )
    BaseVertexIndex - three register writes, done only when a draw moves
    to a different chunk. */
 static uint32_t nv2a_bound_vertex_base;
+
+/* True while the GPU still holds nv2a_enter_lit_state()'s state. The
+   world pass sets it; nv2a_2d_flush's re-entry (the only other path that
+   swaps the program, turns stage 1 off and repoints the attribute arrays)
+   and R_BeginFrame clear it. nv2a_bound_vertex_base above is only a valid
+   shadow while this is true - the TriAPI re-entry moves the same array
+   slots onto its ring without touching it. */
+static qboolean nv2a_lit_state_current;
 
 static void nv2a_bind_vertex_base( uint32_t base )
 {
@@ -1840,7 +1610,7 @@ static qboolean nv2a_entity_has_lightmap( const model_t *world, const cl_entity_
 
 /* Point texture stage 1 at the real lightmap page, or at the neutral page
    for an unlit entity. Only the offset/pitch/rect change; format, address
-   mode and filter stay as nv2a_draw_map_geometry() set them. Returns false
+   mode and filter stay as nv2a_enter_lit_state() set them. Returns false
    (nothing pushed) if the neutral page cannot be allocated. */
 static qboolean nv2a_bind_lightmap_stage1( qboolean lit )
 {
@@ -2085,31 +1855,104 @@ static int nv2a_trans_entity_compare( const void *a, const void *b )
 	return 0;
 }
 
+/* X9-Y: kRenderTransColor's synthetic diffuse texel - a 16x16 page of one
+   repeated RGBA8 value, the same allocation shape as nv2a_unlit_page just
+   above, rewritten per draw to the entity's own rendercolor/renderamt.
+   Every real face's baked UVs were meant for that face's REAL texture, not
+   this one, but that does not matter: every texel here is identical, so
+   any UV samples the same value. Format matches nv2a_map_lightmap's own
+   citation above (LU_IMAGE_A8B8G8R8 names a little-endian word whose LOW
+   byte is R, i.e. bytes [R,G,B,A] in memory - this writes the same byte
+   layout, not a packed native-endian literal). */
+static uint32_t *nv2a_flat_color_page;
+
+/* Binds the page above to stage 0 with exactly the RGBA ps_lit's diffuse
+   sampler will read. Returns false only if the one-time contiguous
+   allocation fails. */
+static qboolean nv2a_bind_flat_color_stage0( byte r, byte g, byte b, byte a )
+{
+	uint32_t *p;
+	uint32_t phys, word;
+	int k;
+
+	if( !nv2a_flat_color_page )
+	{
+		nv2a_flat_color_page = MmAllocateContiguousMemoryEx( NV2A_UNLIT_PAGE_SIZE * NV2A_UNLIT_PAGE_SIZE * 4, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+		if( !nv2a_flat_color_page )
+			return false;
+	}
+
+	word = (uint32_t)r | ( (uint32_t)g << 8 ) | ( (uint32_t)b << 16 ) | ( (uint32_t)a << 24 );
+	for( k = 0; k < NV2A_UNLIT_PAGE_SIZE * NV2A_UNLIT_PAGE_SIZE; k++ )
+		nv2a_flat_color_page[k] = word;
+
+	phys = (uint32_t)nv2a_flat_color_page & 0x03ffffff;
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, phys );
+	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
+		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
+		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, ( NV2A_UNLIT_PAGE_SIZE * 4 ) << 16 );
+	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( NV2A_UNLIT_PAGE_SIZE << 16 ) | NV2A_UNLIT_PAGE_SIZE );
+	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x01012000 ); /* nearest - every texel is identical; never a zero convolution-kernel field (divergences.md #102) */
+	pb_end( p );
+	return true;
+}
+
 /* ref/gl's R_SetRenderMode (gl_rsurf.c:1717) on NV2A state. ref/gl
    modulates the texture by a vertex colour whose alpha is tr.blend; this
    combiner (ps_lit) has no colour input, so the blend amount goes in as
    NV097_SET_BLEND_COLOR's alpha and the blend factors use CONSTANT_ALPHA
    in place of SRC_ALPHA. That is exact for opaque texels; for a
    '{'-masked texture drawn in a translucent mode it ignores the texel's
-   own alpha, which ref/gl would multiply in. Returns false for
-   kRenderTransColor: ref/gl draws that as a flat colour with texturing
-   off, and ps_lit has no untextured path - not drawn (divergences.md
-   #103). A future port: its alpha is curstate.renderamt, not tr.blend
-   (gl_rsurf.c:1724-1730). */
-static qboolean nv2a_set_render_mode( int rendermode, float blend )
+   own alpha, which ref/gl would multiply in.
+
+   kRenderTransColor (gl_rsurf.c:1724-1730): ref/gl draws that as a flat
+   colour with texturing off, using curstate.renderamt directly rather
+   than tr.blend (the `blend` parameter below, which every other case
+   uses). ps_lit has no untextured path, so this binds
+   nv2a_bind_flat_color_stage0() instead - with the lightmap stage already
+   pointed at the neutral page (nv2a_entity_has_lightmap's kRenderTransColor
+   case, called by nv2a_draw_brush_entity before this function), ps_lit.ps.cg
+   computes diffuse.rgb * light.rgb * 2 == diffuse.rgb (light.rgb == 0.5
+   doubled to 1) and outputs diffuse.a unmodified, so the fragment IS
+   exactly (r,g,b,a) and real SRC_ALPHA/ONE_MINUS_SRC_ALPHA blending
+   reproduces the reference exactly - not the CONSTANT_ALPHA approximation
+   the other translucent modes below need. */
+static qboolean nv2a_set_render_mode( const cl_entity_t *e, float blend )
 {
 	uint32_t *p = pb_begin();
 	uint32_t alpha = (uint32_t)( bound( 0.0f, blend, 1.0f ) * 255.0f + 0.5f );
 
-	switch( rendermode )
+	switch( e->curstate.rendermode )
 	{
 	case kRenderNormal:
 		p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
 		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 ); /* R_DrawWorld/R_DrawBrushModel leave it off (gl_rsurf.c:3691,1931) */
 		break;
 	case kRenderTransColor:
+	{
+		byte a = (byte)bound( 0, e->curstate.renderamt, 255 );
+
+		pb_end( p ); /* nv2a_bind_flat_color_stage0 opens its own block - these pairs don't nest */
+
+		if( !nv2a_bind_flat_color_stage0( e->curstate.rendercolor.r, e->curstate.rendercolor.g, e->curstate.rendercolor.b, a ))
+			return false; /* no contiguous memory for the synthetic texture - draw nothing rather than the wrong thing */
+
+		p = pb_begin();
+		p = pb_push1( p, NV097_SET_BLEND_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA );
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA );
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
 		pb_end( p );
-		return false;
+		return true;
+	}
 	case kRenderTransAdd:
 		p = pb_push1( p, NV097_SET_BLEND_ENABLE, 1 );
 		p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
@@ -2134,7 +1977,24 @@ static qboolean nv2a_set_render_mode( int rendermode, float blend )
 		p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_CONSTANT_ALPHA );
 		p = pb_push1( p, NV097_SET_BLEND_COLOR, alpha << 24 );
 		p = pb_push1( p, NV097_SET_DEPTH_MASK, 0 );
-		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
+		/* divergences.md #103 point 5: CONSTANT_ALPHA blends a '{'-masked
+		   texture's fully-transparent DXT1 texel (decoded as plain black,
+		   confirmed by the baker's own transparent-texel convention -
+		   X9-Q's rgbcx encode notes above) at the ENTITY's blend amount
+		   instead of not drawing it, painting a solid black window/grate
+		   cutout where ref/gl "draws nothing there". A real per-fragment
+		   alpha *= entity blend would need a combiner change (ps_lit has
+		   no such constant input yet); this alpha-test instead discards
+		   only the fully-transparent sentinel texel (ps_lit.ps.cg's
+		   diffuse.a passes the real, unmodified, never-doubled texel alpha
+		   through), which is what removes the visible black smudge in the
+		   common case (a masked window/grate at its default, non-fading
+		   blend). Left open: a bilinear-filtered edge texel's own
+		   fractional alpha still blends at the uniform CONSTANT_ALPHA
+		   amount rather than its own value once inside the pass band. */
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
+		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x01 );
 		break;
 	}
 
@@ -2161,6 +2021,131 @@ static void nv2a_reset_render_mode( void )
 		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x80 );
 	}
 	pb_end( p );
+}
+
+/* The GPU state every lit draw (the world, and each brush entity) draws
+   under: depth/cull (nv2a_set_3d_state), the vs_lit/ps_lit program, stage 1
+   on the lightmap page, CONTROL0, the world alpha test, constant 96 = the
+   world's viewproj, and the attribute arrays on the map's vertex chunk 0.
+   Was the head of nv2a_draw_map_geometry(); factored out so a brush entity
+   drawn after the TriAPI pass took the GPU (nv2a_2d_flush's re-entry: the
+   tri program, stage 1 off, alpha GREATER, arrays on the TriAPI ring) can
+   put it back - see nv2a_lit_state_current. */
+static void nv2a_enter_lit_state( void )
+{
+	uint32_t *p;
+	uint32_t tex_phys;
+	uint32_t i;
+
+	nv2a_set_3d_state();
+
+	/* This path's own two-texcoord/two-texture program, re-uploaded every
+	   time: the NV2A holds one resident program at a time, and the 2D/
+	   TriAPI pass uploads its own in between (nv2a_resident_program). */
+	nv2a_init_lit_shader();
+
+	/* X9-C: texture stage 1, the real RGBA8 lightmap - bound ONCE per
+	   frame, here, before the per-batch loop below: unaffected by X9-K's
+	   own per-texture-batch change (the lightmap atlas is explicitly out
+	   of scope for that whole change - this file's header comment), so it
+	   keeps its original "set up once, draw everything" shape while stage
+	   0 (below) moves inside the loop. The SAME uncompressed-linear path
+	   X9-A's own checkerboard used on stage 0 (not "proven" by it - see
+	   nv2a_map_lightmap's declaration comment), just at stage 1's own
+	   register offset (+0x40 per stage, tools/
+	   x4-triangle/main.c's own documented per-stage addressing), and a
+	   DIFFERENT color format (codex review, TWO rounds, real finding both
+	   times - the first fix was itself wrong): the baker writes each
+	   texel bytewise as R,G,B,A in memory (tools/asset-studio/src/
+	   formats/BspParser.cpp's writeBlock(), `page.rgba[destOffset+0..3] =
+	   R,G,B,A`). X9-A's own checkerboard uses LU_IMAGE_A8R8G8B8 correctly
+	   because it writes native uint32_t INTEGER literals (0xFFFFFFFFu
+	   etc.) matching that format's own packed-integer convention
+	   (verified against the checkerboard's own "opaque HEV orange" value,
+	   0xFFFF8000 -> A=FF,R=FF,G=80,B=00, a real orange), not raw bytes.
+	   For a raw LITTLE-ENDIAN byte buffer, the format name has to match
+	   the INTEGER that byte order forms when read as a little-endian
+	   word, not the byte order itself directly: [R,G,B,A] in memory reads
+	   as the word 0xAABBGGRR (byte0=R is the LOW byte), which is
+	   LU_IMAGE_A8B8G8R8's own name (A=MSB..R=LSB), NOT LU_IMAGE_R8G8B8A8
+	   (round 1's own fix - wrong, corrected in round 2: that name would
+	   match memory order [A,B,G,R], not this buffer's real [R,G,B,A]). */
+	p = pb_begin();
+	tex_phys = (uint32_t)nv2a_map_lightmap & 0x03ffffff;
+	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET + 0x40, tex_phys );
+	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT + 0x40,
+		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR ) /* see nv2a_bind_map_texture_stage0 */
+		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1 + 0x40, nv2a_map_lightmap_pitch << 16 );
+	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT + 0x40, ( nv2a_map_lightmap_width << 16 ) | nv2a_map_lightmap_height );
+	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS + 0x40, 0x00030303 );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0x4003ffc0 );
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER + 0x40, 0x02022000 );
+	/* Defensive, not a behaviour change: pbkit's set_draw_buffer()
+	   (pbkit.c, via pb_target_back_buffer every frame) already pushes
+	   0x00110001 here - W-buffering, perspective-correct texture
+	   interpolation and stencil write. Restating the exact same value
+	   keeps the map path correct even if that pbkit call moves, the way
+	   Perfect Dark X's gfx_nv2a.cpp nv2a_control0() does. */
+	p = pb_push1( p, NV097_SET_CONTROL0,
+		NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE | NV097_SET_CONTROL0_TEXTURE_PERSPECTIVE_ENABLE
+		| NV097_SET_CONTROL0_STENCIL_WRITE_ENABLE );
+	pb_end( p );
+
+	/* X9-I: native alpha test (nv2a_r_noalphatest's own declaration
+	   comment above has the full account of why this is safe to apply
+	   globally, not just to masked faces, and why it still ships
+	   disabled pending a live A/B). Pushed every call, not just once,
+	   so toggling the convar mid-session actually takes effect instead
+	   of latching whatever state a previous frame left - same reason
+	   nv2a_r_novis/nv2a_r_nocullback are read fresh per face rather than
+	   applied once at init. GEQUAL against 0x80 matches TextureOpt.cpp's
+	   own compressToDXT encode-time boundary (`a < 128` forces the
+	   transparent selector), so a texel this test lets through is
+	   exactly one the baker itself decided was real content. */
+	p = pb_begin();
+	if( nv2a_r_noalphatest.value )
+	{
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
+	}
+	else
+	{
+		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GEQUAL );
+		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x80 );
+	}
+	pb_end( p );
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
+	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
+	memcpy( p, nv2a_map_viewproj, 16 * 4 );
+	p += 16;
+	{
+		/* c[4] = (0, 1, 0, 0): vs_lit.inl's own `#const c[4] = 0 1`,
+		   the literal it writes into each texcoord's .zw (q = 1). */
+		static const float vs_lit_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+		memcpy( p, vs_lit_c4, sizeof( vs_lit_c4 ));
+		p += 4;
+	}
+	pb_end( p );
+
+	p = pb_begin();
+	pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
+	for( i = 0; i < 16; i++ )
+		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
+	pb_end( p );
+
+	/* Position (slot 0), diffuse UV (slot 9) and lightmap UV (slot 10 -
+	   vs_lit.vs.cg's own TEXCOORD1, confirmed by a real vp20compiler run,
+	   not assumed, to map there), pointed at vertex chunk 0; draws of
+	   faces in another chunk re-point them (X9-S). */
+	nv2a_bind_vertex_base( 0 );
+
+	nv2a_lit_state_current = true;
 }
 
 /* ref/gl's R_DrawBrushModel (gl_rsurf.c:1822) for one entity: bounds and
@@ -2205,6 +2190,20 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 
 	if( nv2a_frustum_cull_box( mins, maxs ))
 		return;
+
+	/* Everything below draws under the world pass's state and only
+	   rebinds what differs per entity. Since a48b415e (X9-X step 5) this
+	   runs from the entity lists, interleaved with studio models and after
+	   pfnDrawNormalTriangles, and any TriAPI flush in between re-enters its
+	   own program, turns stage 1 off and moves the attribute arrays onto
+	   its ring - so a brush entity that followed a VISIBLE studio model
+	   indexed the TriAPI ring with the tri program and did not appear,
+	   while one that followed a culled studio model drew: doors, the tram
+	   and grates came and went with camera angle and player position.
+	   ref/gl's R_DrawBrushModel (gl_rsurf.c:1822) likewise sets up its
+	   own draw state rather than inheriting the previous entity's. */
+	if( !nv2a_lit_state_current )
+		nv2a_enter_lit_state();
 
 	/* Object matrix in this file's row-vector convention (position *
 	   object * viewproj): rows are the model's X/Y/Z axes in world space
@@ -2251,7 +2250,7 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 	if( !lit && !nv2a_bind_lightmap_stage1( false ))
 		lit = true; /* no neutral page: draw lit rather than not at all */
 
-	if( !nv2a_set_render_mode( e->curstate.rendermode, blend ))
+	if( !nv2a_set_render_mode( e, blend ))
 	{
 		if( !lit )
 			nv2a_bind_lightmap_stage1( true );
@@ -2311,12 +2310,15 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 				continue;
 		}
 
-		if( face->texture >= nv2a_map_texture_count )
-			continue;
-		if( face->texture != bound_texture )
+		if( e->curstate.rendermode != kRenderTransColor ) /* stage 0 is already the flat colour page - real faces never bound */
 		{
-			nv2a_bind_map_texture_stage0( &nv2a_map_textures[face->texture] );
-			bound_texture = face->texture;
+			if( face->texture >= nv2a_map_texture_count )
+				continue;
+			if( face->texture != bound_texture )
+			{
+				nv2a_bind_map_texture_stage0( &nv2a_map_textures[face->texture] );
+				bound_texture = face->texture;
+			}
 		}
 		if( nv2a_face_vertex_base( face ) != nv2a_bound_vertex_base ) /* X9-S: entity faces may sit in any chunk */
 			nv2a_bind_vertex_base( nv2a_face_vertex_base( face ));
@@ -2465,8 +2467,6 @@ static void nv2a_draw_trans_entities( const model_t *world )
    docs/r3d/fork-plan.md's X9-K entry). */
 static void nv2a_draw_map_geometry( void )
 {
-	uint32_t *p;
-	uint32_t tex_phys;
 	uint32_t i, b;
 	/* X9-H: the engine's own already-loaded world model, read directly
 	   for its real per-surface plane/flags (backface test below) - the
@@ -2477,116 +2477,10 @@ static void nv2a_draw_map_geometry( void )
 	   other optional cull test in this function. */
 	const model_t *world = gp_cl->models[1];
 
-	nv2a_set_3d_state();
+	nv2a_enter_lit_state();
 
 	if( world != nv2a_map_owner )
 		world = NULL;
-
-	/* This path's own two-texcoord/two-texture program, re-uploaded every
-	   time it draws for the same reason nv2a_draw_test_triangle() now
-	   re-uploads its own - see that function's own comment. */
-	nv2a_init_lit_shader();
-
-	/* X9-C: texture stage 1, the real RGBA8 lightmap - bound ONCE per
-	   frame, here, before the per-batch loop below: unaffected by X9-K's
-	   own per-texture-batch change (the lightmap atlas is explicitly out
-	   of scope for that whole change - this file's header comment), so it
-	   keeps its original "set up once, draw everything" shape while stage
-	   0 (below) moves inside the loop. The SAME uncompressed-linear path
-	   X9-A's own checkerboard used on stage 0 (not "proven" by it - see
-	   nv2a_map_lightmap's declaration comment), just at stage 1's own
-	   register offset (+0x40 per stage, tools/
-	   x4-triangle/main.c's own documented per-stage addressing), and a
-	   DIFFERENT color format (codex review, TWO rounds, real finding both
-	   times - the first fix was itself wrong): the baker writes each
-	   texel bytewise as R,G,B,A in memory (tools/asset-studio/src/
-	   formats/BspParser.cpp's writeBlock(), `page.rgba[destOffset+0..3] =
-	   R,G,B,A`). X9-A's own checkerboard uses LU_IMAGE_A8R8G8B8 correctly
-	   because it writes native uint32_t INTEGER literals (0xFFFFFFFFu
-	   etc.) matching that format's own packed-integer convention
-	   (verified against the checkerboard's own "opaque HEV orange" value,
-	   0xFFFF8000 -> A=FF,R=FF,G=80,B=00, a real orange), not raw bytes.
-	   For a raw LITTLE-ENDIAN byte buffer, the format name has to match
-	   the INTEGER that byte order forms when read as a little-endian
-	   word, not the byte order itself directly: [R,G,B,A] in memory reads
-	   as the word 0xAABBGGRR (byte0=R is the LOW byte), which is
-	   LU_IMAGE_A8B8G8R8's own name (A=MSB..R=LSB), NOT LU_IMAGE_R8G8B8A8
-	   (round 1's own fix - wrong, corrected in round 2: that name would
-	   match memory order [A,B,G,R], not this buffer's real [R,G,B,A]). */
-	p = pb_begin();
-	tex_phys = (uint32_t)nv2a_map_lightmap & 0x03ffffff;
-	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET + 0x40, tex_phys );
-	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT + 0x40,
-		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR ) /* see nv2a_bind_map_texture_stage0 */
-		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8 )
-		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1 + 0x40, nv2a_map_lightmap_pitch << 16 );
-	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT + 0x40, ( nv2a_map_lightmap_width << 16 ) | nv2a_map_lightmap_height );
-	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS + 0x40, 0x00030303 );
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0x4003ffc0 );
-	p = pb_push1( p, NV097_SET_TEXTURE_FILTER + 0x40, 0x02022000 );
-	/* Defensive, not a behaviour change: pbkit's set_draw_buffer()
-	   (pbkit.c, via pb_target_back_buffer every frame) already pushes
-	   0x00110001 here - W-buffering, perspective-correct texture
-	   interpolation and stencil write. Restating the exact same value
-	   keeps the map path correct even if that pbkit call moves, the way
-	   Perfect Dark X's gfx_nv2a.cpp nv2a_control0() does. */
-	p = pb_push1( p, NV097_SET_CONTROL0,
-		NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE | NV097_SET_CONTROL0_TEXTURE_PERSPECTIVE_ENABLE
-		| NV097_SET_CONTROL0_STENCIL_WRITE_ENABLE );
-	pb_end( p );
-
-	/* X9-I: native alpha test (nv2a_r_noalphatest's own declaration
-	   comment above has the full account of why this is safe to apply
-	   globally, not just to masked faces, and why it still ships
-	   disabled pending a live A/B). Pushed every call, not just once,
-	   so toggling the convar mid-session actually takes effect instead
-	   of latching whatever state a previous frame left - same reason
-	   nv2a_r_novis/nv2a_r_nocullback are read fresh per face rather than
-	   applied once at init. GEQUAL against 0x80 matches TextureOpt.cpp's
-	   own compressToDXT encode-time boundary (`a < 128` forces the
-	   transparent selector), so a texel this test lets through is
-	   exactly one the baker itself decided was real content. */
-	p = pb_begin();
-	if( nv2a_r_noalphatest.value )
-	{
-		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
-	}
-	else
-	{
-		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 1 );
-		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GEQUAL );
-		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x80 );
-	}
-	pb_end( p );
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
-	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
-	memcpy( p, nv2a_map_viewproj, 16 * 4 );
-	p += 16;
-	{
-		/* c[4] = (0, 1, 0, 0): vs_lit.inl's own `#const c[4] = 0 1`,
-		   the literal it writes into each texcoord's .zw (q = 1). */
-		static const float vs_lit_c4[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
-		memcpy( p, vs_lit_c4, sizeof( vs_lit_c4 ));
-		p += 4;
-	}
-	pb_end( p );
-
-	p = pb_begin();
-	pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
-	for( i = 0; i < 16; i++ )
-		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
-	pb_end( p );
-
-	/* Position (slot 0), diffuse UV (slot 9) and lightmap UV (slot 10 -
-	   vs_lit.vs.cg's own TEXCOORD1, confirmed by a real vp20compiler run,
-	   not assumed, to map there), pointed at vertex chunk 0; draws of
-	   faces in another chunk re-point them (X9-S). */
-	nv2a_bind_vertex_base( 0 );
 
 	nv2a_cull_faces_total = nv2a_map_face_count;
 	nv2a_cull_faces_visible = 0;
@@ -2919,20 +2813,6 @@ uint32_t debug_frame_count;
 
 static qboolean pb_initialized;
 
-/* One cleanup path for every failure branch below, and for normal
-   shutdown - matching ref/soft's own unconditional R_Free_Video discipline
-   (r_main.c:1351-1398) rather than gating it on how far init got (a real
-   gap codex review found: the first version skipped R_Free_Video entirely
-   on an R_Init_Video failure, and skipped it in R_Shutdown unless nv2a_ready
-   was already true). pb_kill() is still gated on pb_initialized specifically,
-   since pbkit's own contract has no documented "safe to call without a
-   matching pb_init" guarantee. */
-static void nv2a_free_resources( void )
-{
-	if( nv2a_vb )  { MmFreeContiguousMemory( nv2a_vb );  nv2a_vb  = NULL; }
-	if( nv2a_tex ) { MmFreeContiguousMemory( nv2a_tex ); nv2a_tex = NULL; }
-}
-
 /* X9-B's own map-geometry resources - separate from the above because they
    come and go with map loads/unloads (Mod_ProcessRenderData), not with
    R_Init/R_Shutdown, though R_Shutdown must still free them if a map is
@@ -2957,7 +2837,7 @@ static void nv2a_free_map_resources( void )
 	nv2a_map_chunk_count = 0; /* X9-U */
 	/* X9-U: the per-map tables come from malloc, not the zone: Mem_Malloc
 	   calls Sys_Error when it runs out (engine/common/zone.c), and a map
-	   too big for what is free must fall back to the test triangle
+	   too big for what is free must fall back to a frame with no world
 	   (nv2a-xbox-specialist, X9-T review; rocket_frenzy ended the game at
 	   its index buffer). */
 	if( nv2a_map_vb )            { MmFreeContiguousMemory( nv2a_map_vb );            nv2a_map_vb            = NULL; }
@@ -3061,36 +2941,6 @@ static qboolean R_Init( void )
 	nv2a_width  = pb_back_buffer_width();
 	nv2a_height = pb_back_buffer_height();
 
-	nv2a_init_shader();
-
-	if( !nv2a_init_texture() )
-	{
-		debug_marker = 6;
-		pb_kill();
-		pb_initialized = false;
-		Mem_FreePool( &r_temppool );
-		gEngfuncs.R_Free_Video();
-		return false;
-	}
-
-	nv2a_vb = MmAllocateContiguousMemoryEx( sizeof( nv2a_test_verts ), 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
-	if( !nv2a_vb )
-	{
-		/* pb_kill() before freeing nv2a_tex, matching R_Shutdown's own
-		   ordering - no frame has been submitted yet at this point in
-		   R_Init, so there is no in-flight GPU reference to race here,
-		   but keeping one consistent teardown order avoids relying on
-		   that reasoning holding at every call site forever. */
-		debug_marker = 7;
-		pb_kill();
-		pb_initialized = false;
-		nv2a_free_resources();
-		Mem_FreePool( &r_temppool );
-		gEngfuncs.R_Free_Video();
-		return false;
-	}
-	memcpy( nv2a_vb, nv2a_test_verts, sizeof( nv2a_test_verts ));
-
 	/* X9-X D1: the texture manager's own arena/table, and the 2D pass's
 	   own vertex ring - both allocated once, here, before any map. */
 	nv2a_2d_ring = MmAllocateContiguousMemoryEx( NV2A_2D_VERTEX_RING_BYTES, 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
@@ -3099,7 +2949,6 @@ static qboolean R_Init( void )
 		debug_marker = 8;
 		pb_kill();
 		pb_initialized = false;
-		nv2a_free_resources();
 		Mem_FreePool( &r_temppool );
 		gEngfuncs.R_Free_Video();
 		return false;
@@ -3112,7 +2961,6 @@ static qboolean R_Init( void )
 		pb_initialized = false;
 		MmFreeContiguousMemory( nv2a_2d_ring );
 		nv2a_2d_ring = NULL;
-		nv2a_free_resources();
 		Mem_FreePool( &r_temppool );
 		gEngfuncs.R_Free_Video();
 		return false;
@@ -3129,14 +2977,11 @@ static qboolean R_Init( void )
 		nv2a_tex_shutdown();
 		MmFreeContiguousMemory( nv2a_2d_ring );
 		nv2a_2d_ring = NULL;
-		nv2a_free_resources();
 		Mem_FreePool( &r_temppool );
 		gEngfuncs.R_Free_Video();
 		return false;
 	}
 	R_StudioInit();
-
-	nv2a_matrix_viewport( nv2a_viewport, 0, 0, (float)nv2a_width, (float)nv2a_height, 0, 65536.0f );
 
 	debug_marker = 5;
 	nv2a_ready = true;
@@ -3170,7 +3015,6 @@ static void R_Shutdown( void )
 		nv2a_2d_ring = NULL;
 	}
 
-	nv2a_free_resources();
 	nv2a_free_map_resources();
 	Mem_FreePool( &r_temppool );
 
@@ -3622,7 +3466,7 @@ static qboolean nv2a_read_at( file_t *f, fs_offset_t offset, void *dst, fs_offse
    1,024 at a time and converted to nv2a_lit_vertex_t on the way in (pos,
    diffuse UV, and lightmap UV scaled to texels - LINEAR textures are
    addressed in texel units, docs/r3d/divergences.md #100). Any failure
-   frees what was built and leaves the map not ready (the test triangle),
+   frees what was built and leaves the map not ready (no world is drawn),
    exactly as a failed load always has. */
 static qboolean nv2a_upload_map_gpu_data( void )
 {
@@ -3738,7 +3582,7 @@ typedef struct
    leaves *out NULL and succeeds. The load's temporaries use malloc, not
    Mem_Malloc: the zone allocator calls Sys_Error when it runs out
    (engine/common/zone.c), and a map too big for what is free should fall
-   back to the test triangle, not end the game (nv2a-xbox-specialist,
+   back to a frame with no world, not end the game (nv2a-xbox-specialist,
    X9-T review). */
 static qboolean nv2a_read_lump( file_t *f, const mpak_lump_t *lump, byte **out )
 {
@@ -4220,7 +4064,7 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 	   now written every real frame by GL_RenderFrame's own real
 	   vieworigin/viewangles/fov - see nv2a_view_valid's own declaration
 	   comment for why a map loaded before the first real frame still
-	   draws safely (falls back to the test triangle) instead of ever
+	   draws safely (no world drawn that frame) instead of ever
 	   reading whatever this matrix defaults to. */
 
 	/* X9-F: build the per-face bounding-box/index-range table for
@@ -5333,9 +5177,9 @@ static qboolean nv2a_2d_pushed_valid;
 static nv2a_2d_batch_key_t nv2a_2d_batch_key;
 static qboolean nv2a_2d_dirty = true; /* forces a full GPU-state re-entry the first time the 2D pass ever flushes */
 /* nv2a_resident_program and nv2a_2d_ring are declared near
-   nv2a_init_shader() above - both are needed by code defined well
-   before this point in the file (R_Init/R_Shutdown, nv2a_init_shader()
-   itself). */
+   nv2a_init_lit_shader() above - both are needed by code defined well
+   before this point in the file (R_Init/R_Shutdown,
+   nv2a_init_lit_shader() itself). */
 
 static uint32_t nv2a_2d_ring_write_offset;
 static uint32_t nv2a_2d_ring_batch_base_offset;
@@ -5356,12 +5200,12 @@ qboolean nv2a_frame_is_open( void ) { return nv2a_frame_open; }
 uint32_t nv2a_current_frame_number( void ) { return debug_frame_count; }
 qboolean nv2a_global_texture_nearest( void ) { return nv2a_r_texturenearest.value != 0.0f; }
 
-/* X9-X: the same cgc/vp20compiler/fp20compiler pipeline vs.inl/vs_lit.inl
+/* X9-X: the same cgc/vp20compiler/fp20compiler pipeline vs_lit.inl
    already went through - see vs_2d.vs.cg/ps_2d.ps.cg's own provenance
    comments and docs/r3d/design/x9-x-textures-and-2d.md's shader-facts
    section for the scratch compile that established the exact register
    layout these two headers carry. Otherwise identical in shape to
-   nv2a_init_shader()/nv2a_init_lit_shader() above. */
+   nv2a_init_lit_shader() above. */
 static void nv2a_init_2d_shader( void )
 {
 	uint32_t *p;
@@ -5648,6 +5492,7 @@ static void nv2a_2d_flush( void )
 			pb_end( p );
 		}
 
+		nv2a_lit_state_current = false; /* program, stage 1 and arrays are the TriAPI's now - a later brush entity re-enters */
 		nv2a_2d_pushed_base_valid = false; /* force the pointer/cache re-push below too, whatever base offset it last pointed at */
 		nv2a_2d_pushed_valid = false; /* force the shadow push below to run too, whatever it was last set to */
 		nv2a_2d_last_reentry_space = nv2a_2d_batch_state.space;
@@ -5723,8 +5568,8 @@ static void nv2a_2d_flush( void )
 		nv2a_2d_pushed_valid = true;
 	}
 
-	/* Stage-0 texture block, exactly as the test triangle pushes it
-	   (r_context.c's own citation there) - LU_IMAGE_A8B8G8R8, not
+	/* Stage-0 texture block, as the removed bring-up test triangle pushed
+	   it - LU_IMAGE_A8B8G8R8, not
 	   A8R8G8B8: PF_RGBA_32's own memory byte order (R,G,B,A per pixel)
 	   IS that format's bit layout read as a little-endian 32-bit word,
 	   so nv2a_tex_upload's plain memcpy needs no channel swap. The colour
@@ -5865,21 +5710,32 @@ static void nv2a_2d_append_quad( float x, float y, float w, float h, float s1, f
 	nv2a_2d_append( NV2A_IMM_SPACE_2D, NV097_SET_BEGIN_END_OP_QUADS, verts, 4 );
 }
 
+static void nv2a_draw_no_world_backdrop( void );
+
 /* C1. */
 static void R_Set2DMode( qboolean enable )
 {
 	if( enable )
 	{
-		if( nv2a_in2d )
-			return;
+		if( !nv2a_in2d )
+		{
+			nv2a_in2d = true;
+			nv2a_2d_color[0] = nv2a_2d_color[1] = nv2a_2d_color[2] = nv2a_2d_color[3] = 255;
+			nv2a_2d_desired.alpha_test_enable = true;
+			/* X9-X step 4 Part F: gl_draw.c's own R_Set2DMode(true) - GL_Cull(NONE), pglDepthMask(GL_FALSE). */
+			nv2a_2d_desired.depth_mask = false;
+			nv2a_2d_desired.cull_enable = false;
+			nv2a_2d_dirty = true;
+		}
 
-		nv2a_in2d = true;
-		nv2a_2d_color[0] = nv2a_2d_color[1] = nv2a_2d_color[2] = nv2a_2d_color[3] = 255;
-		nv2a_2d_desired.alpha_test_enable = true;
-		/* X9-X step 4 Part F: gl_draw.c's own R_Set2DMode(true) - GL_Cull(NONE), pglDepthMask(GL_FALSE). */
-		nv2a_2d_desired.depth_mask = false;
-		nv2a_2d_desired.cull_enable = false;
-		nv2a_2d_dirty = true;
+		/* The first R_Set2DMode(true) after R_BeginFrame's own is
+		   V_PostRender's (cl_view.c:530), ahead of every HUD, console and
+		   menu draw - with no world this frame (V_RenderView skipped it
+		   under the menu, cl_view.c:394, or the map is not ready) the
+		   backdrop goes in here, under all of them. Checked outside the
+		   in2d early-out: with no world V_RenderView never left 2D mode. */
+		if( nv2a_no_world_backdrop_pending )
+			nv2a_draw_no_world_backdrop();
 	}
 	else
 	{
@@ -5890,6 +5746,68 @@ static void R_Set2DMode( qboolean enable )
 		nv2a_2d_desired.cull_enable = true;
 		nv2a_2d_dirty = true; /* every 3D path sets its own state via nv2a_set_3d_state(); push nothing here */
 	}
+}
+
+/* Resonance3D (docs/r3d/divergences.md #129): what a frame with no world
+   shows. R_BeginFrame already cleared it to black; this adds the engine
+   version at the bottom right, the same text, colour and position the
+   main menu shows (Con_DrawVersion's key_menu branch, console.c:2064-2100),
+   so a paused game or a map that is not drawn yet reads as the engine
+   running rather than a hang. It replaces the bring-up test triangle,
+   which R_EndFrame drew AFTER the 2D pass, over the in-game menu. ref/gl
+   draws nothing here: its frame is simply whatever the clear left.
+
+   Skipped once anything 2D was already appended this frame (the connecting
+   plaque draws before V_PostRender, cl_scrn.c:684), so HUD, console,
+   menu and plaque are always on top of it. */
+static void nv2a_draw_no_world_backdrop( void )
+{
+	char version[128], engine_version[32], os[32], arch[32];
+	nv2a_2d_shadow_t saved_desired;
+	byte saved_color[4];
+	rgba_t color = { 240, 180, 24, 255 }; /* g_color_table[7]'s default, console.c:84 */
+	int build, r, g, b, len = 0, height = 0;
+
+	nv2a_no_world_backdrop_pending = false;
+
+	if( nv2a_world_drawn_this_frame || nv2a_2d_ring_write_offset != 0 )
+		return;
+
+	if( !gEngfuncs.pfnGetCvarFloat( "scr_drawversion" ))
+		return; /* Con_DrawVersion's own gate */
+
+	/* host_ver is the engine's own "%i " XASH_VERSION " %s %s %s" of
+	   Q_buildnum, Q_buildos, Q_buildarch and the commit (host.c:1238) -
+	   the same values Con_DrawVersion formats. */
+	if( sscanf( gEngfuncs.pfnGetCvarString( "host_ver" ), "%d %31s %31s %31s", &build, engine_version, os, arch ) != 4 )
+		return;
+	snprintf( version, sizeof( version ), "v%i/%s (%s-%s build %i)", PROTOCOL_VERSION, engine_version, os, arch, build );
+
+	/* g_color_table[7] follows con_color (Con_SetColor, console.c:197). */
+	switch( sscanf( gEngfuncs.pfnGetCvarString( "con_color" ), "%i %i %i", &r, &g, &b ))
+	{
+	case 1:
+		color[0] = color[1] = color[2] = (byte)bound( 0, r, 255 );
+		break;
+	case 3:
+		color[0] = (byte)bound( 0, r, 255 );
+		color[1] = (byte)bound( 0, g, 255 );
+		color[2] = (byte)bound( 0, b, 255 );
+		break;
+	}
+
+	/* CL_DrawString sets its own render mode and colour through this
+	   renderer (GL_SetRenderMode/Color4ub); put back what the engine's own
+	   next 2D draw expects R_Set2DMode(true) to have left. Batches already
+	   appended keep their own snapshot (nv2a_2d_batch_state). */
+	saved_desired = nv2a_2d_desired;
+	memcpy( saved_color, nv2a_2d_color, sizeof( saved_color ));
+
+	gEngfuncs.Con_DrawStringLen( version, &len, &height );
+	gEngfuncs.Con_DrawString( gpGlobals->width - len * 1.05f, gpGlobals->height - height * 1.05f, version, color );
+
+	nv2a_2d_desired = saved_desired;
+	memcpy( nv2a_2d_color, saved_color, sizeof( saved_color ));
 }
 
 /* C2: port of GL_SetRenderMode (ref/gl/gl_backend.c:424-461) - sets the
@@ -6257,7 +6175,6 @@ static void R_BeginFrame( qboolean clearScene )
 	   this frame's first real world pass. */
 	nv2a_view_captured_this_frame = false;
 	nv2a_world_drawn_this_frame = false;
-	nv2a_frame_in_game = clearScene; /* !paused && ca_active */
 
 	pb_wait_for_vbl();
 	pb_reset();
@@ -6265,12 +6182,12 @@ static void R_BeginFrame( qboolean clearScene )
 
 	pb_erase_depth_stencil_buffer( 0, 0, nv2a_width, nv2a_height );
 	pb_fill( 0, 0, nv2a_width, nv2a_height, 0x00000000 );
-	pb_erase_text_screen();
 
 	while( pb_busy())
 		;
 
 	nv2a_frame_open = true;
+	nv2a_lit_state_current = false; /* only the world pass (or a brush entity) establishes it within a frame */
 
 	/* X9-X: releases whatever GL_FreeTexture/GL_UpdateTexture queued last
 	   frame (D4 - safe now, the pb_busy wait above proves the GPU is
@@ -6280,26 +6197,26 @@ static void R_BeginFrame( qboolean clearScene )
 	nv2a_2d_ring_write_offset = 0;
 	nv2a_2d_ring_pending_verts = 0;
 	R_Set2DMode( true );
+	nv2a_no_world_backdrop_pending = true; /* set after the call above, so only the engine's own next R_Set2DMode(true) draws it */
 }
 
 static void R_EndFrame( void )
 {
 	if( !nv2a_ready || !nv2a_frame_open )
 		return;
+
+	/* A frame V_PostRender never reached (SCR_UpdateScreen skips it on
+	   some changelevel frames, cl_scrn.c:703) still owes the no-world
+	   backdrop; R_Set2DMode(true) draws it. Before nv2a_frame_open drops -
+	   nv2a_2d_append refuses a closed frame. */
+	if( nv2a_no_world_backdrop_pending )
+		R_Set2DMode( true );
+
 	nv2a_frame_open = false;
 
-	/* X9-X: flushes the 2D pass's own pending batch first, as ref/gl's
-	   own R_EndFrame does (gl_rmain.c:1125), before the diagnostic
-	   fallback below can draw over it. */
+	/* X9-X: flushes the 2D pass's own pending batch, as ref/gl's own
+	   R_EndFrame does (gl_rmain.c:1125). */
 	R_Set2DMode( false );
-
-	/* Diagnostic, kept from bring-up: in a game (not the menu or the
-	   console) with no world drawn this frame, ref/nv2a has no map ready -
-	   show the test triangle rather than a black screen that looks like a
-	   hang. X9-E: a camera that was never set (all-zero matrix) is the
-	   same case. */
-	if( nv2a_frame_in_game && !nv2a_world_drawn_this_frame )
-		nv2a_draw_test_triangle();
 
 	while( pb_busy())
 		;

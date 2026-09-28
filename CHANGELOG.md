@@ -5,6 +5,28 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - brush entities popping in and out on Xbox (ref/nv2a)
+
+Doors, cabinet doors, the c0a0/c1a0 tram car, grates and handrails
+appeared or vanished depending on where the player stood or looked. This
+was a regression from the studio-model work (a48b415e, #152). That change
+moved brush entities into the entity lists, where they interleave with
+studio models, but each brush entity still assumed the world pass's GPU
+state. A visible studio model drawn before it had already switched the GPU
+to the TriAPI program and vertex arrays, so the brush entity drew nothing.
+A culled studio model left the state alone and the brush entity appeared.
+Brush entities now re-enter the world's draw state whenever the TriAPI
+has taken the GPU, as ref/gl's R_DrawBrushModel sets up its own state.
+
+### Changed - no bring-up triangle when there is no world to draw (ref/nv2a)
+
+The bring-up test triangle, which R_EndFrame drew over the in-game menu
+whenever no world had been drawn, is gone along with its shader, texture
+and vertex buffer. A frame with no world is now plain black with the
+engine version at the bottom right, in the main menu's own text, colour
+and position. It is drawn before the HUD, console and menu, so they stay
+on top. See divergence #129.
+
 ### Fixed - low-memory menu asset restoration (X9-X follow-up)
 
 Low-memory builds release menu fonts, font-file data and background

@@ -29,6 +29,18 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### NEVER move a draw call that pushes GPU state directly without making it re-enter that state itself
+
+a48b415e moved ref/nv2a's brush entities from right after the world into
+the entity lists, interleaved with studio models drawn through the TriAPI
+flush, which swaps the program, stage 1 and vertex arrays. The brush draw
+only pushed its own per-entity deltas, so it drew correctly exactly when
+nothing visible ran before it: doors and the tram vanished whenever a
+visible studio model preceded them, and came back when that model was
+culled (r_context.c nv2a_draw_brush_entity, fixed 37646d16). A draw that
+depends on state it never sets looks like a culling bug, not a state bug,
+because whether it breaks depends on what else is on screen.
+
 ### ALWAYS bind a boot test to the disc actually selected by the emulator
 
 PR #153's investigation repacked `hl.iso` while xemu's configuration still

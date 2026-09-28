@@ -9152,8 +9152,17 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
     11. *Water warp* (`!` textures: `GL_SubdivideSurface` and the per-vertex
         sin-table texture coordinates of `EmitWaterPolys`) and underwater
         fog (`R_CheckFog`).
-    12. `kRenderTransColor` on brush entities; decals; screenshots (the
-        save-game thumbnail); `Mod_GetCurrentVis`.
+    12. ~~`kRenderTransColor` on brush entities~~ **Done (brush-entity-visibility
+        branch, divergences.md #103 point 2):** a synthetic flat-colour
+        texel bound to stage 0 in place of the entity's own face texture,
+        real `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA` blending against it. Also
+        narrowed while touching the same render-mode switch: `{`-masked
+        `kRenderTransTexture`/`kRenderGlow` brushes (glass, grates) now
+        alpha-test-discard the fully-transparent DXT1 sentinel texel instead
+        of blending it as a black smudge (#103 point 5; the sub-threshold
+        bilinear-edge case is left open, needs a combiner change). Still
+        open: decals; screenshots (the save-game thumbnail);
+        `Mod_GetCurrentVis`.
 
 15. **Optional: reflective water (enhancement, off by default).** Once
     item 14's water warp is in and X11's profiling shows frame time to
