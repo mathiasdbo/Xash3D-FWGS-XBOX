@@ -212,7 +212,7 @@ function gatePlan(filesChanged, ctx) {
 	if (touched(LOOP_SELF)) { gates.push({ name: 'loop-self-test', command: 'node tools/test_agentic_loop.mjs' }); covered.push(LOOP_SELF) }
 	if (touched(/^tools\/gate-chain\.sh$/)) { gates.push({ name: 'gate-chain-self-test', command: 'bash tools/gate-chain.sh --self-test' }); covered.push(/^tools\/gate-chain\.sh$/) }
 	if (touched(HOST_TESTED)) { gates.push({ name: 'host-tests', command: sh('tools/host-tests/run.sh') }); covered.push(HOST_TESTED) }
-	if (touched(/^tools\/[^/]+\.py$/)) { gates.push({ name: 'python-tests', command: 'python -m unittest discover -s tools -p "test_*.py" -t .' }); covered.push(/^tools\/[^/]+\.py$/) }
+	if (touched(/^tools\/[^/]+\.py$/)) { gates.push({ name: 'python-tests', command: 'python -m unittest discover -s tools -p "test_*.py"' }); covered.push(/^tools\/[^/]+\.py$/) }
 	if (touched(/^tools\/asset-studio\//)) {
 		covered.push(/^tools\/asset-studio\//)
 		gates.push({ name: 'asset-studio-configure', command: '[ -f tools/asset-studio/build/CMakeCache.txt ] || cmake -S tools/asset-studio -B tools/asset-studio/build' })

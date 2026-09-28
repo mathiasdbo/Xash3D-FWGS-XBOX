@@ -139,6 +139,22 @@ claimed in this project's own history were already in the tree, and one
 ran the other way — every one was a claim of exactly this shape, unverified
 until someone checked. A claim without a line is itself a finding.
 
+**Clean-tree and diff checks in this repository's tools** (relevant when
+the diff reads `git status` or `git diff` to decide what to gate or to
+refuse): the build tools dirty two submodule working trees on every
+compile. `tools/xbox-cc.sh` applies tracked `patches/` to
+`3rdparty/library_suffix` and `3rdparty/opusfile`. So any "the tree must
+be clean" check needs `--ignore-submodules=dirty`, or it refuses forever
+once anything has built. Also check:
+- a diff that can fail inside a pipeline, where its exit status is lost
+  and the result is an empty file list, an empty plan, a pass;
+- a submodule pointer bump, which is listed as a bare path with no
+  trailing `/`;
+- a rename, which `--name-only` reports only by its new path.
+
+All four were in `tools/fast-gates.sh`'s first version (PR #155),
+behind a self-test that only ever ran plan mode.
+
 ## Output discipline
 
 Every finding must include the affected file, `line_start`/`line_end`, a

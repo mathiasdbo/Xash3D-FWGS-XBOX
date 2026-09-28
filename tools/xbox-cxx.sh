@@ -183,7 +183,16 @@ NXDK_INCLUDES=(
 
 OUT="${OUT:-/tmp/$(basename "${SRC%.cpp}").obj}"
 
-exec clang++ \
+# Opt-in object cache, off unless configured: tools/xbox-cc-cache.sh says
+# what a hit is and why it is the object this compile would produce. The
+# file form is the one that survives the MSYS2 shell boundary (lessons.md).
+# read, not $(cat): a fork per compile is measurable on MSYS2.
+CC_CACHE="${XBOX_CC_CACHE_DIR:-}"
+[ -n "$CC_CACHE" ] || { [ -f "$REPO/.sweep/cc-cache-dir" ] && read -r CC_CACHE < "$REPO/.sweep/cc-cache-dir"; }
+CC_WRAP=()
+[ -n "$CC_CACHE" ] && CC_WRAP=( env NXDK_DIR="${NXDK_DIR:-}" bash "$REPO/tools/xbox-cc-cache.sh" "$CC_CACHE" )
+
+exec ${CC_WRAP[@]+"${CC_WRAP[@]}"} clang++ \
 	-target i386-pc-win32 \
 	-march=pentium3 \
 	-fuse-ld=nxdk-link \

@@ -1,6 +1,6 @@
 ---
 name: loop-implementer
-description: The agentic loop's own implementation stage — applies one loop-research spec, or a fix list from QA, codex-review or the live look, and runs the gate plan itself before handing off. Micro-commits as it goes, per AGENTS.md. Not for direct use outside .claude/workflows/agentic-loop.js.
+description: The agentic loop's own implementation stage — applies one loop-research spec, or a fix list from QA, codex-review or the live look, and runs the gate plan itself before handing off. Micro-commits as it goes, per AGENTS.md. Not for direct use outside .claude/workflows/agentic-loop.js and fast-loop.js.
 model: sonnet
 effort: high
 tools: Read, Edit, Write, Bash, Grep, Glob
@@ -49,6 +49,17 @@ find the built nxdk through the worktree's `.sweep/nxdk-dir`.
 - On a fix round: apply the list precisely. Something you disagree with
   goes in `justified` with the reason — never silently unfixed. Then
   re-run the gates.
+
+## In fast-loop.js
+
+There is no research stage or spec: the call that implements also reads
+the design note and the code and forms the plan, citing `file:line` in
+the commits. The self-gate is one command the workflow gives you,
+`tools/fast-gates.sh cheap`, which computes its own plan from the
+branch's diff. Return its `results.tsv` as `cheapResults` and commit
+everything: verify refuses a dirty tree. Fix rounds carry gate failures,
+live-look defects and codex findings together; each finding id goes in
+`fixed` or `justified`, never neither.
 
 ## Log
 

@@ -26,6 +26,40 @@ That investigation recorded image-verified c1a0 and disposal loads with
 not measurements of this follow-up build. See divergence #127 and
 docs/r3d/reports/menu-loading-fix.md for current verification.
 
+### Added - a reduced agentic loop, with cached builds and one-boot live looks
+
+`.claude/workflows/fast-loop.js` (`docs/r3d/fast-loop.md`) does the
+agentic loop's job with about half the agents: 5-6 for a typical green
+topic, against v2's 8-10 and a maximum of 23. It also spends less time
+on the two things that dominated the real runs, large builds and xemu.
+v2 stays until the new loop has a measured run.
+
+- One thinking agent per round: research and implementation in one call.
+  Every other stage is a Haiku `loop-runner` that runs one generated
+  script and returns its files verbatim. The script computes the verdict,
+  and the publish script re-checks it on disk before pushing.
+- `tools/fast-gates.sh` computes the gate plan from the branch's own
+  `git diff` and runs it through `tools/gate-chain.sh`, in two tiers:
+  - cheap: self-tests, host and python tests, a compile of each changed
+    engine file, and the ref isolate;
+  - full: the engine sweep and the hl link.
+- `tools/xbox-cc-cache.sh`: an opt-in, content-addressed object cache in
+  front of `tools/xbox-cc.sh` and `tools/xbox-cxx.sh`. Every sweep still
+  runs the driver on every file; a compile of an input already compiled
+  becomes a copy. The key is the preprocessed unit, the arguments and the
+  compiler. Repository paths are mapped out of the key and out of
+  `__FILE__`, so a worktree reuses the main checkout's objects. Off
+  unless `.sweep/cc-cache-dir` or `XBOX_CC_CACHE_DIR` is set.
+- `tools/live-look.sh`: one command for a live look.
+  - It builds the overlay, packs the disc and boots xemu.
+  - Before capturing, it waits for identity and for the scene.
+  - It diffs against origin/main's frame of the same scene, which is
+    cached, so a look costs one boot instead of two.
+- origin/main's baseline build runs while the implementer works, not
+  after it.
+- Fixed: the v2 loop's `python-tests` gate command could never pass
+  (`discover -t .` on a directory that is not a package).
+
 
 ### Changed - Xbox studio model skins upload on first use, at 16 bpp, under a 2 MiB cache (X9-X step 5)
 
@@ -94,6 +128,7 @@ Verified: the loop's baseline build (sweep, then
 `xbox-game-link-check.sh hl --include-client --include-freevgui`) under
 `SCRATCH=.sweep/agentic-loop-baseline/<commit>` links with 0 undefined
 and writes a valid XBE plus its `.identity` sidecar.
+
 
 ### Changed - the agentic loop computes its own build gate, spends review rounds only on code that builds, and looks at the screen
 

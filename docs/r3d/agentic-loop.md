@@ -11,6 +11,12 @@ costs and why, and how to call it. Not a `divergences.md` entry: that
 ledger is scoped to deviation from upstream engine behaviour, and this is
 tooling.
 
+**See also `docs/r3d/fast-loop.md`** (2026-09-28): the reduced loop - one
+thinking agent per round, every other stage a Haiku runner of a generated
+script, the gate plan computed from the branch's own diff, origin/main's
+build and scene frames cached. This v2 loop stays until that one has a
+measured run.
+
 ## Why this exists
 
 Driving a phase by hand — research, implement, verify, iterate, publish —
@@ -269,7 +275,7 @@ inline and in the worktree's `.sweep/nxdk-dir`.
 | Paths touched | Gate(s), in order |
 |---|---|
 | `ref/nv2a/`, `compat/xbox/`, `tools/host-tests/` | `tools/host-tests/run.sh` |
-| `tools/*.py` | `python -m unittest discover -s tools -p "test_*.py" -t .` |
+| `tools/*.py` | `python -m unittest discover -s tools -p "test_*.py"` |
 | `tools/asset-studio/` | cmake configure (if needed), build, `ctest` |
 | any Xbox code (`engine/`, `common/`, `public/`, `filesystem/`, `compat/`, `3rdparty/`, `ref/soft|nv2a|null/`, `deps/hlsdk`) **or build infrastructure** (`tools/xbox-*.sh`, `tools/gate-chain.sh`, `tools/host-tests/run.sh`, `patches/`, `wscript`, `scripts/waifulib/`) | `xbox-ref-isolate.sh <soft|nv2a>` for each touched module first (ten seconds; it reads nothing the sweep makes, and it is where run 1's defect would have surfaced), then `xbox-sweep.sh` over the engine directories — **with `--expect-fail <baseline>` when an engine directory changed** (the sweep exits 0 without a baseline even when files fail, by design; `CHANGELOG.md` holds the tracked count, passed in as `args.baselines.engineSweepExpectFail`; missing on an engine change = the plan is unconfigured and cannot go green) — then `xbox-game-link-check.sh hl --expect-undefined 0 --include-client --include-freevgui --xbe …` (which runs the game sweeps, isolates, the freevgui sweep and the baseline link itself, and leaves the bootable image) |
 | `.claude/workflows/agentic-loop.js`, `tools/test_agentic_loop.mjs` | `node tools/test_agentic_loop.mjs`; `tools/gate-chain.sh` → its `--self-test` |

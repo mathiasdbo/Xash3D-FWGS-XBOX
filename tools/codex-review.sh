@@ -94,6 +94,23 @@ fi
 
 cd "$REPO" || exit 1
 
+# Git Bash / MSYS2 can resolve $HOME to a directory that does not exist
+# (on the dev machine, "/home/Mathias Development", while Claude Code's
+# plugins live under the Windows profile - tools/xbox-env.sh's "Spaces in
+# paths" note is the same machine trait). The lookup below then finds no
+# plugin and reports it "not installed" when it is. When $HOME has no
+# .claude and the Windows profile does, use the profile as HOME for the
+# rest of this script: exported, so the Codex companion (a Node process
+# that looks under the home directory too) sees the same one.
+if [ ! -d "$HOME/.claude" ] && [ -n "${USERPROFILE:-}" ]; then
+	PROFILE_HOME="$USERPROFILE"
+	command -v cygpath > /dev/null 2>&1 && PROFILE_HOME="$(cygpath -u "$USERPROFILE")"
+	if [ -d "$PROFILE_HOME/.claude" ]; then
+		echo "codex-review: \$HOME ($HOME) has no .claude - using the Windows profile $PROFILE_HOME" >&2
+		export HOME="$PROFILE_HOME"
+	fi
+fi
+
 # Dynamic version resolution, not hardcoded: hardcoding e.g. "1.0.6" here
 # would go stale the moment the plugin updates, and would then fail against
 # a wrong-but-plausible-looking path instead of the newest install actually

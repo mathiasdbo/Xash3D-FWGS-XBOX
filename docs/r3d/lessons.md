@@ -1770,3 +1770,59 @@ Upstream's low-memory modes discard exactly the kind of data a
 memory-saving design wants to keep, so the console build's `#if
 XASH_LOW_MEMORY` branches are the ones to read first, not the default
 path a desktop reading of the loader shows.
+
+### NEVER ship a gate command you have not run once - a test of the plan's shape says nothing about whether its commands work
+
+The v2 loop's `python-tests` gate was `python -m unittest discover -s
+tools -p "test_*.py" -t .`, from its first commit until 2026-09-28. With
+`-t .` and no `tools/__init__.py`, unittest raises "Start directory is not
+importable" every time, so any change to a `tools/*.py` file could never
+go green. `tools/test_agentic_loop.mjs` checked that the plan named that
+gate for a `.py` change, and passed. The defect surfaced only when
+`tools/fast-gates.sh` ran the same command on its first real invocation.
+A gate is code: run each command once on a tree where it should pass,
+and once where it should fail, before any plan lists it.
+
+### NEVER let a test's stub return the verdict the test is checking - drive the stub from what the code under test sent it
+
+`tools/test_fast_loop.mjs`'s first version mocked the publish stage with
+a fixed status. A scenario asserting RED passed while a mutant that
+dropped the XBE-hash condition from the live-look verdict computed
+GREEN: the mock's own "RED" was being asserted, not the workflow's. With
+the mock echoing the `STATUS=` line the workflow wrote into the publish
+script, the same mutant fails the test. In any flow test, ask which value
+the assertion actually reads, and whether the code under test produced
+it.
+
+### NEVER normalise something out of a cache key without removing it from the cached artifact too
+
+`tools/xbox-cc-cache.sh`'s first version rewrote the repository path to a
+token in the key only, reasoning that the path "only" reached the object
+through `__FILE__`. Against real clang, a second checkout at another path
+got a cache HIT and received an object carrying the first checkout's
+absolute `__FILE__` strings: a wrong hit, in a cache whose whole claim is
+"a hit is the object a fresh compile would give". The fix applies the
+same normalisation to the compile (`-fmacro-prefix-map` for every path
+form the key rewrites). Anything a key treats as equal must be made
+equal in the output, or it must stay in the key. Test a cache with the
+two inputs it claims are the same, not only with one input twice.
+
+Second data point, the same day, same script: the fix normalised the
+repository path in the WHOLE preprocessed text, while the prefix map it
+relied on only covers `__FILE__`. A review reproduced a cross-checkout
+wrong hit through a `-D` string carrying the path. The normalisation now
+touches only line markers. The rule held; the scope of "the same
+normalisation" had been read wider than the mechanism behind it.
+
+### NEVER build a test fixture from what a tool is supposed to output - capture it from the tool, or test the tool's own mode that the caller runs
+
+`tools/test_fast_loop.mjs` mocked a docs-only verify as an empty plan
+with `gate_exit=0`, which is what `tools/fast-gates.sh` was documented to
+produce. The real tool wrote a one-newline `plan.tsv` (`printf '%s\n'`
+with no arguments), which gate-chain rejects with exit 2. Every docs-only
+topic would have gone RED after two fix rounds. `fast-gates.sh`'s own
+self-test missed it too: it only exercised `plan --files`, never the run
+mode the loop calls. Both were found by a stand-in review on PR #155. A
+fixture is a claim about another component's output. Take it from a real
+run, or give that component a test of the exact mode its caller uses.
+

@@ -37,6 +37,13 @@ sense inside that workflow's own control flow, though each carries a
 sensible default `model`/`effort` in its frontmatter in case it's ever
 invoked directly.
 
+`.claude/workflows/fast-loop.js` (the reduced loop, `docs/r3d/fast-loop.md`)
+reuses `loop-implementer` for its one thinking stage (research and
+implementation in one call) and runs every other stage through
+`loop-runner`: a Haiku agent that runs one generated script verbatim and
+returns its files, the smallest prompt that can carry a build, a codex
+review or a publish.
+
 One split governs what a `loop-*` file may say, because per-call facts
 kept in two places have already drifted (the audit of v2 found three
 pairs disagreeing, one on which ref codex reviews against): an agent file
