@@ -74,3 +74,7 @@ add_test(NAME lightmap_atlas_packer_test COMMAND lightmap_atlas_packer_test)
 add_executable(phs_builder_test tests/phs_builder_test.cpp)
 target_link_libraries(phs_builder_test PRIVATE AssetStudioFormats)
 add_test(NAME phs_builder_test COMMAND phs_builder_test)
+
+add_executable(menu_art_bake_test tests/menu_art_bake_test.cpp)
+target_link_libraries(menu_art_bake_test PRIVATE AssetStudioFormats)
+add_test(NAME menu_art_bake_test COMMAND menu_art_bake_test)

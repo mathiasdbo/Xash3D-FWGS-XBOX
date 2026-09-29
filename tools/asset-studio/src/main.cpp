@@ -292,6 +292,7 @@ int main(int argc, char *argv[]) {
     bool packUi = false;
     bool buildGlobal = false;
     bool bakeMenuArt = false;
+    bool menuArtDxt1 = false;
     formats::PakManager pak;
 
     // --pack-menu specific options. Separate from --game-dir/--sprites since
@@ -364,6 +365,9 @@ int main(int argc, char *argv[]) {
             resourceDir = argv[++i];
         } else if (arg == "--bake-menu-art") {
             bakeMenuArt = true;
+        } else if (arg == "--menu-art-dxt1") {
+            // divergences.md #131: DXT1 .dds tiles for ref/nv2a instead of TGA
+            menuArtDxt1 = true;
         }
     }
 
@@ -383,7 +387,7 @@ int main(int argc, char *argv[]) {
             std::cerr << "--bake-menu-art requires --output <directory> (an overlay tree, not a file)\n";
             return 1;
         }
-        bool ok = formats::UiPacker::bakeBackgroundArt(gameDir, outputPath);
+        bool ok = formats::UiPacker::bakeBackgroundArt(gameDir, outputPath, 640, 480, 256, menuArtDxt1);
         return ok ? 0 : 1;
     }
 

@@ -29,6 +29,21 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### NEVER take a "before" measurement from a build a working-tree edit can reach
+
+This session's first baseline XBE for the menu-compression branch was
+linked while the renderer edits were uncommitted but not yet compiled,
+reasoning that only the sweeps compile source. The link itself re-isolates
+ref/nv2a from the working tree (`tools/xbox-link-check.sh:763`), so that
+"main" already carried the new texture classifier: it read 31.66 MiB free
+against the real main's 25.88, and only a texture table showing A8Y8 rows
+on a build that predates A8Y8 exposed it. **A baseline is built from a
+clean checkout of the base commit, or with every edit stashed across the
+whole build, link included; confirm it with one observable only the
+change can produce.** The same holds for the disc: a staged file the new
+build needs (here a `BackgroundLayout.txt` naming `.dds` tiles) makes the
+old build fail differently, not look like the old build.
+
 ### ALWAYS check what state a reused upstream helper reads when calling it earlier than any upstream caller does
 
 Divergence #130 drew the loading plaque with upstream's own

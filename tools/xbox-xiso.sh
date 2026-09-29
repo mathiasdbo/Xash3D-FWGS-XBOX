@@ -307,6 +307,25 @@ tga_dims() { # <path>: echoes "<w> <h>" or fails
 	case "$w$h" in *[!0-9]*|"") return 1 ;; esac
 	printf '%s %s\n' "$w" "$h"
 }
+# divergences.md #131: `--bake-menu-art --menu-art-dxt1` writes opaque
+# DXT1 .dds tiles instead (ref/nv2a uploads them compressed). dds_dims
+# reads the same 128-byte header tools/asset-studio's makeDxt1Dds writes
+# (UiPacker.cpp): "DDS " at 0, height at 12, width at 16, FourCC "DXT1" at
+# 84. ref/nv2a sizes a DXT texture only by log2 BASE_SIZE fields, so a
+# tile that is not a power of two on both axes would be refused at load -
+# and one refused tile drops the whole background - so that is checked
+# here too, with the exact file size (128 + whole 4x4 blocks * 8).
+dds_dims() { # <path>: echoes "<w> <h>" for a DXT1 .dds, or fails
+	local magic fourcc w h
+	magic=$(head -c 4 "$1" 2>/dev/null)
+	fourcc=$(dd if="$1" bs=1 skip=84 count=4 2>/dev/null)
+	[ "$magic" = "DDS " ] && [ "$fourcc" = "DXT1" ] || return 1
+	h=$(od -An -tu4 -j12 -N4 "$1" 2>/dev/null | tr -d '[:space:]')
+	w=$(od -An -tu4 -j16 -N4 "$1" 2>/dev/null | tr -d '[:space:]')
+	case "$w$h" in *[!0-9]*|"") return 1 ;; esac
+	printf '%s %s\n' "$w" "$h"
+}
+is_pot() { [ "$1" -gt 0 ] && [ $(( $1 & ($1 - 1) )) -eq 0 ]; }
 validate_menu_bake() {
 	local dir="$1" layout="$1/resource/BackgroundLayout.txt" resLine tileCount=0
 	local tilePath tileFile dims w h expectedSize actualSize
@@ -326,21 +345,42 @@ validate_menu_bake() {
 			echo "xbox-xiso: $layout references $tilePath, which does not exist under $dir." >&2
 			return 1
 		fi
-		if ! dims=$(tga_dims "$tileFile"); then
-			echo "xbox-xiso: $tileFile: could not read a TGA header (too short or unreadable)." >&2
-			return 1
-		fi
-		read -r w h <<<"$dims"
-		if [ "$w" -eq 0 ] || [ "$h" -eq 0 ]; then
-			echo "xbox-xiso: $tileFile: TGA header declares 0x0 dimensions." >&2
-			return 1
-		fi
-		expectedSize=$((18 + w * h * 4))
-		actualSize=$(wc -c < "$tileFile")
-		if [ "$actualSize" -ne "$expectedSize" ]; then
-			echo "xbox-xiso: $tileFile: $actualSize bytes, expected $expectedSize for an uncompressed 32-bit ${w}x${h} TGA - truncated or corrupt." >&2
-			return 1
-		fi
+		case "$tilePath" in
+		*.dds)
+			if ! dims=$(dds_dims "$tileFile"); then
+				echo "xbox-xiso: $tileFile: not a DXT1 .dds (bad magic or FourCC, or unreadable)." >&2
+				return 1
+			fi
+			read -r w h <<<"$dims"
+			if ! is_pot "$w" || ! is_pot "$h" || [ "$w" -lt 4 ] || [ "$h" -lt 4 ]; then
+				echo "xbox-xiso: $tileFile: ${w}x${h} - ref/nv2a needs power-of-two DXT tiles of at least 4x4." >&2
+				return 1
+			fi
+			expectedSize=$((128 + (w / 4) * (h / 4) * 8))
+			actualSize=$(wc -c < "$tileFile")
+			if [ "$actualSize" -ne "$expectedSize" ]; then
+				echo "xbox-xiso: $tileFile: $actualSize bytes, expected $expectedSize for a one-level ${w}x${h} DXT1 .dds - truncated or corrupt." >&2
+				return 1
+			fi
+			;;
+		*)
+			if ! dims=$(tga_dims "$tileFile"); then
+				echo "xbox-xiso: $tileFile: could not read a TGA header (too short or unreadable)." >&2
+				return 1
+			fi
+			read -r w h <<<"$dims"
+			if [ "$w" -eq 0 ] || [ "$h" -eq 0 ]; then
+				echo "xbox-xiso: $tileFile: TGA header declares 0x0 dimensions." >&2
+				return 1
+			fi
+			expectedSize=$((18 + w * h * 4))
+			actualSize=$(wc -c < "$tileFile")
+			if [ "$actualSize" -ne "$expectedSize" ]; then
+				echo "xbox-xiso: $tileFile: $actualSize bytes, expected $expectedSize for an uncompressed 32-bit ${w}x${h} TGA - truncated or corrupt." >&2
+				return 1
+			fi
+			;;
+		esac
 		tileCount=$((tileCount + 1))
 	done < <(awk '$1 != "resolution" && NF >= 4 { print $1 }' "$layout")
 	if [ "$tileCount" -eq 0 ]; then

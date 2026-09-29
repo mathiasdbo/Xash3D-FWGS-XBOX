@@ -133,3 +133,56 @@ void nv2a_2d_build_matrix( float out[4][4], float nv2a_width, float nv2a_height,
 	out[3][2] = 32768.0f;
 	out[3][3] = 1.0f;
 }
+
+nv2a_texel_class_t nv2a_2d_classify_rgba( const uint8_t *rgba, uint32_t texel_count )
+{
+	int all_white = 1;
+	uint32_t i;
+
+	for( i = 0; i < texel_count; i++, rgba += 4 )
+	{
+		if( rgba[0] != rgba[1] || rgba[0] != rgba[2] )
+			return NV2A_TEXELS_RGBA;
+		if( rgba[0] != 255 )
+			all_white = 0;
+	}
+
+	return all_white ? NV2A_TEXELS_WHITE_ALPHA : NV2A_TEXELS_GREY_ALPHA;
+}
+
+void nv2a_2d_pack_row_a8( uint8_t *dst, const uint8_t *rgba, uint32_t width )
+{
+	uint32_t x;
+
+	for( x = 0; x < width; x++ )
+		dst[x] = rgba[x * 4 + 3];
+}
+
+void nv2a_2d_pack_row_a8y8( uint8_t *dst, const uint8_t *rgba, uint32_t width )
+{
+	uint32_t x;
+
+	for( x = 0; x < width; x++ )
+	{
+		dst[x * 2 + 0] = rgba[x * 4 + 0];
+		dst[x * 2 + 1] = rgba[x * 4 + 3];
+	}
+}
+
+int nv2a_2d_log2_pot( uint32_t v )
+{
+	int n = 0;
+
+	if( v == 0 || v > 4096 || ( v & ( v - 1 )) != 0 )
+		return -1;
+
+	while(( 1u << n ) < v )
+		n++;
+
+	return n;
+}
+
+uint32_t nv2a_2d_dxt_level0_bytes( uint32_t width, uint32_t height, uint32_t block_bytes )
+{
+	return (( width + 3 ) / 4 ) * (( height + 3 ) / 4 ) * block_bytes;
+}

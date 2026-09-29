@@ -2,6 +2,7 @@
 #include "PakManager.h"
 #include "BmpParser.h"
 #include "../utils/TextureOpt.h"
+#include "../utils/rgbcx.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -676,11 +677,56 @@ std::string trimManifestLine(std::string line) {
 // facts" for why: this engine's mainui loads through PIC_Load/imagelib,
 // not through any consumer this tool's archives have).
 //
-// Always writes plain TGA (ref_soft profile only, for now) - the NV2A/DXT
-// profile the plan also describes is not implemented by this function;
-// XB owns that work once X9 exists to consume it.
+// Writes plain TGA by default (the ref_soft profile); with dxt1, opaque
+// DXT1 .dds tiles for ref/nv2a (docs/r3d/divergences.md #131), a quarter
+// of the GPU memory of the RGBA32 texture a TGA tile becomes.
+std::vector<int> UiPacker::potTileSpans(int total, int maxTile) {
+    std::vector<int> spans;
+    if (total <= 0 || maxTile <= 0 || (maxTile & (maxTile - 1)) != 0) {
+        return spans;
+    }
+    int remaining = total;
+    while (remaining > 0) {
+        int span = maxTile;
+        while (span > remaining) {
+            span >>= 1;
+        }
+        spans.push_back(span);
+        remaining -= span;
+    }
+    return spans;
+}
+
+std::vector<uint8_t> UiPacker::makeDxt1Dds(int width, int height, const std::vector<uint8_t>& blocks) {
+    // Field order is img_dds.c's dds_t (engine/common/imagelib/imagelib.h):
+    // ident, size, flags, height, width, linearSize, depth, mipMapCount,
+    // alphaBitDepth, reserved1[10], pixelformat{size, flags, fourCC,
+    // bitcount, 4 masks}, caps{caps1..caps4}, textureStage.
+    const uint32_t kDdsdCaps = 0x1, kDdsdHeight = 0x2, kDdsdWidth = 0x4, kDdsdPixelFormat = 0x1000,
+                   kDdsdLinearSize = 0x80000, kDdpfFourCC = 0x4, kDdsCapsTexture = 0x1000;
+    std::vector<uint8_t> out(128 + blocks.size(), 0);
+    auto put = [&out](size_t off, uint32_t v) { std::memcpy(&out[off], &v, 4); };
+    put(0, 0x20534444u);               // "DDS "
+    put(4, 124);                       // dwSize: the header minus the ident
+    put(8, kDdsdCaps | kDdsdHeight | kDdsdWidth | kDdsdPixelFormat | kDdsdLinearSize);
+    put(12, static_cast<uint32_t>(height));
+    put(16, static_cast<uint32_t>(width));
+    put(20, static_cast<uint32_t>(blocks.size()));
+    put(76, 32);                       // pixel format dwSize
+    put(80, kDdpfFourCC);
+    put(84, 0x31545844u);              // "DXT1"
+    put(108, kDdsCapsTexture);
+    std::memcpy(&out[128], blocks.data(), blocks.size());
+    return out;
+}
+
 bool UiPacker::bakeBackgroundArt(const std::string& gameDir, const std::string& outDir,
-                                  int canvasW, int canvasH, int tileSize) {
+                                  int canvasW, int canvasH, int tileSize, bool dxt1) {
+    if (dxt1 && (canvasW % 4 != 0 || canvasH % 4 != 0 || potTileSpans(canvasW, tileSize).empty())) {
+        std::cerr << "bakeBackgroundArt: DXT1 needs a canvas in whole 4x4 blocks and a power-of-two tile size ("
+                   << canvasW << "x" << canvasH << ", tile " << tileSize << ")\n";
+        return false;
+    }
     int resW = 0, resH = 0;
     std::vector<BackgroundTile> tiles;
     std::string layoutPath = gameDir + "/resource/BackgroundLayout.txt";
@@ -727,11 +773,26 @@ bool UiPacker::bakeBackgroundArt(const std::string& gameDir, const std::string& 
     }
     layoutOut << "resolution\t" << canvasW << "\t" << canvasH << "\n\n";
 
+    // TGA keeps the fixed tileSize grid (edge tiles take the remainder);
+    // DXT1 needs power-of-two tiles (see the header), so its grid is the
+    // greedy power-of-two spans of each axis.
+    std::vector<int> colSpans, rowSpans;
+    if (dxt1) {
+        colSpans = potTileSpans(canvasW, tileSize);
+        rowSpans = potTileSpans(canvasH, tileSize);
+        rgbcx::init(rgbcx::bc1_approx_mode::cBC1Ideal); // the same decoder model PakManager bakes world DXT1 with
+    } else {
+        for (int x = 0; x < canvasW; x += tileSize) colSpans.push_back(std::min(tileSize, canvasW - x));
+        for (int y = 0; y < canvasH; y += tileSize) rowSpans.push_back(std::min(tileSize, canvasH - y));
+    }
+
     int tileCount = 0;
-    for (int ty = 0; ty < canvasH; ty += tileSize) {
-        int th = std::min(tileSize, canvasH - ty);
-        for (int tx = 0; tx < canvasW; tx += tileSize) {
-            int tw = std::min(tileSize, canvasW - tx);
+    int ty = 0;
+    for (size_t row = 0; row < rowSpans.size(); ty += rowSpans[row], ++row) {
+        int th = rowSpans[row];
+        int tx = 0;
+        for (size_t col = 0; col < colSpans.size(); tx += colSpans[col], ++col) {
+            int tw = colSpans[col];
 
             std::vector<uint8_t> tileBuf(static_cast<size_t>(tw) * th * 4);
             for (int y = 0; y < th; ++y) {
@@ -741,9 +802,24 @@ bool UiPacker::bakeBackgroundArt(const std::string& gameDir, const std::string& 
             }
 
             char name[64];
-            std::snprintf(name, sizeof(name), "bake_%d_%d.tga", ty / tileSize, tx / tileSize);
+            std::snprintf(name, sizeof(name), "bake_%d_%d.%s", static_cast<int>(row), static_cast<int>(col),
+                           dxt1 ? "dds" : "tga");
             std::string tilePath = outBgDir + "/" + name;
-            if (!writeTga(tilePath, tileBuf, tw, th)) {
+            bool written = false;
+            if (dxt1) {
+                // The background is opaque (mainui draws it with PIC_Draw,
+                // no blending): force alpha to 255 so no block is offered
+                // BC1's transparent selector.
+                for (size_t i = 3; i < tileBuf.size(); i += 4) tileBuf[i] = 255;
+                std::vector<uint8_t> blocks = TextureOpt::compressToDXT(tileBuf.data(), tw, th, false);
+                std::vector<uint8_t> dds = makeDxt1Dds(tw, th, blocks);
+                std::ofstream f(tilePath, std::ios::binary);
+                f.write(reinterpret_cast<const char*>(dds.data()), static_cast<std::streamsize>(dds.size()));
+                written = f.good();
+            } else {
+                written = writeTga(tilePath, tileBuf, tw, th);
+            }
+            if (!written) {
                 std::cerr << "bakeBackgroundArt: could not write " << tilePath << "\n";
                 return false;
             }

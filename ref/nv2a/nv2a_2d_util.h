@@ -65,6 +65,44 @@ uint32_t nv2a_2d_tile_split( float x, float y, float w, float h,
 void nv2a_2d_build_matrix( float out[4][4], float nv2a_width, float nv2a_height,
 	float engine_width, float engine_height, float pixel_offset );
 
+/* Menu GPU-memory compression (docs/r3d/divergences.md #131). What an
+   RGBA32 image's texels allow it to be stored as without changing a
+   single sampled value:
+   - NV2A_TEXELS_WHITE_ALPHA: every texel's R, G and B are 255 - stored as
+     LU_IMAGE_A8, which samples as (1, 1, 1, a) (xemu
+     hw/xbox/nv2a/pgraph/gl/constants.h: swizzle {ONE, ONE, ONE, RED};
+     Cxbx-Reloaded XbConvert.cpp: X_D3DFMT_LIN_A8 "R=G=B=255").
+   - NV2A_TEXELS_GREY_ALPHA: every texel has R == G == B - stored as
+     LU_IMAGE_A8Y8, byte 0 = Y (= R), byte 1 = A, which samples as
+     (Y, Y, Y, A) (xemu: GL_RG8, swizzle {RED, RED, RED, GREEN};
+     Cxbx: X_D3DFMT_LIN_A8L8 "R=G=B=L").
+   - NV2A_TEXELS_RGBA: anything else, kept A8B8G8R8.
+   Exact by construction: the class is decided on every texel, so a
+   single coloured texel keeps the whole image at 32 bpp. */
+typedef enum
+{
+	NV2A_TEXELS_RGBA = 0,
+	NV2A_TEXELS_GREY_ALPHA,
+	NV2A_TEXELS_WHITE_ALPHA
+} nv2a_texel_class_t;
+
+nv2a_texel_class_t nv2a_2d_classify_rgba( const uint8_t *rgba, uint32_t texel_count );
+
+/* Packs one row of `width` RGBA32 texels (bytes R,G,B,A) into A8 (one
+   byte: A) or A8Y8 (two bytes: R, then A) - the layouts described above. */
+void nv2a_2d_pack_row_a8( uint8_t *dst, const uint8_t *rgba, uint32_t width );
+void nv2a_2d_pack_row_a8y8( uint8_t *dst, const uint8_t *rgba, uint32_t width );
+
+/* log2(v) if v is a power of two in [1, 4096] (the NV2A's texture size
+   limit; the FORMAT word's BASE_SIZE_U/V fields hold log2), else -1. */
+int nv2a_2d_log2_pot( uint32_t v );
+
+/* Bytes of mip level 0 of a width x height block-compressed image with
+   `block_bytes`-byte 4x4 blocks (8 for DXT1, 16 for DXT3/DXT5), each
+   axis rounded up to whole blocks - the level-0 term of img_dds.c's own
+   Image_DXTCalcMipmapSize. */
+uint32_t nv2a_2d_dxt_level0_bytes( uint32_t width, uint32_t height, uint32_t block_bytes );
+
 #ifdef __cplusplus
 }
 #endif

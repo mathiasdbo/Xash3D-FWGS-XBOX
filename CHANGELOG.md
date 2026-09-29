@@ -5,6 +5,18 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - the menu takes a third of the GPU memory; the focused item glows (Xbox)
+
+With the main menu up, ref/nv2a's menu textures drop from 9.6 MiB to
+2.8 MiB and free memory rises from 25.9 to 32.6 MiB (xemu). Images whose
+texels allow it are stored at 8 bits per texel (white glyphs and the title
+layers, as alpha only) or 16 (grey images), which samples exactly the
+same colours; the menu background is baked to DXT1 tiles
+(`asset-studio --bake-menu-art --menu-art-dxt1`) and uploaded compressed.
+The focused menu button now has a soft glow behind its text, the same
+heavy-blur pass the PC menu uses, so the selection is visible at a
+glance on a TV. See divergence #131.
+
 ### Changed - loading screen for a map started from the main menu (Xbox)
 
 Starting a map from the main menu (New Game, Load Game, or `map` in the

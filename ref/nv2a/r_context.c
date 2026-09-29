@@ -2966,6 +2966,14 @@ static qboolean R_Init( void )
 		return false;
 	}
 
+	/* divergences.md #131: the NV2A samples DXT1/3/5 natively, so tell
+	   imagelib to hand compressed DDS data through instead of rejecting it
+	   (img_dds.c Image_LoadDDS: "silently rejected" without this flag) -
+	   the same call ref/gl makes when the GPU reports S3TC
+	   (gl_opengl.c:1108-1109). nv2a_tex_upload_compressed takes it from
+	   there; the baked menu background tiles are its only user today. */
+	gEngfuncs.Image_AddCmdFlags( IL_DDS_HARDWARE );
+
 	/* X9-X step 5, design note section 5: the studio state (heap-allocated,
 	   R_AllocStudioStatics pattern) - allocated last, right before success,
 	   so every earlier failure path above is unaffected. */
@@ -3114,6 +3122,11 @@ STATIC_ASSERT( NV2A_STUDIO_DFACTOR_ONE_MINUS_SRC_ALPHA == NV097_SET_BLEND_FUNC_D
 STATIC_ASSERT( NV2A_TEX_COLOR_LU_A1R5G5B5 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5, "NV2A_TEX_COLOR_LU_A1R5G5B5 drifted from nv_regs.h" );
 STATIC_ASSERT( NV2A_TEX_COLOR_LU_R5G6B5 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5, "NV2A_TEX_COLOR_LU_R5G6B5 drifted from nv_regs.h" );
 STATIC_ASSERT( NV2A_TEX_COLOR_LU_A8B8G8R8 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8, "NV2A_TEX_COLOR_LU_A8B8G8R8 drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_TEX_COLOR_LU_A8 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8, "NV2A_TEX_COLOR_LU_A8 drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_TEX_COLOR_LU_A8Y8 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8Y8, "NV2A_TEX_COLOR_LU_A8Y8 drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_TEX_COLOR_L_DXT1 == NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5, "NV2A_TEX_COLOR_L_DXT1 drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_TEX_COLOR_L_DXT23 == NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT23_A8R8G8B8, "NV2A_TEX_COLOR_L_DXT23 drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_TEX_COLOR_L_DXT45 == NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT45_A8R8G8B8, "NV2A_TEX_COLOR_L_DXT45 drifted from nv_regs.h" );
 
 static nv2a_2d_shadow_t nv2a_studio_pre_mesh_state;
 
@@ -5579,13 +5592,29 @@ static void nv2a_2d_flush( void )
 	   format of the pixels this batch was queued against. */
 	{
 		uint32_t *p = pb_begin();
+		uint32_t base_size = 0;
+
+		/* divergences.md #131: a compressed texture (a baked DXT1 menu
+		   tile) is sized ONLY by the FORMAT word's BASE_SIZE_U/V log2
+		   fields - IMAGE_RECT and pitch size linear textures only, and
+		   left at 0 a DXT texture is 1x1 (divergences.md #100, the
+		   world's own DXT1 push above). nv2a_tex_upload_compressed only
+		   accepts power-of-two sizes, so the log2 is exact. Its texture
+		   coordinates are normalized (nv2a_tex_coord_scale). */
+		if( NV2A_TEX_COLOR_IS_COMPRESSED( nv2a_2d_batch_key.color_format ))
+		{
+			base_size = MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_U, (uint32_t)nv2a_2d_log2_pot( nv2a_2d_batch_key.width ))
+				| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_V, (uint32_t)nv2a_2d_log2_pot( nv2a_2d_batch_key.height ));
+		}
+
 		p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, nv2a_2d_batch_key.offset );
 		p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
 			MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
 			| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
 			| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
 			| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, nv2a_2d_batch_key.color_format )
-			| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 ));
+			| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 )
+			| base_size );
 		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, nv2a_2d_batch_key.pitch << 16 );
 		p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( nv2a_2d_batch_key.width << 16 ) | nv2a_2d_batch_key.height );
 		p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
@@ -6021,8 +6050,7 @@ void Begin( int primitiveCode )
 	nv2a_tri_op = nv2a_tri_topology_op( topo );
 
 	tex = nv2a_tex_get( nv2a_tex_current());
-	nv2a_tri_tex_w = tex ? (float)tex->width : 1.0f;
-	nv2a_tri_tex_h = tex ? (float)tex->height : 1.0f;
+	nv2a_tex_coord_scale( tex, &nv2a_tri_tex_w, &nv2a_tri_tex_h ); /* texels for linear, 1 for DXT (divergences.md #131) */
 
 	nv2a_tri_begin( &nv2a_tri_asm, topo, nv2a_tri_emit_primitive, NULL );
 }
@@ -6121,9 +6149,11 @@ static void FillRGBA( int rendermode, float x, float y, float w, float h, byte r
 static void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum )
 {
 	const nv2a_texture_t *tex;
+	float ss, st;
 
 	GL_Bind( 0, (unsigned int)texnum );
 	tex = nv2a_tex_get( nv2a_tex_current());
+	nv2a_tex_coord_scale( tex, &ss, &st ); /* texels for linear, 1 for DXT (divergences.md #131) */
 
 	if( !FBitSet( tex->flags, TF_CLAMP )
 		&& ( s1 < 0.0f || s1 > 1.0f || s2 < 0.0f || s2 > 1.0f || t1 < 0.0f || t1 > 1.0f || t2 < 0.0f || t2 > 1.0f ))
@@ -6139,13 +6169,13 @@ static void R_DrawStretchPic( float x, float y, float w, float h, float s1, floa
 		for( i = 0; i < n; i++ )
 		{
 			nv2a_2d_append_quad( tiles[i].x, tiles[i].y, tiles[i].w, tiles[i].h,
-				tiles[i].s1 * tex->width, tiles[i].t1 * tex->height,
-				tiles[i].s2 * tex->width, tiles[i].t2 * tex->height );
+				tiles[i].s1 * ss, tiles[i].t1 * st,
+				tiles[i].s2 * ss, tiles[i].t2 * st );
 		}
 		return;
 	}
 
-	nv2a_2d_append_quad( x, y, w, h, s1 * tex->width, t1 * tex->height, s2 * tex->width, t2 * tex->height );
+	nv2a_2d_append_quad( x, y, w, h, s1 * ss, t1 * st, s2 * ss, t2 * st );
 }
 
 /* X9-X: the frame, in the engine's own order (cl_view.c):

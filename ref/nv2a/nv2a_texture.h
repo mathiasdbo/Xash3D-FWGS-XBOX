@@ -112,6 +112,23 @@ extern "C" {
 #define NV2A_TEX_COLOR_LU_R5G6B5   0x11u
 #define NV2A_TEX_COLOR_LU_A8B8G8R8 0x3Fu
 
+/* divergences.md #131 (menu GPU memory): the narrower storage classes
+   nv2a_tex_upload picks when an image allows it without changing a
+   sampled value (nv2a_2d_util.h nv2a_2d_classify_rgba), and the
+   block-compressed formats a DDS pic arrives in (nv_regs.h:547-549,
+   :562-563). Compressed textures are addressed like the world's DXT1
+   pages: normalized coordinates, sized by the FORMAT word's
+   BASE_SIZE_U/V (divergences.md #100) - never by IMAGE_RECT/pitch, which
+   size only the LU_IMAGE formats above. */
+#define NV2A_TEX_COLOR_LU_A8       0x1Fu
+#define NV2A_TEX_COLOR_LU_A8Y8     0x20u
+#define NV2A_TEX_COLOR_L_DXT1      0x0Cu /* L_DXT1_A1R5G5B5 */
+#define NV2A_TEX_COLOR_L_DXT23     0x0Eu /* L_DXT23_A8R8G8B8 */
+#define NV2A_TEX_COLOR_L_DXT45     0x0Fu /* L_DXT45_A8R8G8B8 */
+
+#define NV2A_TEX_COLOR_IS_COMPRESSED( fmt ) \
+	(( fmt ) == NV2A_TEX_COLOR_L_DXT1 || ( fmt ) == NV2A_TEX_COLOR_L_DXT23 || ( fmt ) == NV2A_TEX_COLOR_L_DXT45 )
+
 typedef struct nv2a_texture_s
 {
 	char       name[256];  /* ref/soft image_t::name's own size (r_local.h:303) */
@@ -210,6 +227,13 @@ unsigned int nv2a_tex_current( void );
    texture in that case, so this is a defensive case, not a normal one. */
 qboolean nv2a_tex_gpu_params( unsigned int texnum, uint32_t *phys_offset, uint32_t *pitch,
 	uint32_t *width, uint32_t *height, qboolean *bilinear, uint32_t *color_format );
+
+/* What a 0..1 texture coordinate is multiplied by before it reaches the
+   GPU for `tex`: its width/height for a linear (LU_IMAGE) texture, which
+   the NV2A samples in texel units (divergences.md #100), and 1 for a
+   compressed one, which it samples in normalized units. Every 2D/TriAPI
+   path that used to scale by tex->width/height goes through this. */
+void nv2a_tex_coord_scale( const nv2a_texture_t *tex, float *scale_s, float *scale_t );
 
 /* Marks `texnum` used this frame. The 2D/TriAPI append path calls it for
    every primitive it queues: a texture can stay bound across frames with

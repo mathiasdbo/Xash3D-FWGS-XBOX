@@ -2,8 +2,9 @@
 r_image.c - X9-X Part D: ref/nv2a's texture manager. CPU-side table,
 upload path and every GL_*Texture* / RefGetParm-adjacent entry point the
 engine calls through gReffuncs (r_context.c). See nv2a_texture.h for the
-scope statement (flat RGBA32 upload, no mips, no compression, no world
-textures - Part A keeps those off the GPU entirely).
+scope statement (flat upload, no mips, no world textures - Part A keeps
+those off the GPU entirely; 8/16 bpp and DXT storage for 2D pics since
+divergences.md #131).
 
 Ported from, in order of how closely each piece is followed:
   - ref/soft/r_image.c: the table itself, GL_AllocTexture, GL_CheckTexName,
@@ -38,6 +39,7 @@ Ported from, in order of how closely each piece is followed:
 #include "nv2a_arena.h"
 #include "nv2a_skin_cache.h"
 #include "nv2a_studio_util.h" /* NV2A_STUDIO_NF_MASKED, pinned to studio.h in r_studio.c */
+#include "nv2a_2d_util.h" /* texel classification and DXT sizes (divergences.md #131) */
 
 /* ------------------------------------------------------------------ */
 /* Table storage.                                                      */
@@ -504,15 +506,82 @@ static void nv2a_tex_set_dimensions( nv2a_texture_t *tex, int width, int height 
 	tex->height = (word)Q_max( 1, height );
 }
 
+/* divergences.md #131: a block-compressed pic (a DDS - img_dds.c hands
+   PF_DXT1/3/5 through unchanged once R_Init has set IL_DDS_HARDWARE, as
+   ref/gl does when the GPU has S3TC, gl_opengl.c:1108-1109) is copied
+   to the GPU as is: the NV2A samples DXT natively (nv_regs.h:547-549),
+   as the world's own DXT1 pages already prove. ref/gl uploads every mip
+   level the file has (GL_UploadTexture); this 2D manager has no mip
+   chain anywhere (nv2a_texture.h), so only level 0 goes up. Sized by
+   BASE_SIZE, which holds log2 - so both sides must be powers of two;
+   the baker only writes POT tiles (UiPacker bakeBackgroundArt), and
+   anything else is refused and logged rather than resampled (a DXT
+   image cannot go through Image_Process). */
+static qboolean nv2a_tex_upload_compressed( nv2a_texture_t *tex, rgbdata_t *pic )
+{
+	uint32_t format, block_bytes, bytes;
+	void *dstBase;
+
+	switch( pic->type )
+	{
+	case PF_DXT1: format = NV2A_TEX_COLOR_L_DXT1;  block_bytes = 8;  break;
+	case PF_DXT3: format = NV2A_TEX_COLOR_L_DXT23; block_bytes = 16; break;
+	case PF_DXT5: format = NV2A_TEX_COLOR_L_DXT45; block_bytes = 16; break;
+	default:
+		gEngfuncs.Con_Printf( S_ERROR "ref_nv2a: %s: compressed format %d has no NV2A equivalent, not uploaded\n", tex->name, pic->type );
+		return false;
+	}
+
+	if( nv2a_2d_log2_pot( pic->width ) < 0 || nv2a_2d_log2_pot( pic->height ) < 0 )
+	{
+		gEngfuncs.Con_Printf( S_ERROR "ref_nv2a: %s: compressed %dx%d is not power-of-two sized, not uploaded\n",
+			tex->name, pic->width, pic->height );
+		return false;
+	}
+
+	bytes = nv2a_2d_dxt_level0_bytes( pic->width, pic->height, block_bytes );
+	if( !pic->buffer || pic->size < bytes )
+	{
+		gEngfuncs.Con_Printf( S_ERROR "ref_nv2a: %s: compressed data too short (%u < %u), not uploaded\n",
+			tex->name, (unsigned int)pic->size, bytes );
+		return false;
+	}
+
+	/* No 1024 halving here (nv2a_tex_set_dimensions): a DXT image cannot
+	   be resampled, and 4096 is the NV2A's own limit, checked above. */
+	tex->srcWidth = tex->width = pic->width;
+	tex->srcHeight = tex->height = pic->height;
+
+	if( !nv2a_tex_alloc_storage( tex, bytes ))
+		return false;
+	tex->pitch = (( pic->width + 3 ) / 4 ) * block_bytes; /* one row of blocks; ignored by the GPU for DXT, kept for texturelist */
+	tex->color_format = format;
+
+	dstBase = tex->has_arena_storage ? (byte *)nv2a_texture_arena_mem + tex->gpu_offset : tex->fallback;
+	memcpy( dstBase, pic->buffer, bytes );
+	return true;
+}
+
 /* D2: shared by GL_LoadTexture, GL_LoadTextureFromBuffer and
    GL_CreateTexture. `pic` must already have been through
    nv2a_tex_process_image. No mip chain, no cube faces, no arrays or 3D
-   layers (all out of scope this phase - see nv2a_texture.h). */
+   layers (all out of scope this phase - see nv2a_texture.h).
+
+   divergences.md #131: an image whose every texel has R == G == B is
+   stored at 8 bpp (LU_IMAGE_A8, all RGB 255) or 16 bpp (LU_IMAGE_A8Y8)
+   instead of 32 - the menu's font atlases are white glyphs with coverage
+   in alpha (mainui StbFont.cpp GetCharRGBA), 2.9 MiB of RGBA32 measured
+   with the main menu up. The class is decided on every texel
+   (nv2a_2d_classify_rgba), so what the GPU samples is unchanged. */
 static qboolean nv2a_tex_upload( nv2a_texture_t *tex, rgbdata_t *pic )
 {
-	uint32_t pitch, y;
+	uint32_t pitch, y, bpp, format;
+	nv2a_texel_class_t texels;
 	byte *src, *dst;
 	void *dstBase;
+
+	if( pic->buffer && ImageCompressed( pic->type ))
+		return nv2a_tex_upload_compressed( tex, pic );
 
 	nv2a_tex_set_dimensions( tex, pic->width, pic->height );
 
@@ -528,11 +597,19 @@ static qboolean nv2a_tex_upload( nv2a_texture_t *tex, rgbdata_t *pic )
 			return false;
 	}
 
-	pitch = ALIGN((uint32_t)tex->width * 4, 64 );
+	texels = nv2a_2d_classify_rgba( pic->buffer, (uint32_t)tex->width * tex->height );
+	switch( texels )
+	{
+	case NV2A_TEXELS_WHITE_ALPHA: bpp = 1; format = NV2A_TEX_COLOR_LU_A8;       break;
+	case NV2A_TEXELS_GREY_ALPHA:  bpp = 2; format = NV2A_TEX_COLOR_LU_A8Y8;     break;
+	default:                      bpp = 4; format = NV2A_TEX_COLOR_LU_A8B8G8R8; break;
+	}
+
+	pitch = ALIGN((uint32_t)tex->width * bpp, 64 ); /* LU_IMAGE rows: 64-byte pitch alignment at every depth */
 	if( !nv2a_tex_alloc_storage( tex, (size_t)pitch * tex->height ))
 		return false;
 	tex->pitch = pitch;
-	tex->color_format = NV2A_TEX_COLOR_LU_A8B8G8R8;
+	tex->color_format = format;
 
 	if( tex->gpu_size == 0 )
 		return true;
@@ -542,7 +619,16 @@ static qboolean nv2a_tex_upload( nv2a_texture_t *tex, rgbdata_t *pic )
 	dst = (byte *)dstBase;
 
 	for( y = 0; y < (uint32_t)tex->height; y++ )
-		memcpy( dst + (size_t)y * pitch, src + (size_t)y * tex->width * 4, (size_t)tex->width * 4 );
+	{
+		const byte *row = src + (size_t)y * tex->width * 4;
+
+		if( bpp == 1 )
+			nv2a_2d_pack_row_a8( dst + (size_t)y * pitch, row, tex->width );
+		else if( bpp == 2 )
+			nv2a_2d_pack_row_a8y8( dst + (size_t)y * pitch, row, tex->width );
+		else
+			memcpy( dst + (size_t)y * pitch, row, (size_t)tex->width * 4 );
+	}
 
 	return true;
 }
@@ -1276,7 +1362,11 @@ void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, co
 	   there is truly no old storage to defer-free (both release helpers
 	   already no-op when neither has_arena_storage nor fallback is set),
 	   and that branch allocates real storage before copying into it. */
-	if( cols == tex->width && rows == tex->height && tex->gpu_size != 0 )
+	/* divergences.md #131: in place only onto 32 bpp storage - a slot the
+	   upload stored at 8/16 bpp or compressed has a different row size, so
+	   it takes the reallocating branch below, which stores RGBA32. */
+	if( cols == tex->width && rows == tex->height && tex->gpu_size != 0
+		&& ( tex->color_format == 0 || tex->color_format == NV2A_TEX_COLOR_LU_A8B8G8R8 ))
 	{
 		void *dstBase;
 		byte *dst, *src;
@@ -1304,6 +1394,11 @@ void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, co
 		void *dstBase;
 		byte *dst, *src;
 		uint32_t y;
+		/* Restored whole on an allocation failure below, so the slot keeps
+		   describing the storage it still owns (size, pitch and format
+		   together - a DXT format beside a new NPOT size would otherwise
+		   survive in a slot the 2D flush can still resolve). */
+		const nv2a_texture_t before = *tex;
 
 		tex->srcWidth = (word)cols;
 		tex->srcHeight = (word)rows;
@@ -1314,9 +1409,7 @@ void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, co
 		if( !nv2a_tex_alloc_storage( tex, (size_t)pitch * tex->height ))
 		{
 			gEngfuncs.Con_Printf( S_ERROR "%s: %s: out of texture memory on update\n", __func__, tex->name );
-			tex->has_arena_storage = old_has_arena;
-			tex->gpu_offset = old_offset;
-			tex->fallback = old_fallback;
+			*tex = before;
 			gEngfuncs.FS_FreeImage( owned );
 			return;
 		}
@@ -1388,6 +1481,13 @@ qboolean nv2a_tex_gpu_params( unsigned int texnum, uint32_t *phys_offset, uint32
 	if( tex->gpu_size == 0 )
 		return false;
 
+	/* A compressed texture is sized only by log2 BASE_SIZE fields (the 2D
+	   flush): nv2a_tex_upload_compressed only stores power-of-two ones, so
+	   this never fires - but a -1 must never reach that register field. */
+	if( NV2A_TEX_COLOR_IS_COMPRESSED( tex->color_format )
+		&& ( nv2a_2d_log2_pot( tex->width ) < 0 || nv2a_2d_log2_pot( tex->height ) < 0 ))
+		return false;
+
 	if( phys_offset )
 	{
 		uint32_t base = tex->has_skin_storage
@@ -1404,6 +1504,19 @@ qboolean nv2a_tex_gpu_params( unsigned int texnum, uint32_t *phys_offset, uint32
 	if( color_format ) *color_format = tex->color_format ? tex->color_format : NV2A_TEX_COLOR_LU_A8B8G8R8;
 
 	return true;
+}
+
+void nv2a_tex_coord_scale( const nv2a_texture_t *tex, float *scale_s, float *scale_t )
+{
+	if( !tex || NV2A_TEX_COLOR_IS_COMPRESSED( tex->color_format ))
+	{
+		*scale_s = 1.0f;
+		*scale_t = 1.0f;
+		return;
+	}
+
+	*scale_s = (float)tex->width;
+	*scale_t = (float)tex->height;
 }
 
 /* ------------------------------------------------------------------ */

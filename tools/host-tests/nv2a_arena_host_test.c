@@ -570,6 +570,45 @@ static void test_check_macro_failure_path( void )
 	}
 }
 
+
+/* Menu GPU-memory compression (divergences.md #131): the classifier must
+   only ever pick a narrower format when every texel survives it exactly. */
+static void test_texel_classify( void )
+{
+	const uint8_t white[] = { 255, 255, 255, 0,   255, 255, 255, 128,   255, 255, 255, 255 };
+	const uint8_t grey[]  = { 255, 255, 255, 10,  0, 0, 0, 0,           77, 77, 77, 200 };
+	const uint8_t color[] = { 255, 255, 255, 10,  10, 10, 11, 255 };
+	const uint8_t black_transparent[] = { 255, 255, 255, 200,  0, 0, 0, 0 }; /* stb font atlas before mainui whitens it */
+	uint8_t out[8];
+
+	CHECK( nv2a_2d_classify_rgba( white, 3 ) == NV2A_TEXELS_WHITE_ALPHA, "classify: all-white RGB is A8" );
+	CHECK( nv2a_2d_classify_rgba( grey, 3 ) == NV2A_TEXELS_GREY_ALPHA, "classify: R==G==B but not all 255 is A8Y8" );
+	CHECK( nv2a_2d_classify_rgba( color, 2 ) == NV2A_TEXELS_RGBA, "classify: one coloured texel keeps RGBA" );
+	CHECK( nv2a_2d_classify_rgba( black_transparent, 2 ) == NV2A_TEXELS_GREY_ALPHA,
+		"classify: a black transparent texel is NOT white - A8 would sample it as white" );
+	CHECK( nv2a_2d_classify_rgba( color, 0 ) == NV2A_TEXELS_WHITE_ALPHA, "classify: empty image is trivially white" );
+
+	nv2a_2d_pack_row_a8( out, white, 3 );
+	CHECK( out[0] == 0 && out[1] == 128 && out[2] == 255, "pack a8: alpha bytes in order" );
+	nv2a_2d_pack_row_a8y8( out, grey, 3 );
+	CHECK( out[0] == 255 && out[1] == 10 && out[2] == 0 && out[3] == 0 && out[4] == 77 && out[5] == 200,
+		"pack a8y8: byte 0 = Y (R), byte 1 = A" );
+}
+
+static void test_pot_and_dxt_sizes( void )
+{
+	CHECK( nv2a_2d_log2_pot( 1 ) == 0, "log2: 1" );
+	CHECK( nv2a_2d_log2_pot( 256 ) == 8, "log2: 256" );
+	CHECK( nv2a_2d_log2_pot( 4096 ) == 12, "log2: 4096 is the limit" );
+	CHECK( nv2a_2d_log2_pot( 8192 ) == -1, "log2: beyond the NV2A limit" );
+	CHECK( nv2a_2d_log2_pot( 0 ) == -1, "log2: 0" );
+	CHECK( nv2a_2d_log2_pot( 88 ) == -1, "log2: NPOT (retail 800_3_a tile height)" );
+	CHECK( nv2a_2d_dxt_level0_bytes( 256, 256, 8 ) == 32768, "dxt1 256x256 = 32 KiB" );
+	CHECK( nv2a_2d_dxt_level0_bytes( 128, 32, 8 ) == 2048, "dxt1 128x32" );
+	CHECK( nv2a_2d_dxt_level0_bytes( 2, 2, 8 ) == 8, "dxt1: a sub-block image is one block" );
+	CHECK( nv2a_2d_dxt_level0_bytes( 64, 64, 16 ) == 4096, "dxt5 64x64" );
+}
+
 int main( void )
 {
 	test_check_macro_failure_path();
@@ -590,6 +629,8 @@ int main( void )
 	test_tile_split_wrap();
 	test_tile_split_cap();
 	test_2d_matrix();
+	test_texel_classify();
+	test_pot_and_dxt_sizes();
 
 	test_tri_fan();
 	test_tri_strip();

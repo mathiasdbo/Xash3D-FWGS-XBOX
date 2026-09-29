@@ -2,6 +2,7 @@
 #define UIPACKER_H
 
 #include <string>
+#include <vector>
 
 namespace formats {
 
@@ -76,8 +77,31 @@ public:
     // profile only; the NV2A/DXT profile is X9's to add once it exists to
     // consume it. Returns false on any missing/malformed input or write
     // failure - never a partial bake.
+    //
+    // dxt1 (docs/r3d/divergences.md #131): instead of TGA, write each tile
+    // as an opaque DXT1 .dds (resource/background/bake_<row>_<col>.dds).
+    // ref/nv2a uploads a DXT pic as is and sizes it by the FORMAT word's
+    // BASE_SIZE_U/V, which hold log2 - so in this mode every tile is a
+    // power of two on both axes: each axis is cut greedily into the
+    // largest power-of-two spans no wider than tileSize (potTileSpans),
+    // 640 -> 256+256+128 and 480 -> 256+128+64+32, which covers the canvas
+    // exactly with no padding. Requires canvasW/canvasH to be multiples
+    // of 4 (whole DXT blocks).
     static bool bakeBackgroundArt(const std::string& gameDir, const std::string& outDir,
-                                   int canvasW = 640, int canvasH = 480, int tileSize = 256);
+                                   int canvasW = 640, int canvasH = 480, int tileSize = 256,
+                                   bool dxt1 = false);
+
+    // Greedy power-of-two spans covering `total` (each <= maxTile, a power
+    // of two itself). Empty if total <= 0 or maxTile is not a power of two.
+    static std::vector<int> potTileSpans(int total, int maxTile);
+
+    // A complete .dds file (128-byte header + data) around `blocks`, the
+    // DXT1 level-0 blocks of a width x height image, in the exact shape
+    // engine/common/imagelib/img_dds.c Image_LoadDDS accepts: FourCC DXT1,
+    // DDSD_LINEARSIZE with dwLinearSize == blocks.size(), no mip count,
+    // every reserved field 0 (dwReserved1[0] is read back as the image's
+    // encode method, img_dds.c:374 - it must stay DXT_ENCODE_DEFAULT).
+    static std::vector<uint8_t> makeDxt1Dds(int width, int height, const std::vector<uint8_t>& blocks);
 };
 
 }
