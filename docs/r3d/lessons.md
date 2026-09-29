@@ -29,6 +29,20 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### ALWAYS confirm the thing under test is in the renderer's own lists before reading a live look
+
+X9-X step 6's first three xemu looks at sprites (c0a0, c1a0, c1a0b) showed
+no sprite on either build, and a draw counter of 0 read as "the new path
+draws nothing". Reading `nv2a_solid/trans_entities` over the debugger
+showed why: the c0a0 tram had already carried the player 6000 units past
+its glows, and the c1a0/c1a0b spawns had no sprite entity in the frame's
+lists at all. Teleported into c1a0e's chamber (server edict origin
+written over gdb), the same build drew 231 sprite quads in seconds. **A
+live look proves a draw path only when the object is known to be sent,
+in view and unoccluded: read the frame's entity list, or set position
+and angles yourself, before a screenshot of nothing is taken as a
+failure (or a pass).**
+
 ### NEVER take a "before" measurement from a build a working-tree edit can reach
 
 This session's first baseline XBE for the menu-compression branch was

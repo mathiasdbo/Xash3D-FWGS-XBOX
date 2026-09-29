@@ -9112,7 +9112,8 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        lighting from `ref/common` (`R_LightVec`, `R_EntityDynamicLight`),
        client events and attachments (muzzle-flash elights and
        `HUD_StudioEvent` model sounds do run), the glow shell (tinted by
-       `rendercolor`, not the real chrome sprite - #121), the view model
+       `rendercolor`, not the real chrome sprite until step 6 restored
+       it), the view model
        with a real depth-range remap (a second view-projection matrix at
        the same viewport-z convention the world already uses, not a
        hardware depth-range register - design note section 2),
@@ -9135,7 +9136,40 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        both release calls without changing ref/nv2a. Font measurement
        and background preference restoration are corrected on the fix
        branch. See `reports/menu-loading-fix.md` for verification.
-    6. *Sprites* and sprite temp-entities (explosions, glows).
+    6. *Sprites* and sprite temp-entities (explosions, glows):
+       **landed, X9-X step 6, 2026-09-29** - new `ref/nv2a/r_sprite.c`, a
+       whole-function port of `gl_sprite.c` through the TriAPI internals
+       (as `r_studio.c` ports `gl_studio.c`), with the GL-state mapping and
+       the group/angled frame choice host-tested (`nv2a_sprite_util.c`).
+       All five orientation types, frame lerping (`r_sprite_lerping`), the
+       glow occlusion/distance fade, the sprite 'lightmap' pass
+       (`r_sprite_lighting`, `GL_EQUAL`), `R_CullSpriteModel`, and the
+       reference's draw order (a second walk of the solid list, sprites
+       inside the sorted translucent list). Loading needed nothing: the
+       engine already uploads every frame at precache through
+       `GL_LoadTexture` (`cl_sprite.c`), so the frames were resident on
+       main without ever being drawn. The glow shell's chrome sprite and
+       the studio shadow quad bind their sprites again (`TriSpriteTexture`).
+       Divergence #132 (clamp, no mips, no fog).
+       Memory, measured (xemu, texture table read over the debugger on
+       main 9f7300a5, c1a0e after `impulse 101`): 194 world-sprite frames,
+       2.29 MiB (RGBA32 2.12, A8Y8 0.13, A8 0.05 by the #131 classifier) -
+       the largest `Fexplo1` 380 KiB, `flare6` 320, `XFlare1` 312,
+       `explode1` 277, `zerogxplode` 240 - plus 1.22 MiB of HUD sprites.
+       This step adds no texture memory (the uploads are unchanged); kept
+       eager rather than lazy like the studio skins, because an explosion
+       or muzzle flash is on screen for a few frames and a skin-cache
+       style placeholder would show as white. Follow-up worth measuring:
+       most of those bytes are opaque additive frames (alpha 255
+       everywhere), which `R5G6B5` would halve at a banding cost on glows.
+       Verified live in xemu (branch vs main, same teleported position
+       and view angles in the c1a0e test chamber): the ceiling lamps'
+       `env_glow` flares draw as soft additive halos; an MP5 AR grenade's
+       explosion draws additive and depth-tested behind the pillar, with
+       spark sprites; the MP5 muzzle flash draws at the barrel; HUD, view
+       model and world are otherwise unchanged; none of them on main.
+       Not verified live: the glow shell's chrome sprite, `SPR_ALPHTEST`
+       lit sprites (blood), angled frames; real hardware.
     7. *Effects:* the `CL_DrawEFX` hook (still unimplemented), beams
        (and `ET_BEAM` entities), particles, tracers - the `pfnDraw*Triangles`
        hooks themselves are done, step 4 above.

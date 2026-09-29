@@ -57,6 +57,14 @@ nv2a_skin_cache() {
 }
 run_test nv2a_skin_cache nv2a_skin_cache
 
+# tools/host-tests/nv2a_sprite_util_host_test.c, header.
+nv2a_sprite_util() {
+	gcc -O1 -Wall -std=c99 -Iref/nv2a \
+		tools/host-tests/nv2a_sprite_util_host_test.c ref/nv2a/nv2a_sprite_util.c \
+		-o "$OUT/nv2a_sprite_util_test" && "$OUT/nv2a_sprite_util_test"
+}
+run_test nv2a_sprite_util nv2a_sprite_util
+
 # tools/host-tests/printf_host_test.c, header.
 printf_test() {
 	gcc -O1 -Wall -Wno-format -fstack-protector-all \

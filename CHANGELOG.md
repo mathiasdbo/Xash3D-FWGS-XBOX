@@ -5,6 +5,18 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - sprites on Xbox (ref/nv2a)
+
+ref/nv2a now draws sprite entities and sprite temp-entities: `env_sprite`
+and `env_glow` halos around lamps, explosions, muzzle flashes, sparks and
+smoke. It is a port of the reference OpenGL renderer's sprite code
+(`gl_sprite.c`) with every orientation type, frame interpolation, the
+glow fade with distance and occlusion, and the lit 'blood' sprites. The
+sprite frames were already loaded into video memory on every map (about
+2.3 MiB on c1a0e) but never drawn, so this adds no memory. The glow shell
+around a studio model now uses the real chrome sprite instead of a flat
+tint. See divergence #132.
+
 ### Changed - the menu takes a third of the GPU memory; the focused item glows (Xbox)
 
 With the main menu up, ref/nv2a's menu textures drop from 9.6 MiB to

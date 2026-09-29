@@ -55,6 +55,14 @@ typedef struct
 	int      space; /* nv2a_imm_space_t, kept as a plain int here so this
 	                    header does not need r_context.c's own enum */
 	uint32_t op;
+	/* X9-X step 6 (sprites, r_sprite.c): kRenderGlow sprites draw with
+	   the depth test off (gl_sprite.c:415) and the sprite 'lightmap' pass
+	   with glDepthFunc( GL_EQUAL ) (:551). Both 3D-only, and both zero by
+	   default so every earlier writer of this struct keeps its meaning
+	   (depth test on, pbkit's LEQUAL - pbkit.c:3161). Last, after `op`,
+	   so the positional initializer of nv2a_2d_desired stays valid. */
+	qboolean depth_test_disable;
+	qboolean depth_func_equal;
 } nv2a_2d_shadow_t;
 
 extern nv2a_2d_shadow_t nv2a_2d_desired;
@@ -97,6 +105,12 @@ cl_entity_t *nv2a_get_entity_by_index( int index );
    CURRENT entity's rendermode, computed by the caller (r_studio.c). */
 void nv2a_studio_apply_mesh_state( int face_flags, int entity_opaque );
 void nv2a_studio_restore_mesh_state( void );
+
+/* X9-X step 6: r_context.c's own R_WorldToScreen port (NDC x,y, returns
+   true when the point is behind the eye) - ref/gl's gl_sprite.c reaches
+   it through its TriWorldToScreen (gl_triapi.c:223), which r_sprite.c
+   ports on top of this. */
+int nv2a_world_to_screen( const vec3_t world, vec3_t screen );
 
 /* Design note section 2: forces a flush/re-entry (r_context.c's own
    nv2a_2d_flush) whenever this changes, so the 3D branch's constant-96

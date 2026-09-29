@@ -62,6 +62,8 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "nv2a_studio_util.h" /* X9-X step 5 Part C: the studio batch-state mapping (nv2a_studio_util.c), host-tested */
 #include "r_studio_bridge.h" /* X9-X step 5: the private glue with r_studio.c - nv2a_2d_shadow_t now lives here */
 #include "r_studio.h" /* X9-X step 5: r_studio.c's own entry points */
+#include "nv2a_sprite_util.h" /* X9-X step 6: the sprite GL-state mirrors pinned below */
+#include "r_sprite.h" /* X9-X step 6: r_sprite.c's own entry points (gl_sprite.c port) */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -1564,8 +1566,9 @@ R_TransEntityCompare (gl_rmain.c:86) - R_DrawEntitiesOnList's order
 (gl_rmain.c). Each brush entity draws with its own transform
 (R_RotateForEntity/R_TranslateForEntity, gl_rmain.c:448,474) and render
 mode (R_SetRenderMode, gl_rsurf.c:1717); each studio entity draws through
-R_DrawStudioModel (r_studio.c). Sprites and beams are still accepted by
-R_AddEntity but not drawn (step 6, out of scope).
+R_DrawStudioModel (r_studio.c), each sprite through R_DrawSpriteModel
+(r_sprite.c, X9-X step 6). Beams are still accepted by R_AddEntity but not
+drawn (step 7).
 ========================================================================
 */
 /* NV2A_MAX_ENTITIES itself now lives in r_studio_bridge.h (included
@@ -2373,7 +2376,7 @@ static void nv2a_draw_solid_entities( const model_t *world )
 			nv2a_studio_begin_entity( e );
 			R_DrawStudioModel( e );
 		}
-		else if( can_draw_brush )
+		else if( e->model->type == mod_brush && can_draw_brush )
 		{
 			nv2a_2d_flush();
 			nv2a_draw_brush_entity( world, e, 1.0f );
@@ -2384,6 +2387,22 @@ static void nv2a_draw_solid_entities( const model_t *world )
 
 	if( drew_brush )
 		nv2a_restore_world_constant96();
+
+	/* X9-X step 6: "draw sprites seperately, because of alpha blending"
+	   (gl_rmain.c:837-856) - a second walk of the solid list, after every
+	   brush and studio model in it. tr.blend is R_DrawEntitiesOnList's
+	   initial 1.0 here (gl_rmain.c:799): a solid-list entity is
+	   kRenderNormal, which nothing in the solid pass changes it for. */
+	for( i = 0; i < nv2a_num_solid_entities; i++ )
+	{
+		cl_entity_t *e = nv2a_solid_entities[i];
+
+		if( e->model->type == mod_sprite )
+		{
+			R_SpriteSetBlend( 1.0f );
+			R_DrawSpriteModel( e );
+		}
+	}
 }
 
 /* The translucent half of the same reference function, sorted by
@@ -2420,7 +2439,12 @@ static void nv2a_draw_trans_entities( const model_t *world )
 			nv2a_studio_begin_entity( e );
 			R_DrawStudioModel( e );
 		}
-		else if( can_draw_brush )
+		else if( e->model->type == mod_sprite )
+		{
+			R_SpriteSetBlend( blend ); /* X9-X step 6, gl_rmain.c:901-903 */
+			R_DrawSpriteModel( e );
+		}
+		else if( e->model->type == mod_brush && can_draw_brush )
 		{
 			nv2a_2d_flush();
 			nv2a_draw_brush_entity( world, e, blend );
@@ -2990,6 +3014,7 @@ static qboolean R_Init( void )
 		return false;
 	}
 	R_StudioInit();
+	R_SpriteInit(); /* X9-X step 6: r_traceglow and the view entity (r_sprite.h) */
 
 	debug_marker = 5;
 	nv2a_ready = true;
@@ -3044,12 +3069,12 @@ static void GL_SetupAttributes( int safegl )
 	;
 }
 
-/* X9-M/X9-X step 5: ref/gl's R_AddEntity (gl_rmain.c:234). Brush and
-   studio models are kept (this renderer's own two draw paths); sprites
-   and alias models are still accepted but not drawn (step 6 and out of
-   scope respectively) - the accept/reject rules (r_drawentities,
-   EF_NODRAW, fully faded translucents) and the solid/translucent split
-   are the reference's own, unconditional on model type. */
+/* X9-M/X9-X steps 5-6: ref/gl's R_AddEntity (gl_rmain.c:234). Brush,
+   studio and sprite models are kept (this renderer's three draw paths);
+   beams (step 7) and alias models (out of scope) are still accepted but
+   not drawn - the accept/reject rules (r_drawentities, EF_NODRAW, fully
+   faded translucents) and the solid/translucent split are the
+   reference's own, unconditional on model type. */
 static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 {
 	if( !r_drawentities->value )
@@ -3061,8 +3086,8 @@ static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 	if( clent->curstate.rendermode != kRenderNormal && nv2a_fx_blend( clent ) <= 0 )
 		return true; // invisible
 
-	if( type == ET_BEAM || !clent->model || ( clent->model->type != mod_brush && clent->model->type != mod_studio ))
-		return true; // accepted, but this renderer has no draw path for it yet (sprites, alias)
+	if( type == ET_BEAM || !clent->model || ( clent->model->type != mod_brush && clent->model->type != mod_studio && clent->model->type != mod_sprite ))
+		return true; // accepted, but this renderer has no draw path for it yet (beams, alias)
 
 	if( nv2a_opaque_entity( clent ))
 	{
@@ -3118,6 +3143,12 @@ STATIC_ASSERT( NV2A_STUDIO_SFACTOR_ONE == NV097_SET_BLEND_FUNC_SFACTOR_V_ONE, "N
 STATIC_ASSERT( NV2A_STUDIO_SFACTOR_SRC_ALPHA == NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA, "NV2A_STUDIO_SFACTOR_SRC_ALPHA drifted from nv_regs.h" );
 STATIC_ASSERT( NV2A_STUDIO_DFACTOR_ONE == NV097_SET_BLEND_FUNC_DFACTOR_V_ONE, "NV2A_STUDIO_DFACTOR_ONE drifted from nv_regs.h" );
 STATIC_ASSERT( NV2A_STUDIO_DFACTOR_ONE_MINUS_SRC_ALPHA == NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA, "NV2A_STUDIO_DFACTOR_ONE_MINUS_SRC_ALPHA drifted from nv_regs.h" );
+/* nv2a_sprite_util.h's mirrors (X9-X step 6), same reason. */
+STATIC_ASSERT( NV2A_SPRITE_SFACTOR_ZERO == NV097_SET_BLEND_FUNC_SFACTOR_V_ZERO, "NV2A_SPRITE_SFACTOR_ZERO drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_SPRITE_SFACTOR_SRC_ALPHA == NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA, "NV2A_SPRITE_SFACTOR_SRC_ALPHA drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_SPRITE_DFACTOR_ONE == NV097_SET_BLEND_FUNC_DFACTOR_V_ONE, "NV2A_SPRITE_DFACTOR_ONE drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_SPRITE_DFACTOR_SRC_COLOR == NV097_SET_BLEND_FUNC_DFACTOR_V_SRC_COLOR, "NV2A_SPRITE_DFACTOR_SRC_COLOR drifted from nv_regs.h" );
+STATIC_ASSERT( NV2A_SPRITE_DFACTOR_ONE_MINUS_SRC_ALPHA == NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA, "NV2A_SPRITE_DFACTOR_ONE_MINUS_SRC_ALPHA drifted from nv_regs.h" );
 /* nv2a_texture.h's per-slot colour formats (r_image.c has no pbkit include). */
 STATIC_ASSERT( NV2A_TEX_COLOR_LU_A1R5G5B5 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5, "NV2A_TEX_COLOR_LU_A1R5G5B5 drifted from nv_regs.h" );
 STATIC_ASSERT( NV2A_TEX_COLOR_LU_R5G6B5 == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5, "NV2A_TEX_COLOR_LU_R5G6B5 drifted from nv_regs.h" );
@@ -3240,6 +3271,13 @@ static int WorldToScreen( const vec3_t world, vec3_t screen )
 	screen[0] /= w;
 	screen[1] /= w;
 	return false;
+}
+
+/* X9-X step 6: r_sprite.c's TriWorldToScreen (gl_triapi.c:223) builds on
+   this (r_studio_bridge.h). */
+int nv2a_world_to_screen( const vec3_t world, vec3_t screen )
+{
+	return WorldToScreen( world, screen );
 }
 
 /* X9-X step 4 Part E: port of R_ScreenToWorld (gl_rmain.c:172-186), same
@@ -5008,6 +5046,9 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   sounds), no GPU state touched, so the ordering relative to the
 	   flush/shadow-reset just below does not matter. */
 	nv2a_studio_set_frame_context( rvp->flags, rvp->vieworigin, forward, right, up );
+	/* X9-X step 6: same for the sprite path (r_sprite.h) - the RI.rvp
+	   fields and RI.v* vectors gl_sprite.c reads. */
+	R_SpriteSetFrameContext( rvp->flags, rvp->vieworigin, rvp->viewangles, rvp->viewport, forward, right, up );
 	R_RunViewmodelEvents();
 
 	/* X9-X step 4 Part F: flush whatever the 2D pass had pending (a HUD
@@ -5173,6 +5214,9 @@ static void nv2a_2d_reset_shadow_for_3d( void )
 	nv2a_2d_desired.alpha_test_enable = false;
 	nv2a_2d_desired.cull_enable = true;
 	nv2a_2d_color[0] = nv2a_2d_color[1] = nv2a_2d_color[2] = nv2a_2d_color[3] = 255;
+	/* X9-X step 6: R_Clear's pglDepthFunc( GL_LEQUAL ) (gl_rmain.c:322),
+	   which ref/gl runs at the top of every scene. */
+	nv2a_2d_desired.depth_func_equal = false;
 }
 
 static nv2a_2d_shadow_t nv2a_2d_pushed;
@@ -5565,7 +5609,9 @@ static void nv2a_2d_flush( void )
 		|| nv2a_2d_pushed.dfactor != nv2a_2d_batch_state.dfactor
 		|| nv2a_2d_pushed.alpha_test_enable != nv2a_2d_batch_state.alpha_test_enable
 		|| nv2a_2d_pushed.depth_mask != nv2a_2d_batch_state.depth_mask
-		|| nv2a_2d_pushed.cull_enable != nv2a_2d_batch_state.cull_enable )
+		|| nv2a_2d_pushed.cull_enable != nv2a_2d_batch_state.cull_enable
+		|| nv2a_2d_pushed.depth_test_disable != nv2a_2d_batch_state.depth_test_disable
+		|| nv2a_2d_pushed.depth_func_equal != nv2a_2d_batch_state.depth_func_equal )
 	{
 		uint32_t *p = pb_begin();
 		p = pb_push1( p, NV097_SET_BLEND_ENABLE, nv2a_2d_batch_state.blend_enable ? 1 : 0 );
@@ -5575,6 +5621,14 @@ static void nv2a_2d_flush( void )
 		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, nv2a_2d_batch_state.alpha_test_enable ? 1 : 0 );
 		p = pb_push1( p, NV097_SET_DEPTH_MASK, nv2a_2d_batch_state.depth_mask ? 1 : 0 );
 		p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, nv2a_2d_batch_state.cull_enable ? 1 : 0 );
+		/* X9-X step 6: the depth test and function, 3D only - the 2D
+		   re-entry above already turned the test off, and a space change
+		   always goes through that re-entry. */
+		if( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_3D )
+		{
+			p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, nv2a_2d_batch_state.depth_test_disable ? 0 : 1 );
+			p = pb_push1( p, NV097_SET_DEPTH_FUNC, nv2a_2d_batch_state.depth_func_equal ? NV097_SET_DEPTH_FUNC_V_EQUAL : NV097_SET_DEPTH_FUNC_V_LEQUAL );
+		}
 		pb_end( p );
 
 		nv2a_2d_pushed = nv2a_2d_batch_state;
@@ -5630,6 +5684,26 @@ static void nv2a_2d_flush( void )
 		nv2a_tri_chunk( nv2a_2d_ring_pending_verts, nv2a_2d_op_verts_per_prim( ctx.op ), nv2a_2d_emit_draw_arrays, &ctx );
 	}
 
+	/* X9-X step 6: a glow sprite's depth test off and the sprite
+	   lightmap pass's GL_EQUAL never outlive their own batch. The world
+	   and brush-entity path (nv2a_enter_lit_state/nv2a_set_3d_state)
+	   pushes its own state directly and assumes the depth function is
+	   pbkit's LEQUAL - it never writes DEPTH_FUNC - and a brush entity
+	   that follows without a TriAPI re-entry in between does not re-push
+	   the depth test either, so restore both here, right after the draw,
+	   instead of relying on the next flush's diff (lessons.md: a draw
+	   that depends on state it never sets breaks by what else is on
+	   screen). */
+	if( nv2a_2d_batch_state.depth_test_disable || nv2a_2d_batch_state.depth_func_equal )
+	{
+		uint32_t *p = pb_begin();
+		p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_DEPTH_FUNC, NV097_SET_DEPTH_FUNC_V_LEQUAL );
+		pb_end( p );
+		nv2a_2d_pushed.depth_test_disable = false;
+		nv2a_2d_pushed.depth_func_equal = false;
+	}
+
 	nv2a_2d_ring_pending_verts = 0;
 }
 
@@ -5676,7 +5750,9 @@ static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *ver
 			|| nv2a_2d_batch_state.alpha_ref != nv2a_2d_desired.alpha_ref
 			|| nv2a_2d_batch_state.depth_mask != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.depth_mask )
 			|| nv2a_2d_batch_state.cull_enable != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.cull_enable )
-			|| ( space == NV2A_IMM_SPACE_3D && nv2a_2d_batch_state.viewmodel_depthrange != nv2a_2d_desired.viewmodel_depthrange )))
+			|| ( space == NV2A_IMM_SPACE_3D && nv2a_2d_batch_state.viewmodel_depthrange != nv2a_2d_desired.viewmodel_depthrange )
+			|| nv2a_2d_batch_state.depth_test_disable != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.depth_test_disable )
+			|| nv2a_2d_batch_state.depth_func_equal != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.depth_func_equal )))
 	{
 		nv2a_2d_flush();
 	}
@@ -5708,6 +5784,10 @@ static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *ver
 			nv2a_2d_batch_state.depth_mask = false;
 			nv2a_2d_batch_state.cull_enable = false;
 			nv2a_2d_batch_state.viewmodel_depthrange = false;
+			/* X9-X step 6: 3D-only too - the 2D re-entry turns the depth
+			   test off itself, and 2D never compares depth. */
+			nv2a_2d_batch_state.depth_test_disable = false;
+			nv2a_2d_batch_state.depth_func_equal = false;
 		}
 	}
 
@@ -5773,6 +5853,7 @@ static void R_Set2DMode( qboolean enable )
 		/* X9-X step 4 Part F: gl_draw.c's own R_Set2DMode(false) - pglEnable(GL_DEPTH_TEST)/pglDepthMask(GL_TRUE), GL_Cull(GL_FRONT). Matches nv2a_set_3d_state()'s own values, which every 3D draw path still pushes for itself. */
 		nv2a_2d_desired.depth_mask = true;
 		nv2a_2d_desired.cull_enable = true;
+		nv2a_2d_desired.depth_test_disable = false; /* X9-X step 6: the same function's pglEnable( GL_DEPTH_TEST ) */
 		nv2a_2d_dirty = true; /* every 3D path sets its own state via nv2a_set_3d_state(); push nothing here */
 	}
 }

@@ -27,6 +27,7 @@ separately (nv2a_studio_util.c, tools/host-tests).
 #include "nv2a_studio_util.h"
 #include "r_studio_bridge.h"
 #include "r_studio.h"
+#include "r_sprite.h" /* X9-X step 6: TriSpriteTexture (gl_triapi.c:242) */
 #include <stdlib.h> /* calloc/free, R_StudioAllocStatics */
 #include <string.h>
 #include <math.h>
@@ -1748,11 +1749,10 @@ static void R_StudioSetupSkin( studiohdr_t *ptexturehdr, int index )
 {
 	mstudiotexture_t *ptexture = NULL;
 
+	/* gl_studio.c:1483: the chrome sprite R_StudioRenderModel bound
+	   (TriSpriteTexture, X9-X step 6) stays bound. */
 	if( FBitSet( g_nForceFaceFlags, STUDIO_NF_CHROME ))
-	{
-		GL_Bind( XASH_TEXTURE0, nv2a_tex_white() );
 		return;
-	}
 
 	if( ptexturehdr == NULL )
 		return;
@@ -1829,12 +1829,9 @@ static void R_StudioRenderShadow( int iSprite, float *p1, float *p2, float *p3, 
 	if( !p1 || !p2 || !p3 || !p4 )
 		return;
 
-	/* Sprites are step 6 (spec outOfScope) - TriSpriteTexture has no nv2a
-	   implementation yet, so this always takes the "failed to bind" branch
-	   and the shadow quad never draws, exactly as a real GL renderer would
-	   draw nothing if the sprite failed to bind. Kept structurally (not
-	   deleted) for when sprites land. */
-	if( 0 )
+	/* gl_studio.c:1554 - TriSpriteTexture is r_sprite.c's since X9-X
+	   step 6. */
+	if( TriSpriteTexture( CL_ModelHandle( iSprite ), 0 ))
 	{
 		TriRenderMode( kRenderTransAlpha );
 		Color4f( 0.0f, 0.0f, 0.0f, 1.0f );
@@ -2691,12 +2688,7 @@ static void R_StudioRenderModel( void )
 		R_StudioRenderFinal( );
 
 		R_StudioSetForceFaceFlags( STUDIO_NF_CHROME );
-		/* Sprites are step 6 (spec outOfScope): the glow shell's own chrome
-		   environment-map sprite (REF_CHROME_SPRITE) does not bind here yet.
-		   R_StudioSetupSkin's own STUDIO_NF_CHROME-forced branch already
-		   binds the white texture instead (named divergence,
-		   docs/r3d/divergences.md), so the outline still draws, tinted by
-		   the entity's own rendercolor, just without the real chrome look. */
+		TriSpriteTexture( gEngfuncs.GetDefaultSprite( REF_CHROME_SPRITE ), 0 ); /* gl_studio.c:2830 */
 		nv2a_studio_ctx.currententity->curstate.renderfx = kRenderFxGlowShell;
 
 		R_StudioRenderFinal( );
