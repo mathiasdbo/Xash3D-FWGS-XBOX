@@ -29,6 +29,21 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### ALWAYS check what state a reused upstream helper reads when calling it earlier than any upstream caller does
+
+Divergence #130 drew the loading plaque with upstream's own
+`CL_DrawHUD( CL_LOADING )`, reasoning "the same call that draws it over a
+levelshot". The first boot test showed it everywhere except the first
+load after boot: that frame runs before the client DLL's HUD init, the
+only thing that fills `clgame.scrInfo` (`CL_GetScreenInfo`,
+`cl_game.c:1648`), so the plaque was centred on a 0x0 screen and landed
+off-screen. Every upstream caller runs after a game has initialised the
+HUD, so upstream never hit it. **When a divergence calls an existing
+function from a new point in the lifecycle, list the globals it reads and
+confirm each is set by then; "upstream calls it too" only covers
+upstream's call sites.** Test the first occurrence after boot separately
+from a later repeat, since the repeat inherits state the first one lacks.
+
 ### NEVER move a draw call that pushes GPU state directly without making it re-enter that state itself
 
 a48b415e moved ref/nv2a's brush entities from right after the world into

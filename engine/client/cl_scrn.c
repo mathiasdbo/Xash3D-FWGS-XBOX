@@ -466,6 +466,65 @@ void SCR_MakeScreenShot( void )
 	cls.shotname[0] = '\0';
 }
 
+#if XASH_XBOX
+/*
+================
+SCR_DrawLoadingScreen
+
+Resonance3D (docs/r3d/divergences.md #130): what a new map load shows on
+the Xbox - solid black under the engine's own 'loading' plaque
+(cls.loadingBar, SCR_RegisterTextures below), drawn by the same
+CL_DrawHUD( CL_LOADING ) that puts it over a levelshot in SCR_DrawPlaque.
+Upstream without levelshots shows the solid console instead
+(Con_DrawConsole, console.c:2004-2010), which under XASH_LOW_MEMORY is the
+plain grey built-in texture (Con_VidInit, console.c:2261).
+================
+*/
+static void SCR_DrawLoadingScreen( void )
+{
+	// CL_DrawLoadingOrPaused centres the plaque on clgame.scrInfo, which
+	// only the client's own pfnGetScreenInfo call fills (cl_game.c:1648),
+	// at HUD init. The first load after boot runs before that: a zero
+	// screen put the plaque off-screen (x = -64, and SPR_AdjustSize divides
+	// by the zero size). Upstream only reaches this plaque with levelshots
+	// or during a changelevel, normally after a game has set it. With NULL
+	// this only refreshes clgame.scrInfo, to the values the client gets.
+	CL_GetScreenInfo( NULL );
+
+	ref.dllFuncs.GL_SetRenderMode( kRenderNormal );
+	ref.dllFuncs.FillRGBA( kRenderTransTexture, 0, 0, refState.width, refState.height, 0, 0, 0, 255 );
+	CL_DrawHUD( CL_LOADING );
+}
+
+/*
+================
+SCR_UpdateLoadingScreen
+
+Resonance3D (docs/r3d/divergences.md #130): presents one loading screen
+frame while the client is still disconnected, i.e. before the server
+loads the map. Upstream leaves the last menu frame on screen through the
+whole server spawn (see SCR_BeginLoadingPlaque). Not SCR_UpdateScreen:
+with the menu closed, V_PostRender's Con_DrawConsole would draw the solid
+console over it and move the key destination to the console
+(console.c:2024-2029).
+================
+*/
+static void SCR_UpdateLoadingScreen( void )
+{
+	if( !V_PreRender( ))
+		return;
+
+	// Nothing else is drawn: the menu is already inactive
+	// (UI_SetActiveMenu( false ) in SCR_BeginLoadingPlaque, or the Load
+	// Game screen's own UI_CloseMenu), and its deferred low-memory release
+	// (divergence #127) still runs on the first connecting frame's
+	// UI_UpdateMenu, as before.
+	SCR_DrawLoadingScreen();
+
+	ref.dllFuncs.R_EndFrame();
+}
+#endif // XASH_XBOX
+
 /*
 ================
 SCR_DrawPlaque
@@ -483,6 +542,18 @@ static qboolean SCR_DrawPlaque( void )
 		return true;
 	}
 
+#if XASH_XBOX
+	// Resonance3D (docs/r3d/divergences.md #130): a new map load gets the
+	// loading screen in place of a levelshot. A changelevel keeps
+	// upstream's path: the last frame with the plaque over it, drawn by
+	// SCR_BeginLoadingPlaque's own update (CL_DrawHUD( CL_CHANGELEVEL )).
+	if( !cls.changelevel )
+	{
+		SCR_DrawLoadingScreen();
+		return true;
+	}
+#endif // XASH_XBOX
+
 	return false;
 }
 
@@ -499,9 +570,27 @@ void SCR_BeginLoadingPlaque( qboolean is_background )
 	if( cls.key_dest == key_menu && !cls.changedemo && !is_background )
 	{
 		UI_SetActiveMenu( false );
+#if !XASH_XBOX
 		if( cls.state == ca_disconnected && !(GameState->curstate == STATE_RUNFRAME && GameState->nextstate != STATE_RUNFRAME) )
 			SCR_UpdateScreen();
+#endif // !XASH_XBOX
 	}
+
+#if XASH_XBOX
+	// Resonance3D (docs/r3d/divergences.md #130): a load started while
+	// disconnected (New Game, Load Game, `map` from the main menu) gets
+	// its loading screen now, before the server loads the map. Upstream's
+	// update above is skipped for exactly this case (a transition out of
+	// STATE_RUNFRAME, Host_RunFrame, host_state.c:163-167), which leaves
+	// the frame Host_Frame just drew on screen for the whole server spawn:
+	// with no menu for a new game (UI_UpdateMenu returns while a level
+	// load is pending, cl_gameui.c:50-52), with the menu and its
+	// background for a saved-game load (GameState->loadGame lets it draw).
+	// Not keyed on key_menu: the Load Game screen has already closed the
+	// menu itself (LoadGame.cpp's UI_CloseMenu after queueing `load`).
+	if( cls.state == ca_disconnected && !cls.changedemo && !is_background )
+		SCR_UpdateLoadingScreen();
+#endif // XASH_XBOX
 
 	if( cls.state == ca_disconnected || cls.disable_screen )
 		return; // already set

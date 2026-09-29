@@ -2003,7 +2003,15 @@ void Con_DrawConsole( void )
 
 	if( cls.state == ca_connecting || cls.state == ca_connected )
 	{
+#if XASH_XBOX
+		// Resonance3D (docs/r3d/divergences.md #130): SCR_DrawPlaque draws
+		// the Xbox loading screen while connecting, as it draws a levelshot,
+		// so the console behaves as it does with levelshots (the branch
+		// below) instead of covering the screen as the loading picture.
+		if( false )
+#else
 		if( !cl_allow_levelshots.value && !cls.timedemo )
+#endif // XASH_XBOX
 		{
 			if( cls.key_dest != key_console && Con_BackgroundMapActive( ))
 				con.vislines = con.showlines = 0;
@@ -2022,7 +2030,17 @@ void Con_DrawConsole( void )
 	switch( cls.state )
 	{
 	case ca_disconnected:
+#if XASH_XBOX
+		// Resonance3D (docs/r3d/divergences.md #130): not while a load is
+		// pending. The Load Game screen closes the menu (key_game) and
+		// queues `load`, which runs before this frame is drawn
+		// (Host_ClientBegin, host.c:660); SCR_BeginLoadingPlaque presents
+		// the loading screen right after it, so the solid console would
+		// only flash one grey frame and leave key_dest on the console.
+		if( cls.key_dest != key_menu && GameState->nextstate == STATE_RUNFRAME )
+#else
 		if( cls.key_dest != key_menu )
+#endif // XASH_XBOX
 		{
 			Con_DrawSolidConsole( refState.height );
 			Key_SetKeyDest( key_console );

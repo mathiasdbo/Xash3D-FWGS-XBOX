@@ -5,6 +5,18 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - loading screen for a map started from the main menu (Xbox)
+
+Starting a map from the main menu (New Game, Load Game, or `map` in the
+console) now shows a solid black screen with the engine's own LOADING
+plaque from the moment the load begins until the level is in. Before,
+the Xbox showed about seven seconds of black with only the version
+string, then about seven seconds of plain grey, with no sign that
+anything was loading. The grey was the full-screen console that upstream
+uses as its loading picture when levelshots are off. The level-to-level
+transition (changelevel) keeps its existing behaviour: the last frame
+with LOADING drawn over it. See divergence #130.
+
 ### Fixed - brush entities popping in and out on Xbox (ref/nv2a)
 
 Doors, cabinet doors, the c0a0/c1a0 tram car, grates and handrails
