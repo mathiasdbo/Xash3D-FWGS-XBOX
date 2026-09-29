@@ -264,6 +264,9 @@ void nv2a_tex_flush_skin_cache( void );
    C3: binds *white) and by GL_Bind's own fallback. */
 unsigned int nv2a_tex_default( void );
 unsigned int nv2a_tex_white( void );
+/* X9-X step 7: ref/gl's tr.particleTexture (gl_image.c:1656), bound by
+   CL_DrawParticles (r_efx.c). */
+unsigned int nv2a_tex_particle( void );
 
 /* Implemented in r_context.c, needed here for D4/D6's own frame-hazard
    and filter-selection logic - see each call site's own comment. */

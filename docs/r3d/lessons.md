@@ -29,6 +29,17 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### NEVER leave a renderer callback unimplemented without reading what the engine does around the call
+
+ref/nv2a skipped `CL_DrawEFX` for nine steps as "effects, not drawn
+yet". The engine's `CL_DrawEFX` (`cl_efx.c:2079`) is also where dead
+beams, particles and tracers are freed, so on main the pools filled and
+never emptied: c1a0e read live with 128 dead beams, 3360 particles and
+303 tracers, and new effects could no longer be allocated at all. An
+unimplemented hook is not only a missing picture; **read the engine
+side of every `gEngfuncs`/`ref.dllFuncs` pair you stub, and list the
+housekeeping the stub skips.**
+
 ### ALWAYS confirm the thing under test is in the renderer's own lists before reading a live look
 
 X9-X step 6's first three xemu looks at sprites (c0a0, c1a0, c1a0b) showed

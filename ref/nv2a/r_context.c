@@ -64,6 +64,8 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "r_studio.h" /* X9-X step 5: r_studio.c's own entry points */
 #include "nv2a_sprite_util.h" /* X9-X step 6: the sprite GL-state mirrors pinned below */
 #include "r_sprite.h" /* X9-X step 6: r_sprite.c's own entry points (gl_sprite.c port) */
+#include "r_effects.h" /* X9-X step 7: r_effects.c's own entry points (gl_beams.c/gl_rpart.c port) */
+#include "nv2a_efx_util.h" /* X9-X step 7: the TriAPI texture-repeat splitter */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -637,6 +639,12 @@ static const model_t *nv2a_pvs_parity_checked_for;
    mod_local.h's real MAX_MAP_LEAFS for the same "no extra include" reason
    the constant itself is mirrored, not shared. */
 static byte nv2a_visbytes[( NV2A_MAX_MAP_LEAFS + 7 ) / 8];
+
+/* X9-X step 7: nv2a_visbytes holds a real PVS row (R_FatPVS has filled it
+   for the current map). Until then Mod_GetCurrentVis returns NULL, which
+   Mod_BoxVisible treats as all-visible (mod_bmodel.c:1313) - fail open,
+   as the rest of this file's culling does. */
+static qboolean nv2a_visbytes_valid;
 
 /* X9-H: backface culling. Port of ref/gl's own default world-draw cull
    state: R_SetupGL(true) (gl_rmain.c - reference-renderer-specialist
@@ -1567,8 +1575,8 @@ R_TransEntityCompare (gl_rmain.c:86) - R_DrawEntitiesOnList's order
 (R_RotateForEntity/R_TranslateForEntity, gl_rmain.c:448,474) and render
 mode (R_SetRenderMode, gl_rsurf.c:1717); each studio entity draws through
 R_DrawStudioModel (r_studio.c), each sprite through R_DrawSpriteModel
-(r_sprite.c, X9-X step 6). Beams are still accepted by R_AddEntity but not
-drawn (step 7).
+(r_sprite.c, X9-X step 6). Beams go to a third list, drawn by CL_DrawBeams
+(r_effects.c, X9-X step 7) when the engine's CL_DrawEFX calls back.
 ========================================================================
 */
 /* NV2A_MAX_ENTITIES itself now lives in r_studio_bridge.h (included
@@ -1582,6 +1590,10 @@ cl_entity_t *nv2a_solid_entities[NV2A_MAX_ENTITIES]; /* X9-X step 5: exposed, r_
 cl_entity_t *nv2a_trans_entities[NV2A_MAX_ENTITIES];
 int          nv2a_num_solid_entities;
 int          nv2a_num_trans_entities;
+/* X9-X step 7: ref/gl's draw_list->beam_entities (gl_local.h:172), the
+   ET_BEAM entities CL_DrawBeams (r_effects.c) walks. */
+cl_entity_t *nv2a_beam_entities[NV2A_MAX_ENTITIES];
+int          nv2a_num_beam_entities;
 static vec3_t       nv2a_eye_forward; /* GL_RenderFrame's own AngleVectors forward, for CL_FxBlend's hologram fade */
 static uint32_t    *nv2a_unlit_page;  /* 16x16 texels of 0x80 grey: ps_lit's lightmap x 2 then
                                          multiplies by 1.0, i.e. an unlit draw. Allocated once,
@@ -2849,6 +2861,7 @@ static void nv2a_free_map_resources( void )
 	   from. */
 	nv2a_num_solid_entities = 0;
 	nv2a_num_trans_entities = 0;
+	nv2a_num_beam_entities = 0;
 	nv2a_pending_upload.pending = false; /* X9-T */
 	nv2a_map_ready = false;
 	nv2a_map_owner = NULL;
@@ -2880,6 +2893,7 @@ static void nv2a_free_map_resources( void )
 	   from a previous map. */
 	nv2a_viewleaf = NULL;
 	nv2a_oldviewleaf = NULL;
+	nv2a_visbytes_valid = false; /* X9-X step 7: Mod_GetCurrentVis fails open until the next map's first R_FatPVS */
 
 	/* codex review round 2, real finding, high confidence: this was
 	   missing. The engine keeps the world model in FIXED mod_known[0]
@@ -3015,6 +3029,7 @@ static qboolean R_Init( void )
 	}
 	R_StudioInit();
 	R_SpriteInit(); /* X9-X step 6: r_traceglow and the view entity (r_sprite.h) */
+	R_EfxInit(); /* X9-X step 7: the palette CL_DrawParticles reads (r_effects.h) */
 
 	debug_marker = 5;
 	nv2a_ready = true;
@@ -3069,12 +3084,13 @@ static void GL_SetupAttributes( int safegl )
 	;
 }
 
-/* X9-M/X9-X steps 5-6: ref/gl's R_AddEntity (gl_rmain.c:234). Brush,
-   studio and sprite models are kept (this renderer's three draw paths);
-   beams (step 7) and alias models (out of scope) are still accepted but
-   not drawn - the accept/reject rules (r_drawentities, EF_NODRAW, fully
-   faded translucents) and the solid/translucent split are the
-   reference's own, unconditional on model type. */
+/* X9-M/X9-X steps 5-7: ref/gl's R_AddEntity (gl_rmain.c:234). Brush,
+   studio and sprite models are kept (this renderer's three draw paths)
+   and beams go to their own list (step 7, gl_rmain.c:255-266); alias
+   models (out of scope) are still accepted but not drawn - the
+   accept/reject rules (r_drawentities, EF_NODRAW, fully faded
+   translucents) and the solid/translucent split are the reference's
+   own, unconditional on model type. */
 static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 {
 	if( !r_drawentities->value )
@@ -3086,8 +3102,22 @@ static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 	if( clent->curstate.rendermode != kRenderNormal && nv2a_fx_blend( clent ) <= 0 )
 		return true; // invisible
 
-	if( type == ET_BEAM || !clent->model || ( clent->model->type != mod_brush && clent->model->type != mod_studio && clent->model->type != mod_sprite ))
-		return true; // accepted, but this renderer has no draw path for it yet (beams, alias)
+	if( type == ET_BEAM )
+	{
+		if( nv2a_num_beam_entities >= NV2A_MAX_ENTITIES )
+		{
+			gEngfuncs.Con_Printf( S_ERROR "Too many beams %d!\n", nv2a_num_beam_entities );
+			return false;
+		}
+
+		nv2a_beam_entities[nv2a_num_beam_entities] = clent;
+		nv2a_num_beam_entities++;
+
+		return true;
+	}
+
+	if( !clent->model || ( clent->model->type != mod_brush && clent->model->type != mod_studio && clent->model->type != mod_sprite ))
+		return true; // accepted, but this renderer has no draw path for it yet (alias)
 
 	if( nv2a_opaque_entity( clent ))
 	{
@@ -3110,6 +3140,7 @@ static void R_ClearScene( void )
 {
 	nv2a_num_solid_entities = 0;
 	nv2a_num_trans_entities = 0;
+	nv2a_num_beam_entities = 0;
 
 	// clear the scene befor start new frame
 	if( gEngfuncs.drawFuncs->R_ClearScene != NULL )
@@ -3209,6 +3240,7 @@ static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned
 	{
 		nv2a_num_solid_entities = 0;
 		nv2a_num_trans_entities = 0;
+		nv2a_num_beam_entities = 0;
 		nv2a_entities = NULL;
 		nv2a_max_entities = 0;
 	}
@@ -4461,20 +4493,8 @@ static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte
 /* X9-X step 5: Mod_StudioLoadTextures/Mod_StudioUnloadTextures are now
    real, implemented in r_studio.c and declared by r_studio.h. */
 
-static void CL_DrawParticles( double frametime, particle_t *particles, float partsize )
-{
-	;
-}
-
-static void CL_DrawTracers( double frametime, particle_t *tracers )
-{
-	;
-}
-
-static void CL_DrawBeams( int fTrans, BEAM *beams )
-{
-	;
-}
+/* X9-X step 7: CL_DrawParticles/CL_DrawTracers/CL_DrawBeams are real,
+   implemented in r_effects.c and declared by r_effects.h. */
 
 /* D5: whole port of ref/soft's own GL_RefGetParm switch (r_context.c:124-199),
    corrected where D5 says to - PARM_TEX_FILTERING answered locally
@@ -4770,6 +4790,7 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 	gEngfuncs.R_FatPVS( vieworigin, r_pvs_radius->value, nv2a_visbytes, false, novis );
 	if( force && !novis )
 		gEngfuncs.R_FatPVS( test, r_pvs_radius->value, nv2a_visbytes, true, novis );
+	nv2a_visbytes_valid = true;
 
 	memset( nv2a_map_face_visible, 0, (size_t)nv2a_map_face_count );
 
@@ -4845,6 +4866,7 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
    frame is used. */
 static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 {
+	double rvp_frametime; /* tr.frametime, gl_rmain.c:949-952 */
 	vec3_t forward, right, up;
 	nv2a_vec3_t f, r, u, eye;
 	float view[4][4], proj[4][4], ndc_to_screen[4][4], combined[4][4];
@@ -5049,6 +5071,10 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	/* X9-X step 6: same for the sprite path (r_sprite.h) - the RI.rvp
 	   fields and RI.v* vectors gl_sprite.c reads. */
 	R_SpriteSetFrameContext( rvp->flags, rvp->vieworigin, rvp->viewangles, rvp->viewport, forward, right, up );
+	/* X9-X step 7: and for the effects (r_effects.h), with tr.frametime
+	   as R_RenderScene computes it (gl_rmain.c:949-952). */
+	rvp_frametime = !FBitSet( rvp->flags, RF_DRAW_CUBEMAP ) ? gp_cl->time - gp_cl->oldtime : 0.0;
+	R_EfxSetFrameContext( rvp->flags, rvp->vieworigin, rvp->viewport, forward, right, up, rvp_frametime );
 	R_RunViewmodelEvents();
 
 	/* X9-X step 4 Part F: flush whatever the 2D pass had pending (a HUD
@@ -5096,13 +5122,29 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 			gEngfuncs.R_DrawWorldHull(); /* port of R_DrawWorld's own tail, gl_rsurf.c:3728 */
 
 		/* X9-X step 5, gl_rmain.c:797-935's own order: solid entities
-		   (brush direct, studio through R_DrawStudioModel), then
-		   pfnDrawNormalTriangles, then translucent entities sorted, then
-		   pfnDrawTransparentTriangles, then the view model. */
+		   (brush direct, studio through R_DrawStudioModel), then solid
+		   beams, then pfnDrawNormalTriangles, then translucent entities
+		   sorted, then pfnDrawTransparentTriangles, then the translucent
+		   effects, then the view model. */
 		nv2a_draw_solid_entities( world );
+
+		/* X9-X step 7: solid beams (gl_rmain.c:859-862) - the engine's
+		   CL_DrawEFX (cl_efx.c:2079) frees dead beams and calls back
+		   CL_DrawBeams (r_effects.c). */
+		if( !FBitSet( rvp->flags, RF_ONLY_CLIENTDRAW ))
+			gEngfuncs.CL_DrawEFX( rvp_frametime, false );
+
 		gEngfuncs.pfnDrawNormalTriangles();
 		nv2a_draw_trans_entities( world );
 		gEngfuncs.pfnDrawTransparentTriangles();
+
+		/* X9-X step 7: translucent beams, particles and tracers
+		   (gl_rmain.c:919-924), after the client's own translucent
+		   triangles; R_AllowFog around it is a no-op here (#119). */
+		if( !FBitSet( rvp->flags, RF_ONLY_CLIENTDRAW ))
+			gEngfuncs.CL_DrawEFX( rvp_frametime, true );
+
+		nv2a_2d_desired.blend_enable = false; // pglDisable( GL_BLEND ), gl_rmain.c:928 "Trinity Render issues"
 
 		R_DrawViewModel();
 
@@ -5124,9 +5166,20 @@ static qboolean R_SpeedsMessage( char *out, size_t size )
 	return false;
 }
 
+/* X9-X step 7: ref/gl's Mod_GetCurrentVis (gl_rsurf.c:112) - RI.visbytes,
+   the PVS row R_MarkLeaves filled (here nv2a_mark_leaves). The
+   drawFuncs->Mod_GetCurrentVis branch is for tr.fCustomRendering, which
+   this renderer never sets (no R_RenderFrame override). The engine reads
+   this too: CL_BeamVisible (cl_efx.c:860) and TriBoxInPVS
+   (cl_game.c:3246). NULL (all visible) until a real row exists. */
 static byte *Mod_GetCurrentVis( void )
 {
-	return NULL;
+	return nv2a_visbytes_valid ? nv2a_visbytes : NULL;
+}
+
+byte *nv2a_mod_get_current_vis( void )
+{
+	return Mod_GetCurrentVis();
 }
 
 /*
@@ -6050,6 +6103,29 @@ static uint32_t nv2a_tri_topology_op( nv2a_tri_topology_t topo )
 	}
 }
 
+/* X9-X step 7 (divergences.md #133): GL_REPEAT for the TriAPI's 3D
+   primitives, on only while r_effects.c's R_BeamDraw draws a beam - the
+   one TriAPI caller whose texture coordinates run over many copies of
+   its texture (R_DrawSegs, gl_beams.c:167-173). This renderer's linear
+   textures clamp (TEXTURE_ADDRESS in nv2a_2d_flush), so each primitive is
+   cut at the texture's cell boundaries instead (nv2a_efx_util.c,
+   host-tested), in the units its vertices already carry (texels for a
+   linear texture, 1 for a compressed one: nv2a_tri_tex_w/h, captured at
+   Begin). */
+static qboolean nv2a_tri_repeat;
+
+void nv2a_tri_set_texture_repeat( qboolean on )
+{
+	nv2a_tri_repeat = on;
+}
+
+/* nv2a_efx_wrap_primitive's emit callback: a primitive that fit one cell
+   keeps its Begin's own op; a cut one is always triangles, which starts a
+   new batch when the Begin was QUADS (nv2a_2d_append flushes on an op
+   change) - only a TRI_QUADS beam (TE_BEAMFOLLOW, whose V stays in [0,1])
+   could ever mix the two. */
+static void nv2a_tri_emit_repeated( const nv2a_tri_vert_t *v, uint32_t n, int split, void *ctx );
+
 /* The assembler's own emit callback (nv2a_tri_util.h's nv2a_tri_emit_fn) -
    converts to the 20-byte 2D wire format (dropping z) in 2D space, or
    appends the 24-byte 3D format as-is (nv2a_tri_vert_t IS
@@ -6057,6 +6133,12 @@ static uint32_t nv2a_tri_topology_op( nv2a_tri_topology_t topo )
 static void nv2a_tri_emit_primitive( const nv2a_tri_vert_t *v, uint32_t n, void *ctx )
 {
 	(void)ctx;
+
+	if( nv2a_tri_repeat && nv2a_tri_space == NV2A_IMM_SPACE_3D )
+	{
+		nv2a_efx_wrap_primitive( v, n, nv2a_tri_tex_w, nv2a_tri_tex_h, nv2a_tri_emit_repeated, NULL );
+		return;
+	}
 
 	if( nv2a_tri_space == NV2A_IMM_SPACE_2D )
 	{
@@ -6077,6 +6159,12 @@ static void nv2a_tri_emit_primitive( const nv2a_tri_vert_t *v, uint32_t n, void 
 	{
 		nv2a_2d_append( NV2A_IMM_SPACE_3D, nv2a_tri_op, v, n );
 	}
+}
+
+static void nv2a_tri_emit_repeated( const nv2a_tri_vert_t *v, uint32_t n, int split, void *ctx )
+{
+	(void)ctx;
+	nv2a_2d_append( NV2A_IMM_SPACE_3D, split ? NV097_SET_BEGIN_END_OP_TRIANGLES : nv2a_tri_op, v, n );
 }
 
 /* D3: TriTexCoord2f (gl_triapi.c:180) - latches, does not emit. */

@@ -31,6 +31,11 @@ extern cl_entity_t *nv2a_trans_entities[NV2A_MAX_ENTITIES];
 extern int          nv2a_num_solid_entities;
 extern int          nv2a_num_trans_entities;
 
+/* X9-X step 7: the frame's ET_BEAM entities (gl_rmain.c:255-266),
+   walked by CL_DrawBeams (r_effects.c). */
+extern cl_entity_t *nv2a_beam_entities[NV2A_MAX_ENTITIES];
+extern int          nv2a_num_beam_entities;
+
 /* X9-X step 4 Part C's own nv2a_2d_shadow_t, moved here (from r_context.c)
    so r_studio.c's per-mesh state changes (design note section 6) write
    the SAME shadow the flush (r_context.c) actually pushes - exactly as
@@ -116,6 +121,16 @@ int nv2a_world_to_screen( const vec3_t world, vec3_t screen );
    nv2a_2d_flush) whenever this changes, so the 3D branch's constant-96
    push picks the view-model z-ranged matrix instead of the world's. */
 void nv2a_studio_set_viewmodel_depthrange( int on );
+
+/* X9-X step 7: ref/gl's Mod_GetCurrentVis (gl_rsurf.c:112), which
+   R_BeamCull and R_DrawRing pass to Mod_BoxVisible - NULL (all visible)
+   until nv2a_mark_leaves has a real PVS row. */
+byte *nv2a_mod_get_current_vis( void );
+
+/* X9-X step 7 (divergences.md #133): GL_REPEAT for the TriAPI's 3D
+   primitives while on - r_effects.c's R_BeamDraw turns it on around its
+   Begin/End. */
+void nv2a_tri_set_texture_repeat( qboolean on );
 
 #ifdef __cplusplus
 }

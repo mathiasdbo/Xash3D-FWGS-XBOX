@@ -9170,9 +9170,38 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        model and world are otherwise unchanged; none of them on main.
        Not verified live: the glow shell's chrome sprite, `SPR_ALPHTEST`
        lit sprites (blood), angled frames; real hardware.
-    7. *Effects:* the `CL_DrawEFX` hook (still unimplemented), beams
-       (and `ET_BEAM` entities), particles, tracers - the `pfnDraw*Triangles`
-       hooks themselves are done, step 4 above.
+    7. *Effects:* the `CL_DrawEFX` hook, beams (and `ET_BEAM`
+       entities), particles, tracers: **landed, X9-X step 7, 2026-09-29** -
+       new `ref/nv2a/r_effects.c`, a whole-function port of `gl_beams.c`
+       and `gl_rpart.c` through the TriAPI internals (as `r_sprite.c`
+       ports `gl_sprite.c`), with the beam noise and a texture-repeat
+       splitter host-tested (`nv2a_efx_util.c`). `GL_RenderFrame` now
+       calls the engine's `CL_DrawEFX` at `R_DrawEntitiesOnList`'s two
+       points (`gl_rmain.c:861`, `:922`); `R_AddEntity` keeps `ET_BEAM`
+       entities; `Mod_GetCurrentVis` returns the real PVS row. Found on
+       the way: main never called `CL_DrawEFX`, which is also where the
+       engine frees dead beams and particles (`cl_efx.c:2081-2090`), so
+       on main the pools filled and stayed full (read live on c1a0e: 128
+       dead beams, 3360 particles, 303 tracers held forever). Beam
+       sprites repeat along V where linear NV2A textures only clamp: the
+       TriAPI cuts each beam primitive at the texture's cell boundaries
+       (divergence #133, which also lists fog, shade model and the
+       zeroed locals). Memory: no new texture - the particle texture is
+       the engine's `*particle` (`ref_common.c:531`), already resident on
+       main as 8x8 A8 by the #131 classifier, and beams/tracers bind
+       sprite frames the engine already uploads; 2 KiB of static beam
+       list; the XBE grows 6840320 -> 6868992 bytes (+28 KiB).
+       Verified live in xemu (branch vs main, c1a0e, same view angles,
+       grabbed only while the engine's lists held the effect): MP5 fire
+       draws tracers, spark streaks and the bullet-impact particles; the
+       egon draws its textured beam and sine-noise beam from the gun to
+       the flare (main: the flare only); the gauss draws its beam and
+       impact glows; a tripmine's laser (an `ET_BEAM` entity, the
+       `R_BeamDrawCustomEntity` path) crosses the corridor; world, NPCs,
+       view model, HUD and main menu unchanged. Not verified live:
+       `TE_BEAMTORUS`/`DISK`/`CYLINDER`/`RING`/`FOLLOW` (code ported
+       whole, no scene triggered them), beams whose V crosses a cell
+       mid-primitive seen up close, frame cost (X11), real hardware.
     8. *Animated lightstyles and dynamic lights:* one mechanism - rebuild
        a face's lightmap from `msurface_t->samples` (every style is in the
        classic prefix's `LUMP_LIGHTING`) times `g_lightstylevalue`, plus

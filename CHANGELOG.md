@@ -5,6 +5,19 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - beams, particles and tracers on Xbox (ref/nv2a)
+
+ref/nv2a now draws the engine's client effects: every beam type (tested
+with the gluon and tau guns and tripmine lasers; the resonance cascade's
+lightning, trails and rings go through the same code), particles
+(bullet impacts, blood, sparks) and tracers.
+It is a port of the reference OpenGL renderer's beam and particle code
+(`gl_beams.c`, `gl_rpart.c`), called where the reference calls it.
+Before this the effects were never drawn and, because the engine frees
+dead effects from that same call, their pools filled up and stayed full.
+No new video memory: the effects use textures that were already loaded.
+See divergence #133.
+
 ### Added - sprites on Xbox (ref/nv2a)
 
 ref/nv2a now draws sprite entities and sprite temp-entities: `env_sprite`
