@@ -5,6 +5,17 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - decals no longer vanish right after loading a save
+
+Loading a savegame restored its decals and then the engine wiped them all
+within the first frames. With the retail `logos/remapped.bmp` present, the
+player has a spray-logo customization; `CL_UpdateLogo` and a userinfo update
+clear it right after the load and call `R_DecalRemoveAll( nUserData1 )`,
+but `nUserData1` is 0 until the logo is actually uploaded, and 0 means
+"remove every decal" (`gl_decals.c:1157`). Both call sites
+(`engine/common/custom.c`, `engine/client/parse/cl_parse.c`) now skip the
+call when no logo texture exists. Same code upstream; divergence #140.
+
 ### Added - decals, screenshots and savegame thumbnails on Xbox (ref/nv2a)
 
 Bullet holes, blood, scorch marks and sprayed logos now stay on walls, floors

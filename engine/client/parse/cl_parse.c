@@ -582,7 +582,10 @@ static void CL_RemoveCustomization( int nPlayerNum, customization_t *pRemove )
 		{
 			if( pList->resource.type == t_decal )
 			{
-				if( cls.state == ca_active )
+				// Same guard as COM_ClearCustomizationList (custom.c): a logo
+				// that was never uploaded has nUserData1 0, which
+				// R_DecalRemoveAll reads as "every decal". Divergence #140.
+				if( cls.state == ca_active && pList->nUserData1 != 0 )
 					ref.dllFuncs.R_DecalRemoveAll( pList->nUserData1 );
 				FS_FreeImage( pList->pInfo );
 			}

@@ -65,7 +65,13 @@ void COM_ClearCustomizationList( customization_t *pHead, qboolean bCleanDecals )
 #if !XASH_DEDICATED
 			if( pCurrent->resource.type == t_decal )
 			{
-				if( bCleanDecals && CL_Active( ))
+				// nUserData1 is the logo's decal texture, set only once it is
+				// uploaded (cl_tent.c:2921) and 0 until then (custom.c:122).
+				// R_DecalRemoveAll( 0 ) means "every decal" (gl_decals.c:1157),
+				// so clearing a never-sprayed logo wiped the whole map's decals
+				// right after a load (CL_UpdateLogo). Nothing of this logo
+				// exists yet: skip. Divergence #140.
+				if( bCleanDecals && CL_Active( ) && pCurrent->nUserData1 != 0 )
 					ref.dllFuncs.R_DecalRemoveAll( pCurrent->nUserData1 );
 			}
 #endif
