@@ -26,6 +26,14 @@ cd "$REPO" || exit 1
 OUT="${SCRATCH:-$REPO/.sweep}/host-tests"
 mkdir -p "$OUT" || exit 1
 
+# The code under test is built as the Xbox build builds it (-O2,
+# tools/xbox-opt.sh) with undefined-behaviour checks that trap instead of
+# calling a runtime library (MinGW has none): an optimiser exploits UB the
+# -O0 build never did, and a trap here (exit 132 / SIGILL) is where it
+# shows first. It caught xbox_printf.c converting an out-of-range double
+# to int when the Xbox build moved off -O0.
+HOST_CFLAGS="-O2 -fsanitize=undefined -fsanitize=float-cast-overflow -fsanitize-undefined-trap-on-error"
+
 fail=0
 ran=0
 
@@ -43,7 +51,7 @@ run_test() {
 
 # tools/host-tests/nv2a_arena_host_test.c, header.
 nv2a_arena() {
-	gcc -O1 -Wall -std=c99 -Iref/nv2a \
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
 		tools/host-tests/nv2a_arena_host_test.c ref/nv2a/nv2a_arena.c ref/nv2a/nv2a_2d_util.c ref/nv2a/nv2a_tri_util.c ref/nv2a/nv2a_studio_util.c \
 		-lm -o "$OUT/nv2a_arena_test" && "$OUT/nv2a_arena_test"
 }
@@ -51,7 +59,7 @@ run_test nv2a_arena nv2a_arena
 
 # tools/host-tests/nv2a_skin_cache_host_test.c, header.
 nv2a_skin_cache() {
-	gcc -O1 -Wall -std=c99 -Iref/nv2a \
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
 		tools/host-tests/nv2a_skin_cache_host_test.c ref/nv2a/nv2a_skin_cache.c ref/nv2a/nv2a_arena.c \
 		-o "$OUT/nv2a_skin_cache_test" && "$OUT/nv2a_skin_cache_test"
 }
@@ -59,7 +67,7 @@ run_test nv2a_skin_cache nv2a_skin_cache
 
 # tools/host-tests/nv2a_sprite_util_host_test.c, header.
 nv2a_sprite_util() {
-	gcc -O1 -Wall -std=c99 -Iref/nv2a \
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
 		tools/host-tests/nv2a_sprite_util_host_test.c ref/nv2a/nv2a_sprite_util.c \
 		-o "$OUT/nv2a_sprite_util_test" && "$OUT/nv2a_sprite_util_test"
 }
@@ -67,13 +75,13 @@ run_test nv2a_sprite_util nv2a_sprite_util
 
 # tools/host-tests/nv2a_efx_util_host_test.c, header.
 nv2a_efx_util() {
-	gcc -O1 -Wall -std=c99 -Iref/nv2a 		tools/host-tests/nv2a_efx_util_host_test.c ref/nv2a/nv2a_efx_util.c 		-lm -o "$OUT/nv2a_efx_util_test" && "$OUT/nv2a_efx_util_test"
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a 		tools/host-tests/nv2a_efx_util_host_test.c ref/nv2a/nv2a_efx_util.c 		-lm -o "$OUT/nv2a_efx_util_test" && "$OUT/nv2a_efx_util_test"
 }
 run_test nv2a_efx_util nv2a_efx_util
 
 # tools/host-tests/nv2a_lightmap_util_host_test.c, header.
 nv2a_lightmap_util() {
-	gcc -O1 -Wall -std=c99 -Iref/nv2a \
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
 		tools/host-tests/nv2a_lightmap_util_host_test.c ref/nv2a/nv2a_lightmap_util.c \
 		-o "$OUT/nv2a_lightmap_util_test" && "$OUT/nv2a_lightmap_util_test"
 }
@@ -81,11 +89,11 @@ run_test nv2a_lightmap_util nv2a_lightmap_util
 
 # tools/host-tests/printf_host_test.c, header.
 printf_test() {
-	gcc -O1 -Wall -Wno-format -fstack-protector-all \
+	gcc $HOST_CFLAGS -Wall -Wno-format -fstack-protector-all \
 		-Dvsnprintf=xb_vsnprintf -Dsnprintf=xb_snprintf -Dvsprintf=xb_vsprintf \
 		-Dsprintf=xb_sprintf -D_vsnprintf=xb__vsnprintf -D_snprintf=xb__snprintf \
 		-c compat/xbox/xbox_printf.c -o "$OUT/xp.o" &&
-	gcc -O1 -D__USE_MINGW_ANSI_STDIO=1 -fstack-protector-all \
+	gcc $HOST_CFLAGS -D__USE_MINGW_ANSI_STDIO=1 -fstack-protector-all \
 		tools/host-tests/printf_host_test.c "$OUT/xp.o" -o "$OUT/printf_test" && "$OUT/printf_test"
 }
 run_test printf printf_test

@@ -8893,6 +8893,12 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
       16.7/33.3 ms steps), so presentation does not wait on vsync. Report:
       `docs/r3d/reports/x9-item12-xbox-frametimes.html`. The four slow
       maps are X11's first profiling targets (CPU against GPU).
+    - *Measured on an -O0 build (found 2026-09-29).* Every Xbox build up
+      to PR #162 was compiled without optimisation: `tools/xbox-cc.sh` and
+      `tools/xbox-cxx.sh` passed no `-O` flag. The frame times above, and
+      the per-luxel estimates in step 8, describe that build. The build is
+      now -O2 (`tools/xbox-opt.sh`, X11 below); re-run the route on
+      hardware before using these numbers for any decision.
     - *Conclusion:* no drift and no fragmentation across level changes, so
       the GPU arena and the early `Mod_FreeUnused` are not needed. Open:
       `c1a0b`'s frame rate, and the 2.5 MiB `crossfire` difference.
@@ -9817,6 +9823,29 @@ than algorithmic problems. Expect the same shape.
   measured both ways rather than ported on the strength of the reference
   doing it; and SSE intrinsics only for a loop a hardware profile has named.
 - Memory audit: per-map peak, fragmentation after repeated `changelevel`.
+
+- **Compiler optimisation (done 2026-09-30, branch `x9-x-optimize`).**
+  The Xbox build was -O0 by omission (no `-O` in either compile driver;
+  the reference PC build is -O3). Now -O2, one knob `XBOX_OPT` in
+  `tools/xbox-opt.sh`. Measured in xemu on c1a0e, flashlight on (6 faces,
+  585 luxels rebuilt per frame), median of 10 `nv2a_lm_stats.cycles`:
+
+  | | -O0 | -O2 | -Os |
+  |---|---|---|---|
+  | XBE bytes | 6881280 | 5492736 | 4886528 |
+  | `.text` bytes | 5883425 | 4503969 | 3914081 |
+  | resident Image pages (memstats) | 3332 (13.02 MiB) | 2994 (11.70 MiB) | 2846 (11.12 MiB) |
+  | lightmap rebuild, cycles | 235.7k | 128.9k | 135.2k |
+  | lightmap pass, nothing to rebuild | 75k | 38.6k | 43.0k |
+  | xemu fps, same scene | 25.4-28.5 | 30.0 (cap) | 30.0 (cap) |
+
+  xemu's rdtsc is not Pentium III time; the ratios are the result, not
+  the absolute cycles. -O2 chosen: -Os saves 0.58 MiB but costs 5-11% CPU,
+  and the hardware route showed CPU (44 fps), not memory (22-26 MiB free
+  at every map start), as the constraint. Still -O0: nxdk's prebuilt
+  libraries (`make NXDK_ONLY=y` passes no `CFLAGS`; pdclib's `strlen`
+  disassembles as -O0). Rebuilding them with `CFLAGS=-O2` is the next
+  step. Real-hardware frame times at -O2 are pending.
 
 **Exit:** a documented frame budget and peak memory figure on real hardware.
 

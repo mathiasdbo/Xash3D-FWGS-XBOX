@@ -117,6 +117,17 @@ if [ "${#SOURCES[@]}" -eq 0 ]; then
 	exit 1
 fi
 
+# The SDK's own code-generation flag for every Clang/GCC build, nxdk's
+# included: deps/hlsdk/CMakeLists.txt:83 (-fpermissive -fno-strict-aliasing
+# -Wno-invalid-offsetof). xbox-game-manifest.sh carries only its defines,
+# includes and sources, so the one of the three that changes generated code
+# is repeated here. It was inert while the Xbox build was -O0; since
+# tools/xbox-opt.sh made it -O2, type-based alias analysis would otherwise
+# apply to 25-year-old game code its own build never exposes to it.
+# (-fpermissive is not a clang flag, and -Wno-invalid-offsetof only
+# silences a warning.)
+CXX_SDK_FLAGS=( -fno-strict-aliasing )
+
 CXX_DEFINES=()
 for d in "${DEFINES[@]}"; do
 	CXX_DEFINES+=("-D$d")
@@ -188,7 +199,7 @@ exec 3>> "$LOG"
 for f in "${SOURCES[@]}"; do
 	TOTAL=$((TOTAL + 1))
 	obj="$OUT_DIR/$(printf '%s' "$f" | tr '/' '_' | sed 's/\.cpp$/.obj/')"
-	if tools/xbox-cxx.sh "$f" "${CXX_INCLUDES[@]}" "${CXX_DEFINES[@]}" -o "$obj" >&3 2>&3; then
+	if tools/xbox-cxx.sh "$f" "${CXX_SDK_FLAGS[@]}" "${CXX_INCLUDES[@]}" "${CXX_DEFINES[@]}" -o "$obj" >&3 2>&3; then
 		OK=$((OK + 1))
 	else
 		FAIL=$((FAIL + 1))

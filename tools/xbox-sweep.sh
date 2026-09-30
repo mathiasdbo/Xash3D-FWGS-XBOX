@@ -99,7 +99,22 @@ if [ "${XBOX_SWEEP_APPEND_MANIFEST:-0}" != "1" ]; then
 		echo "xbox-sweep: cannot write $MANIFEST" >&2
 		exit 1
 	fi
-	printf 'DRIVER tools/xbox-cc.sh %s\n' "$(cksum "$REPO/tools/xbox-cc.sh" | awk '{print $1}')" >> "$MANIFEST"
+	# The optimisation level is the fourth field: tools/xbox-link-check.sh
+	# refuses a link whose engine objects were swept at another XBOX_OPT
+	# (tools/xbox-opt.sh) - the driver's checksum cannot see an env override.
+	. "$REPO/tools/xbox-opt.sh"
+	printf 'DRIVER tools/xbox-cc.sh %s %s\n' "$(cksum "$REPO/tools/xbox-cc.sh" | awk '{print $1}')" "$XBOX_OPT" >> "$MANIFEST"
+else
+	# Appending: this run's objects join a manifest whose DRIVER line names
+	# the level of the sweep that started it. Mixing levels under one line
+	# would let link-check vouch for objects at a level it never checked.
+	. "$REPO/tools/xbox-opt.sh"
+	APPEND_OPT="$(awk '$1 == "DRIVER" { print $4; exit }' "$MANIFEST" 2>/dev/null)"
+	if [ "$APPEND_OPT" != "$XBOX_OPT" ]; then
+		echo "xbox-sweep: $MANIFEST was started at XBOX_OPT='${APPEND_OPT:-none recorded}'," >&2
+		echo "  this append runs at '$XBOX_OPT'. Run the full sweep instead." >&2
+		exit 1
+	fi
 fi
 exec 5>> "$MANIFEST"
 

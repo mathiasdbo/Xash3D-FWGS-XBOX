@@ -35,7 +35,8 @@
 # Repository and nxdk paths are rewritten to fixed tokens in the arguments
 # and inside line markers only, so a git worktree hits what the main
 # checkout built. That is sound because __FILE__ - the one way a path
-# reaches the object's bytes at -O0 with no -g (neither driver passes -g;
+# reaches the object's bytes with no -g, at any -O level (neither driver
+# passes -g - tools/xbox-opt.sh says why;
 # COFF's .file symbol is the basename, checked) - is made relative for the
 # same path forms by the -fmacro-prefix-map this script adds to every
 # compile it caches. So with the cache on, __FILE__ reads "./engine/..."
@@ -51,7 +52,7 @@
 # entries from hitting, but objects already copied into a .sweep stay.
 #
 # Anything this script does not understand is a bypass, never a guess: an
-# argument outside the plain -c/-o/-I/-D/-U/-f/-W/-m/-std/-target/-include/
+# argument outside the plain -c/-o/-I/-D/-U/-O/-f/-W/-m/-std/-target/-include/
 # -isystem set (-v, -E, -S, -M*, -save-temps, --serialize-diagnostics...),
 # and -fsanitize*/-fprofile*/-fcoverage*/-fplugin*/-Wp,* within it,
 # no sha256sum, no -o, a failed preprocess. A bypass runs the compiler with
@@ -78,7 +79,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		-E) mode=E ;;
 		-o) out="$2"; shift ;;
-		-c|-P|-I*|-D*|-f*) ;;
+		-c|-P|-I*|-D*|-f*|-O*) ;;
 		*) src="$1" ;;
 	esac
 	shift
@@ -106,6 +107,11 @@ EOF
 	# A different define is a different compile.
 	bash "$0" "$C" "$tmp/cc" -DY -c "$tmp/a.c" -o "$tmp/a3.obj"
 	[ "$(wc -l < "$tmp/count")" -eq 2 ] || { echo "self-test: a changed argument hit the cache" >&2; fail=1; }
+	# A different optimisation level is a different compile, both ways.
+	bash "$0" "$C" "$tmp/cc" -DX -O0 -c "$tmp/a.c" -o "$tmp/o0.obj"
+	bash "$0" "$C" "$tmp/cc" -DX -O2 -c "$tmp/a.c" -o "$tmp/o2.obj"
+	[ "$(wc -l < "$tmp/count")" -eq 4 ] || { echo "self-test: -O0 and -O2 shared a cache entry" >&2; fail=1; }
+	grep -q '^bypass ' "$C/stats.log" && { echo "self-test: an -O flag bypassed the cache" >&2; fail=1; }
 	# Changed input content is a different compile.
 	printf 'int b;\n' > "$tmp/a.c"
 	bash "$0" "$C" "$tmp/cc" -DX -c "$tmp/a.c" -o "$tmp/a4.obj"
@@ -173,6 +179,9 @@ while [ "$i" -lt "${#args[@]}" ]; do
 		-I|-isystem|-include|-target|-D|-U)
 			PP+=( "$a" "${args[$((i + 1))]:-}" ); CMD+=( "$a" "${args[$((i + 1))]:-}" ); i=$((i + 2)); continue ;;
 		-fsanitize*|-fprofile*|-fcoverage*|-fplugin*|-Wp,*) bypass "$@" ;;
+		# -O*: tools/xbox-opt.sh's level. In PP too, so it is in the key (it also
+		# sets __OPTIMIZE__): an -O0 object is never served to an -O2 compile.
+		-O|-O[0-3sgz]) PP+=( "$a" ); CMD+=( "$a" ) ;;
 		-I*|-D*|-U*|-f*|-W*|-m*|-std=*|-nostdlib|-nostdinc|-ffreestanding) PP+=( "$a" ); CMD+=( "$a" ) ;;
 		-*) bypass "$@" ;;
 		*) SRC="$a"; PP+=( "$a" ); CMD+=( "$a" ) ;;

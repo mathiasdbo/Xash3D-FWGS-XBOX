@@ -127,12 +127,22 @@ if [ ! -f "$MANIFEST" ]; then
 	echo "  link objects no sweep vouches for." >&2
 	exit 1
 fi
+# The level the objects must have been compiled at (tools/xbox-opt.sh).
+# Every compile this script and its callers run themselves uses it too.
+. "$REPO/tools/xbox-opt.sh"
 DRIVER_SUM_NOW="$(cksum tools/xbox-cc.sh | awk '{print $1}')"
 DRIVER_SUM_THEN="$(awk '$1 == "DRIVER" { print $3; exit }' "$MANIFEST")"
 if [ "$DRIVER_SUM_NOW" != "$DRIVER_SUM_THEN" ]; then
 	echo "xbox-link-check: tools/xbox-cc.sh changed since the sweep that produced" >&2
 	echo "  $MANIFEST (checksum $DRIVER_SUM_THEN then, $DRIVER_SUM_NOW now) - every" >&2
 	echo "  object may carry stale flags. Re-run the sweep." >&2
+	exit 1
+fi
+DRIVER_OPT_THEN="$(awk '$1 == "DRIVER" { print $4; exit }' "$MANIFEST")"
+if [ "$DRIVER_OPT_THEN" != "$XBOX_OPT" ]; then
+	echo "xbox-link-check: $MANIFEST was swept at XBOX_OPT='${DRIVER_OPT_THEN:-none recorded}'," >&2
+	echo "  this link runs at XBOX_OPT='$XBOX_OPT' (tools/xbox-opt.sh). Re-run the" >&2
+	echo "  sweep at the level you mean to link." >&2
 	exit 1
 fi
 STALE=0
@@ -509,6 +519,15 @@ if [ -d "$MAINUI_DIR" ]; then
 	fi
 	if [[ "$MANIFEST_CONTENT" =~ TOTAL=([0-9]+) ]]; then
 		MANIFEST_TOTAL="${BASH_REMATCH[1]}"
+	fi
+	MANIFEST_OPT=""
+	if [[ "$MANIFEST_CONTENT" =~ OPT=(-O[0-9a-z]) ]]; then
+		MANIFEST_OPT="${BASH_REMATCH[1]}"
+	fi
+	if [ "$MANIFEST_OPT" != "$XBOX_OPT" ]; then
+		echo "xbox-link-check: $MAINUI_DIR was swept at XBOX_OPT='${MANIFEST_OPT:-none recorded}'," >&2
+		echo "  this link runs at XBOX_OPT='$XBOX_OPT'. Re-run tools/xbox-mainui-sweep.sh." >&2
+		exit 1
 	fi
 	# Found in review, 2026-09-09 (second pass): checking FAIL alone was
 	# not enough - tools/xbox-mainui-sweep.sh used to write "OK=0 FAIL=0

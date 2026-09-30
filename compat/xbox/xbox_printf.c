@@ -147,9 +147,14 @@ static size_t emit_integer_part( char *dst, double ip )
 		while( t >= 1.0 && ndig < (int)sizeof( rev ) - 1 )
 		{
 			double q = floor( t / 10.0 );
-			int d = (int)( t - q * 10.0 );
-			if( d < 0 ) d = 0;
-			if( d > 9 ) d = 9;
+			double r = t - q * 10.0;
+			/* Clamp before converting, not after: above 2^53 the remainder
+			   is not confined to [0, 10) - it can be as large as one ulp of
+			   t (1e284 at t = 1e300) - and converting an out-of-range double
+			   to int is undefined. Found by the host test built at -O2 with
+			   -fsanitize=float-cast-overflow when the Xbox build moved off
+			   -O0 (tools/xbox-opt.sh). */
+			int d = r <= 0.0 ? 0 : r >= 9.0 ? 9 : (int)r;
 			rev[ndig++] = (char)( '0' + d );
 			t = q;
 		}

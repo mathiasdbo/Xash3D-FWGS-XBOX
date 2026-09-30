@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - the Xbox build is optimised (-O2); it was -O0
+
+No Xbox compile passed an optimisation flag, so everything - engine, ref/nv2a,
+the menu, the game code - was built unoptimised. Every Xbox frame time measured
+before this, including the real-hardware 44 fps route, was of an -O0 build.
+The build now uses -O2 through one setting, `XBOX_OPT` (`tools/xbox-opt.sh`),
+recorded in the sweep manifests so a link cannot mix levels. The game code
+gets the SDK's own `-fno-strict-aliasing`.
+Measured in xemu against the -O0 build: the XBE shrinks from 6.9 MB to
+5.5 MB, the resident image by 1.3 MiB, and the lightmap rebuild costs 0.55x
+the CPU cycles. A scene that ran at 25-28 fps in xemu holds its 30 fps cap.
+The optimiser exposed two latent bugs, both fixed:
+- Menu text: the space between words was measured from an uninitialised
+  glyph box, so its width depended on the build (divergence #135, an
+  upstream bug).
+- `printf("%f")` of very large numbers converted an out-of-range double to
+  int; the host tests now build at -O2 with undefined-behaviour traps.
+nxdk's own prebuilt libraries (pdclib, pbkit, SDL) are still -O0.
+
 ### Added - animated and switchable lights, and dynamic lights on walls, on Xbox (ref/nv2a)
 
 World and brush-entity lighting now changes at run time, as in the

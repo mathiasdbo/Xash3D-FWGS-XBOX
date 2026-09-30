@@ -29,6 +29,31 @@ Follow these or the file degrades into notes nobody reads.
 
 ## Rules
 
+### NEVER report a CPU or frame-time number without reading the compile line that produced the binary
+
+Every Xbox frame time taken before 2026-09-29 - the real-hardware
+route at 44 fps with four maps near 30, and PR #162's per-luxel cycle
+estimates - came from an -O0 build: `tools/xbox-cc.sh` and
+`tools/xbox-cxx.sh` passed no `-O` flag at all, and nobody had looked.
+Nothing chose -O0; it was an omission that every measurement inherited.
+At -O2 the same lightmap workload costs 0.54x the cycles and the XBE
+is 20% smaller. **Before a performance number goes into a report, read
+the exact flags of the compile (and of the prebuilt libraries it links -
+nxdk's are still -O0) and write the level next to the number.**
+
+### ALWAYS diff the picture from a second optimisation level before trusting "no visual change"
+
+An uninitialised read is deterministic inside one build, so
+screenshots of that build agree with each other and with its own
+baseline forever. `CStbFont::GetCharABCWidthsNoCache` computed the
+space's advance from a glyph box `stbtt_GetGlyphBox` never wrote
+(divergence #135): stable at -O0, stable at -O2, and one to two pixels
+apart between them - visible only because every two-word menu label
+differed while every one-word label was pixel-identical. **When a
+change could expose undefined behaviour, compare the same view built
+at two optimisation levels, and read a difference that follows a
+pattern (all labels with a space) as a bug, not noise.**
+
 ### NEVER leave a renderer callback unimplemented without reading what the engine does around the call
 
 ref/nv2a skipped `CL_DrawEFX` for nine steps as "effects, not drawn

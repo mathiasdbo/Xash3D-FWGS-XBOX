@@ -98,6 +98,8 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
+# The optimisation level (XBOX_OPT, default -O2): see tools/xbox-opt.sh.
+. "$REPO/tools/xbox-opt.sh"
 
 # Same two auto-apply preflights as xbox-cc.sh, verbatim - see that file's
 # own comments for the full reasoning. Duplicated rather than sourced: this
@@ -195,6 +197,7 @@ CC_WRAP=()
 exec ${CC_WRAP[@]+"${CC_WRAP[@]}"} clang++ \
 	-target i386-pc-win32 \
 	-march=pentium3 \
+	"$XBOX_OPT" \
 	-fuse-ld=nxdk-link \
 	-ffreestanding \
 	-nostdlib \

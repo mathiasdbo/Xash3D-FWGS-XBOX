@@ -223,7 +223,10 @@ fi
 # to a broken empty result" (no manifest) apart from "swept, but not
 # cleanly" (manifest says FAIL>0) apart from "swept and clean"
 # (FAIL=0, TOTAL>0) without re-deriving any of this itself.
-echo "OK=$OK FAIL=$FAIL TOTAL=$TOTAL" > "$OUT_DIR/manifest.txt"
+# OPT= is the level tools/xbox-cxx.sh compiled at (tools/xbox-opt.sh);
+# tools/xbox-link-check.sh refuses these objects under any other level.
+. "$REPO/tools/xbox-opt.sh"
+echo "OK=$OK FAIL=$FAIL TOTAL=$TOTAL OPT=$XBOX_OPT" > "$OUT_DIR/manifest.txt"
 
 if [ -n "$EXPECT_TOTAL" ]; then
 	if [ "$TOTAL" -eq "$EXPECT_TOTAL" ]; then

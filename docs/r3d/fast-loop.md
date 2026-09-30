@@ -151,7 +151,7 @@ record these; the record's gate seconds and `live-look` timings carry
 most of them:
 
 - **The cache hit rate.** Read it from the cache's `stats.log`.
-  Preprocessing still runs on a hit. At `-O0` with no `-g`, how much a
+  Preprocessing still runs on a hit. With no `-g`, how much a
   copy saves over a compile is the number to get.
 - **The per-unit driver overhead on MSYS2.** Each `xbox-cc.sh` call is a
   bash process plus nxdk's `activate`. If that dominates a cached sweep,
