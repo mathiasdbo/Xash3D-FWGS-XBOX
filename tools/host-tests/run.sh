@@ -95,6 +95,14 @@ nv2a_texanim_util() {
 }
 run_test nv2a_texanim_util nv2a_texanim_util
 
+# tools/host-tests/nv2a_sky_util_host_test.c, header.
+nv2a_sky_util() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
+		tools/host-tests/nv2a_sky_util_host_test.c ref/nv2a/nv2a_sky_util.c \
+		-lm -o "$OUT/nv2a_sky_util_test" && "$OUT/nv2a_sky_util_test"
+}
+run_test nv2a_sky_util nv2a_sky_util
+
 # tools/host-tests/printf_host_test.c, header.
 printf_test() {
 	gcc $HOST_CFLAGS -Wall -Wno-format -fstack-protector-all \

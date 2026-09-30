@@ -102,6 +102,26 @@ public:
     // every reserved field 0 (dwReserved1[0] is read back as the image's
     // encode method, img_dds.c:374 - it must stay DXT_ENCODE_DEFAULT).
     static std::vector<uint8_t> makeDxt1Dds(int width, int height, const std::vector<uint8_t>& blocks);
+
+    // X9-X item 14 step 10 (docs/r3d/divergences.md #137): bakes every
+    // complete skybox under <gameDir>/gfx/env - the six
+    // <name>{rt,bk,lf,ft,up,dn}.tga the engine's R_SetupSky looks for
+    // (engine/client/dll_int/ref_common.c:33, :71) - to opaque DXT1 .dds
+    // files of the same names under <outDir>/gfx/env, an overlay tree for
+    // tools/xbox-xiso.sh --sky-bake. The engine's CheckSkybox tries .dds
+    // before .tga (ref_common.c:73), so nothing else changes: ref/nv2a
+    // uploads the DXT1 as is (r_image.c nv2a_tex_upload_compressed), 32 KiB
+    // a side instead of the 256 KiB RGBA32 texture a 256x256 TGA side
+    // becomes. Rows are written top-down, as readTga and the engine's own
+    // TGA loader both normalise them (img_tga.c:138-146). A set whose
+    // sides are not all power-of-two squares' worth of whole 4x4 blocks
+    // (ref/nv2a sizes DXT by log2 BASE_SIZE) is left out and reported -
+    // the engine then keeps loading its TGA. Only complete sets are
+    // written: CheckSkybox picks one extension for all six sides, so a
+    // partial .dds set would be ignored. Returns false on an unreadable
+    // or undecodable side or a write failure; `setsWritten` counts the
+    // baked sets.
+    static bool bakeSkyArt(const std::string& gameDir, const std::string& outDir, int& setsWritten);
 };
 
 }

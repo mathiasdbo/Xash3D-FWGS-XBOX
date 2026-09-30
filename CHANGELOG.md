@@ -5,6 +5,31 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - skies on Xbox (ref/nv2a); optional DXT1 sky bake for the disc
+
+Sky surfaces now show the map's skybox (`gfx/env/<skyname>`), drawn around
+the view as in the reference renderer: each visible sky face is clipped onto
+the six sides of a box around the eye and only the covered part of each side
+is drawn (`R_AddSkyBoxSurface`/`R_DrawSkyBox`). Until now sky openings were
+flat black.
+- Everything in front of the sky covers it: world, doors, models, effects.
+  ref/nv2a draws the box before the world with depth off, where ref/gl
+  draws it after the world at half its far clip. ref/nv2a's projection has a
+  fixed far plane of 8192, which the reference's box does not fit on
+  MaxRange 8000-12000 maps (c2a5, Xen) (divergence #137).
+- Fixes a leak: the engine loaded the six sides on every map and ref/nv2a
+  never freed them, so each change to a different sky stranded the previous
+  set (1.5 MiB at RGBA32; measured in xemu, c4a1 then c2a5).
+- `tools/asset-studio --bake-sky-dxt1 --game-dir <valve> --output <dir>`
+  writes every retail sky as DXT1 `.dds` (19 sets, 3.6 MiB on disc), and
+  `tools/xbox-xiso.sh --sky-bake <dir>` puts them next to the retail TGAs.
+  The engine picks the `.dds` first, so a sky costs 192 KiB of GPU memory
+  instead of 1.5 MiB. Quality: mean PSNR 37.9-53.2 dB per set against the
+  TGAs (40.1 dB measured on screen). A disc without them still shows the
+  TGA skies. No map archive needs a re-bake.
+- New tests: the `nv2a_sky_util` host test and the `sky_art_bake_test`
+  ctest.
+
 ### Added - animated textures on Xbox (ref/nv2a); maps need a re-bake
 
 World and brush-entity textures now animate as in the reference renderer

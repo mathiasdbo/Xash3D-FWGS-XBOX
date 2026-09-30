@@ -9307,7 +9307,63 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
          (rocket_frenzy). disposal (32.4%) and contamination (28.4%) still
          fit the nv2a budget.
        - An old archive keeps its old look and prints a re-bake warning.
-    10. *Sky* (skybox from `R_SetupSky`; check the images are on the disc).
+    10. ~~*Sky* (skybox from `R_SetupSky`; check the images are on the
+        disc).~~ **Done (x9-x-sky, divergences.md #137):**
+       - On main `R_SetupSky` was empty. The engine still loaded the six
+         sides of every map's sky (`ref_common.c:103`), and nothing drew
+         or freed them. Sky faces were skipped (X9-K), so sky showed as
+         black. Every change to a different sky stranded the previous set.
+       - `ref/nv2a/r_sky.c` ports `R_SetupSky`, `R_UnloadSkybox`,
+         `R_AddSkyBoxSurface` and `R_DrawSkyBox`. `nv2a_sky_util.c`
+         (host-tested) ports `ClipSkyPolygon`, `DrawSkyPolygon` and
+         `MakeSkyVec` (`gl_warp.c`).
+       - `nv2a_draw_sky` (r_context.c) walks the sky texture's batches with
+         the world pass's own cull tests. It draws the box through the
+         TriAPI before the world, with depth off, so everything drawn after
+         covers it. ref/gl's box at `farClip/2` does not fit ref/nv2a's
+         fixed zFar of 8192 on the MaxRange 8000-12000 maps.
+       - The images are on the disc: `xbox-xiso.sh` copies the whole retail
+         gamedir, so all of `gfx/env` is there (198 files, 28 MiB). All 19
+         sets are 256x256: 114 24-bit TGAs, plus 8-bit BMPs for 14 sets.
+         Every skyname a retail map uses has a TGA set, except `day` and
+         `dawn` (c2a2a, c2a3c). Those have no files, and the engine falls
+         back to `desert`, as upstream does.
+       - Memory. A TGA side becomes RGBA32, 256 KiB, so a sky costs
+         1.5 MiB. `asset-studio --bake-sky-dxt1` writes each set as
+         one-level DXT1 `.dds` (32 KiB a side, 192 KiB a sky, 3.6 MiB on
+         disc for all 19). `xbox-xiso.sh --sky-bake` stages them, and the
+         engine's `CheckSkybox` picks `.dds` first. Quality: mean PSNR
+         37.9-53.2 dB per set against the TGAs, about as good as RGB565 at
+         a quarter of its size. Worst single side: `cliff`, 32.4 dB.
+       - Budget. The sides go into the texture arena, or a fallback
+         allocation when the arena is full (live: 3 sides in the arena, 3
+         outside). Only one sky is resident at a time now. `Nv2aMapFit`
+         does not count them. It never counted the 1.5 MiB main already
+         loaded either: its X9-U calibration predates texture loading
+         (Nv2aMapFit.h). Like the sprites of step 6, this is a
+         pre-existing gap outside the arena term. The DXT1 bake shrinks
+         it to 192 KiB, and no new term is added here.
+       - Nothing needs a re-bake: no `.mpak` changes. The disc needs the
+         `.dds` overlay for DXT1; without it the TGAs load as before.
+       - Verified in xemu, branch vs main (animtex.xbe = main 92c360f4),
+         same disc:
+         - c2a5 (desert): horizon, box corners at yaw 45/135, straight up
+           and pitch -45 all show the sky, with no seam.
+           - At the corner column the gradient is at the frame's median.
+           - The canyon rock, the dam and the Apache cover the sky.
+           - Main shows black there.
+         - c4a1 (neb7): the Xen nebula shows behind the floating islands.
+         - Texture table read live:
+           - neb7 is six DXT1 sides, 32768 bytes each.
+           - Loading c4a1 then c2a5 leaves only the desert set on the
+             branch; on main both sets stay resident.
+           - Without the `.dds`, the TGA sides load as RGBA32 (262144 bytes
+             each) and draw the same sky (40.1 dB between the two grabs).
+         - c1a0e indoors: every pixel stable within each build matches
+           main, except one NPC posed differently between runs.
+       - Not verified: real hardware; frame cost (X11). Not tested live: a
+         map without sky in view but with sky faces in the PVS (the pass
+         just finds no side to draw).
     11. *Water warp* (`!` textures: `GL_SubdivideSurface` and the per-vertex
         sin-table texture coordinates of `EmitWaterPolys`) and underwater
         fog (`R_CheckFog`).
@@ -9322,6 +9378,17 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
         bilinear-edge case is left open, needs a combiner change). Still
         open: decals; screenshots (the save-game thumbnail);
         `Mod_GetCurrentVis`.
+    13. *Frame-time recorder and overlay (the last step; owner's request,
+        2026-09-30).* One enum cvar selects the frame analysis: none,
+        record, or record + overlay. Record writes every frame's time
+        (plus map changes and free memory) to a file on the Xbox's hard
+        drive, collected over FTP; the overlay draws a frame-time graph
+        with current, average and 1% low in the 2D pass, on top of the
+        HUD. Costs nothing when off and is bounded when on; a tool in
+        `tools/` turns the file into the report. It replaces the temporary
+        probe patched into `r_context.c` for item 12's hardware session,
+        which no longer applies to the current code, and `cl_showfps`,
+        which only gives a one-second average.
 
 15. **Optional: reflective water (enhancement, off by default).** Once
     item 14's water warp is in and X11's profiling shows frame time to

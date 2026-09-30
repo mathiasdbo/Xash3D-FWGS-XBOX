@@ -69,6 +69,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "nv2a_lightmap_util.h" /* X9-X step 8: NV2A_LM_MAX_LUXELS_PER_AXIS */
 #include "r_lightmap.h" /* X9-X step 8: lightstyles and dynamic lights (R_CheckLightMap/R_BuildLightMap port) */
 #include "nv2a_texanim_util.h" /* X9-X item 14 step 9: R_TextureAnimation in texture-index space, host-tested */
+#include "r_sky.h" /* X9-X item 14 step 10: the skybox (gl_warp.c port) */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -3402,6 +3403,7 @@ static void R_Shutdown( void )
 	/* X9-X D7: every texture slot, then the arena/table, after pb_kill -
 	   the GPU is idle by now, matching nv2a_tex_shutdown()'s own comment. */
 	nv2a_tex_shutdown();
+	R_SkyShutdown(); /* X9-X item 14 step 10: its texnums were slots of that table */
 	if( nv2a_2d_ring )
 	{
 		MmFreeContiguousMemory( nv2a_2d_ring );
@@ -3604,10 +3606,7 @@ static void GL_ProcessTexture( int texnum, float gamma, int topColor, int bottom
 	;
 }
 
-static void R_SetupSky( int *skytextures )
-{
-	;
-}
+/* X9-X item 14 step 10: R_SetupSky is real now, in r_sky.c (r_sky.h). */
 
 /* GL enums TriGetMatrix/GetMatrix read (gl_export.h:63-64) - the one
    deliberate exception to "no new literal NV097 value outside nv_regs.h":
@@ -4893,7 +4892,7 @@ static intptr_t RefGetParm( int parm, int arg )
 	case PARM_TEX_SRC_HEIGHT: return nv2a_tex_get((unsigned int)arg )->srcHeight;
 	case PARM_TEX_MIPCOUNT:   return 1; /* D2: no mip chain this phase */
 	case PARM_TEX_DEPTH:      return 1;
-	case PARM_TEX_SKYBOX:     return 0;
+	case PARM_TEX_SKYBOX:     return R_SkyboxTexture( arg ); /* gl_context.c:182 */
 	case PARM_TEX_SKYTEXNUM:  return 0;
 	case PARM_TEX_LIGHTMAP:   return 0;
 	case PARM_TEX_TARGET:     return 0;
@@ -5295,6 +5294,101 @@ static void nv2a_update_dynamic_lightmaps( void )
 	R_LightmapUpdate( &view, brush, n );
 }
 
+/* X9-X item 14 step 10: the skybox (r_sky.c, divergences.md #137). The
+   half of R_DrawWorld (gl_rsurf.c:3695-3719) that ref/gl spreads over its
+   world walk: R_ClearSkyBox, every visible SURF_DRAWSKY world face into
+   R_AddSkyBoxSurface (R_RecursiveWorldNode's skychain, gl_rsurf.c:3518,
+   R_DrawTextureChains, :1532), then R_DrawSkyBox when any face came
+   through (:3718, skipped in the dev overview as there).
+
+   Drawn BEFORE the world with depth off (#137), so it cannot ride on
+   nv2a_draw_map_geometry's own walk, which draws as it goes; it walks the
+   sky batches itself instead. A sky face's texture is the map's sky
+   texture, which the engine flags SURF_DRAWSKY by name (Mod_LoadSurfaces),
+   and a batch is one texture, so a batch whose first face is sky is all
+   sky - the rest are skipped at one byte each. Each face gets the world
+   pass's own tests, in the world pass's order: world face (not a brush
+   entity's - ref/gl never draws their sky either, R_RenderBrushPoly,
+   gl_rsurf.c:1483), frustum, PVS, then the back-face test of
+   R_CullSurface (gl_cull.c:83-110). Without a per-face table there is no
+   face-to-surface mapping, and the world pass draws the sky batch as a
+   plain wall, as before this step. */
+static void nv2a_draw_sky( void )
+{
+	const model_t *world = gp_cl->models[1];
+	uint32_t b, i;
+
+	if( world != nv2a_map_owner )
+		world = NULL;
+
+	R_ClearSkyBox( nv2a_eye_origin );
+
+	if( world == NULL || nv2a_map_faces == NULL || nv2a_map_face_orig == NULL )
+		return;
+
+	/* FWORLD_SKYSPHERE without a custom skybox: ref/gl draws Quake clouds
+	   and no box (gl_rsurf.c:1526-1541). Not ported (#137); a Half-Life map
+	   always has a custom skybox (R_SetupSky falls back to "desert"). */
+	if( ENGINE_GET_PARM( PARM_SKY_SPHERE ))
+		return;
+
+	for( b = 0; b < nv2a_map_batch_count; b++ )
+	{
+		const nv2a_map_batch_t *batch = &nv2a_map_batches[b];
+		uint32_t end_face;
+
+		if( (uint64_t)batch->startFace + batch->faceCount > (uint64_t)nv2a_map_face_count || batch->faceCount == 0 )
+			continue;
+		if( !nv2a_map_faces[batch->startFace].sky )
+			continue;
+
+		end_face = batch->startFace + batch->faceCount;
+		for( i = batch->startFace; i < end_face; i++ )
+		{
+			const nv2a_map_face_t *face = &nv2a_map_faces[i];
+			uint32_t orig = nv2a_map_face_orig[i];
+			const msurface_t *surf;
+
+			if( !face->sky || !nv2a_map_face_is_world( world, i ))
+				continue;
+			if( orig >= (uint32_t)world->numsurfaces )
+				continue;
+			if( nv2a_frustum_cull_face( face ))
+				continue;
+			if( nv2a_map_face_visible != NULL && !nv2a_r_novis.value && !nv2a_map_face_visible[i] )
+				continue;
+
+			surf = &world->surfaces[orig];
+
+			/* R_CullSurface's back-face test, as nv2a_draw_map_geometry
+			   applies it (gl_cull.c:76: r_nocull returns first). */
+			if( !nv2a_r_nocullback.value && !nv2a_r_nocull.value && !VectorIsNull( surf->plane->normal ))
+			{
+				float dist = PlaneDiff( nv2a_eye_origin, surf->plane );
+
+				if( FBitSet( surf->flags, NV2A_SURF_PLANEBACK ))
+					dist = -dist;
+				if( dist <= BACKFACE_EPSILON )
+					continue;
+			}
+
+			R_AddSkyBoxSurface( world, surf );
+		}
+	}
+
+	if( R_SkyHasSurfaces() && !ENGINE_GET_PARM( PARM_DEV_OVERVIEW ))
+	{
+		/* A full TriAPI re-entry, whatever was pushed last: this is the
+		   frame's first 3D TriAPI batch, and the GPU may hold the 2D
+		   pass's or the world's state (lessons.md: a draw that depends
+		   on state it never sets breaks by what else is on screen). */
+		nv2a_2d_dirty = true;
+		R_DrawSkyBox();
+		/* Submitted now, before the world pushes its own state directly. */
+		nv2a_2d_flush();
+	}
+}
+
 /* X9-E: the real per-frame camera, replacing the fixed one-time debug
    camera nv2a_load_map_geometry() used to compute. Called by the engine
    (engine/client/cl_view.c's own V_RenderView, BEFORE R_EndFrame runs
@@ -5546,6 +5640,8 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		   map's first frame, its tables), for the world and the brush
 		   entities drawn after it. */
 		nv2a_texanim_begin_frame( gp_cl->models[1] == nv2a_map_owner ? gp_cl->models[1] : NULL );
+		/* X9-X item 14 step 10: the skybox, before the world (#137). */
+		nv2a_draw_sky();
 		nv2a_draw_map_geometry();
 		nv2a_world_drawn_this_frame = true;
 	}

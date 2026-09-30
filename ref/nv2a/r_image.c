@@ -132,6 +132,7 @@ const nv2a_texture_t *nv2a_tex_get( unsigned int texnum )
 unsigned int nv2a_tex_default( void ) { return nv2a_texnum_default; }
 unsigned int nv2a_tex_white( void )   { return nv2a_texnum_white; }
 unsigned int nv2a_tex_particle( void ) { return nv2a_texnum_particle; }
+unsigned int nv2a_tex_gray( void )     { return nv2a_texnum_gray; }
 
 static qboolean nv2a_tex_check_name( const char *name )
 {

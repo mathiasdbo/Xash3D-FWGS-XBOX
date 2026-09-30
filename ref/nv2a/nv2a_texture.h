@@ -267,6 +267,9 @@ unsigned int nv2a_tex_white( void );
 /* X9-X step 7: ref/gl's tr.particleTexture (gl_image.c:1656), bound by
    CL_DrawParticles (r_efx.c). */
 unsigned int nv2a_tex_particle( void );
+/* X9-X item 14 step 10: ref/gl's tr.grayTexture (gl_image.c:1660), the
+   stub R_DrawSkyBox binds for a side with no image (gl_warp.c:351). */
+unsigned int nv2a_tex_gray( void );
 
 /* Implemented in r_context.c, needed here for D4/D6's own frame-hazard
    and filter-selection logic - see each call site's own comment. */

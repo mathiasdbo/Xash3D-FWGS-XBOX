@@ -15,6 +15,9 @@
 #include <tuple>
 #include <cmath>
 #include <cstddef>
+#include <cctype>
+#include <filesystem>
+#include <system_error>
 
 namespace formats {
 
@@ -718,6 +721,119 @@ std::vector<uint8_t> UiPacker::makeDxt1Dds(int width, int height, const std::vec
     put(108, kDdsCapsTexture);
     std::memcpy(&out[128], blocks.data(), blocks.size());
     return out;
+}
+
+bool UiPacker::bakeSkyArt(const std::string& gameDir, const std::string& outDir, int& setsWritten) {
+    // r_skyBoxSuffix, engine/client/dll_int/ref_common.c:33.
+    static const char* const kSides[6] = {"rt", "bk", "lf", "ft", "up", "dn"};
+    setsWritten = 0;
+
+    const std::filesystem::path envDir = std::filesystem::path(gameDir) / "gfx" / "env";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(envDir, ec)) {
+        std::cerr << "bakeSkyArt: no " << envDir.string() << " directory\n";
+        return false;
+    }
+
+    // Base names with a .tga for some side, as spelled on disk (lower-cased
+    // for matching; the disc is case-insensitive, the spelling is kept).
+    std::vector<std::pair<std::string, std::string>> bases; // {lower, as on disk}
+    for (const auto& entry : std::filesystem::directory_iterator(envDir, ec)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (lower.size() <= 6 || lower.compare(lower.size() - 4, 4, ".tga") != 0) continue;
+        std::string stemLower = lower.substr(0, lower.size() - 4);
+        for (const char* side : kSides) {
+            if (stemLower.size() > 2 && stemLower.compare(stemLower.size() - 2, 2, side) == 0) {
+                std::string baseLower = stemLower.substr(0, stemLower.size() - 2);
+                std::string base = name.substr(0, baseLower.size());
+                bool seen = false;
+                for (const auto& b : bases) seen = seen || b.first == baseLower;
+                if (!seen) bases.emplace_back(baseLower, base);
+                break;
+            }
+        }
+    }
+    std::sort(bases.begin(), bases.end());
+    if (ec) {
+        std::cerr << "bakeSkyArt: listing " << envDir.string() << " failed: " << ec.message() << "\n";
+        return false;
+    }
+
+    const std::filesystem::path outEnv = std::filesystem::path(outDir) / "gfx" / "env";
+    std::filesystem::create_directories(outEnv, ec);
+    if (ec) {
+        std::cerr << "bakeSkyArt: could not create " << outEnv.string() << ": " << ec.message() << "\n";
+        return false;
+    }
+
+    rgbcx::init(rgbcx::bc1_approx_mode::cBC1Ideal); // the decoder model the world and menu DXT1 bake with
+
+    for (const auto& base : bases) {
+        // Find each side's file case-insensitively (same base spelling
+        // normally, but a retail set is not guaranteed consistent).
+        std::string sidePaths[6];
+        bool complete = true;
+        for (int s = 0; s < 6 && complete; ++s) {
+            std::string want = base.first + kSides[s] + ".tga";
+            for (const auto& entry : std::filesystem::directory_iterator(envDir, ec)) {
+                std::string name = entry.path().filename().string();
+                std::string lower = name;
+                std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (lower == want) {
+                    sidePaths[s] = entry.path().string();
+                    break;
+                }
+            }
+            complete = !sidePaths[s].empty();
+        }
+        if (!complete) {
+            std::cout << "bakeSkyArt: " << base.second << ": incomplete .tga set, left as is\n";
+            continue;
+        }
+
+        std::vector<std::vector<uint8_t>> dds(6);
+        bool bakeable = true;
+        for (int s = 0; s < 6; ++s) {
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            if (!readTga(sidePaths[s], rgba, w, h)) {
+                std::cerr << "bakeSkyArt: could not decode " << sidePaths[s] << "\n";
+                return false;
+            }
+            const bool pot = (w & (w - 1)) == 0 && (h & (h - 1)) == 0;
+            if (!pot || w < 4 || h < 4) {
+                std::cout << "bakeSkyArt: " << base.second << ": side " << kSides[s] << " is " << w << "x" << h
+                          << ", not power-of-two whole DXT blocks - set left as TGA\n";
+                bakeable = false;
+                break;
+            }
+            // Opaque: the engine draws the box with blending and alpha
+            // test off (gl_warp.c:340-341) - no block may take BC1's
+            // transparent selector.
+            for (size_t i = 3; i < rgba.size(); i += 4) rgba[i] = 255;
+            std::vector<uint8_t> blocks = TextureOpt::compressToDXT(rgba.data(), w, h, false);
+            dds[s] = makeDxt1Dds(w, h, blocks);
+        }
+        if (!bakeable) continue;
+
+        for (int s = 0; s < 6; ++s) {
+            std::filesystem::path out = outEnv / (base.second + kSides[s] + ".dds");
+            std::ofstream f(out, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(dds[s].data()), static_cast<std::streamsize>(dds[s].size()));
+            if (!f.good()) {
+                std::cerr << "bakeSkyArt: could not write " << out.string() << "\n";
+                return false;
+            }
+        }
+        std::cout << "bakeSkyArt: " << base.second << ": 6 sides -> DXT1 .dds\n";
+        ++setsWritten;
+    }
+
+    std::cout << "bakeSkyArt: " << setsWritten << " sky set(s) baked into " << outEnv.string() << "\n";
+    return true;
 }
 
 bool UiPacker::bakeBackgroundArt(const std::string& gameDir, const std::string& outDir,

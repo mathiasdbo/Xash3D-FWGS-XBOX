@@ -79,6 +79,10 @@ add_executable(menu_art_bake_test tests/menu_art_bake_test.cpp)
 target_link_libraries(menu_art_bake_test PRIVATE AssetStudioFormats)
 add_test(NAME menu_art_bake_test COMMAND menu_art_bake_test)
 
+add_executable(sky_art_bake_test tests/sky_art_bake_test.cpp)
+target_link_libraries(sky_art_bake_test PRIVATE AssetStudioFormats)
+add_test(NAME sky_art_bake_test COMMAND sky_art_bake_test)
+
 add_executable(anim_texture_frames_test tests/anim_texture_frames_test.cpp)
 target_link_libraries(anim_texture_frames_test PRIVATE AssetStudioFormats)
 add_test(NAME anim_texture_frames_test COMMAND anim_texture_frames_test)

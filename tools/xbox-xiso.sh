@@ -138,7 +138,7 @@ title_row() {
 
 TITLE="${1:-}"
 if [ -z "$TITLE" ]; then
-	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>] [--delta-lst <file>] [--resource-dir <dir>] [--ui-language <lang>]" >&2
+	echo "usage: $0 <hl|op4|bshift> --steam <path> --xbe <path> [--out <path>] [--menu-bake <dir>] [--sky-bake <dir>] [--delta-lst <file>] [--resource-dir <dir>] [--ui-language <lang>]" >&2
 	exit 1
 fi
 shift
@@ -153,6 +153,7 @@ STEAM=""
 XBE=""
 OUT=""
 MENU_BAKE=""
+SKY_BAKE=""
 DELTA_LST=""
 RESOURCE_DIR=""
 UI_LANGUAGE=""
@@ -163,6 +164,7 @@ while [ $# -gt 0 ]; do
 		--xbe) XBE="$2"; shift 2 ;;
 		--out) OUT="$2"; shift 2 ;;
 		--menu-bake) MENU_BAKE="$2"; shift 2 ;;
+		--sky-bake) SKY_BAKE="$2"; shift 2 ;;
 		--delta-lst) DELTA_LST="$2"; shift 2 ;;
 		--resource-dir) RESOURCE_DIR="$2"; shift 2 ;;
 		--ui-language) UI_LANGUAGE="$2"; shift 2 ;;
@@ -405,6 +407,72 @@ if [ -n "$MENU_BAKE" ]; then
 		exit 1
 	fi
 	echo "xbox-xiso: menu bake overlay verified in the stage." >&2
+fi
+
+# X9-X item 14 step 10 (divergences.md #137): --sky-bake overlays
+# tools/asset-studio --bake-sky-dxt1's output (gfx/env/<name><side>.dds)
+# onto the staged GAMEDIR, after the retail copy, beside the retail TGAs.
+# The engine's CheckSkybox (ref_common.c:71) tries .dds first and needs all
+# six sides in one extension, so validate_sky_bake checks every set is
+# complete (rt bk lf ft up dn) and every side is a one-level power-of-two
+# DXT1 of the exact size - a bad side would make ref/nv2a refuse it and
+# the engine fall back to its default sky. Checked before the copy and
+# again on the staged copy, as validate_menu_bake is.
+validate_sky_bake() {
+	local env="$1/gfx/env" f base side dims w h expectedSize actualSize sets=0
+	if [ ! -d "$env" ]; then
+		echo "xbox-xiso: $1 has no gfx/env - not a tools/asset-studio --bake-sky-dxt1 output." >&2
+		return 1
+	fi
+	for f in "$env"/*rt.dds; do
+		[ -f "$f" ] || continue
+		base="${f%rt.dds}"
+		for side in rt bk lf ft up dn; do
+			if [ ! -f "$base$side.dds" ]; then
+				echo "xbox-xiso: sky set $(basename "$base") is missing its $side side." >&2
+				return 1
+			fi
+			if ! dims=$(dds_dims "$base$side.dds"); then
+				echo "xbox-xiso: $base$side.dds: not a DXT1 .dds." >&2
+				return 1
+			fi
+			read -r w h <<<"$dims"
+			if ! is_pot "$w" || ! is_pot "$h" || [ "$w" -lt 4 ] || [ "$h" -lt 4 ]; then
+				echo "xbox-xiso: $base$side.dds: ${w}x${h} - ref/nv2a needs power-of-two DXT of at least 4x4." >&2
+				return 1
+			fi
+			expectedSize=$((128 + (w / 4) * (h / 4) * 8))
+			actualSize=$(wc -c < "$base$side.dds")
+			if [ "$actualSize" -ne "$expectedSize" ]; then
+				echo "xbox-xiso: $base$side.dds: $actualSize bytes, expected $expectedSize - truncated or corrupt." >&2
+				return 1
+			fi
+		done
+		sets=$((sets + 1))
+	done
+	if [ "$sets" -eq 0 ]; then
+		echo "xbox-xiso: $env holds no complete .dds sky set - refusing an empty bake." >&2
+		return 1
+	fi
+	echo "$sets"
+}
+if [ -n "$SKY_BAKE" ]; then
+	[ -d "$SKY_BAKE" ] || { echo "xbox-xiso: --sky-bake path does not exist or is not a directory: $SKY_BAKE" >&2; exit 1; }
+	if ! SKY_SETS=$(validate_sky_bake "$SKY_BAKE"); then
+		echo "xbox-xiso: --sky-bake $SKY_BAKE failed validation - refusing to pack." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: overlaying $SKY_SETS baked sky set(s) from $SKY_BAKE onto $GAMEDIR..." >&2
+	mkdir -p "$STAGE/$GAMEDIR/gfx/env" || exit 1
+	if ! cp "$SKY_BAKE"/gfx/env/*.dds "$STAGE/$GAMEDIR/gfx/env/"; then
+		echo "xbox-xiso: overlaying $SKY_BAKE onto $STAGE/$GAMEDIR failed." >&2
+		exit 1
+	fi
+	if ! STAGED_SETS=$(validate_sky_bake "$STAGE/$GAMEDIR") || [ "$STAGED_SETS" -lt "$SKY_SETS" ]; then
+		echo "xbox-xiso: staged $GAMEDIR/gfx/env failed the sky bake validation after the copy - copy was incomplete." >&2
+		exit 1
+	fi
+	echo "xbox-xiso: sky bake overlay verified in the stage ($STAGED_SETS set(s))." >&2
 fi
 
 # The menu font (XM.1 item 13 step 1). Unlike delta.lst above, this DOES

@@ -293,6 +293,7 @@ int main(int argc, char *argv[]) {
     bool buildGlobal = false;
     bool bakeMenuArt = false;
     bool menuArtDxt1 = false;
+    bool bakeSkyDxt1 = false;
     formats::PakManager pak;
 
     // --pack-menu specific options. Separate from --game-dir/--sprites since
@@ -365,10 +366,31 @@ int main(int argc, char *argv[]) {
             resourceDir = argv[++i];
         } else if (arg == "--bake-menu-art") {
             bakeMenuArt = true;
+        } else if (arg == "--bake-sky-dxt1") {
+            // divergences.md #137: gfx/env skyboxes as DXT1 .dds for ref/nv2a
+            bakeSkyDxt1 = true;
         } else if (arg == "--menu-art-dxt1") {
             // divergences.md #131: DXT1 .dds tiles for ref/nv2a instead of TGA
             menuArtDxt1 = true;
         }
+    }
+
+    if (bakeSkyDxt1) {
+        // X9-X item 14 step 10: --game-dir is a gamedir root (e.g. a Steam
+        // install's "valve", the directory gfx/env/ sits under); --output
+        // is a directory, an overlay tree for tools/xbox-xiso.sh
+        // --sky-bake, as with --bake-menu-art.
+        if (gameDir == ".") {
+            std::cerr << "--bake-sky-dxt1 requires --game-dir <path to a gamedir, e.g. .../valve>\n";
+            return 1;
+        }
+        if (outputPath == "../test_map.mpak") {
+            std::cerr << "--bake-sky-dxt1 requires --output <directory> (an overlay tree, not a file)\n";
+            return 1;
+        }
+        int sets = 0;
+        bool ok = formats::UiPacker::bakeSkyArt(gameDir, outputPath, sets);
+        return ok ? 0 : 1;
     }
 
     if (bakeMenuArt) {
