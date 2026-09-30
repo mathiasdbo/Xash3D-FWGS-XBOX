@@ -66,6 +66,8 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "r_sprite.h" /* X9-X step 6: r_sprite.c's own entry points (gl_sprite.c port) */
 #include "r_effects.h" /* X9-X step 7: r_effects.c's own entry points (gl_beams.c/gl_rpart.c port) */
 #include "nv2a_efx_util.h" /* X9-X step 7: the TriAPI texture-repeat splitter */
+#include "nv2a_lightmap_util.h" /* X9-X step 8: NV2A_LM_MAX_LUXELS_PER_AXIS */
+#include "r_lightmap.h" /* X9-X step 8: lightstyles and dynamic lights (R_CheckLightMap/R_BuildLightMap port) */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -312,6 +314,13 @@ static uint32_t  nv2a_map_face_remap_count;
    to "no backface test this batch", exactly like world == NULL already
    does, never a wrong-surface read. */
 static uint32_t *nv2a_map_face_orig;
+
+/* X9-X step 8: each SORTED face's style-0 block in the lightmap atlas and
+   its size, from MpakFaceInfo (lightmapBlockX/Y, extents / 16 + 1) - what
+   r_lightmap.c needs to rebuild a face's lightmap in place. NULL = no
+   table (allocation failed, or no usable faceInfo lump): the atlas then
+   stays exactly as baked. */
+static nv2a_lm_block_t *nv2a_map_face_lm;
 
 static void     *nv2a_map_lightmap;     /* GPU-visible, RGBA8, no format conversion needed -
                                             bound on texture stage 1 as LU_IMAGE_A8B8G8R8 (the
@@ -2170,22 +2179,20 @@ static void nv2a_enter_lit_state( void )
    textures, fog, polygon offset (gl_polyoffset_bmodels) and the
    kRenderTransTexture back-to-front face sort - none of which this
    renderer has for the world either yet. */
-static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float blend )
+/* R_DrawBrushModel's entry checks and cull (gl_rsurf.c:1822-1855): only
+   this map's own submodels share its baked faces - anything else (a brush
+   model from another BSP) has nothing to draw here - and an entity whose
+   bounds are outside the frustum is skipped. X9-X step 8: shared with the
+   lightmap update, which must agree with this on which entities draw. */
+static qboolean nv2a_brush_entity_visible( const model_t *world, const cl_entity_t *e, qboolean *rotated_out, vec3_t mins_out )
 {
 	const model_t *clmodel = e->model;
-	vec3_t mins, maxs, modelorg, delta;
-	vec3_t forward, right, up;
-	float object[4][4], mvp[4][4];
+	vec3_t mins, maxs;
 	qboolean rotated;
-	uint32_t *p;
-	uint32_t bound_texture = 0xFFFFFFFFu;
-	qboolean lit;
 	int i;
 
-	/* Only this map's own submodels share its baked faces; anything else
-	   (a brush model from another BSP) has nothing to draw here. */
-	if( !clmodel || clmodel->type != mod_brush || clmodel == world || clmodel->surfaces != world->surfaces )
-		return;
+	if( !world || !clmodel || clmodel->type != mod_brush || clmodel == world || clmodel->surfaces != world->surfaces )
+		return false;
 
 	if( !VectorIsNull( e->angles ))
 	{
@@ -2203,7 +2210,27 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 		rotated = false;
 	}
 
-	if( nv2a_frustum_cull_box( mins, maxs ))
+	if( rotated_out )
+		*rotated_out = rotated;
+	if( mins_out )
+		VectorCopy( mins, mins_out );
+
+	return !nv2a_frustum_cull_box( mins, maxs );
+}
+
+static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float blend )
+{
+	const model_t *clmodel = e->model;
+	vec3_t mins, modelorg, delta;
+	vec3_t forward, right, up;
+	float object[4][4], mvp[4][4];
+	qboolean rotated;
+	uint32_t *p;
+	uint32_t bound_texture = 0xFFFFFFFFu;
+	qboolean lit;
+	int i;
+
+	if( !nv2a_brush_entity_visible( world, e, &rotated, mins ))
 		return;
 
 	/* Everything below draws under the world pass's state and only
@@ -2884,6 +2911,8 @@ static void nv2a_free_map_resources( void )
 	if( nv2a_map_texture_data )  { MmFreeContiguousMemory( nv2a_map_texture_data );  nv2a_map_texture_data  = NULL; }
 	if( nv2a_map_face_remap )    { free( nv2a_map_face_remap );                  nv2a_map_face_remap    = NULL; }
 	if( nv2a_map_face_orig )     { free( nv2a_map_face_orig );                   nv2a_map_face_orig     = NULL; }
+	if( nv2a_map_face_lm )       { free( nv2a_map_face_lm );                     nv2a_map_face_lm       = NULL; }
+	R_LightmapFreeMap(); /* X9-X step 8: its per-map state describes the atlas freed above */
 	if( nv2a_map_lightmap )      { MmFreeContiguousMemory( nv2a_map_lightmap );      nv2a_map_lightmap      = NULL; }
 
 	/* X9-G: both point into the outgoing world model's own leafs[] array
@@ -3841,9 +3870,14 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 	   the engine has freed its copy of the map, so that copy is no longer
 	   part of either side. */
 	{
+		/* X9-X step 8: + the lightmap tables (NV2A_LM_FACE_BYTES per face:
+		   nv2a_map_face_lm here, r_lightmap.c's held flags and styled-face
+		   list at the first frame), mirrored by Nv2aMapBudget.h's
+		   kNv2aLightmapFaceBytes. */
 		const uint64_t tables = idx_bytes + (uint64_t)( geo.faceDrawCmds.length / 8 ) * sizeof( nv2a_map_face_t )
 			+ (uint64_t)geo.faceDrawCmds.length / 8
-			+ (uint64_t)geo.faceRemap.length * 2;
+			+ (uint64_t)geo.faceRemap.length * 2
+			+ (uint64_t)( geo.faceDrawCmds.length / 8 ) * NV2A_LM_FACE_BYTES;
 		const uint64_t gpu = vb_bytes + (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length;
 		const uint64_t load = (uint64_t)vert_count * 3 * sizeof( float )
 			+ (uint64_t)geo.faceDrawCmds.length + (uint64_t)geo.faceVertexBase.length + (uint64_t)geo.faceRemap.length
@@ -4167,6 +4201,8 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 	{
 		uint32_t face_count = (uint32_t)( geo.faceDrawCmds.length / 8 );
 		nv2a_map_face_t *faces = malloc( (size_t)face_count * sizeof( nv2a_map_face_t ));
+		/* X9-X step 8: optional - a failure only leaves the atlas static. */
+		nv2a_lm_block_t *lm_blocks = faces ? malloc( (size_t)face_count * sizeof( nv2a_lm_block_t )) : NULL;
 
 		if( !faces )
 		{
@@ -4217,6 +4253,33 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 				else
 				{
 					faces[i].sky = false;
+				}
+
+				/* X9-X step 8: the face's atlas block. A face with a real
+				   lightmap has non-negative extents, a block on page 0 (the
+				   only page this renderer binds) away from the reserved
+				   corner at (0,0) (BspParser.cpp: lmAlloc defaults there for
+				   a face with none), and at most LM_MAX_LUXELS per axis.
+				   r_lightmap.c checks the rest against the engine's own
+				   surface before it ever writes one. */
+				if( lm_blocks )
+				{
+					const mpak_face_info_t *fi = &lumps->face_info_window[i % NV2A_FACEINFO_WINDOW];
+					nv2a_lm_block_t *blk = &lm_blocks[i];
+
+					blk->x = NV2A_LM_BLOCK_NONE;
+					blk->y = 0;
+					blk->smax = blk->tmax = 0;
+					if( faceinfo_ok && fi->lightmapPage == 0 && ( fi->lightmapBlockX | fi->lightmapBlockY ) != 0
+						&& fi->lightmapBlockX < NV2A_LM_BLOCK_NONE && fi->lightmapBlockY < NV2A_LM_BLOCK_NONE
+						&& fi->extents[0] >= 0 && fi->extents[1] >= 0
+						&& fi->extents[0] / 16 + 1 <= NV2A_LM_MAX_LUXELS_PER_AXIS && fi->extents[1] / 16 + 1 <= NV2A_LM_MAX_LUXELS_PER_AXIS )
+					{
+						blk->x = (uint16_t)fi->lightmapBlockX;
+						blk->y = (uint16_t)fi->lightmapBlockY;
+						blk->smax = (uint8_t)( fi->extents[0] / 16 + 1 );
+						blk->tmax = (uint8_t)( fi->extents[1] / 16 + 1 );
+					}
 				}
 
 				/* X9-U: a face's index count is stored in 16 bits. */
@@ -4294,6 +4357,7 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 			if( tiling_ok && expect_cursor == index_count )
 			{
 				nv2a_map_faces = faces;
+				nv2a_map_face_lm = lm_blocks; /* X9-X step 8 */
 				nv2a_map_face_count = face_count;
 
 				/* X9-M: each sorted face's own texture, from the batch
@@ -4412,6 +4476,8 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 			{
 				gEngfuncs.Con_Printf( "ref_nv2a: FaceDrawCmds tiling did not validate - drawing this map unculled\n" );
 				free( faces );
+				if( lm_blocks )
+					free( lm_blocks );
 			}
 		}
 	}
@@ -4854,6 +4920,65 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 	}
 }
 
+/* X9-X step 8: r_lightmap.c's per-face visibility question - drawn by the
+   world pass this frame? The same PVS and frustum tests
+   nv2a_draw_map_geometry applies (before its backface test, which only
+   drops faces seen from behind this frame). */
+static qboolean nv2a_lm_face_in_view( uint32_t sorted )
+{
+	if( sorted >= nv2a_map_face_count || !nv2a_map_faces )
+		return false;
+	if( nv2a_map_faces[sorted].sky )
+		return false;
+	if( nv2a_map_face_visible && !nv2a_map_face_visible[sorted] )
+		return false;
+	return !nv2a_frustum_cull_face( &nv2a_map_faces[sorted] );
+}
+
+/* X9-X step 8: hands r_lightmap.c this frame's map, view and the brush
+   entities that will be drawn with their lightmap (R_HasLightmap,
+   nv2a_entity_has_lightmap), then lets it rebuild what changed. */
+static void nv2a_update_dynamic_lightmaps( void )
+{
+	static cl_entity_t *brush[NV2A_MAX_ENTITIES * 2];
+	model_t *world = gp_cl->models[1];
+	nv2a_lm_view_t view;
+	int i, n = 0;
+
+	if( !world || world != nv2a_map_owner || !nv2a_map_lightmap || !nv2a_map_face_lm
+		|| !nv2a_map_faces || !nv2a_map_face_remap )
+		return;
+
+	for( i = 0; i < nv2a_num_solid_entities; i++ )
+	{
+		cl_entity_t *e = nv2a_solid_entities[i];
+
+		if( e->model->type == mod_brush && nv2a_entity_has_lightmap( world, e ) && nv2a_brush_entity_visible( world, e, NULL, NULL ))
+			brush[n++] = e;
+	}
+	for( i = 0; i < nv2a_num_trans_entities; i++ )
+	{
+		cl_entity_t *e = nv2a_trans_entities[i];
+
+		if( e->model->type == mod_brush && nv2a_entity_has_lightmap( world, e ) && nv2a_brush_entity_visible( world, e, NULL, NULL ))
+			brush[n++] = e;
+	}
+
+	view.world = world;
+	view.atlas = (uint32_t *)nv2a_map_lightmap;
+	view.atlas_width = nv2a_map_lightmap_width;
+	view.atlas_height = nv2a_map_lightmap_height;
+	view.atlas_stride_words = nv2a_map_lightmap_pitch / 4;
+	view.blocks = nv2a_map_face_lm;
+	view.remap = nv2a_map_face_remap;
+	view.remap_count = nv2a_map_face_remap_count;
+	view.face_count = nv2a_map_face_count;
+	view.framecount = (int)nv2a_current_frame_number();
+	view.face_in_view = nv2a_lm_face_in_view;
+
+	R_LightmapUpdate( &view, brush, n );
+}
+
 /* X9-E: the real per-frame camera, replacing the fixed one-time debug
    camera nv2a_load_map_geometry() used to compute. Called by the engine
    (engine/client/cl_view.c's own V_RenderView, BEFORE R_EndFrame runs
@@ -5094,6 +5219,13 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   menu: V_PostRender, cl_view.c:529-573) and would draw over it. */
 	if( nv2a_frame_open && nv2a_map_ready )
 	{
+		/* X9-X step 8: lightstyles and dynamic lights, written into the
+		   atlas BEFORE this frame's first draw that samples it (the world,
+		   then brush entities below). Safe against the GPU: R_EndFrame
+		   and R_BeginFrame both spun on pb_busy(), so every draw of the
+		   previous frame has retired, and only 2D (no atlas) has been
+		   pushed since R_BeginFrame. */
+		nv2a_update_dynamic_lightmaps();
 		nv2a_draw_map_geometry();
 		nv2a_world_drawn_this_frame = true;
 	}
@@ -6561,7 +6693,7 @@ const ref_interface_t gReffuncs =
 
 	.R_SetSkyCloudsTextures     = R_SetSkyCloudsTextures,
 	.GL_SubdivideSurface = GL_SubdivideSurface,
-	.CL_RunLightStyles   = CL_RunLightStyles,
+	.CL_RunLightStyles   = R_LightmapRunLightStyles, /* X9-X step 8: CL_RunLightStyles, plus "the style table is filled" */
 
 	.Mod_ProcessRenderData  = Mod_ProcessRenderData,
 	.Mod_StudioLoadTextures = Mod_StudioLoadTextures,

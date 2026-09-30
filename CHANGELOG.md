@@ -5,6 +5,26 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - animated and switchable lights, and dynamic lights on walls, on Xbox (ref/nv2a)
+
+World and brush-entity lighting now changes at run time, as in the
+reference renderer. Flickering, pulsing and strobing lights animate. Lights
+that a map or a trigger turns on or off change the walls around them. The
+flashlight, explosions, rockets and server light effects now light nearby
+walls and floors as well as models.
+Before this the world showed only the lightmap baked for the first light
+style of each face. Lights that are on when a map starts but sit on another
+style slot were missing, such as c1a0e's floor spotlights in the test
+chamber.
+It is a port of the reference's lightmap rebuild (`R_BuildLightMap`,
+`R_AddDynamicLights`, `R_CheckLightMap`), writing the changed faces into
+the existing lightmap atlas before each frame's world draw, and only for
+faces on screen.
+The work per frame is bounded to 16384 lightmap texels. It costs 9 bytes
+per face plus 60 KiB of fixed buffers; the XBE grows
+by 12 KiB. No archive changes, so nothing needs re-baking.
+Models were already lit by dynamic lights. See divergence #134.
+
 ### Added - beams, particles and tracers on Xbox (ref/nv2a)
 
 ref/nv2a now draws the engine's client effects: every beam type (tested

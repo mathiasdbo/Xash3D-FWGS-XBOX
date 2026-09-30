@@ -797,6 +797,7 @@ namespace formats {
             const uint64_t facesBytes = static_cast<uint64_t>(header.lenFaceDrawCmds / 8) * kNv2aMapFaceBytes;
             const uint64_t visBytes = static_cast<uint64_t>(header.lenFaceDrawCmds) / 8;
             const uint64_t remapBytes = static_cast<uint64_t>(header.lenFaceRemap) * 2;
+            const uint64_t lmTableBytes = static_cast<uint64_t>(header.lenFaceDrawCmds / 8) * kNv2aLightmapFaceBytes;
             const uint64_t texBytes = static_cast<uint64_t>(header.lenTextureData);
             const uint64_t lmBytes = static_cast<uint64_t>(header.lenLightmapAtlas);
             const uint64_t engineBytes = mpakClassicPrefixBytes(header); // MPAK v12: what the engine holds (reported only)
@@ -809,7 +810,7 @@ namespace formats {
                           << kNv2aMapBudgetBytes
                           << ") - this archive would not draw on the Xbox target. Failing the bake.\n"
                           << "  [vb=" << vbBytes << " idx=" << idxBytes << " faces=" << facesBytes
-                          << " vis=" << visBytes << " remap=" << remapBytes << " tex=" << texBytes
+                          << " vis=" << visBytes << " remap=" << remapBytes << " lmtab=" << lmTableBytes << " tex=" << texBytes
                           << " lm=" << lmBytes << " bsp=" << engineBytes << " file=" << fileSize << "]\n";
                 // The 512 caps above fail before any section is written, so
                 // they only ever leave a 2048-byte stub behind. This check

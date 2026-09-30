@@ -62,6 +62,12 @@ namespace formats {
     // bytes); r_context.c STATIC_ASSERTs the same 24 (52 before X9-U) so the two cannot drift.
     constexpr uint64_t kNv2aMapFaceBytes = 24;
 
+    // X9-X step 8: ref/nv2a's lightmap tables per face - the atlas block
+    // (nv2a_lm_block_t, 6 bytes), a "holds a dynamic light" byte and at most
+    // one 2-byte styled-face entry: r_lightmap.h NV2A_LM_FACE_BYTES, which
+    // r_context.c's ledger adds per FaceDrawCmd.
+    constexpr uint64_t kNv2aLightmapFaceBytes = 9;
+
     // MPAK v12: the bytes the engine is served as the map's .bsp - the
     // first sector plus every classic lump, each padded to a whole sector
     // (filesystem/mpak_layout.c's classicEnd; filesystem/mpak.c serves
@@ -98,7 +104,8 @@ namespace formats {
         const uint64_t tables = idxBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds / 8) * kNv2aMapFaceBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds) / 8
-            + static_cast<uint64_t>(h.lenFaceRemap) * 2;
+            + static_cast<uint64_t>(h.lenFaceRemap) * 2
+            + static_cast<uint64_t>(h.lenFaceDrawCmds / 8) * kNv2aLightmapFaceBytes;
         const uint64_t gpu = vbBytes
             + static_cast<uint64_t>(h.lenTextureData)
             + static_cast<uint64_t>(h.lenLightmapAtlas);

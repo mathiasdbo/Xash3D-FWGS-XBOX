@@ -58,7 +58,9 @@ int main() {
         MpakHeader6 h = zeroHeader();
         h.lenFaceDrawCmds = 15; // 15/8 = 1 face: 1*24 (faces term) + 15/8 (vis term, truncates to 1)
         // MPAK v12: plus the 15-byte lump itself, read in for the load.
-        CHECK(nv2aMapLedgerBytes(h) == 1 * 24 + 1 + 15, "lenFaceDrawCmds=15 must give one 24-byte face, vis=1 (integer truncation) and its 15-byte load copy");
+        // X9-X step 8: plus one face's 9 bytes of lightmap tables.
+        CHECK(kNv2aLightmapFaceBytes == 9, "r_lightmap.h NV2A_LM_FACE_BYTES: 6-byte block + held byte + 2-byte styled entry");
+        CHECK(nv2aMapLedgerBytes(h) == 1 * 24 + 1 + 9 + 15, "lenFaceDrawCmds=15 must give one 24-byte face, vis=1 (integer truncation), 9 lightmap-table bytes and its 15-byte load copy");
     }
 
     // --- the vertex term uses kNv2aLitVertexBytes (28), the RUNTIME nv2a_lit_vertex_t

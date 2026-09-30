@@ -210,9 +210,11 @@ typedef struct
 // (styles[4] is exactly 4 bytes), so this needs no packing pragma either.
 // One entry per baked face, in the archive's own (X9-K: SORTED, not
 // original BSP) face order - the same order FaceDrawCmds/nv2a_map_faces
-// use. X9-K: ref/nv2a's own nv2a_load_map_geometry() reads only `flags`
-// (specifically MPAK_SURF_DRAWSKY) from this lump - the rest of this
-// mirror exists so a later reader doesn't have to re-derive the layout.
+// use. X9-K: ref/nv2a's own nv2a_load_map_geometry() reads `flags`
+// (specifically MPAK_SURF_DRAWSKY) from this lump; X9-X step 8 also reads
+// lightmapPage/lightmapBlockX/lightmapBlockY/extents, the face's block in
+// the lightmap atlas, to rebuild it for lightstyles and dynamic lights
+// (ref/nv2a/r_lightmap.c).
 typedef struct
 {
 	uint32_t flags;

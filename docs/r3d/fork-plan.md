@@ -9208,6 +9208,65 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        `R_AddDynamicLights`, written into the atlas (`R_CheckLightMap`,
        `gl_rsurf.c:1400`); models take dlights through
        `R_EntityDynamicLight`.
+       **Landed, X9-X step 8, 2026-09-29.**
+       - New `ref/nv2a/r_lightmap.c` ports `R_CheckLightMap`,
+         `R_BuildLightMap`, `R_AddDynamicLights` and `R_MarkLights`/
+         `R_PushDlights`. The arithmetic is in `nv2a_lightmap_util.c`,
+         which is host-tested.
+       - It rewrites a face's block of the baked atlas in place, from
+         `GL_RenderFrame` before the world draw. The GPU is idle then:
+         `R_EndFrame`/`R_BeginFrame` spin on `pb_busy()`, and pbkit's
+         `pb_cache_flush` drains write-combining before the first draw.
+       - Rebuilt faces:
+         - world faces the world pass draws, when a style's value
+           changed or a dlight reaches them;
+         - every face of a brush entity drawn lit, with
+           `R_PushDlightsForBmodel` and the entity's matrix.
+       - A block holding a dlight is rebuilt without it once the light
+         stops reaching it.
+       - Each face's block position and size come from `MpakFaceInfo`,
+         which every v13 archive already carries, and are checked against
+         the engine's surface. On c1a0e no block was rejected.
+       - Models needed nothing: `R_EntityDynamicLight` and
+         `R_StudioEntityLight` were already in (step 5).
+       - Divergence #134.
+       - **Verified live in xemu (branch vs main ccbcc81b, c1a0e, same
+         teleported origin and view angles):**
+         - The test chamber's floor spotlights (style 35) are on at map
+           start but were missing on main. They now light the emitter
+           arms, ramp and floor.
+         - `ent_fire floor_spotlight_1 use` toggles them at run time. The
+           lights-off frame is pixel-identical to main's (0 of 307200
+           pixels differ), so a rebuilt block reproduces the baked bytes
+           exactly.
+         - The style-4 strobe fixtures in the pit below flash green
+           between grabs; on main they stay dark.
+         - The flashlight lights a pool on the floor of the dark
+           alien-slave room; main leaves the floor black.
+         - An MP5 grenade's explosion lights the floor around it; main
+           lights only the models.
+       - Cost, per `nv2a_lm_stats`:
+         - At most 16384 luxels are rebuilt per frame
+           (`NV2A_LM_FRAME_LUXELS`).
+         - Measured on c1a0e: a strobe frame rebuilds 20 faces (1804
+           luxels); a flashlight frame 26 faces (1526 luxels); a frame
+           with nothing changed rebuilds none.
+         - The Xbox objects are built at clang's default -O0
+           (`xbox-cc.sh` passes no `-O`). There a luxel is 28 + 31 per
+           extra style + 63 instructions, about 110-150 P6 cycles, so a
+           strobe frame is about 0.35 ms at 733 MHz and a budget-full
+           frame about 3 ms. These are estimates: xemu's rdtsc is not
+           PIII time, and xemu runs vsync-bound at 60 fps on both builds.
+       - Memory:
+         - 9 bytes per face (counted in the per-map ledger and in the
+           baker's `kNv2aLightmapFaceBytes`).
+         - 48 KiB of scratch `r_blocklights`, 8 KiB of lists and 2 KiB
+           of style tables.
+         - The XBE grows from 6868992 to 6881280 bytes.
+       - Not verified: whether the NV2A texture cache can keep stale atlas
+         texels after the CPU rewrites them on real hardware. No
+         invalidate method is known in nxdk or xemu. Real hardware
+         decides.
     9. *Animated textures* (`+0..+9`, `-0..-9`; the engine builds the
        chains, `mod_bmodel.c:3043`); check that frames no face references
        reach the texture directory.
