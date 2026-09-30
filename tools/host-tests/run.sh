@@ -109,6 +109,12 @@ nv2a_warp_util() {
 }
 run_test nv2a_warp_util nv2a_warp_util
 
+# tools/host-tests/nv2a_decal_util_host_test.c, header.
+nv2a_decal_util() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a 		tools/host-tests/nv2a_decal_util_host_test.c ref/nv2a/nv2a_decal_util.c 		-lm -o "$OUT/nv2a_decal_util_test" && "$OUT/nv2a_decal_util_test"
+}
+run_test nv2a_decal_util nv2a_decal_util
+
 # tools/host-tests/printf_host_test.c, header.
 printf_test() {
 	gcc $HOST_CFLAGS -Wall -Wno-format -fstack-protector-all \

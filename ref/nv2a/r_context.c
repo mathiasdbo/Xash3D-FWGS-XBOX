@@ -72,6 +72,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "r_sky.h" /* X9-X item 14 step 10: the skybox (gl_warp.c port) */
 #include "r_warp.h" /* X9-X item 14 step 11: water warp and fog (gl_rsurf.c/gl_rmain.c port) */
 #include "nv2a_warp_util.h" /* X9-X item 14 step 11: the fog register math */
+#include "r_decals.h" /* X9-X item 14 step 12: decals (gl_decals.c port) */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -1213,6 +1214,12 @@ static qboolean      nv2a_fog_pushed_valid;
    R_Shutdown (both well above where the rest of Part F is defined
    below), so its pointer needs to be declared this early too. */
 static void *nv2a_2d_ring;
+
+/* X9-X item 14 step 12: the decals' per-frame vertex buffer (the decal
+   section below R_Init has the account), allocated with the 2D ring. */
+#define NV2A_DECAL_FRAME_VERTS 2048
+static nv2a_lit_vertex_t *nv2a_decal_vb;
+static uint32_t           nv2a_decal_vb_used;
 
 /* X9-C: the diffuse x lightmap x 2 program pair (ref/nv2a/vs_lit.vs.cg,
    ps_lit.ps.cg - both real, freshly-authored Cg sources compiled through
@@ -2530,10 +2537,10 @@ static void nv2a_enter_lit_state( void )
 /* ref/gl's R_DrawBrushModel (gl_rsurf.c:1822) for one entity: bounds and
    frustum cull, object transform, per-face backface cull in model space
    (R_SortBrushModelSurfaces, gl_rsurf.c:1764), render mode, draw.
-   Not ported: dynamic-light pushes, decals, fullbrights, detail
-   textures, fog, polygon offset (gl_polyoffset_bmodels) and the
-   kRenderTransTexture back-to-front face sort - none of which this
-   renderer has for the world either yet. */
+   Not ported: fullbrights, detail textures, polygon offset
+   (gl_polyoffset_bmodels) and the kRenderTransTexture back-to-front face
+   sort. Dynamic lights (step 8), fog (step 11) and decals (step 12) have
+   landed since this list was written. */
 /* R_DrawBrushModel's entry checks and cull (gl_rsurf.c:1822-1855): only
    this map's own submodels share its baked faces - anything else (a brush
    model from another BSP) has nothing to draw here - and an entity whose
@@ -2729,16 +2736,24 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 		}
 
 		/* R_CullSurface's CULL_BACKSIDE, against the model-space eye.
-		   ref/gl keeps a back face only for decals on TransTexture
-		   entities; this renderer has no decals. */
-		if( !nv2a_r_nocullback.value && !nv2a_r_nocull.value && !VectorIsNull( psurf->plane->normal ))
+		   X9-X item 14 step 12: R_SortBrushModelSurfaces keeps a back face
+		   of a kRenderTransTexture entity when it has decals
+		   (gl_rsurf.c:1796) and R_RenderBrushPoly draws those decals in
+		   reverse (gl_rsurf.c:1396). The face itself is not drawn here:
+		   ref/gl's GL_FRONT culling drops it. Whether a face is a back
+		   face for its decals does not depend on nv2a_r_nocullback, which
+		   only decides whether the CPU drops back faces before the GPU. */
+		if( !nv2a_decal_entity_surface_front( psurf, modelorg ))
 		{
-			float dist = PlaneDiff( modelorg, psurf->plane );
-
-			if( FBitSet( psurf->flags, NV2A_SURF_PLANEBACK ))
-				dist = -dist;
-			if( dist <= BACKFACE_EPSILON )
+			if( psurf->pdecals && e->curstate.rendermode == kRenderTransTexture )
+				R_DecalAddBrushSurface( e, (msurface_t *)psurf, true );
+			if( !nv2a_r_nocullback.value )
 				continue;
+		}
+		else if( psurf->pdecals )
+		{
+			/* R_RenderBrushPoly's R_RenderDecalsForSurface (gl_rsurf.c:1384) */
+			R_DecalAddBrushSurface( e, (msurface_t *)psurf, false );
 		}
 
 		if( e->curstate.rendermode != kRenderTransColor ) /* stage 0 is already the flat colour page - real faces never bound */
@@ -2766,6 +2781,12 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 			nv2a_bind_vertex_base( nv2a_face_vertex_base( face ));
 		nv2a_draw_exact_indices( face->index_begin, nv2a_face_index_end( face ));
 	}
+
+	/* X9-X item 14 step 12: the entity's decals, under its render mode
+	   and matrix (R_DrawBrushModel's DrawDecalsBatch, gl_rsurf.c:1914,
+	   and the DrawSurfaceDecals R_RenderDecalsForSurface calls for a
+	   non-kRenderNormal entity - here after its faces, r_decals.c). */
+	R_DecalDrawBrushEntity( e, blend );
 
 	nv2a_reset_render_mode();
 	if( !lit )
@@ -3300,9 +3321,15 @@ static void R_SetDetailScaleForTexture( int texture, float xScale, float yScale 
 	;
 }
 
+/* ref/gl's R_FillRenderAPI (gl_context.c:440) fills the render_api_t
+   custom renderers (XashXT-style mods) call; Half-Life's client never
+   does. X9-X item 14 step 12: R_EntityRemoveDecals (gl_context.c:451), the
+   one entry this renderer implements. The GL-only ones (texture arrays,
+   texture matrices, DrawSingleDecal and R_DecalSetupVerts, which draw
+   outside this renderer's own state) stay NULL. */
 static void R_FillRenderAPI( render_api_t *api )
 {
-	;
+	api->R_EntityRemoveDecals = R_EntityRemoveDecals;
 }
 
 /* Defined later in the file, alongside the rest of X9-X step 4 Part E -
@@ -3513,6 +3540,13 @@ static qboolean R_Init( void )
 		return false;
 	}
 
+	/* X9-X item 14 step 12: the decal vertex buffer. Without it decals are
+	   placed and saved but not drawn (nv2a_decal_gpu_begin). */
+	nv2a_decal_vb = MmAllocateContiguousMemoryEx( NV2A_DECAL_FRAME_VERTS * sizeof( nv2a_lit_vertex_t ), 0, NV2A_TEST_MAXRAM, 0, PAGE_READWRITE | PAGE_WRITECOMBINE );
+	if( !nv2a_decal_vb )
+		gEngfuncs.Con_Printf( S_WARN "ref_nv2a: no memory for the decal vertex buffer - decals will not draw\n" );
+	nv2a_decal_vb_used = 0;
+
 	if( !nv2a_tex_init())
 	{
 		debug_marker = 9;
@@ -3551,6 +3585,7 @@ static qboolean R_Init( void )
 	R_StudioInit();
 	R_SpriteInit(); /* X9-X step 6: r_traceglow and the view entity (r_sprite.h) */
 	R_EfxInit(); /* X9-X step 7: the palette CL_DrawParticles reads (r_effects.h) */
+	R_DecalInit(); /* X9-X item 14 step 12: gl_polyoffset and R_ClearDecals, gl_opengl.c:1181,1282 */
 
 	debug_marker = 5;
 	nv2a_ready = true;
@@ -3584,6 +3619,11 @@ static void R_Shutdown( void )
 	{
 		MmFreeContiguousMemory( nv2a_2d_ring );
 		nv2a_2d_ring = NULL;
+	}
+	if( nv2a_decal_vb )
+	{
+		MmFreeContiguousMemory( nv2a_decal_vb );
+		nv2a_decal_vb = NULL;
 	}
 
 	nv2a_free_map_resources();
@@ -3906,25 +3946,160 @@ static void FogParams( float flDensity, int iFogSkybox )
 	R_WarpTriFogParams( flDensity, iFogSkybox ); /* gl_triapi.c:328 */
 }
 
+/*
+X9-X item 14 step 12: VID_ScreenShot, ref/gl's (gl_backend.c:548) with
+the back buffer in place of glReadPixels. The engine asks from V_PostRender,
+after the HUD and before R_EndFrame (cl_view.c:573-576), so the frame is
+still the back buffer pbkit is rendering to: the TriAPI's pending batch is
+flushed and the GPU waited for, then the rows are read from
+pb_back_buffer() - pbkit's LE_A8R8G8B8 surface (pbkit.c:61), bytes
+B,G,R,X in memory, which is PF_BGRA_32 once X is forced to 255 (ref/soft
+does the same, Get8888PixelAt, r_glblit.c:720: a 32-bit BMP keeps its
+alpha, img_bmp.c:461). The rows are top-down already, so no IMAGE_FLIP_Y
+(glReadPixels is bottom-up; ref/soft copies bottom-up then flips).
+
+The shot types, as gl_backend.c:565-583: VID_SCREENSHOT and VID_SNAPSHOT
+(direct paths) as read; VID_LEVELSHOT and VID_MINISHOT resampled to 480 or
+200 lines high at the screen's aspect (640x480 -> 640x480, 267x200 -
+the savegame thumbnail, save/<name>.bmp from `saveshot`, sv_save.c:1791);
+VID_MAPSHOT to 1024x768, 8-bit. The size is the framebuffer's
+(nv2a_width x nv2a_height), the picture actually rendered; ref/gl reads
+gpGlobals->width x height rounded up to 4, the same 640x480 here.
+
+Divergence (docs/r3d/divergences.md #139): VID_MINISHOT reads the buffer
+at half size, each pixel the average of a 2x2 block, before the engine's
+resample to 267x200 - 300 KiB of r_temppool instead of the full 1.2 MiB,
+because saving happens mid-game on maps with little memory to spare and
+the zone allocator stops the game (Sys_Error) rather than fail a shot. It
+still reads every pixel. A full-size shot (screenshot, snapshot,
+levelshot) takes the whole 1.2 MiB, but only when the player asks. The
+write-combined framebuffer is uncached, 307200 separate 32-bit reads a
+shot: estimated at tens of milliseconds, once per shot, not measured on
+hardware. The aspect is the framebuffer's pixel ratio, right while the
+output is 4:3 only.
+*/
 static qboolean VID_ScreenShot( const char *filename, int shot_type )
 {
-	return false;
+	uint flags = 0;
+	int width = 0, height = 0;
+	int src_w, src_h, step, x, y;
+	const byte *fb;
+	uint32_t pitch;
+	rgbdata_t *r_shot;
+	qboolean result;
+
+	if( !nv2a_ready || !pb_initialized || !filename )
+		return false;
+
+	/* The frame's pending 2D/TriAPI batch, then everything pushed so far.
+	   Outside a frame there is nothing to read: R_EndFrame's pb_finished()
+	   has already moved pb_back_buffer() on to the next target. */
+	if( !nv2a_frame_open )
+		return false;
+	nv2a_2d_flush_and_wait();
+
+	fb = (const byte *)pb_back_buffer();
+	pitch = pb_back_buffer_pitch();
+	src_w = nv2a_width;
+	src_h = nv2a_height;
+	if( !fb || src_w <= 0 || src_h <= 0 )
+		return false;
+
+	step = ( shot_type == VID_MINISHOT ) ? 2 : 1;
+
+	r_shot = Mem_Calloc( r_temppool, sizeof( rgbdata_t ));
+	r_shot->width = src_w / step;
+	r_shot->height = src_h / step;
+	r_shot->flags = IMAGE_HAS_COLOR;
+	r_shot->type = PF_BGRA_32;
+	r_shot->size = r_shot->width * r_shot->height * gEngfuncs.Image_GetPFDesc( r_shot->type )->bpp;
+	r_shot->palette = NULL;
+	r_shot->buffer = Mem_Malloc( r_temppool, r_shot->size );
+
+	// get screen frame
+	for( y = 0; y < (int)r_shot->height; y++ )
+	{
+		byte *dst = r_shot->buffer + (size_t)y * r_shot->width * 4;
+
+		if( step == 1 )
+		{
+			const byte *src = fb + (size_t)y * pitch;
+
+			for( x = 0; x < (int)r_shot->width; x++, src += 4, dst += 4 )
+			{
+				uint32_t px;
+
+				memcpy( &px, src, 4 ); /* one uncached 32-bit read */
+				px |= 0xFF000000u;
+				memcpy( dst, &px, 4 );
+			}
+		}
+		else
+		{
+			const byte *row0 = fb + (size_t)( y * 2 ) * pitch;
+			const byte *row1 = row0 + pitch;
+
+			for( x = 0; x < (int)r_shot->width; x++, dst += 4 )
+			{
+				uint32_t a, b, c, d;
+				int k;
+
+				memcpy( &a, row0 + x * 8, 4 );
+				memcpy( &b, row0 + x * 8 + 4, 4 );
+				memcpy( &c, row1 + x * 8, 4 );
+				memcpy( &d, row1 + x * 8 + 4, 4 );
+				for( k = 0; k < 3; k++ )
+				{
+					const int sh = k * 8;
+					dst[k] = (byte)(((( a >> sh ) & 0xFF ) + (( b >> sh ) & 0xFF ) + (( c >> sh ) & 0xFF ) + (( d >> sh ) & 0xFF ) + 2 ) >> 2 );
+				}
+				dst[3] = 0xFF;
+			}
+		}
+	}
+
+	switch( shot_type )
+	{
+	case VID_SCREENSHOT:
+		break;
+	case VID_SNAPSHOT:
+		gEngfuncs.fsapi->AllowDirectPaths( true );
+		break;
+	case VID_LEVELSHOT:
+	case VID_MINISHOT:
+		flags |= IMAGE_RESAMPLE;
+		height = shot_type == VID_MINISHOT ? 200 : 480;
+		width = Q_rint( height * ((double)src_w / src_h )); /* the screen's aspect, as ref/gl's r_shot->width / height */
+		break;
+	case VID_MAPSHOT:
+		flags |= IMAGE_RESAMPLE|IMAGE_QUANTIZE;	// GoldSrc request overviews in 8-bit format
+		height = 768;
+		width = 1024;
+		break;
+	}
+
+	gEngfuncs.Image_Process( &r_shot, width, height, flags, 0.0f );
+
+	// write image
+	result = gEngfuncs.FS_SaveImage( filename, r_shot );
+	gEngfuncs.fsapi->AllowDirectPaths( false );			// always reset after store screenshot
+	gEngfuncs.FS_FreeImage( r_shot );
+
+	return result;
 }
 
+/* ref/gl's VID_CubemapShot (gl_backend.c:600) renders six extra views
+   (R_DrawCubemapView) for the `envshot`/`skyshot` developer commands. This
+   renderer draws one world view per frame (GL_RenderFrame keeps the
+   first), so, as ref/soft (r_context.c:306), it has none: the engine
+   prints "Unable to write". */
 static qboolean VID_CubemapShot( const char *base, uint size, const float *vieworg, qboolean skyshot )
 {
 	return false;
 }
 
-static void R_DecalShoot( int textureIndex, int entityIndex, int modelIndex, vec3_t pos, int flags, float scale )
-{
-	;
-}
-
-static int R_CreateDecalList( struct decallist_s *pList )
-{
-	return 0;
-}
+/* X9-X item 14 step 12: R_DecalShoot, R_DecalRemoveAll, R_CreateDecalList
+   and R_ClearAllDecals are real, in r_decals.c (r_decals.h). */
 
 /* X9-X step 5: R_StudioEstimateFrame/R_StudioLerpMovement are now real,
    implemented in r_studio.c (whole-function ports of gl_studio.c:561,498)
@@ -5427,6 +5602,394 @@ static qboolean nv2a_lm_face_in_view( uint32_t sorted )
 	return !nv2a_frustum_cull_face( &nv2a_map_faces[sorted] );
 }
 
+/*
+========================================================================
+X9-X item 14 step 12: decals, the GPU side (r_decals.c is the port of
+gl_decals.c that decides what to draw)
+
+A decal polygon is drawn with the world's own vertex program (vs_lit:
+position, stage-0 and stage-1 coordinates) from a per-frame vertex buffer,
+with the decal texture on stage 0, the face's lightmap on stage 1 (the
+baked atlas, or an unlit entity's neutral page, whichever the pass left
+bound) and ps_decal: decal x lightmap x 2 x the entity colour, alpha =
+decal alpha x the entity alpha, into V0 so the fog blend still applies.
+That is ref/gl's picture in one pass: DrawSingleDecal under GL_MODULATE
+with R_SetRenderMode's colour (gl_decals.c:826, gl_rsurf.c:1717), and
+R_BlendLightmaps' multiply over it (gl_rsurf.c:3711-3713).
+
+State, as DrawDecalsBatch/DrawSurfaceDecals push it (gl_decals.c:856-875,
+989-1000): SRC_ALPHA/ONE_MINUS_SRC_ALPHA blending (ONE for a premultiplied
+texture), no depth writes except under kRenderTransColor (whose
+R_SetRenderMode leaves them on), no alpha test, and gl_polyoffset as a
+depth bias. Face culling is off: r_decals.c only hands over faces that
+face the eye, except a kRenderTransTexture entity's back faces, which
+ref/gl draws with GL_Cull( GL_NONE ).
+
+The depth bias (divergences.md #139). With W-buffering (CONTROL0
+Z_PERSPECTIVE, nv2a_enter_lit_state) the depth the NV2A tests is the
+interpolated w, and NV097_SET_POLYGON_OFFSET_BIAS is added to it in the
+same units (xemu hw/xbox/nv2a/pgraph/glsl/psh.c: zvalue += depthOffset
+before the division by the Z24 range): here w is the eye distance in world
+units, one Z24 step each at the vertex program's scale (vs_lit writes the
+raw eye depth, nv2a_matrix_perspective's out[2][3] = 1): the bias assumes
+that unscaled w, and must scale with it if w is ever scaled. The bias is
+-gl_polyoffset, GL's `units` term: 2 world units nearer at any distance,
+so a decal can show through something drawn before it that stands less
+than 2 units in front of its face (a lip seen at a grazing angle). The slope term (GL's factor -1) is left
+at 0: xemu marks the W-buffer slope as partially implemented and it is
+unchecked on hardware, while a decal is coplanar with its face, so the
+constant alone separates them. Unverified on hardware.
+========================================================================
+*/
+
+/* The decal vertex buffer, rewritten each frame from the start (reset in
+   R_BeginFrame, after its pb_busy() wait: no draw of the previous frame
+   still reads it). 2048 vertices is 16 per pool entry of the Xbox's 128
+   (XASH_LOW_MEMORY 1, protocol.h:213); a polygon that does not fit is
+   dropped for the frame and counted. */
+/* NV2A_DECAL_FRAME_VERTS, nv2a_decal_vb and nv2a_decal_vb_used are
+   declared with the 2D ring, above R_Init. */
+
+/* What nv2a_decal_gpu_begin has pushed, for the per-polygon binds. */
+static int      nv2a_decal_bound_texnum = -1;
+static int      nv2a_decal_bound_premult = -1;
+static float    nv2a_decal_scale_s = 1.0f, nv2a_decal_scale_t = 1.0f;
+static qboolean nv2a_decal_active;
+
+int nv2a_decal_entity_surface_front( const msurface_t *surf, const float modelorg[3] )
+{
+	float dist;
+
+	/* R_CullSurface's CULL_BACKSIDE (gl_cull.c:83-110) under GL_FRONT
+	   culling; r_nocull returns CULL_VISIBLE before it (gl_cull.c:76). */
+	if( nv2a_r_nocull.value || VectorIsNull( surf->plane->normal ))
+		return true;
+
+	dist = PlaneDiff( modelorg, surf->plane );
+	if( FBitSet( surf->flags, SURF_PLANEBACK ))
+		dist = -dist;
+
+	return dist > BACKFACE_EPSILON;
+}
+
+int nv2a_decal_world_surface_drawn( const msurface_t *surf )
+{
+	const model_t *world = gp_cl->models[1];
+	uint32_t orig, sorted;
+
+	if( !surf || world != nv2a_map_owner || !world || !world->surfaces || !nv2a_map_face_remap )
+		return false;
+	if( surf < world->surfaces || surf >= world->surfaces + world->numsurfaces )
+		return false;
+
+	orig = (uint32_t)( surf - world->surfaces );
+	if( orig >= nv2a_map_face_remap_count )
+		return false;
+	sorted = nv2a_map_face_remap[orig];
+
+	/* PVS and frustum, as the world pass (R_RecursiveWorldNode's visframe
+	   and R_CullSurface's frustum test). */
+	if( !nv2a_lm_face_in_view( sorted ))
+		return false;
+
+	return nv2a_decal_entity_surface_front( surf, nv2a_eye_origin );
+}
+
+/* R_SetRenderMode's colour for the entity (gl_rsurf.c:1717), packed as the
+   combiner factor's A8R8G8B8 (xemu pgraph_argb_pack32_to_rgba_float). */
+static uint32_t nv2a_decal_tint( const cl_entity_t *e, float blend )
+{
+	float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
+	uint32_t ur, ug, ub, ua;
+
+	switch( e->curstate.rendermode )
+	{
+	case kRenderNormal:
+		break;
+	case kRenderTransColor:
+		r = e->curstate.rendercolor.r / 255.0f;
+		g = e->curstate.rendercolor.g / 255.0f;
+		b = e->curstate.rendercolor.b / 255.0f;
+		a = e->curstate.renderamt / 255.0f;
+		break;
+	case kRenderTransAdd:
+		r = g = b = blend;
+		break;
+	case kRenderTransAlpha:
+		break; /* the non-quake branch, gl_rsurf.c:1742-1751 */
+	default:
+		a = blend;
+		break;
+	}
+
+	ur = (uint32_t)( bound( 0.0f, r, 1.0f ) * 255.0f + 0.5f );
+	ug = (uint32_t)( bound( 0.0f, g, 1.0f ) * 255.0f + 0.5f );
+	ub = (uint32_t)( bound( 0.0f, b, 1.0f ) * 255.0f + 0.5f );
+	ua = (uint32_t)( bound( 0.0f, a, 1.0f ) * 255.0f + 0.5f );
+	return ( ua << 24 ) | ( ur << 16 ) | ( ug << 8 ) | ub;
+}
+
+int nv2a_decal_gpu_begin( const cl_entity_t *e, float blend )
+{
+	uint32_t *p;
+	uint32_t tint;
+	float offset;
+
+	if( !nv2a_decal_vb || !nv2a_frame_open || !e )
+		return false;
+
+	/* Whatever the TriAPI still holds draws first, under its own state
+	   (the world's water, r_warp.c). */
+	nv2a_2d_flush();
+
+	/* The world's decals follow the TriAPI's water, which took the GPU,
+	   and re-enter the lit state (the world's matrix, the atlas). A brush
+	   entity's follow its own faces, still in the lit state with the
+	   entity's matrix and lightmap page - re-entering would put the
+	   world's back (lessons.md: a draw that depends on state it never
+	   sets), so without it the entity's decals are not drawn. */
+	if( !nv2a_lit_state_current )
+	{
+		if( e != nv2a_get_entity_by_index( 0 ))
+			return false;
+		nv2a_enter_lit_state();
+	}
+
+	/* ps_decal in place of ps_lit (vs_lit stays). The upload resets the
+	   final combiner, so the fog goes back on after it. */
+	p = pb_begin();
+	#include "ps_decal.inl"
+	pb_end( p );
+	nv2a_resident_program = NV2A_RESIDENT_NONE;
+	nv2a_fog_pushed_valid = false;
+	nv2a_push_fog( &nv2a_fog_current );
+
+	tint = nv2a_decal_tint( e, blend );
+	offset = R_DecalPolyOffset();
+
+	p = pb_begin();
+	/* SAME_FACTOR_ALL (ps_decal.inl): stage 0's factor serves both
+	   stages; stage 1's is written too, so the constant does not depend
+	   on that bit. */
+	p = pb_push1( p, NV097_SET_COMBINER_FACTOR0, tint );
+	p = pb_push1( p, NV097_SET_COMBINER_FACTOR0 + 4, tint );
+	p = pb_push1( p, NV097_SET_BLEND_ENABLE, 1 );
+	p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
+	p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA );
+	p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA );
+	p = pb_push1( p, NV097_SET_DEPTH_MASK, e->curstate.rendermode == kRenderTransColor ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
+	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 0 );
+	if( offset != 0.0f )
+	{
+		const float factor = 0.0f, bias = -offset;
+		uint32_t word;
+
+		p = pb_push1( p, NV097_SET_POLY_OFFSET_FILL_ENABLE, 1 );
+		memcpy( &word, &factor, sizeof( word ));
+		p = pb_push1( p, NV097_SET_POLYGON_OFFSET_SCALE_FACTOR, word );
+		memcpy( &word, &bias, sizeof( word ));
+		p = pb_push1( p, NV097_SET_POLYGON_OFFSET_BIAS, word );
+	}
+	pb_end( p );
+
+	/* The attribute arrays on the decal buffer; each polygon draws from
+	   its own start index. nv2a_bound_vertex_base no longer describes
+	   what they point at. */
+	nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_lit_vertex_t ), &nv2a_decal_vb[0].pos[0] );
+	nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &nv2a_decal_vb[0].uv0[0] );
+	nv2a_set_attrib_pointer( 10, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &nv2a_decal_vb[0].uv1[0] );
+	p = pb_begin();
+	p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
+	pb_end( p );
+	nv2a_bound_vertex_base = 0xFFFFFFFFu;
+
+	nv2a_decal_bound_texnum = -1;
+	nv2a_decal_bound_premult = -1;
+	nv2a_decal_active = true;
+	return true;
+}
+
+/* Stage 0 on engine texture `texnum`, as GL_Bind and the 2D flush's
+   stage-0 block do it (r_image.c's table, the substitutions GL_Bind makes
+   for a bad or storage-less slot), plus DrawSingleDecal's blend for a
+   premultiplied texture (gl_decals.c:834-836). */
+static qboolean nv2a_decal_bind_texture( int texnum )
+{
+	uint32_t phys, pitch, width, height, color_format;
+	unsigned int prev, resolved;
+	qboolean bilinear;
+	int premult;
+	uint32_t base_size = 0;
+	uint32_t *p;
+
+	if( texnum == nv2a_decal_bound_texnum )
+		return true;
+
+	prev = nv2a_tex_current();
+	GL_Bind( 0, (unsigned int)texnum );
+	resolved = nv2a_tex_current();
+	GL_Bind( 0, prev ); /* the TriAPI keeps its own binding */
+
+	if( !nv2a_tex_gpu_params( resolved, &phys, &pitch, &width, &height, &bilinear, &color_format ))
+		return false;
+	nv2a_tex_mark_used( resolved );
+	nv2a_tex_coord_scale( nv2a_tex_get( resolved ), &nv2a_decal_scale_s, &nv2a_decal_scale_t );
+
+	if( NV2A_TEX_COLOR_IS_COMPRESSED( color_format ))
+	{
+		base_size = MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_U, (uint32_t)nv2a_2d_log2_pot( width ))
+			| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_V, (uint32_t)nv2a_2d_log2_pot( height ));
+	}
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, phys );
+	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
+		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
+		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, color_format )
+		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 )
+		| base_size );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, pitch << 16 );
+	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( width << 16 ) | height );
+	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 ); /* TF_DECAL is TF_CLAMP (ref_api.h:84) */
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
+	/* never a zero convolution-kernel field (divergences.md #102) */
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, bilinear ? 0x02022000 : 0x01012000 );
+
+	premult = FBitSet( nv2a_tex_get( resolved )->flags, TF_PREMULTIPLIED ) ? 1 : 0;
+	if( premult != nv2a_decal_bound_premult )
+	{
+		p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, premult ? NV097_SET_BLEND_FUNC_SFACTOR_V_ONE : NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA );
+		nv2a_decal_bound_premult = premult;
+	}
+	pb_end( p );
+
+	nv2a_decal_bound_texnum = texnum;
+	return true;
+}
+
+/* Where the face's lightmap sits for the decal's stage-1 coordinates, in
+   atlas texels: the block's origin, to which each vertex adds its luxel
+   position (r_decals.c's R_DecalVertsLight) - the baker's own formula
+   (BspParser.cpp: blockX + (s - texturemins) / 16 + 0.5, Xbox bakes have
+   no border). A face without a usable block (no lightmap, or one
+   r_lightmap.c found disagreeing with the engine) samples what its own
+   baked vertices sample: the coordinates of its first one, which for a
+   face without a lightmap are the bake's constant fallback texel. */
+static void nv2a_decal_lightmap_origin( const msurface_t *surf, float *bx, float *by, qboolean *fixed )
+{
+	const model_t *world = gp_cl->models[1];
+	uint32_t orig, sorted;
+	const nv2a_map_face_t *face;
+	const nv2a_lit_vertex_t *vb;
+	uint32_t idx;
+
+	*bx = *by = 0.0f;
+	*fixed = true;
+
+	if( !surf || world != nv2a_map_owner || !world || !world->surfaces || !nv2a_map_face_remap || !nv2a_map_faces )
+		return;
+	if( surf < world->surfaces || surf >= world->surfaces + world->numsurfaces )
+		return;
+	orig = (uint32_t)( surf - world->surfaces );
+	if( orig >= nv2a_map_face_remap_count )
+		return;
+	sorted = nv2a_map_face_remap[orig];
+	if( sorted >= nv2a_map_face_count )
+		return;
+
+	if( nv2a_map_face_lm && nv2a_map_face_lm[sorted].x != NV2A_LM_BLOCK_NONE )
+	{
+		*bx = (float)nv2a_map_face_lm[sorted].x;
+		*by = (float)nv2a_map_face_lm[sorted].y;
+		*fixed = false;
+		return;
+	}
+
+	face = &nv2a_map_faces[sorted];
+	if( !nv2a_map_vb || !nv2a_map_index_dwords )
+		return;
+	idx = ( (const uint16_t *)nv2a_map_index_dwords )[face->index_begin];
+	vb = (const nv2a_lit_vertex_t *)nv2a_map_vb + nv2a_face_vertex_base( face ) + idx;
+	*bx = vb->uv1[0];
+	*by = vb->uv1[1];
+}
+
+void nv2a_decal_gpu_draw( int texture, const float *v, int numverts, const msurface_t *surf )
+{
+	float bx, by;
+	qboolean fixed;
+	nv2a_lit_vertex_t *out;
+	uint32_t *p;
+	int i;
+
+	if( !nv2a_decal_active || numverts < 3 || numverts > 256 )
+		return;
+
+	if( nv2a_decal_vb_used + (uint32_t)numverts > NV2A_DECAL_FRAME_VERTS )
+	{
+		nv2a_decal_stats.dropped++;
+		return;
+	}
+
+	if( !nv2a_decal_bind_texture( texture ))
+		return;
+
+	nv2a_decal_lightmap_origin( surf, &bx, &by, &fixed );
+
+	out = &nv2a_decal_vb[nv2a_decal_vb_used];
+	for( i = 0; i < numverts; i++, v += VERTEXSIZE, out++ )
+	{
+		out->pos[0] = v[0];
+		out->pos[1] = v[1];
+		out->pos[2] = v[2];
+		out->uv0[0] = v[3] * nv2a_decal_scale_s;
+		out->uv0[1] = v[4] * nv2a_decal_scale_t;
+		out->uv1[0] = fixed ? bx : bx + v[5];
+		out->uv1[1] = fixed ? by : by + v[6];
+	}
+
+	/* GL_POLYGON: a convex polygon, the same triangles as a fan. The
+	   vertex fetch cache is broken first: these vertices were written
+	   after the GPU started on the previous polygon, whose last cache
+	   line they may share (28-byte stride) - as nv2a_bind_vertex_base and
+	   the 2D ring do whenever the array contents change. */
+	p = pb_begin();
+	p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
+	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLE_FAN );
+	p = pb_push1( p, 0x40000000 | NV097_DRAW_ARRAYS,
+		MASK( NV097_DRAW_ARRAYS_COUNT, (uint32_t)numverts - 1 )
+		| MASK( NV097_DRAW_ARRAYS_START_INDEX, nv2a_decal_vb_used ));
+	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
+	pb_end( p );
+
+	nv2a_decal_vb_used += (uint32_t)numverts;
+}
+
+void nv2a_decal_gpu_end( void )
+{
+	uint32_t *p;
+
+	if( !nv2a_decal_active )
+		return;
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_POLY_OFFSET_FILL_ENABLE, 0 );
+	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 1 );
+	p = pb_push1( p, NV097_SET_DEPTH_MASK, 1 );
+	p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
+	pb_end( p );
+
+	/* The program, the arrays and stage 0 are the decals' now: the next
+	   lit draw re-enters the lit state (ps_lit, arrays, constants) and the
+	   TriAPI its own. */
+	nv2a_lit_state_current = false;
+	nv2a_2d_dirty = true;
+	nv2a_decal_active = false;
+}
+
 /* X9-X step 8: hands r_lightmap.c this frame's map, view and the brush
    entities that will be drawn with their lightmap (R_HasLightmap,
    nv2a_entity_has_lightmap), then lets it rebuild what changed. */
@@ -5828,6 +6391,9 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		/* X9-X item 14 step 10: the skybox, before the world (#137). */
 		nv2a_draw_sky();
 		nv2a_draw_map_geometry(); /* ends with the world's opaque water (r_warp.c) */
+		/* X9-X item 14 step 12: R_DrawWorld's DrawDecalsBatch, after the
+		   texture chains (gl_rsurf.c:3707-3711). */
+		R_DecalDrawWorld();
 		nv2a_world_drawn_this_frame = true;
 	}
 
@@ -7240,6 +7806,9 @@ static void R_BeginFrame( qboolean clearScene )
 	nv2a_tex_begin_frame();
 	nv2a_2d_ring_write_offset = 0;
 	nv2a_2d_ring_pending_verts = 0;
+	/* X9-X item 14 step 12: the decal buffer too, past the same wait. */
+	nv2a_decal_vb_used = 0;
+	nv2a_decal_stats.surfaces = nv2a_decal_stats.decals = nv2a_decal_stats.verts = nv2a_decal_stats.dropped = 0;
 	R_Set2DMode( true );
 	nv2a_no_world_backdrop_pending = true; /* set after the call above, so only the engine's own next R_Set2DMode(true) draws it */
 }
@@ -7341,6 +7910,12 @@ static void R_NewMap( void )
 	/* X9-X item 14 step 11: the water textures' fog parameters. */
 	R_WarpNewMap( gp_cl->models[1] );
 
+	/* X9-X item 14 step 12: R_ClearDecals, gl_context.c:403 - clear all
+	   level decals - and GL_BuildLightmaps' reset of every surface's decal
+	   chain (gl_context.c:429, gl_rsurf.c:3932-3944). */
+	R_ClearDecals();
+	R_DecalClearSurfaceChains();
+
 	/* X9-X step 5, gl_context.c:405: forget every cached per-client player
 	   model on a map change - the client index<->model_t mapping is only
 	   valid for the map that built it. */
@@ -7397,10 +7972,10 @@ const ref_interface_t gReffuncs =
 	   ref/common's real function to the same _nv2a_-prefixed name. */
 	.R_LightPoint = R_LightPoint,
 
-	.R_DecalShoot      = R_DecalShoot,
-	.R_DecalRemoveAll  = R_SimpleStubInt,
+	.R_DecalShoot      = R_DecalShoot,      /* X9-X item 14 step 12: r_decals.c, gl_context.c:519-522 */
+	.R_DecalRemoveAll  = R_DecalRemoveAll,
 	.R_CreateDecalList = R_CreateDecalList,
-	.R_ClearAllDecals  = R_SimpleStub,
+	.R_ClearAllDecals  = R_ClearAllDecals,
 
 	.R_StudioEstimateFrame = R_StudioEstimateFrame,
 	.R_StudioLerpMovement  = R_StudioLerpMovement,

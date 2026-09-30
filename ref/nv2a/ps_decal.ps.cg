@@ -1,0 +1,26 @@
+/*
+ * X9-X item 14 step 12: the decal pixel shader - ps_lit (decal texel x
+ * lightmap x 2) with the entity's colour/alpha as a constant, the
+ * glColor4f(1,1,1,tr.blend) (or R_SetRenderMode's kRenderTransColor
+ * glColor4ub) a decal is modulated by in ref/gl (DrawSingleDecal,
+ * gl_decals.c:826, under GL_MODULATE). The constant is register-combiner
+ * constant colour 0, written at draw time (NV097_SET_COMBINER_FACTOR0,
+ * r_context.c's nv2a_decal_begin); alpha is the decal texel's own alpha
+ * times it, never doubled, for the SRC_ALPHA/ONE_MINUS_SRC_ALPHA blend.
+ */
+struct vOut {
+	float2 tex0 : TEXCOORD0;
+	float2 tex1 : TEXCOORD1;
+};
+
+float4 main(
+	vOut              I,
+	uniform sampler2D decalMap,
+	uniform sampler2D lightMap,
+	uniform float4    tint
+	) : COLOR
+{
+	float4 decal = tex2D(decalMap, I.tex0.xy);
+	float4 light = tex2D(lightMap, I.tex1.xy);
+	return float4(decal.rgb * light.rgb * 2.0f * tint.rgb, decal.a * tint.a);
+}

@@ -28,6 +28,21 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER script anything after a command the engine follows up through the command buffer
+
+X9-X step 12: a test config ran `save dectest`, then `wait`s, `load dectest`
+and `menu_loadgame`. The thumbnail came out black apart from the HUD and the
+menu showed none. `SaveGameSlot` queues the thumbnail with
+`Cbuf_AddTextf( "saveshot ..." )` (sv_save.c:1791), which appends it behind
+everything still in the buffer, so it ran after `menu_loadgame`, over the
+open menu, where `V_RenderView` draws no world. A normal save, with an empty
+buffer, shoots the next frame.
+
+**When a scripted command makes the engine queue a follow-up (`saveshot`
+after `save`, a `levelshot`, an `exec`), end the script there and do the
+next step in a new boot or from input.** Otherwise the follow-up runs in
+whatever state the rest of the script left.
+
 
 ### NEVER report a CPU or frame-time number without reading the compile line that produced the binary
 

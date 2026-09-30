@@ -5,6 +5,38 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - decals, screenshots and savegame thumbnails on Xbox (ref/nv2a)
+
+Bullet holes, blood, scorch marks and sprayed logos now stay on walls, floors
+and doors, as in the reference renderer (`gl_decals.c`): a decal is clipped
+to every face it touches, lit by that face's lightmap and drawn over it with
+a small depth bias (`gl_polyoffset`). Until now ref/nv2a threw every decal
+away.
+- Decals on doors, trains and other brush entities are kept in the entity's
+  own space and move with it; translucent entities draw theirs with the
+  entity's colour and transparency.
+- Decals are saved with the game and placed again on load
+  (`R_CreateDecalList`). Engine note, unchanged here and the same upstream:
+  when the player has a logo (the retail `logos/remapped.bmp`) the engine
+  removes every decal just after a load, through `R_DecalRemoveAll( 0 )`
+  for a logo that was never sprayed.
+- The `screenshot`, `snapshot` and `levelshot` commands now write their
+  files, and every save writes its thumbnail (`save/<name>.bmp`), which the
+  Load Game menu shows. The picture is read back from the NV2A's back
+  buffer after the HUD is drawn, as ref/gl's `glReadPixels`.
+- Memory: 128 decals (the Xbox's low-memory limit): a 7.5 KiB pool plus each
+  decal's clipped polygon in the renderer's zone (128 bytes for a typical
+  4-vertex decal, about 16 KiB for a full pool), and a 56 KiB vertex buffer
+  for drawing. Saving takes 300 KiB of zone for a moment for the thumbnail.
+  The XBE grows by 16 KiB.
+- Frame cost: 65-83 decals on screen after a firefight in c1a0e (260-338
+  vertices), estimated well under 0.1 ms of CPU at 733 MHz. Not yet
+  measured on the console.
+- No map needs a re-bake and the disc needs nothing new.
+- New test: the `nv2a_decal_util` host test (the decal clip and its
+  lightmap coordinates).
+- Divergence #139.
+
 ### Added - moving water and underwater fog on Xbox (ref/nv2a)
 
 Water (`!` textures) now moves as in the reference renderer: each water

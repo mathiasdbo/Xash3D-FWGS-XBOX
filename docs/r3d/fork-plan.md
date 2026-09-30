@@ -9451,9 +9451,114 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
         `kRenderTransTexture`/`kRenderGlow` brushes (glass, grates) now
         alpha-test-discard the fully-transparent DXT1 sentinel texel instead
         of blending it as a black smudge (#103 point 5; the sub-threshold
-        bilinear-edge case is left open, needs a combiner change). Still
-        open: decals; screenshots (the save-game thumbnail);
-        `Mod_GetCurrentVis`.
+        bilinear-edge case is left open, needs a combiner change). The
+        rest of this step landed later: `Mod_GetCurrentVis` with step 7
+        (#161), decals and screenshots below.
+       **Decals and screenshots: landed, x9-x-decals, 2026-09-30
+       (divergences.md #139).**
+       - On main every decal was thrown away (`R_DecalShoot` and
+         `R_CreateDecalList` were empty stubs, `R_DecalRemoveAll` and
+         `R_ClearAllDecals` did nothing), `VID_ScreenShot` returned false
+         (the engine printed "Unable to write") and no save had a
+         thumbnail, so the Load Game list showed mainui's "DIE, FREEMAN"
+         fallback for every save.
+       - New `ref/nv2a/r_decals.c` ports `gl_decals.c` function for
+         function: the pool (128 entries, `MAX_RENDER_DECALS` under
+         `XASH_LOW_MEMORY` 1), `R_DecalShoot`'s BSP walk and placement,
+         overlap stealing, the clip to the face, `R_CreateDecalList` for
+         savegames, `R_DecalRemoveAll`, `R_EntityRemoveDecals` (also in
+         `R_FillRenderAPI`, gl_context.c:451) and `R_ClearAllDecals`.
+         `R_NewMap` runs `R_ClearDecals` and `GL_BuildLightmaps`' reset of
+         every surface's decal chain (gl_rsurf.c:3932-3944).
+         `nv2a_decal_util.c` (host-tested) holds the Sutherland-Hodgman
+         clip and `R_LightmapCoord` within the face's block.
+       - The face polygon is read from the model's edges when a decal is
+         placed: ref/gl clips against `msurface_t::polys`, which this
+         renderer never builds (the world comes from the bake). With
+         `gl_keeptjunctions` 1 it is the same edge loop.
+       - Drawing: after the world (`R_DrawWorld`'s `DrawDecalsBatch`) and
+         after each brush entity's faces, in the entity's model space, so
+         decals move with doors and trains; a kRenderTransTexture entity
+         keeps its back faces' decals, drawn in reverse. The world's vertex
+         program with a new combiner, `ps_decal` (compiled from Cg with
+         cgc/fp20compiler): decal x lightmap x 2 x `R_SetRenderMode`'s
+         colour, alpha = decal alpha x the entity alpha; the lightmap is
+         sampled from the baked atlas at the face's block. Blending
+         `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA` (`ONE` for premultiplied),
+         `gl_polyoffset` as a depth bias (`NV097_SET_POLYGON_OFFSET_BIAS`,
+         -2 w units; no slope term, #139). Vertices stream through a
+         2048-vertex (56 KiB) per-frame buffer.
+       - Screenshots: `VID_ScreenShot` reads pbkit's back buffer from
+         `V_PostRender`, before `R_EndFrame`, as `PF_BGRA_32` with alpha
+         forced opaque, then the engine resamples and saves it per shot
+         type, as gl_backend.c:548. The savegame thumbnail
+         (`VID_MINISHOT`, 267x200, `save/<name>.bmp`) is read at half size
+         first (2x2 average) so it takes 300 KiB rather than 1.2 MiB of
+         zone mid-game (#139). `VID_CubemapShot` stays unimplemented, as in
+         ref/soft (`envshot`/`skyshot` only).
+       - Memory: the pool is 7.5 KiB static; each decal's clipped polygon
+         lives in r_temppool (16 bytes plus 28 per vertex, 128 bytes for
+         the 4-vertex polygons every decal in these tests had, so about
+         16 KiB for a full pool); 56 KiB contiguous vertex buffer; 1.8 KiB
+         of clip buffers and 1.5 KiB of draw lists. The XBE grows from
+         5517312 to 5533696 bytes (+16 KiB).
+       - Cost, per `nv2a_decal_stats` (read live): c1a0e after an MP5 burst
+         and a grenade, 65 decals on 10 surfaces, 260 vertices, in one
+         frame; after a load 83 decals, 338 vertices, 13 surfaces; nothing
+         dropped. Estimated at 733 MHz (-O2): about 40 instructions a
+         vertex and 200 a polygon (bind, lightmap lookup, push), plus the
+         128-entry pool walk: about 30-40k instructions, well under 0.1 ms
+         for 80 decals. Not measured on hardware (step 13's recorder).
+       - Verified live in xemu, branch vs main (water.xbe = main ec2a9d70),
+         c1a0e, MP5 at the two scientists in the airlock and an AR grenade:
+         - Blood splats on the door and the grille wall behind them, bullet
+           holes, blood across the floor and a soot scorch on the door,
+           shaded by the door's lightmap, no z-fighting. Main after the
+           same script: gibs on a clean floor, no marks anywhere.
+         - A decal on a moving door follows it: the test lab door
+           (`tldoor`, slowed with `ent_fire tldoor set speed 4`), grabbed
+           every sixth frame from `CBaseDoor::DoorGoUp`: the bullet-hole
+           cluster moves down with the lower half and keeps its place on
+           the panel, while the spark particles (world space) stay put.
+         - `screenshot` wrote `scrshots/c1a0e_shot0000.png` and `0001.png`
+           (640x480, correct colours, decals and HUD) on the emulated
+           drive, under `E:\UDATA\FFFF0002\valve\valve\` (the write path
+           is the gamedir inside the title's gamedir); main wrote none.
+         - Every branch save wrote `save/<name>.bmp` (268x200, 32-bit) in
+           the same second as the `.sav`; the Load Game list shows it for
+           the selected save; main's saves have none and show the
+           fallback.
+         - Decals survive a save and a reload into a fresh boot: 88 in the
+           pool after the load, the frame matching the one before the save
+           (1639 of 307200 pixels differ by more than 8, view-model sway
+           and HUD; the floor's redness identical).
+       - Owner-side, hand-tested in xemu on decals.xbe (2026-09-30):
+         decals visible, decals following moving objects, the savegame
+         thumbnail in the Load Game list and the `screenshot` command -
+         "everything is ok".
+       - Found on the way, engine behaviour identical in the root clone
+         (not changed here): with the retail `logos/remapped.bmp` the
+         player has a logo customization, and once the client is active
+         after a load, `CL_UpdateLogo` (cl_main.c:298) and a userinfo
+         update (cl_parse.c:1395) clear it with
+         `R_DecalRemoveAll( nUserData1 )`. `nUserData1` stays 0 until the
+         player actually sprays (cl_tent.c:2911-2921), and 0 means "every
+         decal" in `R_DecalRemoveAll` (gl_decals.c:1157), so the restored
+         decals are wiped a moment after they are placed (traced: 76
+         placed, then two `R_DecalRemoveAll( 0 )`). The survival check ran
+         with that one file parked. The fix belongs upstream (skip the
+         call when `nUserData1` is 0).
+       - Reviewed (reference-renderer-specialist, nv2a-xbox-specialist):
+         fixed the stale surface decal chains on a same-map reload, a
+         vertex-cache break per polygon, a guard so an entity's decals are
+         never drawn with the world's matrix, and a screenshot outside a
+         frame; the combiner, factor packing, bias registers and the
+         framebuffer read were checked against nv_regs.h, pbkit and xemu.
+       - Not verified: real hardware (the bias under W-buffering, the
+         vertex cache, the framebuffer read cost - estimated at tens of
+         milliseconds a shot); `R_EntityRemoveDecals` (no Half-Life caller);
+         custom sprayed logos (`IMAGE_PLAYERDECAL`, no multiplayer here);
+         translucent brush entities with decals seen from behind.
     13. *Frame-time recorder and overlay (the last step; owner's request,
         2026-09-30).* One enum cvar selects the frame analysis: none,
         record, or record + overlay. Record writes every frame's time
