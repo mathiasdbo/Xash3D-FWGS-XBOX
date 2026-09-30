@@ -26,6 +26,7 @@ separately (nv2a_studio_util.c, tools/host-tests).
 #include "nv2a_texture.h"
 #include "nv2a_studio_util.h"
 #include "r_studio_bridge.h"
+#include "r_warp.h" /* X9-X item 14 step 11: R_WarpAllowFog */
 #include "r_studio.h"
 #include "r_sprite.h" /* X9-X step 6: TriSpriteTexture (gl_triapi.c:242) */
 #include <stdlib.h> /* calloc/free, R_StudioAllocStatics */
@@ -36,16 +37,12 @@ separately (nv2a_studio_util.c, tools/host-tests).
    not an engine one, so copied rather than included from anywhere. */
 #define SHADE_LAMBERT 1.4953241
 
-/* R_AllowFog (ref/soft/r_local.h:387, ref/gl's own R_AllowFog): an
-   internal helper both those renderers implement for real (GL fog
-   enable/disable around additive studio meshes); nv2a has no fog
-   (TriRenderMode's own comment) so this is a pure no-op, called bare -
-   NOT gEngfuncs.R_AllowFog, a completely different thing (ref_interface_t's
-   own slot, the ENGINE's callback INTO this renderer, r_context.c's own
-   stub for it). */
+/* R_AllowFog (ref/soft/r_local.h:387, ref/gl's own R_AllowFog): the GL
+   fog enable/disable around additive studio meshes - r_warp.c's port
+   since X9-X item 14 step 11. */
 static void R_AllowFog( qboolean allow )
 {
-	(void)allow;
+	R_WarpAllowFog( allow );
 }
 
 /* nv2a_studio_util.h's own mirrors of studio.h's STUDIO_NF_MASKED/ADDITIVE

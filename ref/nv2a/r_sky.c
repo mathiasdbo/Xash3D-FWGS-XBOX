@@ -44,8 +44,10 @@ Where it departs from ref/gl (docs/r3d/divergences.md #137):
   answers true without a custom skybox - a Half-Life map always has one
   (R_SetupSky falls back to "desert"). In that case nothing is drawn here;
   ref/gl draws clouds and no box.
-- No fog (#119), no skybox texnum slots (SKYBOX_BASE_NUM, gl_image.c:1224:
-  a GL texture-name trick for mods, nothing to reserve here).
+- No skybox texnum slots (SKYBOX_BASE_NUM, gl_image.c:1224:
+  a GL texture-name trick for mods, nothing to reserve here). The box's
+  fog (off unless RI.fogSkybox, half density, gl_warp.c:334-365) is set
+  around R_DrawSkyBox by r_context.c (R_WarpSkyFogBegin/End, r_warp.c).
 */
 #include "ref_common.h"
 #include "xash3d_mathlib.h"

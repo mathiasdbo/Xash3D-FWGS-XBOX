@@ -232,6 +232,9 @@ typedef struct
 // mirrors formats::SURF_DRAWSKY (MpakHeader.h). Only the one bit ref/nv2a
 // actually consumes is mirrored here; add more as real consumers need them.
 #define MPAK_SURF_DRAWSKY 0x0004u // texture name starts with "sky" - never has real geometry to show
+// X9-X step 11: formats::SURF_DRAWTURB (MpakHeader.h:434) - a water face,
+// drawn warped (ref/nv2a/r_warp.c). Every v13 archive already carries it.
+#define MPAK_SURF_DRAWTURB 0x0010u // texture name starts with '*' or '!'
 
 // v9: mirrors formats::MpakTextureInfo (tools/asset-studio/src/formats/
 // MpakHeader.h) byte-for-byte - one directory entry per unique per-texture

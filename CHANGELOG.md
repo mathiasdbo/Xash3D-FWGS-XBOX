@@ -5,6 +5,29 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - moving water and underwater fog on Xbox (ref/nv2a)
+
+Water (`!` textures) now moves as in the reference renderer: each water
+surface is cut into 64-unit pieces when the map loads, and every frame its
+texture swirls with the sin-table warp and, where a func_water sets a wave
+height, the surface rises and falls (`GL_SubdivideSurface`,
+`EmitWaterPolys`). Until now water was a still, baked surface.
+- Translucent func_water keeps its render mode and can be seen from below;
+  translucent world water (`sv_wateralpha` below 1) draws after models.
+- With the view under water the scene fogs with the water's colour and
+  density (`R_CheckFog`/`R_DrawFog`), taken from the water texture's
+  palette in the game's WADs; the client's `TriFog` works too. Additive
+  effects stay unfogged, as in the reference.
+- Memory: the water pieces cost at most 0.62 MiB (disposal) in the map's
+  own pool, 0.1 MiB or less on 40 of the 52 retail maps with water.
+- Frame cost: up to ~12500 warped vertices a frame across the biggest
+  lake (c4a3), estimated at 2-3.5 ms of CPU at 733 MHz; a typical pool is a
+  few hundred microseconds. Not yet measured on the console.
+- No map needs a re-bake and the disc needs nothing new.
+- New test: the `nv2a_warp_util` host test (subdivision, the warp and its
+  per-frame form, the fog register math).
+- Divergence #138; #119's "no fog" is closed.
+
 ### Added - skies on Xbox (ref/nv2a); optional DXT1 sky bake for the disc
 
 Sky surfaces now show the map's skybox (`gfx/env/<skyname>`), drawn around

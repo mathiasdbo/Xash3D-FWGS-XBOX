@@ -34,6 +34,7 @@ pushes; two fields were added to that shadow for this file
 #include "nv2a_texture.h"
 #include "nv2a_sprite_util.h"
 #include "r_studio_bridge.h"
+#include "r_warp.h" /* X9-X item 14 step 11: R_WarpAllowFog */
 #include "r_sprite.h"
 
 /* nv2a_sprite_util.h's mirrors of const.h, pinned here where const.h is
@@ -97,11 +98,11 @@ void R_SpriteSetBlend( float blend )
 	RI.blend = blend;
 }
 
-/* R_AllowFog: this renderer has no fog (TriRenderMode's own comment,
-   r_context.c; r_studio.c keeps the same no-op). */
+/* R_AllowFog (gl_rmain.c:42), r_warp.c's port since X9-X item 14
+   step 11. */
 static void R_AllowFog( qboolean allowed )
 {
-	(void)allowed;
+	R_WarpAllowFog( allowed );
 }
 
 /* The GL state gl_sprite.c changes, read from and written back to the

@@ -16,6 +16,7 @@ r_context.c-owned globals it needs to read/write.
 
 #include "xash3d_types.h"
 #include "triangleapi.h" /* TRICULLSTYLE */
+#include "nv2a_tri_util.h" /* nv2a_tri_vert_t, X9-X step 11 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,7 +69,33 @@ typedef struct
 	   so the positional initializer of nv2a_2d_desired stays valid. */
 	qboolean depth_test_disable;
 	qboolean depth_func_equal;
+	/* X9-X step 11: the GL fog state (glEnable( GL_FOG ), glFog*) a batch
+	   was appended under - snapshotted from nv2a_fog_current at append,
+	   only in nv2a_2d_batch_state/nv2a_2d_pushed; nv2a_2d_desired's copy
+	   is never read, so a caller that saves and restores nv2a_2d_desired
+	   around a draw can never roll the fog state back. */
+	struct nv2a_fog_hw_s
+	{
+		qboolean enable;
+		int      mode;      /* NV2A_FOG_MODE_* */
+		float    density;
+		float    start, end;
+		uint32_t color;     /* NV097_SET_FOG_COLOR byte order, nv2a_fog_pack_color */
+	} fog;
 } nv2a_2d_shadow_t;
+
+typedef struct nv2a_fog_hw_s nv2a_fog_hw_t;
+
+/* GL_EXP, GL_EXP2, GL_LINEAR. */
+#define NV2A_FOG_MODE_EXP    0
+#define NV2A_FOG_MODE_EXP2   1
+#define NV2A_FOG_MODE_LINEAR 2
+
+/* X9-X step 11: the current GL fog state, written only by r_warp.c (the
+   port of R_DrawFog/R_CheckFog/R_AllowFog/TriFog) and read by every draw:
+   TriAPI batches snapshot it at append, the world and brush-entity path
+   (vs_lit/ps_lit) push it when they enter their own state. */
+extern nv2a_fog_hw_t nv2a_fog_current;
 
 extern nv2a_2d_shadow_t nv2a_2d_desired;
 
@@ -131,6 +158,32 @@ byte *nv2a_mod_get_current_vis( void );
    primitives while on - r_effects.c's R_BeamDraw turns it on around its
    Begin/End. */
 void nv2a_tri_set_texture_repeat( qboolean on );
+
+/* X9-X step 11: bind one of the map's own DXT1 directory textures (the
+   world's, nv2a_map_textures) for the TriAPI's next primitives instead of
+   the texture-table texture GL_Bind selected - normalized coordinates,
+   the world's own WRAP addressing, mip chain and filter. r_warp.c draws
+   the water with it. NV2A_TRI_NO_MAP_TEXTURE returns to GL_Bind's. */
+#define NV2A_TRI_NO_MAP_TEXTURE 0xFFFFFFFFu
+void nv2a_tri_bind_map_texture( uint32_t dir );
+
+/* X9-X step 11: the map directory entry a surface of the current world
+   draws with (the baked face's own batch texture), or
+   NV2A_TRI_NO_MAP_TEXTURE when there is no per-face table or no entry. */
+struct msurface_s;
+uint32_t nv2a_surface_map_texture( const struct msurface_s *surf );
+
+/* X9-X step 11: submits the TriAPI's pending batch (r_context.c's
+   nv2a_2d_flush), for callers outside r_context.c that must draw before
+   state they do not own changes. */
+void nv2a_tri_flush( void );
+
+/* X9-X step 11: whole 3D primitives (quads, or triangles) straight into
+   the TriAPI's batch, with the current colour - Begin/Vertex3f/End's
+   output without its assembler (r_warp.c's per-vertex hot path). Texture
+   coordinates are in the bound texture's units (normalized for a map
+   directory texture). */
+void nv2a_tri_append_3d( qboolean quads, nv2a_tri_vert_t *v, uint32_t n );
 
 #ifdef __cplusplus
 }

@@ -24,7 +24,7 @@ Where it departs from ref/gl (docs/r3d/divergences.md #133):
   nv2a_efx_util.c) around its draw, so each primitive is cut at the
   texture's cell boundaries instead. Bilinear filtering does not blend
   across a cut the way it blends across GL_REPEAT's seam.
-- No fog (R_AllowFog a no-op, #119); pglNormal3fv has no consumer (no
+- R_AllowFog is r_warp.c's (X9-X item 14 step 11); pglNormal3fv has no consumer (no
   lighting on the TriAPI); pglShadeModel is always Gouraud (pbkit.c:3170).
 */
 #include "ref_common.h"
@@ -41,6 +41,7 @@ Where it departs from ref/gl (docs/r3d/divergences.md #133):
 #include "nv2a_efx_util.h"
 #include "nv2a_sprite_util.h" /* NV2A_SPRITE_SFACTOR_ / DFACTOR_ mirrors of nv_regs.h, pinned in r_context.c */
 #include "r_studio_bridge.h"
+#include "r_warp.h" /* X9-X item 14 step 11: R_WarpAllowFog */
 #include "r_sprite.h"    /* TriSpriteTexture (gl_triapi.c:242) */
 #include "r_effects.h"
 
@@ -115,10 +116,11 @@ static inline model_t *CL_ModelHandle( int index )
 #define R_CullBox( mins, maxs ) nv2a_frustum_cull_box( mins, maxs )
 #define Mod_GetCurrentVis() nv2a_mod_get_current_vis()
 
-/* R_AllowFog: no fog in this renderer (#119), as r_sprite.c/r_studio.c. */
+/* R_AllowFog (gl_rmain.c:42), r_warp.c's port since X9-X item 14
+   step 11. */
 static void R_AllowFog( qboolean allowed )
 {
-	(void)allowed;
+	R_WarpAllowFog( allowed );
 }
 
 /* ---- the ref/gl TriAPI helpers these files call ---------------------- */

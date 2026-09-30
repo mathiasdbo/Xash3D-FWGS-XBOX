@@ -9364,9 +9364,85 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
        - Not verified: real hardware; frame cost (X11). Not tested live: a
          map without sky in view but with sky faces in the PVS (the pass
          just finds no side to draw).
-    11. *Water warp* (`!` textures: `GL_SubdivideSurface` and the per-vertex
+    11. ~~*Water warp* (`!` textures: `GL_SubdivideSurface` and the per-vertex
         sin-table texture coordinates of `EmitWaterPolys`) and underwater
-        fog (`R_CheckFog`).
+        fog (`R_CheckFog`).~~ **Done (x9-x-water, divergences.md #138):**
+       - On main a water face drew from the bake as a static, unwarped
+         surface (`SURF_DRAWTURB` was only used for the brush-entity side
+         and bottom tests), `GL_SubdivideSurface` was empty, and fog was a
+         no-op everywhere (#119).
+       - `ref/nv2a/r_warp.c` ports `GL_SubdivideSurface`/`SubdividePolygon_r`,
+         `EmitWaterPolys`, `R_DrawWaterSurfaces` and `R_RenderBrushPoly`'s
+         water branch (`gl_rsurf.c`), and `R_CheckFog`, `R_DrawFog`,
+         `R_AllowFog` (`gl_rmain.c`), `TriFog`/`TriFogParams` and the
+         skybox's fog. `nv2a_warp_util.c` (host-tested) holds the
+         subdivision, the warp arithmetic and the fog register math.
+       - World water faces (`MPAK_SURF_DRAWTURB`, a bit every v13 archive
+         already has) are taken out of the baked batch walk and drawn
+         warped through the TriAPI with their own DXT1 directory texture,
+         bound with the world's WRAP addressing and mip chain; brush-entity
+         water (func_water) draws under the entity's render mode and
+         transform, its back faces reversed so it shows from below;
+         `sv_wateralpha` < 1 water draws after the entities.
+       - Fog: `vs_lit`/`vs_tri` output the eye depth as `FOG`,
+         `NV097_SET_FOG_*` carry GL's EXP/EXP2/LINEAR state and the final
+         combiner blends with the fog colour, on the world, brush entities
+         and every TriAPI draw, with `R_AllowFog`'s exceptions (additive
+         entities and effects). The water's colour and density come from
+         the texture's WAD palette (entries 3 and 4), loaded once per map
+         from the gamedir's WADs through the engine's image loader.
+       - Memory, measured over the 122 retail BSPs with the same
+         subdivision code: 52 maps have water, 12 need more than 0.1 MiB;
+         the most is disposal, 652348 bytes (928 faces, 12410 pieces,
+         49836 vertices), then c2a5 0.54 MiB, c4a3 0.48, c2a4b 0.42 - in
+         the map's zone pool. The reference's one `glpoly2_t` per piece
+         would cost 1.91 MiB on disposal (2.7 MiB free), hence one
+         position-only block per face (#138 (1)); a 1 MiB per-map cap
+         leaves anything beyond it unwarped. The XBE grows by 12 KiB.
+       - Frame cost, CPU (decided with these numbers - the GPU route would
+         need a sine VP20 does not have, a new vertex program and ~0.6 MiB
+         of contiguous memory for static water vertices): warped vertices
+         per frame read live in xemu (the most of 8-10 debugger halts, since a
+         halt can land mid-frame) - c3a1 pool 1238, c2a4 func_water 1204,
+         c1a4g slime tank 832, c4a3's lake 1900-10176 and 12459 at worst
+         (25 faces, 3105 pieces). The first version truncated four
+         doubles per vertex on the x87 (an FLDCW pair each) and staged
+         every vertex through the TriAPI assembler; now the time terms are
+         split once per frame (host test: 237 of 600000 results one table
+         step off the reference's double expression), each vertex is ~100
+         instructions of warp and coordinates (the wave's 73 are skipped at
+         waveheight 0, which world water has) plus ~60 per vertex of
+         batching, with no x87 truncation. Estimate at 733 MHz: 0.2-0.4 ms
+         for a typical pool, 2-3.5 ms for the c4a3 lake views. Not measured
+         on hardware (step 13's recorder is the tool).
+       - No map needs a re-bake: the archives already carry the flag and
+         the textures; the disc already carries the WADs.
+       - Verified live in xemu, branch vs main (sky.xbe = main ca4cb868),
+         same teleported pose: c3a1's pool (`!gwater2`) ripples - two grabs
+         0.4 s apart differ only on the water, main's are pixel-identical;
+         underwater the view fogs green (EXP, density 0.0032, colour
+         (24,38,8) = the WAD palette's), main shows clear, unfogged walls;
+         c2a4's translucent func_water (TransTexture 210) warps and shows
+         its underside from below; with the eye in it the fog is
+         `!watergreen`'s (33,41,16), and a wall ~300 units away reads
+         exactly the GL_EXP blend (measured (71.7,46.5,31.3), predicted
+         (71.4,46.5,31.3)); c1a4g's slime and c4a3's lake warp.
+       - Not verified: real hardware (the fog registers and final combiner
+         especially, #138 (6)); c2a4's in-water fog needed the server's
+         water level set over the debugger, because a teleported player is
+         not simulated (lessons.md); `TriFog` (no retail client call);
+         the TriAPI ring (256 KiB) holds ~10900 vertices, so c4a3's worst lake
+         view (12459, 292 KiB) wraps it every frame (a flush and a wait for
+         the GPU); the picture is intact in xemu, the stall's cost is not
+         measured;
+         fog is per vertex (#138 (6)), so a large unsubdivided wall seen
+         underwater is less fogged mid-face than on GL - a hardware look
+         decides whether per-pixel fog (a lookup texture) is needed.
+       - Reviewed (reference-renderer-specialist, nv2a-xbox-specialist):
+         fixed the water budget counting across map loads, R_NewMap's fog
+         reset, an extra R_AllowFog, a dropped-face case; the fog
+         registers, final combiner and DXT1 binding were checked against
+         nv_regs.h and the world's own bind.
     12. ~~`kRenderTransColor` on brush entities~~ **Done (brush-entity-visibility
         branch, divergences.md #103 point 2):** a synthetic flat-colour
         texel bound to stage 0 in place of the entity's own face texture,

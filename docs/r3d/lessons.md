@@ -195,6 +195,32 @@ never wrote, and nothing downstream will say so. (`strtod`/`strtof`/
 `strtold` are `assert(0); return 0.0` at `xboxrt/libc_extensions/
 stdlib_ext_.c:89-105`, waiting for their turn.)
 
+### ALWAYS boot the baseline twice before calling a branch-vs-main pixel difference a regression
+
+X9-X step 11 (water): at the same teleported pose in c3a1, the rock walls
+far from any water read (44.9, 28.0, 29.1) on the branch and (41.1, 24.6,
+24.8) on main - stable within each boot over five seconds, so it looked
+like the change brightened the world. A second boot of main read (49.0,
+29.8, 30.8): the level's own state differs per boot, not per build.
+
+**A difference outside what the change touches is only evidence once the
+baseline has been booted at least twice and agrees with itself.** One boot
+per build measures the boot, not the build.
+
+### NEVER read a game-derived renderer input after a debugger teleport without reading what the game derived
+
+X9-X step 11: underwater fog never came on in c2a4's func_water after
+writing the player's origin into the pool. The renderer was fine: the
+teleported player was not being simulated (it hung at z=0 with no gravity),
+so the server's `pev->waterlevel` stayed at its spawn value 1
+(`entvars_t` offset 448, read over the debugger) and `R_CheckFog`'s first
+gate (`PARM_WATER_LEVEL < 3`) returned, as ref/gl's would.
+
+**When a teleport or poke feeds a renderer path through game state -
+water level, contents, ground entity - read that state off the guest
+before judging the renderer.** Set it explicitly (and say so) when the
+simulation will not.
+
 ### ALWAYS confirm which map a live measurement is in before comparing it with map data
 
 XG.1's first probes compared a spawn angle read off the wire, `(0, 0, 0)`,

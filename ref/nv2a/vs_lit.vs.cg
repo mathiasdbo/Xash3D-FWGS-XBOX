@@ -13,6 +13,7 @@ struct vIn {
 
 struct vOut {
 	float4 pos  : POSITION;
+	float  fog  : FOG;
 	float4 tex0 : TEXCOORD0;
 	float4 tex1 : TEXCOORD1;
 };
@@ -26,6 +27,11 @@ vOut main(
 	float4 position;
 
 	position = mul(float4(I.position.xyz, 1.0f), m_viewport);
+	/* X9-X step 11: the fog distance, the eye-space depth (w before the
+	   divide: the view matrix's third column is the eye's forward axis and
+	   the projection copies it into w). The fog unit reads it when
+	   NV097_SET_FOG_ENABLE is on (r_warp.c, R_DrawFog); ignored otherwise. */
+	result.fog = position.w;
 	position.xyz = position.xyz / position.w;
 
 	/* Write the whole texcoord: ps_lit's texture stages are 2D_PROJECTIVE

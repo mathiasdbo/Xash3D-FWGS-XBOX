@@ -70,6 +70,8 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "r_lightmap.h" /* X9-X step 8: lightstyles and dynamic lights (R_CheckLightMap/R_BuildLightMap port) */
 #include "nv2a_texanim_util.h" /* X9-X item 14 step 9: R_TextureAnimation in texture-index space, host-tested */
 #include "r_sky.h" /* X9-X item 14 step 10: the skybox (gl_warp.c port) */
+#include "r_warp.h" /* X9-X item 14 step 11: water warp and fog (gl_rsurf.c/gl_rmain.c port) */
+#include "nv2a_warp_util.h" /* X9-X item 14 step 11: the fog register math */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -476,6 +478,10 @@ typedef struct
 	                 run regardless of frustum/PVS visibility, matching the
 	                 reference's own minimum behaviour (never draw the sky's
 	                 literal placeholder texture as normal geometry). */
+	uint8_t  turb; /* X9-X step 11: MpakFaceInfo::flags & MPAK_SURF_DRAWTURB -
+	                  a water face, drawn warped through r_warp.c instead of
+	                  from the baked batch (fits the struct's padding: still
+	                  24 bytes). */
 } nv2a_map_face_t;
 
 #define NV2A_FACE_NO_TEXTURE 0xFFFFu
@@ -1198,6 +1204,11 @@ typedef enum
 
 static nv2a_resident_program_t nv2a_resident_program;
 
+/* X9-X step 11: the fog state last pushed (nv2a_push_fog); invalid after
+   any pixel-program upload, which resets the final combiner. */
+static nv2a_fog_hw_t nv2a_fog_pushed;
+static qboolean      nv2a_fog_pushed_valid;
+
 /* X9-X D1: the 2D pass's own vertex ring - allocated in R_Init, freed in
    R_Shutdown (both well above where the rest of Part F is defined
    below), so its pointer needs to be declared this early too. */
@@ -1249,6 +1260,77 @@ static void nv2a_init_lit_shader( void )
 	p = pb_begin();
 	#include "ps_lit.inl"
 	pb_end( p );
+	nv2a_fog_pushed_valid = false; /* ps_lit.inl just reset the final combiner to its unfogged form */
+}
+
+/* X9-X step 11: the GL fog state (nv2a_fog_current, r_warp.c) in
+   hardware. The vertex programs write the eye depth to FOG (vs_lit/vs_tri),
+   the fog unit turns it into the fog factor for NV097_SET_FOG_MODE with
+   NV097_SET_FOG_PARAMS (nv2a_warp_util.c), and the final combiner blends
+   with the fog colour: A = the fog factor (FOG, alpha), B = the colour the
+   general combiners left in V0 (the pixel programs' own final D source),
+   C = the fog colour (FOG, rgb) - A*B + (1-A)*C, GL's own fog blend. Off,
+   the final combiner is exactly what ps_2d.inl/ps_lit.inl push (D = V0).
+   NV097_SET_FOG_GEN_MODE is not written: with a vertex program the fog
+   distance is the program's FOG output (xemu hw/xbox/nv2a/pgraph/glsl/
+   vsh.c reads oFog.x); not yet checked on hardware. */
+static uint32_t nv2a_final_combiner_cw0( qboolean fog )
+{
+	if( !fog )
+		return MASK( NV097_SET_COMBINER_SPECULAR_FOG_CW0_D_SOURCE, 0x4 );
+
+	return MASK( NV097_SET_COMBINER_SPECULAR_FOG_CW0_A_SOURCE, 0x3 ) | MASK( NV097_SET_COMBINER_SPECULAR_FOG_CW0_A_ALPHA, 1 )
+		| MASK( NV097_SET_COMBINER_SPECULAR_FOG_CW0_B_SOURCE, 0x4 )
+		| MASK( NV097_SET_COMBINER_SPECULAR_FOG_CW0_C_SOURCE, 0x3 );
+}
+
+static void nv2a_push_fog( const nv2a_fog_hw_t *fog )
+{
+	nv2a_fog_hw_t want;
+	uint32_t *p;
+
+	memset( &want, 0, sizeof( want ));
+	if( fog && fog->enable && ( fog->mode != NV2A_FOG_MODE_LINEAR || fog->end > fog->start ))
+		want = *fog;
+
+	if( nv2a_fog_pushed_valid && !memcmp( &want, &nv2a_fog_pushed, sizeof( want )))
+		return;
+
+	p = pb_begin();
+	if( want.enable )
+	{
+		float params[3] = { 0.0f, 0.0f, 0.0f };
+		uint32_t mode;
+
+		switch( want.mode )
+		{
+		case NV2A_FOG_MODE_LINEAR:
+			nv2a_fog_linear_params( want.start, want.end, params );
+			mode = NV097_SET_FOG_MODE_V_LINEAR;
+			break;
+		case NV2A_FOG_MODE_EXP2:
+			nv2a_fog_exp2_params( want.density, params );
+			mode = NV097_SET_FOG_MODE_V_EXP2;
+			break;
+		case NV2A_FOG_MODE_EXP:
+		default:
+			nv2a_fog_exp_params( want.density, params );
+			mode = NV097_SET_FOG_MODE_V_EXP;
+			break;
+		}
+
+		p = pb_push1( p, NV097_SET_FOG_MODE, mode );
+		pb_push( p++, NV097_SET_FOG_PARAMS, 3 );
+		memcpy( p, params, sizeof( params ));
+		p += 3;
+		p = pb_push1( p, NV097_SET_FOG_COLOR, want.color );
+	}
+	p = pb_push1( p, NV097_SET_FOG_ENABLE, want.enable ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_COMBINER_SPECULAR_FOG_CW0, nv2a_final_combiner_cw0( want.enable ));
+	pb_end( p );
+
+	nv2a_fog_pushed = want;
+	nv2a_fog_pushed_valid = true;
 }
 
 static void nv2a_set_attrib_pointer( unsigned int index, unsigned int format, unsigned int size, unsigned int stride, const void *data )
@@ -1938,6 +2020,27 @@ static qboolean nv2a_map_face_is_world( const model_t *world, uint32_t sorted )
 		&& orig < (uint32_t)world->firstmodelsurface + (uint32_t)world->nummodelsurfaces;
 }
 
+/* X9-X step 11 (r_studio_bridge.h): the directory entry the baked face of
+   a surface of the current world draws with. */
+uint32_t nv2a_surface_map_texture( const msurface_t *surf )
+{
+	const model_t *world = gp_cl->models[1];
+	uint32_t orig, sorted;
+
+	if( !surf || world != nv2a_map_owner || !world->surfaces || !nv2a_map_faces || !nv2a_map_face_remap )
+		return NV2A_TRI_NO_MAP_TEXTURE;
+	if( surf < world->surfaces || surf >= world->surfaces + world->numsurfaces )
+		return NV2A_TRI_NO_MAP_TEXTURE;
+
+	orig = (uint32_t)( surf - world->surfaces );
+	if( orig >= nv2a_map_face_remap_count )
+		return NV2A_TRI_NO_MAP_TEXTURE;
+	sorted = nv2a_map_face_remap[orig];
+	if( sorted >= nv2a_map_face_count || nv2a_map_faces[sorted].texture >= nv2a_map_texture_count )
+		return NV2A_TRI_NO_MAP_TEXTURE;
+	return nv2a_map_faces[sorted].texture;
+}
+
 /* X9-X step 5: nv2a_brush_entity_render_mode (the brush-only branch of
    ref/gl's R_GetEntityRenderMode, gl_studio.c:2384) is gone - both callers
    below now use the whole function (r_studio.c, includes the brush branch
@@ -2316,6 +2419,9 @@ static void nv2a_enter_lit_state( void )
 	   time: the NV2A holds one resident program at a time, and the 2D/
 	   TriAPI pass uploads its own in between (nv2a_resident_program). */
 	nv2a_init_lit_shader();
+	/* X9-X step 11: the world and brush entities are fogged like
+	   everything else 3D (R_DrawFog enables GL_FOG before R_DrawWorld). */
+	nv2a_push_fog( &nv2a_fog_current );
 
 	/* X9-C: texture stage 1, the real RGBA8 lightmap - bound ONCE per
 	   frame, here, before the per-batch loop below: unaffected by X9-K's
@@ -2551,6 +2657,12 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 		return;
 	}
 
+	/* X9-X step 11: R_DrawBrushModel's R_AllowFog( false ) for additive
+	   entities (gl_rsurf.c:1884-1888), restored below. */
+	if( e->curstate.rendermode == kRenderTransAdd )
+		R_WarpAllowFog( false );
+	nv2a_push_fog( &nv2a_fog_current );
+
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
 	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
@@ -2589,6 +2701,31 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 				continue;
 			if( mins[2] + 1.0f >= psurf->plane->dist )
 				continue;
+		}
+
+		/* X9-X step 11: a water face goes to r_warp.c, drawn warped after
+		   the entity's other faces (R_RenderBrushPoly's SURF_DRAWTURB
+		   branch, gl_rsurf.c:1488). R_SortBrushModelSurfaces keeps its
+		   CULL_BACKSIDE (no lightmapped water, gl_rsurf.c:1787-1793) and
+		   R_DrawBrushModel draws it reversed (cull_type == CULL_BACKSIDE,
+		   :1491), so it shows from below the surface too - tested here
+		   whatever nv2a_r_nocullback says, since that only stands in for
+		   dropping faces. A face the engine could not subdivide (no
+		   pieces) draws unwarped below, as before. */
+		if( FBitSet( psurf->flags, NV2A_SURF_DRAWTURB ) && psurf->polys )
+		{
+			qboolean reverse = false;
+
+			if( !nv2a_r_nocull.value && !VectorIsNull( psurf->plane->normal ))
+			{
+				float dist = PlaneDiff( modelorg, psurf->plane );
+
+				if( FBitSet( psurf->flags, NV2A_SURF_PLANEBACK ))
+					dist = -dist;
+				reverse = dist <= BACKFACE_EPSILON;
+			}
+			R_WarpAddBrushSurface( (msurface_t *)psurf, reverse );
+			continue;
 		}
 
 		/* R_CullSurface's CULL_BACKSIDE, against the model-space eye.
@@ -2633,6 +2770,16 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 	nv2a_reset_render_mode();
 	if( !lit )
 		nv2a_bind_lightmap_stage1( true );
+
+	if( e->curstate.rendermode == kRenderTransAdd )
+		R_WarpAllowFog( true );
+
+	/* X9-X step 11: the entity's water faces, queued above, through the
+	   TriAPI - which must fully re-enter its own state after this
+	   function's direct pushes (lessons.md: a draw that depends on state
+	   it never sets). */
+	nv2a_2d_dirty = true;
+	R_WarpDrawBrushEntity( e, blend, rotated );
 }
 
 /* Brush's own direct constant-96 push (nv2a_draw_brush_entity) leaves the
@@ -2998,6 +3145,23 @@ static void nv2a_draw_map_geometry( void )
 					}
 				}
 
+				/* X9-X item 14 step 11: a water face is drawn warped by
+				   r_warp.c after the world (R_DrawTextureChains' SURF_DRAWTURB
+				   chains, gl_rsurf.c:1553-1566), not from its baked, unwarped
+				   triangles - once the engine subdivided it (polys set) and
+				   agrees it is water, and it has a directory texture to bind
+				   (else it keeps its baked draw). Skipping it ends the run. */
+				if( face->turb && face->texture < nv2a_map_texture_count && world != NULL && nv2a_map_face_orig != NULL && nv2a_map_face_orig[i] < (uint32_t)world->numsurfaces )
+				{
+					msurface_t *surf = &world->surfaces[nv2a_map_face_orig[i]];
+
+					if( FBitSet( surf->flags, NV2A_SURF_DRAWTURB ) && surf->polys )
+					{
+						R_WarpAddWorldSurface( surf );
+						continue;
+					}
+				}
+
 				nv2a_cull_faces_visible++;
 
 				/* X9-X item 14 step 9: which frame this face shows. */
@@ -3077,6 +3241,15 @@ static void nv2a_draw_map_geometry( void )
 			}
 		}
 	}
+
+	/* X9-X item 14 step 11: the world's water, queued above, through the
+	   TriAPI - a full re-entry after the direct pushes above, submitted
+	   before anything else draws, as ref/gl draws it inside
+	   R_DrawTextureChains. Translucent water stays queued for
+	   R_WarpDrawWaterSurfaces. */
+	nv2a_2d_dirty = true;
+	R_WarpDrawWorld();
+	nv2a_2d_flush();
 
 	/* X9-X step 5, spec Part B item 1: brush/studio entities no longer
 	   draw from inside this function - GL_RenderFrame now calls
@@ -3201,6 +3374,8 @@ static void nv2a_free_map_resources( void )
 	nv2a_num_trans_entities = 0;
 	nv2a_num_beam_entities = 0;
 	nv2a_pending_upload.pending = false; /* X9-T */
+	nv2a_tri_bind_map_texture( NV2A_TRI_NO_MAP_TEXTURE ); /* X9-X step 11: the directory is about to go */
+	R_WarpFreeMap();
 	nv2a_map_ready = false;
 	nv2a_map_owner = NULL;
 	nv2a_map_vert_count = 0;
@@ -3404,6 +3579,7 @@ static void R_Shutdown( void )
 	   the GPU is idle by now, matching nv2a_tex_shutdown()'s own comment. */
 	nv2a_tex_shutdown();
 	R_SkyShutdown(); /* X9-X item 14 step 10: its texnums were slots of that table */
+	R_WarpShutdown(); /* X9-X item 14 step 11 */
 	if( nv2a_2d_ring )
 	{
 		MmFreeContiguousMemory( nv2a_2d_ring );
@@ -3717,19 +3893,17 @@ static void GetMatrix( const int pname, float *matrix )
 		Matrix4x4_ToArrayFloatGL( nv2a_gl_projection, matrix );
 }
 
-/* X9-X step 4 Part E: Fog/FogParams are documented no-ops - nv2a has no
-   fog yet (fork-plan item 14.11 is the exit), same precedent ref/soft
-   itself uses (r_triapi.c:307-340). TriRenderMode's own R_AllowFog is
-   likewise a no-op (D). Divergence #119; nothing in this fork's own SDK
-   client build calls either yet. */
+/* X9-X step 4 Part E: Fog/FogParams - no-ops until X9-X item 14 step 11,
+   now TriFog/TriFogParams ported in r_warp.c (divergence #138 closes
+   #119's fog point). */
 static void Fog( float flFogColor[3], float flStart, float flEnd, int bOn )
 {
-	(void)flFogColor; (void)flStart; (void)flEnd; (void)bOn;
+	R_WarpTriFog( flFogColor, flStart, flEnd, bOn ); /* X9-X item 14 step 11: gl_triapi.c:266 */
 }
 
 static void FogParams( float flDensity, int iFogSkybox )
 {
-	(void)flDensity; (void)iFogSkybox;
+	R_WarpTriFogParams( flDensity, iFogSkybox ); /* gl_triapi.c:328 */
 }
 
 static qboolean VID_ScreenShot( const char *filename, int shot_type )
@@ -3761,9 +3935,10 @@ static void R_SetSkyCloudsTextures( int solidskyTexture, int alphaskyTexture )
 	;
 }
 
+/* X9-X item 14 step 11: gl_rsurf.c:361, ported in r_warp.c. */
 static void GL_SubdivideSurface( model_t *mod, msurface_t *fa )
 {
-	;
+	R_WarpSubdivideSurface( mod, fa );
 }
 
 /* Cheap, side-effect-free pre-check: does this buffer even look like a
@@ -4564,10 +4739,12 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 				if( faceinfo_ok )
 				{
 					faces[i].sky = ( lumps->face_info_window[i % NV2A_FACEINFO_WINDOW].flags & MPAK_SURF_DRAWSKY ) != 0;
+					faces[i].turb = ( lumps->face_info_window[i % NV2A_FACEINFO_WINDOW].flags & MPAK_SURF_DRAWTURB ) != 0;
 				}
 				else
 				{
 					faces[i].sky = false;
+					faces[i].turb = false;
 				}
 
 				/* X9-X step 8: the face's atlas block. A face with a real
@@ -5383,9 +5560,11 @@ static void nv2a_draw_sky( void )
 		   pass's or the world's state (lessons.md: a draw that depends
 		   on state it never sets breaks by what else is on screen). */
 		nv2a_2d_dirty = true;
+		R_WarpSkyFogBegin(); /* X9-X item 14 step 11: gl_warp.c:334-338 */
 		R_DrawSkyBox();
 		/* Submitted now, before the world pushes its own state directly. */
 		nv2a_2d_flush();
+		R_WarpSkyFogEnd();
 	}
 }
 
@@ -5623,6 +5802,12 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	nv2a_2d_flush();
 	nv2a_2d_reset_shadow_for_3d();
 
+	/* X9-X item 14 step 11: R_SetupFrame's glState.isFogEnabled sample
+	   (gl_rmain.c:517), then R_DrawFog (:965) - the fog R_CheckFog chose
+	   last frame - before anything 3D draws. */
+	R_WarpSetupFrame( rvp->vieworigin );
+	R_WarpDrawFog();
+
 	/* X9-X: the world is drawn here, where the engine asks for it
 	   (V_RenderView), as ref/gl's R_RenderFrame does (gl_rmain.c:1076) -
 	   not in R_EndFrame, which runs after the engine's 2D (HUD, console,
@@ -5642,7 +5827,7 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		nv2a_texanim_begin_frame( gp_cl->models[1] == nv2a_map_owner ? gp_cl->models[1] : NULL );
 		/* X9-X item 14 step 10: the skybox, before the world (#137). */
 		nv2a_draw_sky();
-		nv2a_draw_map_geometry();
+		nv2a_draw_map_geometry(); /* ends with the world's opaque water (r_warp.c) */
 		nv2a_world_drawn_this_frame = true;
 	}
 
@@ -5669,6 +5854,10 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		if( nv2a_world_drawn_this_frame )
 			gEngfuncs.R_DrawWorldHull(); /* port of R_DrawWorld's own tail, gl_rsurf.c:3728 */
 
+		/* X9-X item 14 step 11: R_CheckFog, right after R_DrawWorld
+		   (gl_rmain.c:971). */
+		R_WarpCheckFog( rvp->flags, nv2a_viewleaf );
+
 		/* X9-X step 5, gl_rmain.c:797-935's own order: solid entities
 		   (brush direct, studio through R_DrawStudioModel), then solid
 		   beams, then pfnDrawNormalTriangles, then translucent entities
@@ -5688,13 +5877,23 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 
 		/* X9-X step 7: translucent beams, particles and tracers
 		   (gl_rmain.c:919-924), after the client's own translucent
-		   triangles; R_AllowFog around it is a no-op here (#119). */
+		   triangles, with R_AllowFog( false ) around them
+		   (gl_rmain.c:921-923; X9-X item 14 step 11). */
 		if( !FBitSet( rvp->flags, RF_ONLY_CLIENTDRAW ))
+		{
+			R_WarpAllowFog( false );
 			gEngfuncs.CL_DrawEFX( rvp_frametime, true );
+			R_WarpAllowFog( true );
+		}
 
 		nv2a_2d_desired.blend_enable = false; // pglDisable( GL_BLEND ), gl_rmain.c:928 "Trinity Render issues"
 
 		R_DrawViewModel();
+
+		/* X9-X item 14 step 11: R_DrawWaterSurfaces, after
+		   R_DrawEntitiesOnList (gl_rmain.c:977) - the translucent world
+		   water, when sv_wateralpha is below 1. */
+		R_WarpDrawWaterSurfaces( rvp->flags );
 
 		/* Ends the frame with nothing queued - the SDK's own tri hooks
 		   above may have batched TriAPI primitives that would otherwise
@@ -5777,7 +5976,21 @@ typedef struct
 	uint32_t offset, pitch, width, height;
 	qboolean bilinear;
 	uint32_t color_format; /* NV2A_TEX_COLOR_* - studio skins are 16 bpp, everything else A8B8G8R8 */
+	/* X9-X step 11: the rest of the stage-0 words, so a map directory
+	   texture (nv2a_tri_bind_map_texture) keeps the world's own WRAP
+	   addressing, mip chain and filter - every texture-table texture
+	   still gets the clamp/one-level/plain-filter values it always had. */
+	uint32_t address, mip_levels, control0, filter;
 } nv2a_2d_batch_key_t;
+
+/* X9-X step 11: the map directory texture bound for the TriAPI instead of
+   GL_Bind's (r_studio_bridge.h), or NV2A_TRI_NO_MAP_TEXTURE. */
+static uint32_t nv2a_tri_map_texture = NV2A_TRI_NO_MAP_TEXTURE;
+
+void nv2a_tri_bind_map_texture( uint32_t dir )
+{
+	nv2a_tri_map_texture = dir;
+}
 
 /* X9-X step 4 Part C: nv2a_2d_desired is now the single GL-like current
    state GL_SetRenderMode/VGUI_SetupDrawing/FillRGBA/TriRenderMode all
@@ -5898,6 +6111,7 @@ static void nv2a_init_2d_shader( void )
 	p = pb_begin();
 	#include "ps_2d.inl"
 	pb_end( p );
+	nv2a_fog_pushed_valid = false; /* the final combiner is ps_2d.inl's again */
 }
 
 /* X9-X step 4 Part B: the TriAPI's own vertex program (vs_tri.vs.cg/
@@ -5941,6 +6155,7 @@ static void nv2a_init_tri_shader( void )
 	p = pb_begin();
 	#include "ps_2d.inl"
 	pb_end( p );
+	nv2a_fog_pushed_valid = false; /* the final combiner is ps_2d.inl's again */
 }
 
 static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
@@ -5948,6 +6163,29 @@ static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
 	uint32_t phys, pitch, width, height;
 	qboolean bilinear;
 	uint32_t color_format;
+
+	/* X9-X step 11: a map directory texture, with exactly the words
+	   nv2a_bind_map_texture_stage0 gives the world's own faces. */
+	if( nv2a_tri_map_texture != NV2A_TRI_NO_MAP_TEXTURE )
+	{
+		const nv2a_map_texture_t *tex;
+		qboolean nearest = nv2a_r_texturenearest.value != 0.0f;
+
+		if( nv2a_tri_map_texture >= nv2a_map_texture_count || !nv2a_map_texture_data )
+			return false;
+		tex = &nv2a_map_textures[nv2a_tri_map_texture];
+		key->offset = ( (uint32_t)nv2a_map_texture_data + (uint32_t)tex->physOffset ) & 0x03ffffff;
+		key->width = 1u << tex->log2Width;
+		key->height = 1u << tex->log2Height;
+		key->pitch = key->width * 2; /* DXT1, as nv2a_bind_map_texture_stage0 */
+		key->bilinear = !nearest;
+		key->color_format = NV2A_TEX_COLOR_L_DXT1;
+		key->address = 0x00010101;
+		key->mip_levels = tex->mipLevels;
+		key->control0 = 0x4003ffc0 | nv2a_anisotropy_bits();
+		key->filter = ( nearest ? 0x01032000 : 0x02062000 ) | nv2a_lod_bias_bits();
+		return true;
+	}
 
 	if( !nv2a_tex_gpu_params( nv2a_tex_current(), &phys, &pitch, &width, &height, &bilinear, &color_format ))
 		return false; /* GL_Bind already substitutes the default whenever a slot has no storage - defensive only */
@@ -5964,6 +6202,11 @@ static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
 	key->height = height;
 	key->bilinear = bilinear;
 	key->color_format = color_format;
+	key->address = 0x00030303;
+	key->mip_levels = 1;
+	key->control0 = 0x4003ffc0;
+	/* D5/C4: NEVER a zero convolution-kernel field (divergences.md #102) - 0x01012000/0x02022000, same values nv2a_draw_map_geometry already proved. */
+	key->filter = bilinear ? 0x02022000 : 0x01012000;
 	return true;
 }
 
@@ -6268,16 +6511,19 @@ static void nv2a_2d_flush( void )
 			| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
 			| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
 			| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, nv2a_2d_batch_key.color_format )
-			| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, 1 )
+			| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, nv2a_2d_batch_key.mip_levels )
 			| base_size );
 		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, nv2a_2d_batch_key.pitch << 16 );
 		p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( nv2a_2d_batch_key.width << 16 ) | nv2a_2d_batch_key.height );
-		p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
-		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
-		/* D5/C4: NEVER a zero convolution-kernel field (divergences.md #102) - 0x01012000/0x02022000, same values nv2a_draw_map_geometry already proved. */
-		p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_2d_batch_key.bilinear ? 0x02022000 : 0x01012000 );
+		p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, nv2a_2d_batch_key.address );
+		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, nv2a_2d_batch_key.control0 );
+		p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_2d_batch_key.filter ); /* nv2a_2d_resolve_batch_key */
 		pb_end( p );
 	}
+
+	/* X9-X step 11: the batch's fog (3D only - 2D never fogs), after any
+	   re-entry above, whose program upload resets the final combiner. */
+	nv2a_push_fog( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_3D ? &nv2a_2d_batch_state.fog : NULL );
 
 	{
 		nv2a_2d_draw_ctx_t ctx;
@@ -6306,6 +6552,33 @@ static void nv2a_2d_flush( void )
 	}
 
 	nv2a_2d_ring_pending_verts = 0;
+}
+
+/* X9-X step 11 (r_studio_bridge.h). */
+void nv2a_tri_flush( void )
+{
+	nv2a_2d_flush();
+}
+
+/* X9-X step 11 (r_studio_bridge.h): r_warp.c's water pieces, whole
+   primitives straight into the 3D batch - what Begin/Vertex3f/End would
+   produce for TRI_QUADS or a fan, without the assembler's per-vertex
+   staging, which dominated the cost of a lake's 10,000 vertices a frame.
+   Same gate as Begin (renderer, frame and camera ready); the colour is
+   the current Color4ub/Color4f, as Vertex3f takes it. */
+static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *verts, uint32_t n );
+
+void nv2a_tri_append_3d( qboolean quads, nv2a_tri_vert_t *v, uint32_t n )
+{
+	uint32_t i;
+
+	if( !nv2a_ready || !nv2a_frame_open || nv2a_in2d || !nv2a_view_valid || n == 0 )
+		return;
+
+	for( i = 0; i < n; i++ )
+		memcpy( v[i].rgba, nv2a_2d_color, 4 );
+
+	nv2a_2d_append( NV2A_IMM_SPACE_3D, quads ? NV097_SET_BEGIN_END_OP_QUADS : NV097_SET_BEGIN_END_OP_TRIANGLES, v, n );
 }
 
 void nv2a_2d_flush_and_wait( void )
@@ -6353,7 +6626,8 @@ static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *ver
 			|| nv2a_2d_batch_state.cull_enable != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.cull_enable )
 			|| ( space == NV2A_IMM_SPACE_3D && nv2a_2d_batch_state.viewmodel_depthrange != nv2a_2d_desired.viewmodel_depthrange )
 			|| nv2a_2d_batch_state.depth_test_disable != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.depth_test_disable )
-			|| nv2a_2d_batch_state.depth_func_equal != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.depth_func_equal )))
+			|| nv2a_2d_batch_state.depth_func_equal != ( space == NV2A_IMM_SPACE_2D ? false : nv2a_2d_desired.depth_func_equal )
+			|| ( space == NV2A_IMM_SPACE_3D && memcmp( &nv2a_2d_batch_state.fog, &nv2a_fog_current, sizeof( nv2a_fog_current )) != 0 )))
 	{
 		nv2a_2d_flush();
 	}
@@ -6375,6 +6649,12 @@ static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *ver
 		nv2a_2d_batch_state = nv2a_2d_desired;
 		nv2a_2d_batch_state.space = space;
 		nv2a_2d_batch_state.op = op;
+		/* X9-X step 11: the GL fog state now, not nv2a_2d_desired's copy
+		   (r_studio_bridge.h); 2D never fogs. */
+		if( space == NV2A_IMM_SPACE_3D )
+			nv2a_2d_batch_state.fog = nv2a_fog_current;
+		else
+			memset( &nv2a_2d_batch_state.fog, 0, sizeof( nv2a_2d_batch_state.fog ));
 		if( space == NV2A_IMM_SPACE_2D )
 		{
 			/* Effective, not desired: 2D always draws with both forced
@@ -6525,6 +6805,10 @@ static void nv2a_draw_no_world_backdrop( void )
    desired shadow only, applied lazily at the next flush. */
 static void GL_SetRenderMode( int renderMode )
 {
+	/* X9-X item 14 step 11: R_AllowFog per mode (gl_backend.c:429-460) -
+	   every mode but glow and additive allows it. */
+	R_WarpAllowFog( renderMode != kRenderGlow && renderMode != kRenderTransAdd );
+
 	switch( renderMode )
 	{
 	default:
@@ -6593,11 +6877,17 @@ GL_SetRenderMode/VGUI_SetupDrawing/FillRGBA already share.
 static float nv2a_tri_texcoord[2];
 
 /* D: TriRenderMode (gl_triapi.c:40-72), ported onto nv2a_2d_desired -
-   R_AllowFog is a no-op (nv2a has no fog), and neither alpha test nor the
-   depth TEST are ever touched here (only depth_mask). No default case,
-   same as the reference. */
+   with its R_AllowFog calls since X9-X item 14 step 11 (r_warp.c); neither
+   alpha test nor the depth TEST are ever touched here (only depth_mask).
+   No default case, same as the reference. */
 void TriRenderMode( int mode )
 {
+	/* X9-X item 14 step 11: R_AllowFog per mode (gl_triapi.c:47-66). */
+	if( mode == kRenderGlow || mode == kRenderTransAdd )
+		R_WarpAllowFog( false );
+	else if( mode == kRenderNormal || mode == kRenderTransAlpha || mode == kRenderTransColor || mode == kRenderTransTexture )
+		R_WarpAllowFog( true );
+
 	switch( mode )
 	{
 	case kRenderNormal:
@@ -6766,8 +7056,15 @@ void Begin( int primitiveCode )
 
 	nv2a_tri_op = nv2a_tri_topology_op( topo );
 
-	tex = nv2a_tex_get( nv2a_tex_current());
-	nv2a_tex_coord_scale( tex, &nv2a_tri_tex_w, &nv2a_tri_tex_h ); /* texels for linear, 1 for DXT (divergences.md #131) */
+	if( nv2a_tri_map_texture != NV2A_TRI_NO_MAP_TEXTURE )
+	{
+		nv2a_tri_tex_w = nv2a_tri_tex_h = 1.0f; /* X9-X step 11: a DXT1 directory texture - normalized */
+	}
+	else
+	{
+		tex = nv2a_tex_get( nv2a_tex_current());
+		nv2a_tex_coord_scale( tex, &nv2a_tri_tex_w, &nv2a_tri_tex_h ); /* texels for linear, 1 for DXT (divergences.md #131) */
+	}
 
 	nv2a_tri_begin( &nv2a_tri_asm, topo, nv2a_tri_emit_primitive, NULL );
 }
@@ -7041,6 +7338,9 @@ static void R_NewMap( void )
 	if( nv2a_pending_upload.pending )
 		nv2a_try_pending_upload();
 
+	/* X9-X item 14 step 11: the water textures' fog parameters. */
+	R_WarpNewMap( gp_cl->models[1] );
+
 	/* X9-X step 5, gl_context.c:405: forget every cached per-client player
 	   model on a map change - the client index<->model_t mapping is only
 	   valid for the map that built it. */
@@ -7068,7 +7368,7 @@ const ref_interface_t gReffuncs =
 	.GL_BackendEndFrame   = R_SimpleStub,
 
 	.R_ClearScreen    = R_SimpleStub,
-	.R_AllowFog       = R_SimpleStubBool,
+	.R_AllowFog       = R_WarpAllowFog, /* X9-X item 14 step 11: gl_rmain.c:42 */
 	.GL_SetRenderMode = GL_SetRenderMode,
 
 	.R_AddEntity      = R_AddEntity,
