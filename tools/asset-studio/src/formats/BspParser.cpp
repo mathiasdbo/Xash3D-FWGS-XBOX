@@ -1,6 +1,7 @@
 #include "BspParser.h"
 #include "WadParser.h"
 #include "LightmapAtlasPacker.h"
+#include "AnimTextureFrames.h"
 #include <fstream>
 #include <iostream>
 #include <cmath>
@@ -1065,8 +1066,24 @@ namespace formats {
         // ref/nv2a binds textures through the batch table alone, and the
         // unused ones were 0.56 MiB of rocket_frenzy's GPU texture data.
         if (pak.isXboxTarget() && pak.isProfileNv2a()) {
-            const size_t dropped = pak.pruneUnusedXboxTextures();
-            std::cout << "Textures: dropped " << dropped << " no face draws\n";
+            // X9-X item 14 step 9: except the animation frames no face
+            // references - the renderer reaches them through the engine's
+            // texture chains (AnimTextureFrames.h). They go after the
+            // drawn textures, in miptex order; ref/nv2a relies on both.
+            std::vector<bool> mipUsed(texLocations.size(), false);
+            for (size_t f = 0; f < numFaces; ++f) {
+                const int32_t ti = faces[f].texinfo;
+                if (ti >= 0 && static_cast<size_t>(ti) < numTexinfos && texinfos[ti].miptex < mipUsed.size())
+                    mipUsed[texinfos[ti].miptex] = true;
+            }
+            const std::vector<uint32_t> extraMips = unreferencedAnimationFrames(mipNamesLower, mipUsed);
+            std::vector<uint32_t> appendAfter;
+            appendAfter.reserve(extraMips.size());
+            for (uint32_t m : extraMips)
+                appendAfter.push_back(texLocations[m].textureIndex);
+            const size_t dropped = pak.pruneUnusedXboxTextures(appendAfter);
+            std::cout << "Textures: dropped " << dropped << " no face draws; kept " << appendAfter.size()
+                      << " animation frame(s) no face draws\n";
         }
         pak.setFaceRemap(std::move(faceRemap));
 

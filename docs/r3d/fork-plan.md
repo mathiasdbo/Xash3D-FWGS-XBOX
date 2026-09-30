@@ -9273,9 +9273,40 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
          texels after the CPU rewrites them on real hardware. No
          invalidate method is known in nxdk or xemu. Real hardware
          decides.
-    9. *Animated textures* (`+0..+9`, `-0..-9`; the engine builds the
+    9. ~~*Animated textures* (`+0..+9`, `-0..-9`; the engine builds the
        chains, `mod_bmodel.c:3043`); check that frames no face references
-       reach the texture directory.
+       reach the texture directory.~~ **Done (x9-x-animated-textures,
+       divergences.md #136):**
+       - The frames did NOT reach the directory: X9-U's prune
+         (`pruneUnusedXboxTextures`) dropped every texture no face draws,
+         which is every `+1..+9`, `+a..+j` and unreferenced `-N` frame.
+         c1a0 had 164 miptex and 129 directory entries.
+       - The baker now appends those frames after the drawn textures, in
+         miptex order (`AnimTextureFrames.h`, ctest
+         `anim_texture_frames_test`). There is no format change.
+       - ref/nv2a (`nv2a_texanim_util.c`, host-tested; `r_context.c`) maps
+         engine textures to directory entries from the faces plus the same
+         rule, checked by count. It then binds what `R_TextureAnimation`
+         (`gl_rsurf.c:518`) picks:
+         - frames by time;
+         - the `+a` set when the entity's frame is non-zero;
+         - `-` random tiles per face.
+       - Resolved once per drawn world batch; per face only for random
+         tiles.
+       - Correction to this item's wording: `-0..-9` are random tiles, not
+         alternates. The alternates are `+a..+j`.
+       - Measured in xemu on c1a0:
+         - 156 directory entries (129 + 27 frames).
+         - The lab console's screens change between grabs 1-2 ticks apart;
+           main's XBE on the same archive and view is pixel-identical
+           across grabs.
+         - The office light switch (func_button, `+0/+afiftsstch4`) flips
+           to its `+a` texture on each press; on main it never changes.
+       - Every map needs a re-bake to animate. 117 of the 125 retail maps
+         gain frames: about 100 KiB on average, 572 KiB at most
+         (rocket_frenzy). disposal (32.4%) and contamination (28.4%) still
+         fit the nv2a budget.
+       - An old archive keeps its old look and prints a re-bake warning.
     10. *Sky* (skybox from `R_SetupSky`; check the images are on the disc).
     11. *Water warp* (`!` textures: `GL_SubdivideSurface` and the per-vertex
         sin-table texture coordinates of `EmitWaterPolys`) and underwater

@@ -915,8 +915,19 @@ namespace formats {
         return phs;
     }
 
-    size_t PakManager::pruneUnusedXboxTextures() {
+    size_t PakManager::pruneUnusedXboxTextures(const std::vector<uint32_t>& appendAfter) {
         const size_t count = mXboxTextures.size();
+        // Copied before the compaction below moves entries out of place.
+        std::vector<std::vector<uint8_t>> appendRgba;
+        std::vector<bool> appendMasked;
+        std::vector<uint32_t> appendWidths, appendHeights;
+        for (uint32_t src : appendAfter) {
+            if (src >= count) continue;
+            appendRgba.push_back(mXboxTextures[src]);
+            appendMasked.push_back(mXboxTexturesMasked[src]);
+            appendWidths.push_back(mXboxTextureWidths[src]);
+            appendHeights.push_back(mXboxTextureHeights[src]);
+        }
         std::vector<uint32_t> newIndex(count, UINT32_MAX);
         for (const MpakTextureBatch& b : mTextureBatches)
             if (b.textureIndex < count)
@@ -941,6 +952,12 @@ namespace formats {
         for (MpakTextureBatch& b : mTextureBatches)
             if (b.textureIndex < count)
                 b.textureIndex = newIndex[b.textureIndex];
+        for (size_t k = 0; k < appendRgba.size(); ++k) {
+            mXboxTextures.push_back(std::move(appendRgba[k]));
+            mXboxTexturesMasked.push_back(appendMasked[k]);
+            mXboxTextureWidths.push_back(appendWidths[k]);
+            mXboxTextureHeights.push_back(appendHeights[k]);
+        }
         return count - next;
     }
 

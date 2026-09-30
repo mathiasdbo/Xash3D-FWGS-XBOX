@@ -68,6 +68,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "nv2a_efx_util.h" /* X9-X step 7: the TriAPI texture-repeat splitter */
 #include "nv2a_lightmap_util.h" /* X9-X step 8: NV2A_LM_MAX_LUXELS_PER_AXIS */
 #include "r_lightmap.h" /* X9-X step 8: lightstyles and dynamic lights (R_CheckLightMap/R_BuildLightMap port) */
+#include "nv2a_texanim_util.h" /* X9-X item 14 step 9: R_TextureAnimation in texture-index space, host-tested */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -1565,6 +1566,253 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 
 /*
 ========================================================================
+X9-X item 14 step 9: animated brush textures
+
+ref/gl draws each surface with R_TextureAnimation( surf )
+(gl_rsurf.c:518, called from R_RenderBrushPoly, gl_rsurf.c:1486): the
+alternate set (+a..+j) when the entity's frame is non-zero, the +0..+9
+frames by time, and the '-' random tiles by the surface's texturemins.
+The chains are the engine's (Mod_SequenceAnimatedTexture,
+mod_bmodel.c:3043), on the world model's texture_t list.
+
+Here a face carries a texture DIRECTORY index (its batch's), not a
+texture_t. nv2a_texanim_build maps the two once per map:
+- a directory entry a face draws belongs to the engine texture that
+  face's texinfo names (every BSP face is both an engine msurface_t and a
+  baked face, joined by nv2a_map_face_remap);
+- the frames no face draws follow the drawn entries, in engine texture
+  order, as the baker appended them (tools/asset-studio/src/formats/
+  AnimTextureFrames.h) - found with nv2a_texanim_extra_frames, the same
+  rule. The directory must then hold exactly drawn + extra entries; an
+  archive baked before the frames were kept holds only the drawn ones,
+  and its animated textures stay on the frame the face names (what this
+  renderer drew before), with one console line saying so.
+The draw loops then ask nv2a_texanim_dir_for which directory entry to
+bind instead of the face's own: once per texture batch in the world pass
+(the frame is the same for every face of a batch), per face only for the
+'-' random tiles, and per face with a one-entry cache in the brush-entity
+pass (whose faces arrive in face order, not batch order).
+========================================================================
+*/
+STATIC_ASSERT( MOD_FRAMES == NV2A_TEXANIM_MOD_FRAMES, "nv2a_texanim_resolve indexes ref/common's rtable[MOD_FRAMES][MOD_FRAMES]" );
+
+static nv2a_texanim_t  nv2a_texanim[NV2A_MAP_MAX_TEXTURES];        /* per engine texture, world->textures[] order */
+static uint16_t        nv2a_texanim_dir[NV2A_MAP_MAX_TEXTURES];    /* engine texture -> directory entry, NV2A_TEXANIM_NONE if not baked */
+static uint16_t        nv2a_texanim_of_dir[NV2A_MAP_MAX_TEXTURES]; /* directory entry -> engine texture, NV2A_TEXANIM_NONE if none or shared */
+static uint32_t        nv2a_texanim_count;     /* world->numtextures once the tables are built and usable, else 0 */
+static const model_t  *nv2a_texanim_built_for; /* the world the tables were built for (reset per map, like nv2a_pvs_parity_checked_for) */
+static int             nv2a_texanim_ticks_now; /* (int)( cl.time * 20 ), set once per frame (gl_rsurf.c:549) */
+
+static void nv2a_texanim_reset( void )
+{
+	nv2a_texanim_count = 0;
+	nv2a_texanim_built_for = NULL;
+}
+
+/* Index of `tex` in world->textures, NV2A_TEXANIM_NONE if it is not there
+   (load time only: a linear scan, starting at `hint`). */
+static uint32_t nv2a_texanim_index_of( const model_t *world, const texture_t *tex, uint32_t hint )
+{
+	uint32_t n = (uint32_t)world->numtextures, k;
+
+	if( !tex )
+		return NV2A_TEXANIM_NONE;
+	for( k = 0; k < n; k++ )
+	{
+		uint32_t j = ( hint + k ) % n;
+		if( world->textures[j] == tex )
+			return j;
+	}
+	return NV2A_TEXANIM_NONE;
+}
+
+static void nv2a_texanim_build( const model_t *world )
+{
+	uint32_t n, t, o, d, faces_n, drawn = 0, extra_n, animated = 0;
+	uint32_t numtexinfo;
+	uint16_t *texinfo_tex = NULL, *extras = NULL;
+	const char **names = NULL;
+	uint8_t *used = NULL;
+	uint32_t hint = 0;
+	qboolean consistent = true;
+
+	nv2a_texanim_built_for = world;
+	nv2a_texanim_count = 0;
+
+	if( !world || !world->textures || world->numtextures <= 0 || !world->surfaces || !world->texinfo || world->numtexinfo <= 0 )
+		return;
+	n = (uint32_t)world->numtextures;
+	numtexinfo = (uint32_t)world->numtexinfo;
+	if( n > NV2A_MAP_MAX_TEXTURES || !nv2a_map_faces || !nv2a_map_face_remap )
+		return;
+
+	for( d = 0; d < NV2A_MAP_MAX_TEXTURES; d++ )
+		nv2a_texanim_of_dir[d] = NV2A_TEXANIM_NONE;
+
+	/* The engine's chains, turned into indices. */
+	for( t = 0; t < n; t++ )
+	{
+		const texture_t *tx = world->textures[t];
+		nv2a_texanim_t *e = &nv2a_texanim[t];
+
+		memset( e, 0, sizeof( *e ));
+		e->anim_next = NV2A_TEXANIM_NONE;
+		e->alternate = NV2A_TEXANIM_NONE;
+		nv2a_texanim_dir[t] = NV2A_TEXANIM_NONE;
+		if( !tx )
+			continue;
+		/* anim_* are at most 10 frames * ANIM_CYCLE (mod_bmodel.c:3134);
+		   anything past int16 is not a chain the engine built. */
+		if( tx->anim_total > 0 && tx->anim_total <= 0x7FFF && tx->anim_min >= 0 && tx->anim_max <= 0x7FFF && tx->anim_min <= tx->anim_max )
+		{
+			e->anim_total = (int16_t)tx->anim_total;
+			e->anim_min = (int16_t)tx->anim_min;
+			e->anim_max = (int16_t)tx->anim_max;
+		}
+		e->width = (uint16_t)( tx->width > 0xFFFF ? 0 : tx->width );
+		e->height = (uint16_t)( tx->height > 0xFFFF ? 0 : tx->height );
+		e->random = tx->name[0] == '-';
+		e->anim_next = (uint16_t)nv2a_texanim_index_of( world, tx->anim_next, t );
+		e->alternate = (uint16_t)nv2a_texanim_index_of( world, tx->alternate_anims, t );
+		if( e->anim_total || e->alternate != NV2A_TEXANIM_NONE )
+			animated++;
+	}
+	if( !animated )
+		return; /* nothing to animate: leave nv2a_texanim_count 0, every lookup returns at once */
+
+	texinfo_tex = (uint16_t *)malloc( numtexinfo * sizeof( *texinfo_tex ) + n * ( sizeof( *extras ) + sizeof( *names ) + sizeof( *used )));
+	if( !texinfo_tex )
+	{
+		gEngfuncs.Con_Printf( S_WARN "ref_nv2a: no memory for the animated-texture tables; textures stay on their first frame\n" );
+		return;
+	}
+	names = (const char **)( texinfo_tex + numtexinfo + ( numtexinfo & 1 )); /* keep the pointers 4-aligned */
+	extras = (uint16_t *)( names + n );
+	used = (uint8_t *)( extras + n );
+	memset( used, 0, n );
+
+	for( o = 0; o < numtexinfo; o++ )
+	{
+		uint32_t idx = nv2a_texanim_index_of( world, world->texinfo[o].texture, hint );
+		texinfo_tex[o] = (uint16_t)idx;
+		if( idx != NV2A_TEXANIM_NONE )
+			hint = idx;
+	}
+	for( t = 0; t < n; t++ )
+		names[t] = world->textures[t] ? world->textures[t]->name : NULL;
+
+	/* Every face joins its engine texture to its directory entry. */
+	faces_n = (uint32_t)world->numsurfaces < nv2a_map_face_remap_count ? (uint32_t)world->numsurfaces : nv2a_map_face_remap_count;
+	for( o = 0; o < faces_n && consistent; o++ )
+	{
+		const msurface_t *surf = &world->surfaces[o];
+		uint32_t sorted = nv2a_map_face_remap[o];
+		ptrdiff_t ti;
+
+		if( !surf->texinfo || sorted >= nv2a_map_face_count )
+			continue;
+		ti = surf->texinfo - world->texinfo;
+		if( ti < 0 || (uint32_t)ti >= numtexinfo )
+			continue;
+		t = texinfo_tex[ti];
+		d = nv2a_map_faces[sorted].texture;
+		if( t >= n || d >= nv2a_map_texture_count )
+			continue;
+
+		used[t] = 1;
+		if( nv2a_texanim_dir[t] == NV2A_TEXANIM_NONE )
+			nv2a_texanim_dir[t] = (uint16_t)d;
+		else if( nv2a_texanim_dir[t] != d )
+			consistent = false; /* one miptex in two directory entries: not an archive this code understands */
+		if( nv2a_texanim_of_dir[d] == NV2A_TEXANIM_NONE )
+			nv2a_texanim_of_dir[d] = (uint16_t)t;
+		else if( nv2a_texanim_of_dir[d] != t )
+			nv2a_texanim_of_dir[d] = NV2A_TEXANIM_NONE - 1; /* shared (the baker's missing-texture placeholder): never animated */
+		if( d + 1 > drawn )
+			drawn = d + 1;
+	}
+
+	if( !consistent )
+	{
+		gEngfuncs.Con_Printf( S_WARN "ref_nv2a: %s: faces of one texture use two texture-directory entries; animated textures disabled\n", world->name );
+		free( texinfo_tex );
+		return;
+	}
+
+	for( d = 0; d < NV2A_MAP_MAX_TEXTURES; d++ )
+		if( nv2a_texanim_of_dir[d] == NV2A_TEXANIM_NONE - 1 )
+			nv2a_texanim_of_dir[d] = NV2A_TEXANIM_NONE;
+
+	extra_n = nv2a_texanim_extra_frames( names, used, n, extras, n );
+	if( extra_n && drawn + extra_n == nv2a_map_texture_count )
+	{
+		for( o = 0; o < extra_n; o++ )
+		{
+			nv2a_texanim_dir[extras[o]] = (uint16_t)( drawn + o );
+			nv2a_texanim_of_dir[drawn + o] = extras[o];
+		}
+	}
+	else if( extra_n )
+	{
+		gEngfuncs.Con_Printf( S_WARN "ref_nv2a: %s: the archive has %u texture(s), not %u drawn + %u animation frame(s) - baked before those frames were kept? Re-bake it; animated textures stay on the frame each face names\n",
+			world->name, nv2a_map_texture_count, drawn, extra_n );
+	}
+
+	free( texinfo_tex );
+	nv2a_texanim_count = n;
+	gEngfuncs.Con_Reportf( "ref_nv2a: %u animated texture(s), %u frame(s) only the chains reach\n", animated, extra_n );
+}
+
+/* The directory entry to bind for a face whose own entry is `dir`, now -
+   R_TextureAnimation (gl_rsurf.c:518) through nv2a_texanim_resolve.
+   `alternate` is the entity's curstate.frame != 0; `surf` is the face's
+   engine surface, needed only for the '-' random tiles (NULL takes the
+   R_TextureAnim branch, which leaves them on the face's own tile). The
+   face's own entry whenever the answer is not in the archive. */
+static uint32_t nv2a_texanim_dir_for( uint32_t dir, qboolean alternate, const msurface_t *surf )
+{
+	uint32_t t, r;
+	const nv2a_texanim_t *e;
+
+	if( !nv2a_texanim_count || dir >= NV2A_MAP_MAX_TEXTURES )
+		return dir;
+	t = nv2a_texanim_of_dir[dir];
+	if( t >= nv2a_texanim_count )
+		return dir;
+	e = &nv2a_texanim[t];
+	if( !e->anim_total && ( !alternate || e->alternate == NV2A_TEXANIM_NONE ))
+		return dir; /* the common case: not animated */
+
+	r = nv2a_texanim_resolve( nv2a_texanim, nv2a_texanim_count, t, alternate, nv2a_texanim_ticks_now,
+		surf != NULL, surf ? surf->texturemins[0] : 0, surf ? surf->texturemins[1] : 0,
+		(const uint16_t( * )[NV2A_TEXANIM_MOD_FRAMES])rtable );
+	if( r >= nv2a_texanim_count || nv2a_texanim_dir[r] >= nv2a_map_texture_count )
+		return dir;
+	return nv2a_texanim_dir[r];
+}
+
+/* Whether faces drawn with directory entry `dir` each show a different
+   frame (the '-' random tiles), so they cannot share one bind. */
+static qboolean nv2a_texanim_dir_per_surface( uint32_t dir, qboolean alternate )
+{
+	uint32_t t;
+
+	if( !nv2a_texanim_count || dir >= NV2A_MAP_MAX_TEXTURES )
+		return false;
+	t = nv2a_texanim_of_dir[dir];
+	return t < nv2a_texanim_count && nv2a_texanim_per_surface( nv2a_texanim, nv2a_texanim_count, t, alternate );
+}
+
+/* Once per rendered frame, before the world and entity passes. */
+static void nv2a_texanim_begin_frame( const model_t *world )
+{
+	if( world && world != nv2a_texanim_built_for )
+		nv2a_texanim_build( world );
+	nv2a_texanim_ticks_now = nv2a_texanim_ticks( gp_cl->time );
+}
+
+/*
+========================================================================
 X9-M/X9-X step 5: brush AND studio entities (func_door, func_wall,
 func_illusionary, ladders, NPCs, items, the view model...)
 
@@ -2227,6 +2475,9 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 	qboolean rotated;
 	uint32_t *p;
 	uint32_t bound_texture = 0xFFFFFFFFu;
+	uint32_t anim_src = 0xFFFFFFFFu, anim_dir = 0xFFFFFFFFu; /* X9-X item 14 step 9: last face entry -> frame entry */
+	qboolean anim_per_surface = false;
+	qboolean alternate = e->curstate.frame != 0.0f; /* gl_rsurf.c:522: RI.currententity->curstate.frame */
 	qboolean lit;
 	int i;
 
@@ -2354,12 +2605,23 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 
 		if( e->curstate.rendermode != kRenderTransColor ) /* stage 0 is already the flat colour page - real faces never bound */
 		{
+			uint32_t draw_dir;
+
 			if( face->texture >= nv2a_map_texture_count )
 				continue;
-			if( face->texture != bound_texture )
+			/* X9-X item 14 step 9: R_TextureAnimation, resolved once per
+			   run of faces sharing an entry (per face for random tiles). */
+			if( face->texture != anim_src )
 			{
-				nv2a_bind_map_texture_stage0( &nv2a_map_textures[face->texture] );
-				bound_texture = face->texture;
+				anim_src = face->texture;
+				anim_per_surface = nv2a_texanim_dir_per_surface( anim_src, alternate );
+				anim_dir = anim_per_surface ? anim_src : nv2a_texanim_dir_for( anim_src, alternate, NULL );
+			}
+			draw_dir = anim_per_surface ? nv2a_texanim_dir_for( anim_src, alternate, psurf ) : anim_dir;
+			if( draw_dir != bound_texture )
+			{
+				nv2a_bind_map_texture_stage0( &nv2a_map_textures[draw_dir] );
+				bound_texture = draw_dir;
 			}
 		}
 		if( nv2a_face_vertex_base( face ) != nv2a_bound_vertex_base ) /* X9-S: entity faces may sit in any chunk */
@@ -2531,6 +2793,7 @@ static void nv2a_draw_trans_entities( const model_t *world )
 static void nv2a_draw_map_geometry( void )
 {
 	uint32_t i, b;
+	qboolean world_alternate;
 	/* X9-H: the engine's own already-loaded world model, read directly
 	   for its real per-surface plane/flags (backface test below) - the
 	   SAME model_t X9-G's nv2a_mark_leaves() already trusts, guarded the
@@ -2544,6 +2807,14 @@ static void nv2a_draw_map_geometry( void )
 
 	if( world != nv2a_map_owner )
 		world = NULL;
+
+	/* X9-X item 14 step 9: R_DrawWorld sets RI.currententity to the world
+	   entity (gl_rsurf.c R_DrawWorld); its frame selects the alternate
+	   textures for world faces, as for any brush entity. */
+	{
+		const cl_entity_t *world_ent = nv2a_get_entity_by_index( 0 );
+		world_alternate = world_ent && world_ent->curstate.frame != 0.0f;
+	}
 
 	nv2a_cull_faces_total = nv2a_map_face_count;
 	nv2a_cull_faces_visible = 0;
@@ -2560,8 +2831,7 @@ static void nv2a_draw_map_geometry( void )
 	   across the whole map before X9-K. */
 	for( b = 0; b < nv2a_map_batch_count; b++ )
 	{
-		const nv2a_map_batch_t *batch = &nv2a_map_batches[b];
-		const nv2a_map_texture_t *tex = &nv2a_map_textures[batch->textureIndex]; /* textureIndex validated < nv2a_map_texture_count at load */
+		const nv2a_map_batch_t *batch = &nv2a_map_batches[b]; /* textureIndex validated < nv2a_map_texture_count at load */
 
 		/* X9-O: nv2a_r_nocull no longer takes this path. It used to, and
 		   the whole-batch draw below ignores everything the per-face path
@@ -2604,7 +2874,9 @@ static void nv2a_draw_map_geometry( void )
 					? nv2a_face_vertex_base( &nv2a_map_faces[batch->startFace] ) : 0;
 				if( base != nv2a_bound_vertex_base )
 					nv2a_bind_vertex_base( base );
-				nv2a_bind_map_texture_stage0( tex );
+				/* X9-X item 14 step 9: no per-face table here, so the '-'
+				   random tiles stay on the face's own tile (R_TextureAnim). */
+				nv2a_bind_map_texture_stage0( &nv2a_map_textures[nv2a_texanim_dir_for( batch->textureIndex, world_alternate, NULL )] );
 				nv2a_draw_index_range( begin, end );
 			}
 			nv2a_cull_faces_visible += batch->faceCount;
@@ -2635,6 +2907,13 @@ static void nv2a_draw_map_geometry( void )
 			qboolean have_run = false;
 			qboolean stage0_bound = false;
 			uint32_t end_face = batch->startFace + batch->faceCount;
+			/* X9-X item 14 step 9: the entry this batch draws now
+			   (resolved at its first surviving face, so a batch nothing
+			   survives in costs no lookup), and the one bound. A '-'
+			   random-tile batch resolves per face instead, and a new
+			   entry ends the current run. */
+			uint32_t batch_dir = NV2A_TEXANIM_NONE, bound_dir = NV2A_TEXANIM_NONE;
+			qboolean per_surface = false;
 
 			for( i = batch->startFace; i < end_face; i++ )
 			{
@@ -2720,6 +2999,37 @@ static void nv2a_draw_map_geometry( void )
 
 				nv2a_cull_faces_visible++;
 
+				/* X9-X item 14 step 9: which frame this face shows. */
+				{
+					uint32_t face_dir;
+
+					if( batch_dir == NV2A_TEXANIM_NONE )
+					{
+						per_surface = nv2a_texanim_dir_per_surface( batch->textureIndex, world_alternate );
+						batch_dir = per_surface ? batch->textureIndex : nv2a_texanim_dir_for( batch->textureIndex, world_alternate, NULL );
+					}
+					face_dir = batch_dir;
+					if( per_surface && world != NULL && nv2a_map_face_orig != NULL && nv2a_map_face_orig[i] < (uint32_t)world->numsurfaces )
+						face_dir = nv2a_texanim_dir_for( batch->textureIndex, world_alternate, &world->surfaces[nv2a_map_face_orig[i]] );
+
+					if( have_run && face_dir != bound_dir )
+					{
+						nv2a_draw_exact_indices( run_begin, run_end );
+						nv2a_cull_runs++;
+						nv2a_cull_dwords += ( run_end - run_begin + 1 ) / 2;
+						have_run = false;
+					}
+					if( stage0_bound && face_dir != bound_dir )
+					{
+						nv2a_bind_map_texture_stage0( &nv2a_map_textures[face_dir] );
+						bound_dir = face_dir;
+					}
+					else if( !stage0_bound )
+					{
+						bound_dir = face_dir; /* bound below, with the vertex base, before the first draw */
+					}
+				}
+
 				/* X9-M: runs are EXACT index ranges now (they were dword
 				   ranges snapped out to 6 indices) - a snapped range could
 				   reach a neighbouring brush-entity face's triangles, which
@@ -2745,7 +3055,7 @@ static void nv2a_draw_map_geometry( void )
 						   ever make (that call only happens later, once
 						   this run - or a later one - gets flushed), never
 						   per-run. */
-						nv2a_bind_map_texture_stage0( tex );
+						nv2a_bind_map_texture_stage0( &nv2a_map_textures[bound_dir] ); /* X9-X item 14 step 9: the frame, not always tex */
 						/* X9-S: the baker never lets a batch span two vertex
 						   chunks, so one base bind per batch covers every run. */
 						if( nv2a_face_vertex_base( face ) != nv2a_bound_vertex_base )
@@ -2936,6 +3246,7 @@ static void nv2a_free_map_resources( void )
 	   to catch a baker/loader face-count mismatch - exactly the failure
 	   the check above this comment was added to fail open against. */
 	nv2a_pvs_parity_checked_for = NULL;
+	nv2a_texanim_reset(); /* X9-X item 14 step 9: same fixed-storage reason as the line above */
 }
 
 static qboolean R_Init( void )
@@ -2960,6 +3271,11 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_anisotropy );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lodbias );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_2d_pixeloffset );
+
+	/* X9-X item 14 step 9: the random-tiling table R_TextureAnimation
+	   reads (gl_rsurf.c:536), filled where ref/gl's R_Init fills it
+	   (gl_opengl.c:1250). */
+	GL_InitRandomTable();
 
 	/* Codex review, X9-D: nv2a_map_index_dwords (CPU-only, see its own
 	   declaration comment) belongs in ordinary engine-pooled memory, not
@@ -5226,6 +5542,10 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		   previous frame has retired, and only 2D (no atlas) has been
 		   pushed since R_BeginFrame. */
 		nv2a_update_dynamic_lightmaps();
+		/* X9-X item 14 step 9: this frame's animation time (and, on a new
+		   map's first frame, its tables), for the world and the brush
+		   entities drawn after it. */
+		nv2a_texanim_begin_frame( gp_cl->models[1] == nv2a_map_owner ? gp_cl->models[1] : NULL );
 		nv2a_draw_map_geometry();
 		nv2a_world_drawn_this_frame = true;
 	}

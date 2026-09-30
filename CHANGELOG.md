@@ -5,6 +5,30 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - animated textures on Xbox (ref/nv2a); maps need a re-bake
+
+World and brush-entity textures now animate as in the reference renderer
+(`R_TextureAnimation`):
+- `+0..+9` textures cycle over time: computer screens, warning signs,
+  blinking panels.
+- The `+a..+j` alternate set is shown while the entity's frame is non-zero.
+  This covers buttons that change look when pressed, health and HEV
+  chargers, and lights that a trigger switches.
+- `-0..-9` textures pick a random tile per face, as upstream does, instead
+  of every face showing tile 0.
+
+Until now the baker dropped every texture no face draws (X9-U's texture
+prune). That removed exactly these frames: they are reached only through
+the chains the engine builds by name. The baker now appends them to the map's
+texture directory, after the drawn textures and in miptex order, so the
+format is unchanged. c1a0 keeps 27 frames (+76 KiB). Across the retail
+maps, 117 of 125 gain frames: about 100 KiB on average, at most 572 KiB
+(rocket_frenzy).
+ref/nv2a finds the frames from the engine's own texture list with the same
+rule. An archive baked before this change still loads and looks as it did,
+and the console says it needs a re-bake. New tests: the
+`anim_texture_frames_test` ctest and the `nv2a_texanim_util` host test.
+
 ### Changed - the Xbox build is optimised (-O2); it was -O0
 
 No Xbox compile passed an optimisation flag, so everything - engine, ref/nv2a,

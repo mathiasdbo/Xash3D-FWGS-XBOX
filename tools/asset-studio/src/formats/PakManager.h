@@ -201,8 +201,21 @@ namespace formats {
         // map's WAD set names gets baked, used or not - and remaps the
         // batches' textureIndex to the compacted order. Call after
         // setTextureBatches(). Returns the number of textures dropped.
-        size_t pruneUnusedXboxTextures();
+        //
+        // X9-X item 14 step 9: appendAfter names textures (pre-prune
+        // textureIndex values) to append after the compacted set, one new
+        // entry each and in the order given, whether or not a batch draws
+        // them - the animation frames no face references
+        // (AnimTextureFrames.h). They must follow the drawn textures, in
+        // this order, because ref/nv2a finds them there by position.
+        size_t pruneUnusedXboxTextures(const std::vector<uint32_t>& appendAfter = {});
         void setFaceRemap(std::vector<uint32_t> remap) { mFaceRemap = std::move(remap); }
+
+        // Read-only views for tests/anim_texture_frames_test.cpp.
+        size_t xboxTextureCountForTest() const { return mXboxTextures.size(); }
+        uint32_t xboxTextureWidthForTest(size_t i) const { return mXboxTextureWidths.at(i); }
+        uint32_t xboxTextureHeightForTest(size_t i) const { return mXboxTextureHeights.at(i); }
+        uint32_t textureBatchIndexForTest(size_t i) const { return mTextureBatches.at(i).textureIndex; }
 
     private:
         std::vector<Vertex> mVertices;
