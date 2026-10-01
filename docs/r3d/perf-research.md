@@ -10,16 +10,23 @@ It implements nothing: its only write is one report under
 
 ## Shape
 
-| Stage | Agent | Calls | What it does |
-|---|---|---|---|
-| Survey | `console-performance-specialist` (CPU / Pentium III), `nv2a-xbox-specialist` (GPU), `render-architecture-specialist` (engine hot paths), `memory-budget-specialist` (memory, streaming) | 2-4, parallel | Each returns up to 12 structured candidates: bound, targets, `file:line` evidence, concrete change, expected gain with its basis, risk, how it is measured. |
-| Referee | `reference-renderer-specialist` | 0-1 | Confirms or refutes every claim about what the reference renderer does, by reading it. Skipped if no candidate makes one. |
-| Plan | `perf-research-planner` | 1 | Merges, drops refuted items into a "Refuted" section, writes the report. |
+| Stage | Agent | Model / effort | Calls | What it does |
+|---|---|---|---|---|
+| Survey | `console-performance-specialist` (CPU / Pentium III), `nv2a-xbox-specialist` (GPU), `render-architecture-specialist` (engine hot paths), `memory-budget-specialist` (memory, streaming) | sonnet / medium | 2-4, parallel | Each returns up to 12 structured candidates: bound, targets, `file:line` evidence, concrete change, expected gain with its basis, risk, how it is measured. |
+| Referee | `reference-renderer-specialist` | opus / high | 0-1 | Confirms or refutes every claim about what the reference renderer does, by reading it. Skipped if no candidate makes one. |
+| Plan | `perf-research-planner` | opus / high | 1 | Merges, drops refuted items into a "Refuted" section, writes the report. |
 
 3-6 agents per run; `args.dryRun` prints the count without spawning anything.
 Every agent is a leaf. The lens set follows `args`: `scenario: 'cpu'` drops the
 GPU lens, `scenario: 'gpu'` drops the CPU lens, `target: 'pentium3'` drops the
 NV2A lens.
+
+Every `agent()` call passes its model and effort explicitly, so the agent
+files' frontmatter is not what decides. The referee and planner get the top
+tier because a wrong verdict or plan is paid for by whoever implements it
+(`lessons.md`: never list an optimisation as a port without grepping the
+reference); the lenses are checklist-shaped surveys. Override per run with
+`args.models = { lens: { model, effort }, referee: {...}, planner: {...} }`.
 
 ## Arguments
 

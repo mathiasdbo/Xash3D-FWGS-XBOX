@@ -40,6 +40,18 @@ const target = ['xbox', 'pentium3', 'both'].includes(A.target) ? A.target : 'bot
 const paths = Array.isArray(A.paths) ? A.paths.map(String) : []
 const slug = String(A.slug || focus).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'perf-research'
 const dryRun = !!A.dryRun
+
+// Model and effort per stage, explicit on every agent() call. The referee
+// is the stage whose mistakes lessons.md records (false "port X" items), and
+// the planner writes the one deliverable, so both get the top tier; the
+// lenses are checklist-shaped domain surveys. Override per run with
+// args.models = { lens: { model, effort }, referee: {...}, planner: {...} }.
+const MODELS = {
+	lens: { model: 'sonnet', effort: 'medium' },
+	referee: { model: 'opus', effort: 'high' },
+	planner: { model: 'opus', effort: 'high' },
+	...(A.models || {}),
+}
 const reportPath = `docs/r3d/reports/perf-research/${slug}.md`
 
 const TARGETS = {
@@ -176,13 +188,13 @@ function plannerPrompt(lensResults, verdicts) {
 
 if (dryRun) {
 	const n = LENSES.length + 2
-	log(`dry run: ${LENSES.length} lens(es) [${LENSES.map(l => l.key).join(', ')}] + referee + planner = ${n} agents; scenario ${scenario}, target ${target}; report ${reportPath}`)
-	return { dryRun: true, agents: n, lenses: LENSES.map(l => `${l.key} -> ${l.agentType}`), reportPath, scenario, target }
+	log(`dry run: models ${JSON.stringify(MODELS)}; ${LENSES.length} lens(es) [${LENSES.map(l => l.key).join(', ')}] + referee + planner = ${n} agents; scenario ${scenario}, target ${target}; report ${reportPath}`)
+	return { dryRun: true, agents: n, models: MODELS, lenses: LENSES.map(l => `${l.key} -> ${l.agentType}`), reportPath, scenario, target }
 }
 
 phase('Survey')
 const lensResults = (await parallel(LENSES.map(l => async () => {
-	const r = await agent(lensPrompt(l), { agentType: l.agentType, schema: LENS_SCHEMA, phase: 'Survey', label: `survey:${l.key}` })
+	const r = await agent(lensPrompt(l), { agentType: l.agentType, ...MODELS.lens, schema: LENS_SCHEMA, phase: 'Survey', label: `survey:${l.key}` })
 	return r ? { lens: l.key, ...r } : null
 }))).filter(Boolean)
 
@@ -196,7 +208,7 @@ log(`Survey: ${lensResults.length}/${LENSES.length} lenses, ${candidates.length}
 phase('Referee')
 let verdicts = []
 if (candidates.some(c => c.referenceClaim)) {
-	const ref = await agent(refereePrompt(candidates), { agentType: 'reference-renderer-specialist', schema: REFEREE_SCHEMA, phase: 'Referee', label: 'referee' })
+	const ref = await agent(refereePrompt(candidates), { agentType: 'reference-renderer-specialist', ...MODELS.referee, schema: REFEREE_SCHEMA, phase: 'Referee', label: 'referee' })
 	verdicts = ref ? ref.verdicts : []
 	if (!ref) log('Referee produced no result - the report will mark every reference claim unverified.')
 } else {
@@ -204,7 +216,7 @@ if (candidates.some(c => c.referenceClaim)) {
 }
 
 phase('Plan')
-const report = await agent(plannerPrompt(lensResults, verdicts), { agentType: 'perf-research-planner', schema: REPORT_SCHEMA, phase: 'Plan', label: 'plan' })
+const report = await agent(plannerPrompt(lensResults, verdicts), { agentType: 'perf-research-planner', ...MODELS.planner, schema: REPORT_SCHEMA, phase: 'Plan', label: 'plan' })
 if (!report || !report.written) log(`Plan: the report was not written (${report ? 'planner said so' : 'no result'}).`)
 else log(`Plan: ${report.reportPath} - ${report.counts.proposed} proposed, ${report.counts.refuted} refuted, ${report.counts.unverified} unverified`)
 
