@@ -62,6 +62,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "nv2a_studio_util.h" /* X9-X step 5 Part C: the studio batch-state mapping (nv2a_studio_util.c), host-tested */
 #include "r_studio_bridge.h" /* X9-X step 5: the private glue with r_studio.c - nv2a_2d_shadow_t now lives here */
 #include "r_studio.h" /* X9-X step 5: r_studio.c's own entry points */
+#include "r_studio_gpu.h" /* divergences.md #143: the GPU studio path's draws, below */
 #include "nv2a_sprite_util.h" /* X9-X step 6: the sprite GL-state mirrors pinned below */
 #include "r_sprite.h" /* X9-X step 6: r_sprite.c's own entry points (gl_sprite.c port) */
 #include "r_effects.h" /* X9-X step 7: r_effects.c's own entry points (gl_beams.c/gl_rpart.c port) */
@@ -1202,10 +1203,19 @@ typedef enum
 {
 	NV2A_RESIDENT_NONE,
 	NV2A_RESIDENT_2D,
-	NV2A_RESIDENT_TRI
+	NV2A_RESIDENT_TRI,
+	NV2A_RESIDENT_STUDIO /* divergences.md #143, vs_studio */
 } nv2a_resident_program_t;
 
 static nv2a_resident_program_t nv2a_resident_program;
+
+/* divergences.md #143: true while the GPU holds the studio path's program,
+   combiner, stage-1-off and array formats (nv2a_sgpu_enter). Cleared by
+   every other program upload (the three nv2a_init_*_shader functions, the
+   decal pass's pixel program) and at the start of each frame. The
+   constants it relies on (hardware 0..95 and 101..191) are written by no
+   other path, so they survive another path's draws in between. */
+static qboolean nv2a_sgpu_entered;
 
 /* X9-X step 11: the fog state last pushed (nv2a_push_fog); invalid after
    any pixel-program upload, which resets the final combiner. */
@@ -1239,6 +1249,7 @@ static void nv2a_init_lit_shader( void )
 	int i;
 
 	nv2a_resident_program = NV2A_RESIDENT_NONE;
+	nv2a_sgpu_entered = false;
 
 	uint32_t vs_program[] =
 	{
@@ -3595,6 +3606,7 @@ static qboolean R_Init( void )
 		return false;
 	}
 	R_StudioInit();
+	nv2a_sgpu_cache_init(); /* divergences.md #143: bookkeeping only, nothing backed until a build */
 	R_SpriteInit(); /* X9-X step 6: r_traceglow and the view entity (r_sprite.h) */
 	R_EfxInit(); /* X9-X step 7: the palette CL_DrawParticles reads (r_effects.h) */
 	R_DecalInit(); /* X9-X item 14 step 12: gl_polyoffset and R_ClearDecals, gl_opengl.c:1181,1282 */
@@ -3625,6 +3637,7 @@ static void R_Shutdown( void )
 	/* X9-X D7: every texture slot, then the arena/table, after pb_kill -
 	   the GPU is idle by now, matching nv2a_tex_shutdown()'s own comment. */
 	nv2a_tex_shutdown();
+	nv2a_sgpu_cache_shutdown(); /* divergences.md #143, GPU idle since pb_kill */
 	R_SkyShutdown(); /* X9-X item 14 step 10: its texnums were slots of that table */
 	R_WarpShutdown(); /* X9-X item 14 step 11 */
 	if( nv2a_2d_ring )
@@ -5782,6 +5795,7 @@ int nv2a_decal_gpu_begin( const cl_entity_t *e, float blend )
 	#include "ps_decal.inl"
 	pb_end( p );
 	nv2a_resident_program = NV2A_RESIDENT_NONE;
+	nv2a_sgpu_entered = false;
 	nv2a_fog_pushed_valid = false;
 	nv2a_push_fog( &nv2a_fog_current );
 
@@ -6684,6 +6698,8 @@ static void nv2a_init_2d_shader( void )
 		#include "vs_2d.inl"
 	};
 
+	nv2a_sgpu_entered = false;
+
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
 	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
@@ -6727,6 +6743,8 @@ static void nv2a_init_tri_shader( void )
 	{
 		#include "vs_tri.inl"
 	};
+
+	nv2a_sgpu_entered = false;
 
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
@@ -6805,6 +6823,44 @@ static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
 	/* D5/C4: NEVER a zero convolution-kernel field (divergences.md #102) - 0x01012000/0x02022000, same values nv2a_draw_map_geometry already proved. */
 	key->filter = bilinear ? 0x02022000 : 0x01012000;
 	return true;
+}
+
+/* Stage 0 for a resolved batch key (nv2a_2d_resolve_batch_key): the
+   TriAPI flush's own block, shared since divergences.md #143 with the GPU
+   studio path, which binds the same skins. */
+static void nv2a_push_stage0( const nv2a_2d_batch_key_t *key )
+{
+	uint32_t *p = pb_begin();
+	uint32_t base_size = 0;
+
+	/* divergences.md #131: a compressed texture (a baked DXT1 menu
+	   tile) is sized ONLY by the FORMAT word's BASE_SIZE_U/V log2
+	   fields - IMAGE_RECT and pitch size linear textures only, and
+	   left at 0 a DXT texture is 1x1 (divergences.md #100, the
+	   world's own DXT1 push above). nv2a_tex_upload_compressed only
+	   accepts power-of-two sizes, so the log2 is exact. Its texture
+	   coordinates are normalized (nv2a_tex_coord_scale). */
+	if( NV2A_TEX_COLOR_IS_COMPRESSED( key->color_format ))
+	{
+		base_size = MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_U, (uint32_t)nv2a_2d_log2_pot( key->width ))
+			| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_V, (uint32_t)nv2a_2d_log2_pot( key->height ));
+	}
+
+	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, key->offset );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
+	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
+		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
+		| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
+		| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, key->color_format )
+		| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, key->mip_levels )
+		| base_size );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, key->pitch << 16 );
+	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( key->width << 16 ) | key->height );
+	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, key->address );
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, key->control0 );
+	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, key->filter ); /* nv2a_2d_resolve_batch_key */
+	pb_end( p );
 }
 
 /* The number of vertices ONE output primitive of a given hardware
@@ -7086,39 +7142,7 @@ static void nv2a_2d_flush( void )
 	   16 bpp (LU_IMAGE_R5G6B5 / A1R5G5B5, r_image.c nv2a_tex_upload_skin),
 	   and the key is resolved when the batch was APPENDED, so it is the
 	   format of the pixels this batch was queued against. */
-	{
-		uint32_t *p = pb_begin();
-		uint32_t base_size = 0;
-
-		/* divergences.md #131: a compressed texture (a baked DXT1 menu
-		   tile) is sized ONLY by the FORMAT word's BASE_SIZE_U/V log2
-		   fields - IMAGE_RECT and pitch size linear textures only, and
-		   left at 0 a DXT texture is 1x1 (divergences.md #100, the
-		   world's own DXT1 push above). nv2a_tex_upload_compressed only
-		   accepts power-of-two sizes, so the log2 is exact. Its texture
-		   coordinates are normalized (nv2a_tex_coord_scale). */
-		if( NV2A_TEX_COLOR_IS_COMPRESSED( nv2a_2d_batch_key.color_format ))
-		{
-			base_size = MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_U, (uint32_t)nv2a_2d_log2_pot( nv2a_2d_batch_key.width ))
-				| MASK( NV097_SET_TEXTURE_FORMAT_BASE_SIZE_V, (uint32_t)nv2a_2d_log2_pot( nv2a_2d_batch_key.height ));
-		}
-
-		p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, nv2a_2d_batch_key.offset );
-		NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
-		p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
-			MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
-			| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
-			| MASK( NV097_SET_TEXTURE_FORMAT_DIMENSIONALITY, 2 )
-			| MASK( NV097_SET_TEXTURE_FORMAT_COLOR, nv2a_2d_batch_key.color_format )
-			| MASK( NV097_SET_TEXTURE_FORMAT_MIPMAP_LEVELS, nv2a_2d_batch_key.mip_levels )
-			| base_size );
-		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1, nv2a_2d_batch_key.pitch << 16 );
-		p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT, ( nv2a_2d_batch_key.width << 16 ) | nv2a_2d_batch_key.height );
-		p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, nv2a_2d_batch_key.address );
-		p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, nv2a_2d_batch_key.control0 );
-		p = pb_push1( p, NV097_SET_TEXTURE_FILTER, nv2a_2d_batch_key.filter ); /* nv2a_2d_resolve_batch_key */
-		pb_end( p );
-	}
+	nv2a_push_stage0( &nv2a_2d_batch_key );
 
 	/* X9-X step 11: the batch's fog (3D only - 2D never fogs), after any
 	   re-entry above, whose program upload resets the final combiner. */
@@ -7158,6 +7182,315 @@ static void nv2a_2d_flush( void )
 void nv2a_tri_flush( void )
 {
 	nv2a_2d_flush();
+}
+
+/*
+========================================================================
+divergences.md #143: the GPU studio path's draws. R_StudioDrawPoints
+(r_studio.c) hands a submodel here instead of skinning and lighting it
+on the CPU and submitting it through the TriAPI: the static vertices
+(r_studio_gpu.c) are skinned and lit by vs_studio (vs_studio.vp has the
+arithmetic and the constant layout), coloured by ps_2d exactly as the
+TriAPI's vertices are (texture x colour), and drawn as indexed triangle
+lists in the TriAPI assembler's own order. The render state each mesh
+draws under is the same nv2a_2d_desired the TriAPI would have snapshot
+for it at append time, pushed immediately; the pending TriAPI batch is
+flushed first, so draw order is unchanged.
+
+What this path leaves behind for the others: its program (they re-upload
+theirs: nv2a_2d_dirty, nv2a_lit_state_current), its array pointers (the
+TriAPI's re-entry repoints, nv2a_2d_pushed_base_valid), its render and
+stage-0 state (nv2a_2d_pushed_valid; the world's lit-state entry pushes
+its own), and the depth test/function restored exactly as the TriAPI
+flush restores them. It writes hardware constants 0..95 and 101..191,
+which no other path reads; c[0..4] (96..100) are never touched.
+
+Invariants this path relies on (nv2a-xbox-specialist review): no other
+path writes hardware constants 101..127 (c[5..31]: the fixed constants
+and the gamma table, reloaded only on a serial change or once a frame)
+or 128..191 and 0..95 (the palette, reloaded per submodel). Hardware
+0..95 is also where the NV2A keeps its fixed-function transform state:
+NV097_SET_COMPOSITE_MATRIX, MODEL_VIEW/INVERSE_MODEL_VIEW, texture
+matrices and texgen, EYE_POSITION, FOG_PLANE and VIEWPORT_OFFSET/SCALE
+write there. ref/nv2a pushes none of them (pbkit pushes EYE_POSITION and
+FOG_PLANE once, at init); a new path that does must reload the palette
+after it, or the low palette bank breaks.
+========================================================================
+*/
+
+static const nv2a_sgpu_vertex_t *nv2a_sgpu_bound_vb;
+static uint32_t nv2a_sgpu_lut_serial_pushed;
+static qboolean nv2a_sgpu_lut_valid;
+
+/* nv2a_init_tri_shader's shape, with vs_studio (vs_studio.inl, the
+   vp20compiler output of vs_studio.vp) and the same ps_2d combiner. */
+static void nv2a_init_studio_shader( void )
+{
+	uint32_t *p;
+	int i;
+
+	uint32_t vs_program[] =
+	{
+		#include "vs_studio.inl"
+	};
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
+	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
+		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
+		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
+	pb_end( p );
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
+	pb_end( p );
+
+	/* Up to 25 instructions a block (125 dwords) instead of one: each
+	   pb_end flushes the write-combining buffer and spins on the GPU's
+	   (pbkit.c pb_cache_flush), a cost xemu does not show (nv2a-xbox-
+	   specialist review). The program-load pointer advances by one
+	   instruction per four dwords whatever the block boundaries. */
+	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); )
+	{
+		int n = (int)( sizeof( vs_program ) / 16 ) - i, k;
+
+		if( n > 25 )
+			n = 25;
+		p = pb_begin();
+		for( k = 0; k < n; k++ )
+		{
+			pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
+			memcpy( p, &vs_program[( i + k ) * 4], 4 * 4 );
+			p += 4;
+		}
+		pb_end( p );
+		i += n;
+	}
+
+	p = pb_begin();
+	#include "ps_2d.inl"
+	pb_end( p );
+	nv2a_fog_pushed_valid = false; /* the final combiner is ps_2d.inl's again */
+}
+
+/* Writes `count` vec4 constants from hardware slot `slot` on: one
+   SET_TRANSFORM_CONSTANT_LOAD per pbkit block, then up to three 8-vec4
+   SET_TRANSFORM_CONSTANT headers (the method's 32-dword window; the load
+   pointer advances across them) - 101 dwords, under the 128-dword block. */
+static void nv2a_sgpu_push_consts( uint32_t slot, const float (*v)[4], uint32_t count )
+{
+	while( count > 0 )
+	{
+		uint32_t *p = pb_begin();
+		int headers;
+
+		p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, slot );
+		for( headers = 0; headers < 3 && count > 0; headers++ )
+		{
+			uint32_t n = count > 8 ? 8 : count;
+
+			pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, n * 4 );
+			memcpy( p, v, n * 16 );
+			p += n * 4;
+			slot += n;
+			v += n;
+			count -= n;
+		}
+		pb_end( p );
+	}
+}
+
+/* The studio path's own GPU state, when another path took the GPU since
+   it last drew: program and combiner, stage 1 off, alpha function, every
+   array format reset (then 0/1/2/9 pointed at the submodel's vertices by
+   the caller), and c[13..15]. The constants above c[4] survive other
+   paths, so the gamma table and the palette are not reloaded here. */
+static void nv2a_sgpu_enter( void )
+{
+	float fixed[NV2A_SGPU_FIXED_REGS][4];
+	uint32_t *p;
+	int i;
+
+	nv2a_init_studio_shader();
+	nv2a_resident_program = NV2A_RESIDENT_STUDIO;
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
+	p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
+	pb_end( p );
+
+	p = pb_begin();
+	pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
+	for( i = 0; i < 16; i++ )
+		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
+	pb_end( p );
+
+	nv2a_sgpu_fixed_consts( fixed );
+	nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_FIXED, (const float (*)[4])fixed, NV2A_SGPU_FIXED_REGS );
+
+	nv2a_sgpu_bound_vb = NULL;
+	nv2a_sgpu_entered = true;
+}
+
+qboolean nv2a_sgpu_begin_submodel( const nv2a_sgpu_geometry_t *geo, const float light[4],
+	const float lut[NV2A_SGPU_LUT_REGS][4], uint32_t lut_serial )
+{
+	float block[5][4];
+
+	/* Begin()'s own gate: nothing is drawn, on either path, without it. */
+	if( !nv2a_ready || !nv2a_frame_open || !nv2a_view_valid || !geo )
+		return false;
+
+	if( !nv2a_sgpu_lut_valid || nv2a_sgpu_lut_serial_pushed != lut_serial )
+	{
+		nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_LUT, lut, NV2A_SGPU_LUT_REGS );
+		nv2a_sgpu_lut_serial_pushed = lut_serial;
+		nv2a_sgpu_lut_valid = true;
+	}
+
+	/* c[5..8]: the TriAPI re-entry's own choice of matrix (nv2a_2d_flush)
+	   for the current view-model depth range; c[9]: the light terms. */
+	if( nv2a_2d_desired.viewmodel_depthrange )
+	{
+		float viewmodel_viewport[4][4];
+		float z_min, z_max;
+
+		nv2a_studio_viewmodel_zrange( &z_min, &z_max );
+		nv2a_matrix_viewport( viewmodel_viewport, 0, 0, (float)nv2a_width, (float)nv2a_height, z_min, z_max );
+		nv2a_matrix_multiply( (float (*)[4])block, nv2a_view_proj_combined, viewmodel_viewport );
+	}
+	else
+	{
+		memcpy( block, nv2a_map_viewproj, 16 * 4 );
+	}
+	memcpy( block[4], light, 4 * sizeof( float ));
+	nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_MVP, (const float (*)[4])block, 5 );
+	return true;
+}
+
+void nv2a_sgpu_load_palette( const nv2a_sgpu_palette_t *pal, const float (*bonestransform)[3][4], const float (*blightvec)[3] )
+{
+	static float rows[NV2A_SGPU_MAX_PALETTE * 3][4];
+	static float lights[NV2A_SGPU_MAX_PALETTE][4];
+	uint32_t e, low, n = pal->count;
+
+	if( n > NV2A_SGPU_MAX_PALETTE )
+		n = NV2A_SGPU_MAX_PALETTE;
+	for( e = 0; e < n; e++ )
+	{
+		memcpy( rows[e * 3], bonestransform[pal->bone[e]], sizeof( float ) * 12 );
+		lights[e][0] = blightvec[pal->bone[e]][0];
+		lights[e][1] = blightvec[pal->bone[e]][1];
+		lights[e][2] = blightvec[pal->bone[e]][2];
+		lights[e][3] = 0.0f;
+	}
+
+	low = n < NV2A_SGPU_LOW_BONES ? n : NV2A_SGPU_LOW_BONES;
+	nv2a_sgpu_push_consts( nv2a_sgpu_matrix_slot( 0 ), (const float (*)[4])rows, low * 3 );
+	nv2a_sgpu_push_consts( nv2a_sgpu_light_slot( 0 ), (const float (*)[4])lights, low );
+	if( n > low )
+	{
+		nv2a_sgpu_push_consts( nv2a_sgpu_matrix_slot( low ), (const float (*)[4])rows[low * 3], ( n - low ) * 3 );
+		nv2a_sgpu_push_consts( nv2a_sgpu_light_slot( low ), (const float (*)[4])lights[low], n - low );
+	}
+}
+
+void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_consts[NV2A_SGPU_MESH_REGS][4] )
+{
+	const nv2a_sgpu_mesh_t *m = &geo->meshes[mesh];
+	nv2a_2d_batch_key_t key;
+	uint32_t i, begin, end;
+	uint32_t *p;
+
+	/* Whatever the TriAPI holds draws first, under its own state - the
+	   order the CPU path's appends would have kept. */
+	nv2a_2d_flush();
+
+	/* The same texture-stage resolution an append makes (and its
+	   nv2a_tex_mark_used, which keeps the skin cache from evicting a skin
+	   this frame still reads). */
+	if( !nv2a_2d_resolve_batch_key( &key ))
+		return;
+
+	if( !nv2a_sgpu_entered )
+		nv2a_sgpu_enter();
+	nv2a_lit_state_current = false;
+	nv2a_2d_dirty = true;
+	nv2a_2d_pushed_valid = false;
+	nv2a_2d_pushed_base_valid = false;
+
+	if( nv2a_sgpu_bound_vb != geo->vb )
+	{
+		const byte *vb = (const byte *)geo->vb;
+
+		nv2a_set_attrib_pointer( 0, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_sgpu_vertex_t ), vb + 0 );
+		nv2a_set_attrib_pointer( 2, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 3, sizeof( nv2a_sgpu_vertex_t ), vb + 12 );
+		nv2a_set_attrib_pointer( 1, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_sgpu_vertex_t ), vb + 24 );
+		nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_sgpu_vertex_t ), vb + 32 );
+		p = pb_begin();
+		p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
+		pb_end( p );
+		nv2a_sgpu_bound_vb = geo->vb;
+	}
+
+	/* The texture coordinates' scale, as Begin captures it for Vertex3f. */
+	nv2a_tex_coord_scale( nv2a_tex_get( nv2a_tex_current()), &mesh_consts[2][2], &mesh_consts[2][3] );
+	nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_MESH, (const float (*)[4])mesh_consts, NV2A_SGPU_MESH_REGS );
+
+	/* nv2a_2d_flush's 3D shadow push, from the desired state directly
+	   (this draw is not deferred, so the desired state IS the state it
+	   was "appended" under), with the alpha function the TriAPI
+	   re-entry sets. */
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_BLEND_ENABLE, nv2a_2d_desired.blend_enable ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, nv2a_2d_desired.sfactor );
+	p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, nv2a_2d_desired.dfactor );
+	p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
+	p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, nv2a_2d_desired.alpha_test_enable ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
+	p = pb_push1( p, NV097_SET_ALPHA_REF, nv2a_2d_desired.alpha_ref );
+	p = pb_push1( p, NV097_SET_DEPTH_MASK, nv2a_2d_desired.depth_mask ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, nv2a_2d_desired.cull_enable ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, nv2a_2d_desired.depth_test_disable ? 0 : 1 );
+	p = pb_push1( p, NV097_SET_DEPTH_FUNC, nv2a_2d_desired.depth_func_equal ? NV097_SET_DEPTH_FUNC_V_EQUAL : NV097_SET_DEPTH_FUNC_V_LEQUAL );
+	pb_end( p );
+
+	nv2a_push_stage0( &key );
+	nv2a_push_fog( &nv2a_fog_current );
+
+	/* The mesh's triangles: whole dwords of two u16 indices, 120 a block
+	   (80 triangles, so no block splits one) - nv2a_draw_index_range's
+	   shape. */
+	NV2A_FT_ADD( XBOX_FT_W_DRAWS, 1 );
+	begin = m->first_index / 2u;
+	end = begin + m->index_count / 2u;
+	for( i = begin; i < end; )
+	{
+		uint32_t batch = end - i;
+
+		if( batch > 120 )
+			batch = 120;
+		p = pb_begin();
+		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLES );
+		pb_push( p++, 0x40000000 | NV20_TCL_PRIMITIVE_3D_INDEX_DATA, batch );
+		memcpy( p, &geo->index_dwords[i], batch * sizeof( uint32_t ));
+		p += batch;
+		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
+		pb_end( p );
+		NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
+		i += batch;
+	}
+
+	/* nv2a_2d_flush's own tail: the world and brush-entity path assume
+	   the depth test on with LEQUAL and never write either. */
+	if( nv2a_2d_desired.depth_test_disable || nv2a_2d_desired.depth_func_equal )
+	{
+		p = pb_begin();
+		p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
+		p = pb_push1( p, NV097_SET_DEPTH_FUNC, NV097_SET_DEPTH_FUNC_V_LEQUAL );
+		pb_end( p );
+	}
 }
 
 /* X9-X step 11 (r_studio_bridge.h): r_warp.c's water pieces, whole
@@ -7895,6 +8228,8 @@ static void R_BeginFrame( qboolean clearScene )
 
 	nv2a_frame_open = true;
 	nv2a_lit_state_current = false; /* only the world pass (or a brush entity) establishes it within a frame */
+	nv2a_sgpu_entered = false; /* divergences.md #143: re-entered by the first GPU studio mesh */
+	nv2a_sgpu_lut_valid = false; /* ... and its gamma segments reloaded, once a frame */
 
 	/* X9-X: releases whatever GL_FreeTexture/GL_UpdateTexture queued last
 	   frame (D4 - safe now, the pb_busy wait above proves the GPU is
@@ -7952,6 +8287,10 @@ static void nv2a_try_pending_upload( void )
 	   callers run between frames (R_NewMap during the load, R_BeginFrame
 	   before it opens the frame), after R_EndFrame's pb_busy spin. */
 	nv2a_tex_flush_skin_cache();
+	/* divergences.md #143: the studio GPU geometry likewise - rebuilt on
+	   each submodel's next draw. Same safety argument as the skins. */
+	if( !nv2a_frame_open )
+		nv2a_sgpu_cache_flush();
 
 	/* X9-U: the tables first. R_NewMap runs before the client frees the
 	   previous map's unused models (Mod_FreeUnused, cl_parse.c), so a

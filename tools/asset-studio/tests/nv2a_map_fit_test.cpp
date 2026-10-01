@@ -38,9 +38,10 @@ int main() {
     // (Nv2aMapFit.h, kXboxStudioSkinCacheBytes); dropping it from the
     // resident sum is exactly the bug that approved c4a3 and disposal.
     CHECK(kXboxStudioSkinCacheBytes == 2ull * kMiB, "skin cache term mirrors NV2A_STUDIO_SKIN_CACHE_BYTES (2 MiB)");
+    CHECK(kXboxStudioGpuCacheBytes == kMiB + kMiB / 4, "studio GPU cache term mirrors NV2A_STUDIO_GPU_CACHE_BYTES + _HEAP_BYTES (1.25 MiB)");
     CHECK(kXboxRefNv2aResidentBytes == kXboxTextureArenaBytes + kXboxVertexRingBytes + kXboxTextureTableBytes
-                                           + kXboxStudioStateBytes + kXboxStudioSkinCacheBytes,
-          "every resident term, including the skin cache, is in the resident sum");
+                                           + kXboxStudioStateBytes + kXboxStudioSkinCacheBytes + kXboxStudioGpuCacheBytes,
+          "every resident term, including the skin cache and the studio GPU cache, is in the resident sum");
     CHECK(kXboxFreeAtWorldLoadBytes == 36ull * kMiB + kMiB / 4 - kXboxRefNv2aResidentBytes,
           "free-at-world-load is the 36.25 MiB measurement minus everything resident");
 

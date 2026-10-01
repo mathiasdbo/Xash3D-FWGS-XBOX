@@ -80,6 +80,14 @@ Memoised bone setup (`fork-plan.md`, "Memoised bone setup") is also out
 of scope; the reference is eager (`R_StudioSetupBones`,
 `gl_studio.c:815`), and the HL client sets up bones itself anyway.
 
+**Update (divergences.md #143):** the VP20 palette now exists. The
+compiled layout gives 40 bones (4 constants each: three matrix rows and
+the per-bone light vector) in hardware constants 0..95 and 128..191,
+with the program's own constants in 101..127 and c[0..4] left to
+vs_tri/vs_lit. The retail worst case per submodel after splitting
+oversized submodels into per-mesh palettes is 35 (view models), so no
+retail mesh falls back for lack of bones. See `ref/nv2a/vs_studio.vp`.
+
 ## 2. View-model depth range
 
 Reference: `R_DrawViewModel` (`gl_studio.c:3322`) calls
@@ -376,5 +384,7 @@ after.
   shows as pop-in. Both constants are first choices, not measurements.
 - 16-bit linear skins (`LU_IMAGE_R5G6B5`/`A1R5G5B5`) are register values
   this renderer has not pushed on hardware before.
-- The VP20 usable palette (~50 bones) is still an estimate, not a
-  compiled constant layout.
+- The VP20 palette (40 bones, divergences.md #143) is compiled and runs
+  in xemu; reading constants below c[0] through a negative A0, EXP's
+  .y as an exact frac and the colour's float-to-fixed conversion are
+  not yet observed on hardware.

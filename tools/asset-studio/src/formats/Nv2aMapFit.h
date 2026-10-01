@@ -89,8 +89,19 @@ namespace formats {
     // measured maximum.
     constexpr uint64_t kXboxStudioSkinCacheBytes = 2ull * kMiB;      // NV2A_STUDIO_SKIN_CACHE_BYTES
 
+    // divergences.md #143: the GPU studio path's static geometry
+    // (ref/nv2a/r_studio_gpu.h). Its vertices live in a cache backed on
+    // demand in contiguous chunks and capped at NV2A_STUDIO_GPU_CACHE_BYTES,
+    // and its index lists, meshes and palettes on the heap, capped at
+    // NV2A_STUDIO_GPU_HEAP_BYTES; a submodel that does not fit draws on the
+    // CPU path instead, so these two caps bound the whole cost on every map.
+    // Charged as resident for the same reason as the skin cache (flushed
+    // before each map's GPU upload, only ever this large once the level
+    // runs). Change them together.
+    constexpr uint64_t kXboxStudioGpuCacheBytes = kMiB + kMiB / 4;   // NV2A_STUDIO_GPU_CACHE_BYTES + NV2A_STUDIO_GPU_HEAP_BYTES
+
     constexpr uint64_t kXboxRefNv2aResidentBytes = kXboxTextureArenaBytes + kXboxVertexRingBytes + kXboxTextureTableBytes + kXboxStudioStateBytes
-        + kXboxStudioSkinCacheBytes;
+        + kXboxStudioSkinCacheBytes + kXboxStudioGpuCacheBytes;
 
     constexpr uint64_t kXboxFreeAtWorldLoadBytes = 36ull * kMiB + kMiB / 4 - kXboxRefNv2aResidentBytes; // 36.25 MiB measured, minus what ref/nv2a now holds resident before any map
     constexpr uint64_t kXboxPrecacheBytes = 9ull * kMiB;                    // above the 8.1 MiB highest of the nine maps that load

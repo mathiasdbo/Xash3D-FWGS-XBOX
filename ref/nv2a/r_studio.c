@@ -30,6 +30,7 @@ separately (nv2a_studio_util.c, tools/host-tests).
 #include "r_studio.h"
 #include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
 #include "r_sprite.h" /* X9-X step 6: TriSpriteTexture (gl_triapi.c:242) */
+#include "r_studio_gpu.h" /* divergences.md #143: the GPU studio path */
 #include <stdlib.h> /* calloc/free, R_StudioAllocStatics */
 #include <string.h>
 #include <math.h>
@@ -158,6 +159,9 @@ STATIC_ASSERT( sizeof( studio_draw_state_t ) <= 384u * 1024u, "studio_draw_state
 // studio-related cvars
 CVAR_DEFINE_AUTO( r_studio_sort_textures, "0", FCVAR_GLCONFIG, "change draw order for additive meshes" );
 CVAR_DEFINE_AUTO( r_studio_builtin_renderer, "0", 0, "use built-in studio model renderer instead of the one provided by client library (debugging)" );
+/* divergences.md #143: not in ref/gl - the A/B switch for the GPU studio
+   path (0 = every submodel through the CPU path below, as before). */
+CVAR_DEFINE_AUTO( r_studio_gpu, "1", 0, "ref_nv2a: skin and light studio models on the GPU (0 = CPU path)" );
 static cvar_t *cl_righthand = NULL;
 
 static r_studio_interface_t *pStudioDraw;
@@ -318,6 +322,7 @@ void R_StudioInit( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_shadows );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_sort_textures );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_builtin_renderer );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_gpu );
 	cl_righthand = gEngfuncs.pfnGetCvarPointer( "cl_righthand" );
 
 	nv2a_studio_ctx.viewent = (cl_entity_t *)ENGINE_GET_PARM( PARM_GET_VIEWENT_PTR );
@@ -1997,6 +2002,129 @@ static void R_StudioDrawChromeMesh( short *ptricmds, vec3_t *pstudionorms, float
 
 
 /*
+====================
+divergences.md #143: the GPU studio path
+
+R_StudioDrawPoints below hands a submodel's meshes to the NV2A's vertex
+unit (vs_studio.vp, r_context.c nv2a_sgpu_*) instead of transforming,
+lighting and submitting every vertex through the TriAPI. The program
+reproduces this file's arithmetic (Matrix3x4_VectorTransform,
+R_StudioLighting, R_LightLambert without local lights) on static
+per-submodel vertices (r_studio_gpu.c), with bonestransform and blightvec
+uploaded per draw. Everything else stays on the CPU path, unchanged
+(citations are ref/gl/gl_studio.c, the reference this file ports):
+  - entities lit by local lights (g_studio.numlocallights: R_LightLambert's
+    per-vertex elight sum, :1378-1427);
+  - STUDIO_HAS_BONEWEIGHTS models (R_StudioComputeSkinMatrix, :1975-1993);
+  - kRenderFxGlowShell (the shell's vertex offset, :2003-2009) and a forced
+    chrome face (g_nForceFaceFlags);
+  - kRenderTransAdd entities (the light value is the blend, :2023-2031);
+  - chrome meshes (R_StudioSetupChrome's texture coordinates, :2042) and
+    a mesh whose bones do not fit the palette (none in the retail game);
+  - every studio model while the gamma table cannot be represented within
+    half a colour byte by the program's 32 segments (non-default
+    gamma/brightness cvars: R_StudioGpuGamma);
+  - a submodel not built yet (two builds a frame, r_studio_gpu.h) or that
+    found no GPU memory.
+====================
+*/
+static float    sgpu_lut[NV2A_SGPU_LUT_REGS][4];
+static uint32_t sgpu_lut_serial;
+static uint32_t sgpu_lut_hash;
+static uint32_t sgpu_lut_frame = 0xFFFFFFFFu;
+static qboolean sgpu_lut_built;
+static qboolean sgpu_lut_ok;
+
+/* Rebuilds the program's gamma segments whenever the engine's light
+   gamma table changes (checked once a frame: V_CheckGamma rebuilds the
+   table in place, engine/client/gamma.c:119-137), and says whether they
+   are close enough to it. */
+static qboolean R_StudioGpuGamma( void )
+{
+	uint32_t frame = nv2a_current_frame_number();
+	const uint32_t *table = NULL;
+	uint32_t h = 2166136261u;
+
+	if( frame == sgpu_lut_frame )
+		return sgpu_lut_ok;
+	sgpu_lut_frame = frame;
+
+	if( !FBitSet( gp_host->features, ENGINE_LINEAR_GAMMA_SPACE ))
+	{
+		int i;
+
+		table = (const uint32_t *)nv2a_studio_ctx.lightgammatable;
+		if( !table )
+			return sgpu_lut_ok = false;
+		for( i = 0; i < 1024; i++ )
+			h = ( h ^ table[i] ) * 16777619u;
+	}
+
+	if( !sgpu_lut_built || h != sgpu_lut_hash )
+	{
+		float err = nv2a_sgpu_build_lut( table, sgpu_lut );
+
+		/* Half a byte: within it the table alone moves a colour by at
+		   most 1 (the default cvars measure 0.25). The 1/r multiply and
+		   the hardware's DP3 order can each move the table index by one
+		   entry at a boundary too; the host test measures the combined
+		   effect (at most 1, on 2.85% of colour bytes at the default
+		   cvars). */
+		sgpu_lut_ok = err <= 0.5f;
+		sgpu_lut_hash = h;
+		sgpu_lut_built = true;
+		sgpu_lut_serial++;
+		if( !sgpu_lut_ok )
+			gEngfuncs.Con_DPrintf( "ref_nv2a: gamma table is %.2f of a byte from the GPU studio path's segments - studio models stay on the CPU\n", err );
+	}
+	return sgpu_lut_ok;
+}
+
+/* The submodel's GPU geometry when this entity's draw may use the GPU
+   path at all (the list above), else NULL. */
+static const nv2a_sgpu_geometry_t *R_StudioGpuGeometry( mstudiotexture_t *ptexture, short *pskinref0 )
+{
+	cl_entity_t *e = nv2a_studio_ctx.currententity;
+
+	if( !r_studio_gpu.value || !e )
+		return NULL;
+	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ))
+		return NULL;
+	if( g_studio.numlocallights > 0 )
+		return NULL;
+	if( e->curstate.renderfx == kRenderFxGlowShell || e->curstate.rendermode == kRenderTransAdd )
+		return NULL;
+	if( FBitSet( g_nForceFaceFlags, STUDIO_NF_CHROME ))
+		return NULL;
+	if( !R_StudioGpuGamma())
+		return NULL;
+
+	return nv2a_sgpu_cache_get( m_pStudioHeader, m_pSubModel, ptexture, m_pStudioHeader->numtextures,
+		pskinref0, m_pStudioHeader->numskinref, nv2a_current_frame_number());
+}
+
+/* One mesh through the GPU path: R_StudioDrawNormalMesh/
+   R_StudioDrawFloatMesh's output, with the same colour (blend * 255,
+   R_StudioSetColorArray, gl_studio.c:1435) and texture-coordinate scale. */
+static void R_StudioDrawGpuMesh( const nv2a_sgpu_geometry_t *geo, int mesh, float flat_illum, float s, float t, int *loaded_palette )
+{
+	const nv2a_sgpu_mesh_t *m = &geo->meshes[mesh];
+	float consts[NV2A_SGPU_MESH_REGS][4];
+	byte alpha = nv2a_studio_ctx.blend * 255;
+
+	if( (int)m->palette != *loaded_palette )
+	{
+		nv2a_sgpu_load_palette( &geo->palettes[m->palette], (const float (*)[3][4])g_studio.bonestransform, (const float (*)[3])g_studio.blightvec );
+		*loaded_palette = m->palette;
+	}
+
+	if( m->uv_float )
+		s = t = 1.0f;
+	nv2a_sgpu_mesh_consts( g_nFaceFlags, flat_illum, g_studio.lightcolor, alpha, s, t, 1.0f, 1.0f, consts );
+	nv2a_sgpu_draw_mesh( geo, mesh, consts );
+}
+
+/*
 ===============
 R_StudioDrawPoints
 
@@ -2015,6 +2143,13 @@ static void R_StudioDrawPointsInternal( void )
 	mstudiomesh_t    *pmesh;
 	short            *pskinref;
 	float            lv_tmp;
+	/* divergences.md #143 */
+	const nv2a_sgpu_geometry_t *gpu = NULL;
+	qboolean         cpu_needed = true, gpu_drawing = false;
+	byte             gpu_mesh[MAXSTUDIOMESHES];
+	mstudiomesh_t    *pmesh_base;
+	float            gpu_flat_illum = 0.0f;
+	int              gpu_palette = -1;
 
 	if( !m_pStudioHeader )
 		return;
@@ -2048,10 +2183,38 @@ static void R_StudioDrawPointsInternal( void )
 	pstudionorms = (vec3_t *)((byte *)m_pStudioHeader + m_pSubModel->normindex );
 
 	pskinref = (short *)((byte *)m_pStudioHeader + m_pStudioHeader->skinindex );
+	pmesh_base = pmesh;
+
+	/* divergences.md #143: which meshes the GPU draws (skin family 0's
+	   texture flags built the geometry; the draw uses the current
+	   family's, as below, and a mesh whose coordinate format differs
+	   stays on the CPU). The CPU transform and lighting below only run
+	   when some mesh still needs them. */
+	if( m_pSubModel->nummesh <= MAXSTUDIOMESHES )
+		gpu = R_StudioGpuGeometry( ptexture, pskinref );
+
 	if( m_skinnum > 0 && m_skinnum < m_pStudioHeader->numskinfamilies )
 		pskinref += ( m_skinnum * m_pStudioHeader->numskinref );
 
-	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ) && m_pSubModel->blendvertinfoindex != 0 && m_pSubModel->blendnorminfoindex != 0 )
+	if( gpu )
+	{
+		cpu_needed = false;
+		for( j = 0; j < m_pSubModel->nummesh; j++ )
+		{
+			int flags = ptexture[pskinref[pmesh[j].skinref]].flags | g_nForceFaceFlags;
+
+			gpu_mesh[j] = !FBitSet( flags, STUDIO_NF_CHROME ) && gpu->meshes[j].palette != NV2A_SGPU_NO_PALETTE
+				&& ( FBitSet( flags, STUDIO_NF_UV_COORDS ) ? 1 : 0 ) == gpu->meshes[j].uv_float;
+			if( !gpu_mesh[j] )
+				cpu_needed = true;
+		}
+	}
+
+	if( !cpu_needed )
+	{
+		/* nothing below reads g_studio.verts/norms/lightpos */
+	}
+	else if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ) && m_pSubModel->blendvertinfoindex != 0 && m_pSubModel->blendnorminfoindex != 0 )
 	{
 		mstudioboneweight_t *pvertweight = (mstudioboneweight_t *)((byte *)m_pStudioHeader + m_pSubModel->blendvertinfoindex );
 		mstudioboneweight_t *pnormweight = (mstudioboneweight_t *)((byte *)m_pStudioHeader + m_pSubModel->blendnorminfoindex );
@@ -2099,7 +2262,11 @@ static void R_StudioDrawPointsInternal( void )
 		if( FBitSet( g_nFaceFlags, STUDIO_NF_MASKED | STUDIO_NF_ADDITIVE ))
 			need_sort = true;
 
-		if( nv2a_studio_ctx.currententity->curstate.rendermode == kRenderTransAdd )
+		if( !cpu_needed )
+		{
+			/* divergences.md #143: the program lights every normal */
+		}
+		else if( nv2a_studio_ctx.currententity->curstate.rendermode == kRenderTransAdd )
 		{
 			for( i = 0; i < pmesh[j].numnorms; i++, k++, pstudionorms++, pnormbone++ )
 			{
@@ -2154,6 +2321,18 @@ static void R_StudioDrawPointsInternal( void )
 		}
 	}
 
+	/* divergences.md #143: the submodel's per-draw constants (view
+	   projection for the current view-model depth range, light terms,
+	   gamma segments). False when nothing may draw this frame -
+	   the TriAPI's Begin would drop the CPU path's vertices the same way. */
+	if( gpu )
+	{
+		float light[4];
+
+		nv2a_sgpu_light_consts( g_studio.ambientlight, g_studio.shadelight, light, &gpu_flat_illum );
+		gpu_drawing = nv2a_sgpu_begin_submodel( gpu, light, (const float (*)[4])sgpu_lut, sgpu_lut_serial );
+	}
+
 	nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_STUDIO;
 	for( j = 0; j < m_pSubModel->nummesh; j++ )
 	{
@@ -2194,7 +2373,12 @@ static void R_StudioDrawPointsInternal( void )
 
 			R_StudioSetupSkin( m_pStudioHeader, pskinref[pmesh->skinref] );
 
-			if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
+			if( gpu && gpu_mesh[pmesh - pmesh_base] )
+			{
+				if( gpu_drawing )
+					R_StudioDrawGpuMesh( gpu, (int)( pmesh - pmesh_base ), gpu_flat_illum, s, t, &gpu_palette );
+			}
+			else if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
 				R_StudioDrawChromeMesh( ptricmds, pstudionorms, s, t, shellscale );
 			else if( FBitSet( g_nFaceFlags, STUDIO_NF_UV_COORDS ))
 				R_StudioDrawFloatMesh( ptricmds, pstudionorms );
@@ -3507,6 +3691,10 @@ void Mod_StudioUnloadTextures( void *data )
 			continue;
 		GL_FreeTexture( ptexture[i].index );
 	}
+
+	/* divergences.md #143: the model's GPU geometry can no longer be hit
+	   (a model loaded later at this address is a different model). */
+	nv2a_sgpu_cache_forget( phdr );
 }
 
 static void pfnStudioDynamicLight( cl_entity_t *ent, alight_t *plight )

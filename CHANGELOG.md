@@ -5,6 +5,24 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - studio models skinned and lit on the Xbox GPU (R1)
+
+Studio models (NPCs, the view model, items) are now transformed and lit
+by a VP20 vertex program on the NV2A instead of on the CPU, which was
+the largest CPU cost the frame-time spans found (3.5 ms a frame on
+c1a0c on hardware). Each submodel's vertices are built once, on first
+draw, into a 1 MiB GPU cache; every frame only the bone matrices and
+per-bone light vectors are uploaded, and each mesh is one indexed draw.
+The picture matches the CPU path to within one colour level on a few
+tenths of a percent of pixels (xemu, c1a0e, with and without the
+flashlight). Models lit by a muzzle flash or other entity light, glow
+shells, additive models and chrome meshes still draw on the CPU, as do
+all models when the gamma or brightness setting is far from the default.
+`r_studio_gpu 0` switches the GPU path off for comparison. In xemu
+(emulator timing, ratios only) the c1a0e firing scene went from 2.64 to
+0.50 ms of studio CPU time and from 7.29 to 5.03 ms of CPU per frame;
+the console's numbers need a hardware run.
+
 ### Added - frame-time recorder: per-subsystem CPU spans (M2)
 
 The recording now says where each frame's CPU time goes, so the next

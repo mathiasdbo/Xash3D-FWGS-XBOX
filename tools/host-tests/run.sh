@@ -119,6 +119,17 @@ run_test nv2a_decal_util nv2a_decal_util
 # X9-X item 14 step 13: the frame-time recorder's ring, statistics and file
 # encoders; the C test also writes a recording through those encoders,
 # which the report tool's own test then parses.
+nv2a_studio_gpu() {
+	# Every retail model is checked against the TriAPI assembler when the
+	# staged disc tree is present (it is gitignored); the synthetic cases
+	# run regardless.
+	local models=""
+	[ -d .sweep-xiso/hl/valve/models ] && models=$(ls .sweep-xiso/hl/valve/models/*.mdl)
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a 		tools/host-tests/nv2a_studio_gpu_host_test.c ref/nv2a/nv2a_studio_gpu_util.c ref/nv2a/nv2a_tri_util.c 		-lm -o "$OUT/nv2a_studio_gpu_test" && "$OUT/nv2a_studio_gpu_test" $models | grep -v "^  .*submodels,"
+	return "${PIPESTATUS[0]}"
+}
+run_test nv2a_studio_gpu nv2a_studio_gpu
+
 xbox_frametime_util() {
 	# Stale fixtures from an earlier run must not stand in for ones this
 	# run failed to write.
