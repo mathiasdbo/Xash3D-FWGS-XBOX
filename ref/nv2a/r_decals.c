@@ -82,6 +82,7 @@ Where it departs from ref/gl (docs/r3d/divergences.md #139):
 #include "nv2a_decal_util.h"
 #include "r_studio_bridge.h"
 #include "r_decals.h"
+#include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
 
 #define DECAL_OVERLAP_DISTANCE	2
 #define DECAL_DISTANCE		4	// too big values produce more clipped polygons
@@ -930,6 +931,7 @@ static void DrawSingleDecal( decal_t *pDecal, msurface_t *fa )
 	nv2a_decal_gpu_draw( pDecal->texture, v, numVerts, fa );
 	nv2a_decal_stats.decals++;
 	nv2a_decal_stats.verts += (unsigned int)numVerts;
+	NV2A_FT_ADD( XBOX_FT_W_DECALS, 1 );
 }
 
 /* DrawSurfaceDecals( fa, single, reverse ), gl_decals.c:849, without the

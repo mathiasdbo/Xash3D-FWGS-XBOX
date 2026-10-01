@@ -116,6 +116,22 @@ nv2a_decal_util() {
 run_test nv2a_decal_util nv2a_decal_util
 
 # tools/host-tests/printf_host_test.c, header.
+# X9-X item 14 step 13: the frame-time recorder's ring, statistics and file
+# encoders; the C test also writes a recording through those encoders,
+# which the report tool's own test then parses.
+xbox_frametime_util() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_frametime_util_host_test.c engine/platform/xbox/xbox_frametime_util.c \
+		-o "$OUT/xbox_frametime_util_test" && "$OUT/xbox_frametime_util_test" "$OUT/frametime_fixture.bin" "$OUT/frametime_fixture_v1.bin"
+}
+run_test xbox_frametime_util xbox_frametime_util
+
+frametime_report() {
+	[ -f "$OUT/frametime_fixture.bin" ] && [ -f "$OUT/frametime_fixture_v1.bin" ] || { echo "host-tests: no fixtures - the C test above did not write them" >&2; return 1; }
+	FRAMETIME_FIXTURE="$OUT/frametime_fixture.bin" FRAMETIME_FIXTURE_V1="$OUT/frametime_fixture_v1.bin" python tools/test_frametime_report.py
+}
+run_test frametime_report frametime_report
+
 printf_test() {
 	gcc $HOST_CFLAGS -Wall -Wno-format -fstack-protector-all \
 		-Dvsnprintf=xb_vsnprintf -Dsnprintf=xb_snprintf -Dvsprintf=xb_vsprintf \

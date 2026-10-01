@@ -28,6 +28,7 @@ separately (nv2a_studio_util.c, tools/host-tests).
 #include "r_studio_bridge.h"
 #include "r_warp.h" /* X9-X item 14 step 11: R_WarpAllowFog */
 #include "r_studio.h"
+#include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
 #include "r_sprite.h" /* X9-X step 6: TriSpriteTexture (gl_triapi.c:242) */
 #include <stdlib.h> /* calloc/free, R_StudioAllocStatics */
 #include <string.h>
@@ -606,6 +607,17 @@ static void pfnGetModelCounters( int **s, int **a )
 {
 	*s = &g_studio.framecount;
 	*a = &nv2a_studio_stats.c_studio_models_drawn;
+}
+
+/* The frame-time recorder's studio-model count (nv2a_ft.h). The game's
+   client counts the models it draws itself, through the pointer above
+   (deps/hlsdk/cl_dll/StudioModelRenderer.cpp:57 takes it, :1174 and
+   :1470 increment *m_pModelsDrawn), and
+   this file's own R_StudioDrawModel paths add to the same counter, so
+   R_BeginFrame/R_EndFrame report its change over the frame. */
+uint32_t nv2a_studio_models_drawn( void )
+{
+	return (uint32_t)nv2a_studio_stats.c_studio_models_drawn;
 }
 
 /*
@@ -2142,6 +2154,7 @@ static void R_StudioDrawPoints( void )
 		}
 	}
 
+	nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_STUDIO;
 	for( j = 0; j < m_pSubModel->nummesh; j++ )
 	{
 		float oldblend = nv2a_studio_ctx.blend;
@@ -2195,8 +2208,10 @@ static void R_StudioDrawPoints( void )
 		}
 
 		nv2a_studio_stats.c_studio_polys += pmesh->numtris;
+		NV2A_FT_ADD( XBOX_FT_W_STUDIO_TRIS, pmesh->numtris );
 		nv2a_studio_ctx.blend = oldblend;
 	}
+	nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_TRI;
 }
 
 /*

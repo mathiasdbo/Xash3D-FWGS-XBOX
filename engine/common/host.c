@@ -38,6 +38,9 @@ GNU General Public License for more details.
 #include "tests.h"
 #include "library.h"
 #include "platform/platform.h"
+#if XASH_XBOX && !XASH_DEDICATED
+#include "platform/xbox/xbox_frametime.h" // docs/r3d/divergences.md #141
+#endif
 
 host_parm_t host;	// host parms
 static jmp_buf return_from_main_buf;
@@ -651,6 +654,12 @@ void Host_Frame( double time )
 	if( !Host_FilterTime( time ))
 		return;
 
+#if XASH_XBOX && !XASH_DEDICATED
+	// Resonance3D (docs/r3d/divergences.md #141): the frame-time
+	// recorder's frame boundary - one compare when it is off.
+	Xbox_FrameTime_BeginFrame();
+#endif
+
 	double t1 = Platform_DoubleTime();
 
 	if( host.framecount == 0 )
@@ -666,6 +675,10 @@ void Host_Frame( double time )
 
 	host.framecount++;
 	host.pureframetime = Platform_DoubleTime() - t1;
+
+#if XASH_XBOX && !XASH_DEDICATED
+	Xbox_FrameTime_EndFrame(); // docs/r3d/divergences.md #141
+#endif
 }
 
 /*
@@ -1259,6 +1272,11 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 #if XASH_XBOX
 	Cvar_Getf( "ui_xbox_menu_art", 0, "load the menu background/button strip even under host_lowmemorymode (XM item 0 gate; toggle for before/after memstats comparison)", "%i", 1 );
 #endif
+#if XASH_XBOX && !XASH_DEDICATED
+	// Resonance3D (docs/r3d/divergences.md #141): host_frametime_analysis,
+	// registered before config.cfg and userconfig.d run.
+	Xbox_FrameTime_Init();
+#endif
 
 	Cvar_Get( "host_hl25_extended_structs",
 #if SUPPORT_HL25_EXTENDED_STRUCTS
@@ -1450,6 +1468,12 @@ void Host_ShutdownWithReason( const char *reason )
 		return;
 
 	host.shutdown_issued = true;
+
+#if XASH_XBOX && !XASH_DEDICATED
+	// Resonance3D (docs/r3d/divergences.md #141): close the frame-time
+	// file while the filesystem is still up.
+	Xbox_FrameTime_Shutdown();
+#endif
 
 	if( reason != NULL )
 		Con_Printf( S_NOTE "Issuing host shutdown due to reason \"%s\"\n", reason );

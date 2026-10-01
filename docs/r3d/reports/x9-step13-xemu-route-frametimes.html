@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frame-time recorder: scripted route in xemu</title>
+<style>
+:root{
+  --ground:#F2F3EF; --panel:#FAFBF8; --ink:#1B211C; --muted:#5F685F; --rule:#D7DBD3;
+  --accent:#3B7236; --band:rgba(27,33,28,.035);
+  --cpu:#3B8F4A; --gpu:#C98A12; --wait:#6C79A8; --other:#A9AFA6;
+  --warn:#B8740F; --crit:#B2352E; --load:#6A5AA8; --g60:#1D86B0;
+  --w1:#2F6FB0; --w2:#B0452F; --w3:#5E8F2E;
+  --sans:system-ui,-apple-system,"Segoe UI",sans-serif; --mono:ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#111411; --panel:#171B17; --ink:#E3E7E0; --muted:#98A294; --rule:#2B312A;
+    --accent:#86C179; --band:rgba(227,231,224,.04);
+    --cpu:#6CC47B; --gpu:#E6AE45; --wait:#98A5DA; --other:#5F665C;
+    --warn:#E0A445; --crit:#E46A60; --load:#A596E6; --g60:#5CC3EA; color-scheme:dark;
+    --w1:#79AEE6; --w2:#E68A72; --w3:#9CCB6A;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#111411; --panel:#171B17; --ink:#E3E7E0; --muted:#98A294; --rule:#2B312A;
+  --accent:#86C179; --band:rgba(227,231,224,.04);
+  --cpu:#6CC47B; --gpu:#E6AE45; --wait:#98A5DA; --other:#5F665C;
+  --warn:#E0A445; --crit:#E46A60; --load:#A596E6; --g60:#5CC3EA; color-scheme:dark;
+  --w1:#79AEE6; --w2:#E68A72; --w3:#9CCB6A;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55}
+.wrap{max-width:1120px;margin:0 auto;padding:32px 16px 64px;display:flex;flex-direction:column;gap:28px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+h1{font-weight:600;font-size:clamp(26px,4vw,36px);line-height:1.15;margin:6px 0 8px}
+h2{font-weight:600;font-size:19px;margin:0 0 4px}
+p{margin:0;max-width:72ch}
+.lede{color:var(--muted)}
+.banner{border-left:3px solid var(--warn);padding:8px 12px;background:var(--band);font-size:14px}
+.stats{display:flex;flex-wrap:wrap;gap:12px 32px;padding-top:6px}
+.stat{display:flex;flex-direction:column}
+.stat b{font-family:var(--mono);font-weight:500;font-size:24px;font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.panel{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:16px}
+.chart-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:8px}
+.readout{font-family:var(--mono);font-size:12.5px;color:var(--muted);min-height:1.6em;font-variant-numeric:tabular-nums}
+canvas{display:block;width:100%;height:260px;touch-action:pan-y}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--muted);margin-top:8px}
+.key{display:inline-flex;align-items:center;gap:6px}
+.sw{width:14px;height:10px;border-radius:2px;display:inline-block}
+.ln{width:18px;height:2px;display:inline-block}
+.table-box{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:980px}
+th,td{padding:7px 8px;text-align:right;white-space:nowrap}
+th{font-weight:500;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--rule)}
+td{font-family:var(--mono);font-variant-numeric:tabular-nums;border-bottom:1px solid var(--rule)}
+th:first-child,td:first-child{text-align:left}
+tbody tr{cursor:pointer}
+tbody tr:hover td,tbody tr.on td{background:var(--band)}
+.ok{color:var(--accent)} .warn{color:var(--warn)} .crit{color:var(--crit)}
+.dist{display:flex;width:90px;height:9px;border-radius:2px;overflow:hidden;background:var(--rule)}
+.dist i{display:block;height:100%}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}
+.note h3{font-weight:600;font-size:15px;margin:0 0 4px}
+.note p{color:var(--muted);font-size:14px}
+code{font-family:var(--mono);font-size:12.5px}
+.sub{font-weight:600;font-size:15px;margin:18px 0 6px}
+table.small{min-width:0;width:auto}
+[hidden]{display:none!important}
+footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--rule);padding-top:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">Resonance3D &middot; frame-time recorder &middot; xemu (emulator timings)</div>
+  <h1>Frame-time recorder: scripted route in xemu</h1>
+  <p class="lede">A scripted run with the version-2 recorder: <code>host_frametime_analysis 1</code>, then <code>map c1a0</code> and <code>changelevel</code> to c1a0e, c1a0d and c1a0a, about 20 s each, no input (the view stays at each map's spawn). 2,247 frames, four map changes, and per frame the renderer's work counters. The times are xemu's; the counters are what the console would submit for the same views. Each changelevel frame counts its work twice: the loading screen is drawn from outside <code>Host_Frame</code> within that frame's span, so the peak column equals two frames of work there.</p>
+  <div class="stats" id="stats"></div>
+</header>
+<div class="banner"><b>Recorded in xemu.</b> The times are the emulator's on a PC, not a Pentium III and an NV2A: xemu caps presentation at the 60 Hz refresh, its TSC is not the console's clock, and its GPU wait says nothing about the real GPU. The <b>work counters</b> (draws, vertices, pushbuffer, texture binds, lightmap texels...) are counts, not times: they are the same as on the console, so they can drive an optimisation decision from an xemu run; the times and their correlation with the counters need the console.</div>
+<section class="panel">
+  <div class="chart-head"><h2>Frame rate over the session</h2><div class="readout" id="ro1">Hover or tap the chart for a reading.</div></div>
+  <canvas id="c1" height="260"></canvas>
+  <div class="legend">
+    <span class="key"><span class="ln" style="background:var(--ink)"></span>fps, each second of play</span>
+    <span class="key"><span class="ln" style="background:var(--g60)"></span>60 fps (16.7 ms)</span>
+    <span class="key"><span class="ln" style="background:var(--crit)"></span>30 fps (33.3 ms)</span>
+    <span class="key"><span class="sw" style="background:var(--load);opacity:.35"></span>level load</span>
+  </div>
+</section>
+<section class="panel">
+  <div class="chart-head"><h2>Where each frame's time went</h2><div class="readout" id="ro2"></div></div>
+  <canvas id="c2" height="260"></canvas>
+  <div class="legend">
+    <span class="key"><span class="sw" style="background:var(--cpu)"></span>CPU (engine work)</span>
+    <span class="key"><span class="sw" style="background:var(--gpu)"></span>GPU wait (CPU blocked on the GPU)</span>
+    <span class="key"><span class="sw" style="background:var(--wait)"></span>vblank / swap wait</span>
+    <span class="key"><span class="sw" style="background:var(--other)"></span>between frames (frame limiter)</span>
+    <span class="key"><span class="ln" style="background:var(--g60)"></span>16.7 ms</span>
+    <span class="key"><span class="ln" style="background:var(--crit)"></span>33.3 ms</span>
+  </div>
+</section>
+<section class="panel" id="workchart" hidden>
+  <div class="chart-head"><h2>Work per frame over the session</h2><div class="readout" id="ro3"></div></div>
+  <canvas id="c3" height="260"></canvas>
+  <div class="legend">
+    <span class="key"><span class="ln" style="background:var(--w1)"></span>draws</span>
+    <span class="key"><span class="ln" style="background:var(--w2)"></span>vertices</span>
+    <span class="key"><span class="ln" style="background:var(--w3)"></span>pushbuffer dwords</span>
+    <span>each line is a per-second mean over frames in play, scaled to its own session peak (the readout gives the values)</span>
+  </div>
+</section>
+<section class="panel">
+  <h2>Per map</h2>
+  <p class="lede" style="font-size:13.5px;margin-bottom:10px">In-play frames only (not loading, no menu or pause), leaving out a map's first 30 frames. Min and max fps are the slowest and fastest one-second windows. 1% low is the frame rate the slowest 1% of frames fall below (1000 / the 99th-percentile frame time). CPU and GPU are milliseconds per frame. Free memory is sampled at the last flush before the load and at the first frame of the map. Frames that wrote the recording to the disk (every 5 s and at each map start; their time includes the write) are <b>left out</b> of the statistics (<code>--include-flush</code> keeps them): 8 in this file, the Flushes column gives their mean / worst ms. Click a row to mark it on the charts.</p>
+  <div class="table-box"><table>
+    <thead><tr><th>Map</th><th>Played</th><th>Avg fps</th><th>Min</th><th>Max</th><th>1% low</th><th>Worst ms</th><th>CPU ms</th><th>GPU ms</th><th>GPU-bound</th><th>&gt;16.7 ms</th><th>&gt;33.3 ms</th><th>Split</th><th>Flushes</th><th>Load s</th><th>MiB free before / at start</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table></div>
+</section>
+<section class="panel" id="work" hidden>
+  <h2>Work per frame</h2>
+  <p class="lede" style="font-size:13.5px;margin-bottom:10px">What the renderer submitted in each in-play frame, counted where ref/nv2a submits it: mean / peak per map. These are counts, not times, so <b>they are the same in xemu as on the console</b> &mdash; an xemu run measures them exactly. Draws are draw submissions (a world run, a 2D/TriAPI batch, a decal); prims the BEGIN/END blocks they split into; PB KiB the pushbuffer written in the frame; verts every vertex or index submitted (world, studio, TriAPI, 2D, decals); LM texels the lightmap texels rebuilt on the CPU.</p>
+  <div class="table-box"><table id="worktab"></table></div>
+  <h3 class="sub">What the frame time follows</h3>
+  <p class="lede" style="font-size:13.5px;margin-bottom:10px">Over every in-play frame of the session: each counter's mean and peak, and Pearson's r against the frame's CPU time and its GPU wait. A strong r says the time rises and falls with that work. In xemu the times are the emulator's, so these r values describe xemu, not the console.</p>
+  <div class="table-box"><table class="small" id="corrtab"></table></div>
+  <h3 class="sub">GPU-bound frames against the rest</h3>
+  <p class="lede" style="font-size:13.5px;margin-bottom:10px">Per map, the mean work of frames with more than 1 ms of GPU wait next to the frames without: work that is much higher in the first column is what made the CPU wait for the GPU.</p>
+  <div class="table-box"><table class="small" id="hitab"></table></div>
+  <h3 class="sub">The 10 frames with the most GPU wait</h3>
+  <div class="table-box"><table class="small" id="toptab"></table></div>
+</section>
+<section class="notes">
+  <div class="note"><h3>CPU and GPU</h3><p>Each frame is timed with the Pentium III's time-stamp counter, calibrated against the kernel's performance counter (<code>733.33</code> MHz in this file). <b>CPU</b> is the engine's own work: <code>Host_Frame</code> minus the renderer's waits. <b>GPU wait</b> is the time the CPU spun on <code>pb_busy()</code> because the GPU still had work queued. The NV2A runs in parallel with the CPU and pbkit exposes no GPU-side timestamp, so this is the GPU's excess over the CPU, not its busy time: near zero means the GPU kept up and the frame was CPU-bound; a large value means the GPU held the frame. <b>GPU-bound</b> counts frames with more than 1 ms of GPU wait.</p></div>
+  <div class="note"><h3>Waits and the rest</h3><p><b>vblank / swap</b> is time in <code>pb_wait_for_vbl()</code> and in <code>pb_finished()</code> while all three back buffers were queued for display. <b>Between frames</b> is the time outside <code>Host_Frame</code>: the engine's frame limiter (<code>fps_max</code>) and the platform loop. A frame's total is start to next start, so the timeline is wall-clock time.</p></div>
+  <div class="note"><h3>Work counters</h3><p>Version-2 file: 20 counters per frame (draws, prims, pb_dwords, tex_binds, v_world, v_studio, v_tri, v_2d, v_decal, world_faces, pvs_leaves, studio_models, studio_tris, lm_faces, lm_texels, water_verts, decals, particles, beams, sprites), added up by ref/nv2a where it submits the work and stored with each frame. Counts carry over from xemu to the console; times do not.</p></div>
+  <div class="note"><h3>Recording</h3><p>Build <code>Resonance3D 0.21 xbe 6ABE2AD8</code>. The file ends with a clean END chunk. No frames were lost. Ring of 1024 frames, flushed every 5 s.</p></div>
+</section>
+<footer>Generated by <code>tools/frametime-report.py</code> from <code>ft_route_v2.bin</code>. File format: <code>engine/platform/xbox/xbox_frametime_util.h</code>.</footer>
+</div>
+<script>
+const SESSION={"minutes": 0.9077426683694185, "frames": 2247, "loads": 4, "avg_fps": 46.44770104527818, "free_min": 18.89453125, "free_max": 22.61328125, "load_min": 0.8826258365326345, "load_max": 2.1755201525959675, "lost": 0, "clean_end": true, "truncated": false, "tsc_mhz": 733.3335511033027, "build": "Resonance3D 0.21 xbe 6ABE2AD8", "version": 2, "counters": ["draws", "prims", "pb_dwords", "tex_binds", "v_world", "v_studio", "v_tri", "v_2d", "v_decal", "world_faces", "pvs_leaves", "studio_models", "studio_tris", "lm_faces", "lm_texels", "water_verts", "decals", "particles", "beams", "sprites", "verts"], "flush_frames": 8, "flush_included": false};const ROWS=[{"map": "(before first map)", "frames": 0, "all_frames": 10, "flush_frames": 0, "flush_frame_ms": null, "flush_worst_ms": null, "flush_included": false}, {"map": "c1a0", "frames": 559, "all_frames": 600, "flush_frames": 3, "flush_frame_ms": 33.68322363382557, "flush_worst_ms": 33.943489920173505, "flush_included": false, "load_s": 1.8783508403885387, "free_before": 33.640625, "free_after": 22.61328125, "seconds": 18.924021470340577, "avg_fps": 29.53917595560304, "avg_ms": 33.85334788969692, "min_fps": 20.053837128723774, "max_fps": 35.733311594833815, "low1_fps": 28.549168333903967, "p99_ms": 35.027290052874704, "median_ms": 33.31689101533863, "worst_ms": 530.0690421366558, "cpu_ms": 13.530935807854128, "gpu_ms": 8.186414393657103, "wait_ms": 11.235575059981544, "other_ms": 0.9064566173051123, "gpu_bound_pct": 98.74776386404294, "over60": 554, "over30": 267, "overlay_ms": null, "work_avg": {"draws": 366.61001788908766, "prims": 373.61001788908766, "pb_dwords": 10264.978533094813, "tex_binds": 182.61001788908766, "v_world": 5982.0, "v_studio": 8559.0, "v_tri": 0.0, "v_2d": 33.924865831842574, "v_decal": 0.0, "world_faces": 516.0751341681574, "pvs_leaves": 149.73166368515206, "studio_models": 3.992844364937388, "studio_tris": 2853.0, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 14574.924865831843}, "work_peak": {"draws": 733, "prims": 747, "pb_dwords": 10472, "tex_binds": 365, "v_world": 11964, "v_studio": 17118, "v_tri": 0, "v_2d": 220, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 5706, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 29086}, "gpu_hi_frames": 552, "work_gpu_hi": {"draws": 367.2481884057971, "prims": 374.2608695652174, "pb_dwords": 10281.324275362318, "tex_binds": 182.91485507246378, "v_world": 5992.836956521739, "v_studio": 8574.505434782608, "v_tri": 0.0, "v_2d": 31.963768115942027, "v_decal": 0.0, "world_faces": 517.0, "pvs_leaves": 150.0, "studio_models": 4.0, "studio_tris": 2858.1684782608695, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 14599.30615942029}, "work_gpu_lo": {"draws": 316.2857142857143, "prims": 322.2857142857143, "pb_dwords": 8976.0, "tex_binds": 158.57142857142858, "v_world": 5127.428571428572, "v_studio": 7336.285714285715, "v_tri": 0.0, "v_2d": 188.57142857142858, "v_decal": 0.0, "world_faces": 443.14285714285717, "pvs_leaves": 128.57142857142858, "studio_models": 3.4285714285714284, "studio_tris": 2445.4285714285716, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 12652.285714285714}}, {"map": "c1a0e", "frames": 561, "all_frames": 601, "flush_frames": 2, "flush_frame_ms": 36.362588974527426, "flush_worst_ms": 39.35118876885385, "flush_included": false, "load_s": 2.1755201525959675, "free_before": 22.48828125, "free_after": 18.89453125, "seconds": 9.647161931097056, "avg_fps": 58.15181749895269, "avg_ms": 17.19636707860438, "min_fps": 59.98396008416298, "max_fps": 60.028368947813846, "low1_fps": 57.6212954968423, "p99_ms": 17.35469484636632, "median_ms": 16.6865950447646, "worst_ms": 313.98570630455777, "cpu_ms": 9.82907098977319, "gpu_ms": 4.694934398212884, "wait_ms": 2.153494686217329, "other_ms": 0.5188670044009758, "gpu_bound_pct": 100.0, "over60": 287, "over30": 1, "overlay_ms": null, "work_avg": {"draws": 451.80570409982175, "prims": 453.80926916221034, "pb_dwords": 10617.286987522282, "tex_binds": 233.41711229946523, "v_world": 4619.219251336898, "v_studio": 4009.133689839572, "v_tri": 0.0, "v_2d": 0.0071301247771836, "v_decal": 0.0, "world_faces": 352.0, "pvs_leaves": 263.0, "studio_models": 2.0, "studio_tris": 1336.3778966131908, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 8628.360071301247}, "work_peak": {"draws": 903, "prims": 907, "pb_dwords": 10778, "tex_binds": 467, "v_world": 9222, "v_studio": 8004, "v_tri": 0, "v_2d": 4, "v_decal": 0, "world_faces": 352, "pvs_leaves": 263, "studio_models": 2, "studio_tris": 2668, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 17230}, "gpu_hi_frames": 561, "work_gpu_hi": {"draws": 451.80570409982175, "prims": 453.80926916221034, "pb_dwords": 10617.286987522282, "tex_binds": 233.41711229946523, "v_world": 4619.219251336898, "v_studio": 4009.133689839572, "v_tri": 0.0, "v_2d": 0.0071301247771836, "v_decal": 0.0, "world_faces": 352.0, "pvs_leaves": 263.0, "studio_models": 2.0, "studio_tris": 1336.3778966131908, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 8628.360071301247}, "work_gpu_lo": null}, {"map": "c1a0d", "frames": 558, "all_frames": 598, "flush_frames": 2, "flush_frame_ms": 30.331790992700185, "flush_worst_ms": 33.3457905522112, "flush_included": false, "load_s": 1.7069963921828835, "free_before": 21.2265625, "free_after": 20.55859375, "seconds": 9.534755163568173, "avg_fps": 58.52274027256519, "avg_ms": 17.08737484510425, "min_fps": 59.950571372511895, "max_fps": 60.06331278719486, "low1_fps": 56.80432036258466, "p99_ms": 17.604294772245364, "median_ms": 16.66999550423944, "worst_ms": 251.6476257255058, "cpu_ms": 5.269623703954756, "gpu_ms": 2.7119066946747656, "wait_ms": 8.672591493510422, "other_ms": 0.43928288274745375, "gpu_bound_pct": 100.0, "over60": 281, "over30": 1, "overlay_ms": null, "work_avg": {"draws": 86.15591397849462, "prims": 87.15770609318996, "pb_dwords": 2598.28853046595, "tex_binds": 41.075268817204304, "v_world": 1169.0913978494623, "v_studio": 1854.3172043010752, "v_tri": 0.0, "v_2d": 0.007168458781362007, "v_decal": 0.0, "world_faces": 111.0, "pvs_leaves": 119.0, "studio_models": 1.0, "studio_tris": 618.1057347670251, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 3023.4157706093188}, "work_peak": {"draws": 173, "prims": 175, "pb_dwords": 2759, "tex_binds": 83, "v_world": 2334, "v_studio": 3702, "v_tri": 0, "v_2d": 4, "v_decal": 0, "world_faces": 111, "pvs_leaves": 119, "studio_models": 1, "studio_tris": 1234, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 6040}, "gpu_hi_frames": 558, "work_gpu_hi": {"draws": 86.15591397849462, "prims": 87.15770609318996, "pb_dwords": 2598.28853046595, "tex_binds": 41.075268817204304, "v_world": 1169.0913978494623, "v_studio": 1854.3172043010752, "v_tri": 0.0, "v_2d": 0.007168458781362007, "v_decal": 0.0, "world_faces": 111.0, "pvs_leaves": 119.0, "studio_models": 1.0, "studio_tris": 618.1057347670251, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 3023.4157706093188}, "work_gpu_lo": null}, {"map": "c1a0a", "frames": 407, "all_frames": 438, "flush_frames": 1, "flush_frame_ms": 16.718595489807235, "flush_worst_ms": 16.718595489807235, "flush_included": false, "load_s": 0.8826258365326345, "free_before": 22.4921875, "free_after": 21.1171875, "seconds": 6.783258382922768, "avg_fps": 60.00066295935965, "avg_ms": 16.666482513323754, "min_fps": 59.948731677592775, "max_fps": 60.05344380445843, "low1_fps": 55.74044452763048, "p99_ms": 17.940294672467154, "median_ms": 16.659694598207476, "worst_ms": 18.12299461821275, "cpu_ms": 3.0932713463346193, "gpu_ms": 0.06111318488963524, "wait_ms": 13.495288860443805, "other_ms": 0.016809121655687674, "gpu_bound_pct": 0.4914004914004914, "over60": 193, "over30": 0, "overlay_ms": null, "work_avg": {"draws": 57.0, "prims": 57.0, "pb_dwords": 1640.0, "tex_binds": 31.0, "v_world": 1188.0, "v_studio": 0.0, "v_tri": 0.0, "v_2d": 0.0, "v_decal": 0.0, "world_faces": 133.0, "pvs_leaves": 35.0, "studio_models": 0.0, "studio_tris": 0.0, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 1188.0}, "work_peak": {"draws": 57, "prims": 57, "pb_dwords": 1640, "tex_binds": 31, "v_world": 1188, "v_studio": 0, "v_tri": 0, "v_2d": 0, "v_decal": 0, "world_faces": 133, "pvs_leaves": 35, "studio_models": 0, "studio_tris": 0, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 1188}, "gpu_hi_frames": 2, "work_gpu_hi": {"draws": 57.0, "prims": 57.0, "pb_dwords": 1640.0, "tex_binds": 31.0, "v_world": 1188.0, "v_studio": 0.0, "v_tri": 0.0, "v_2d": 0.0, "v_decal": 0.0, "world_faces": 133.0, "pvs_leaves": 35.0, "studio_models": 0.0, "studio_tris": 0.0, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 1188.0}, "work_gpu_lo": {"draws": 57.0, "prims": 57.0, "pb_dwords": 1640.0, "tex_binds": 31.0, "v_world": 1188.0, "v_studio": 0.0, "v_tri": 0.0, "v_2d": 0.0, "v_decal": 0.0, "world_faces": 133.0, "pvs_leaves": 35.0, "studio_models": 0.0, "studio_tris": 0.0, "lm_faces": 0.0, "lm_texels": 0.0, "water_verts": 0.0, "decals": 0.0, "particles": 0.0, "beams": 0.0, "sprites": 0.0, "verts": 1188.0}}];const TL=[[0,null,135.655,2.169,13.285,125.166,676.63,null,null,null],[1,null,244.239,0.58,13.402,0.032,966.54,null,null,null],[2,null,19.33,0.777,3.646,0.016,140.6,null,null,null],[3,38.69,13.872,4.763,7.194,0.018,36.93,369.0,14761.0,10472.0],[4,30.03,13.338,8.729,11.216,0.02,35.2,368.9,14746.2,10467.2],[5,30.02,13.274,8.4,11.623,0.019,34.04,368.0,14613.0,10424.0],[6,29.99,13.244,8.421,11.664,0.017,34.0,368.0,14613.0,10424.0],[7,29.99,14.116,8.473,10.743,0.017,33.94,367.2,14584.2,10346.0],[8,30.01,13.926,8.388,10.99,0.017,34.41,366.0,14541.0,10229.0],[9,30.02,13.801,8.265,11.232,0.017,34.01,366.0,14541.0,10229.0],[10,29.97,13.553,8.446,11.355,0.017,35.03,366.0,14541.0,10229.0],[11,30.0,13.629,8.168,11.513,0.02,34.21,366.0,14541.0,10229.0],[12,30.02,14.383,8.176,10.739,0.018,34.26,366.0,14541.0,10229.0],[13,30.0,13.339,8.033,11.946,0.016,36.39,366.0,14541.0,10229.0],[14,30.0,13.41,8.43,11.476,0.018,35.11,366.0,14541.0,10229.0],[15,29.99,13.378,8.559,11.391,0.02,34.09,366.0,14541.0,10229.0],[16,30.01,13.339,8.494,11.47,0.017,33.84,366.0,14541.0,10229.0],[17,30.0,13.708,8.471,11.136,0.019,33.88,366.0,14541.0,10229.0],[18,30.0,13.47,8.425,11.42,0.017,33.98,366.0,14541.0,10229.0],[19,29.99,13.394,8.275,11.659,0.016,34.36,366.0,14541.0,10229.0],[20,30.0,13.485,8.193,11.636,0.017,34.14,366.0,14541.0,10229.0],[21,16.42,12.679,8.45,12.338,27.623,530.07,386.4,15349.1,10237.9],[22,null,260.707,0.015,1.32,0.683,1696.14,null,null,null],[23,null,0,0,0,0,0.0,null,null,null],[24,null,11.241,4.418,2.774,0.018,73.72,null,null,null],[25,60.0,9.807,4.755,2.087,0.018,17.5,451.0,8613.0,10617.0],[26,60.01,9.8,4.757,2.091,0.017,17.28,451.0,8613.0,10617.0],[27,59.97,9.766,4.789,2.103,0.017,17.33,451.0,8613.0,10617.0],[28,60.04,9.799,4.774,2.065,0.017,17.31,451.0,8613.0,10617.0],[29,59.0,10.124,4.629,2.178,0.018,33.37,451.0,8613.0,10617.0],[30,60.0,9.918,4.589,2.143,0.019,17.37,451.0,8613.0,10617.0],[31,59.99,9.844,4.615,2.188,0.022,17.25,451.0,8613.0,10617.0],[32,60.0,9.894,4.616,2.138,0.019,17.35,451.0,8613.0,10617.0],[33,60.0,9.855,4.636,2.157,0.018,17.47,451.0,8613.0,10617.0],[34,null,91.774,2.957,2.823,15.079,1325.95,null,null,null],[35,null,0,0,0,0,0.0,null,null,null],[36,null,5.992,2.596,8.843,0.018,47.85,null,null,null],[37,60.0,5.349,2.746,8.553,0.018,17.91,86.0,3018.0,2598.0],[38,59.98,5.249,2.77,8.635,0.018,17.59,86.0,3018.0,2598.0],[39,60.01,5.266,2.679,8.7,0.019,18.23,86.0,3018.0,2598.0],[40,59.98,5.253,2.675,8.726,0.019,17.27,86.0,3018.0,2598.0],[41,59.0,5.536,2.682,8.714,0.017,33.35,86.0,3018.0,2598.0],[42,60.01,5.297,2.649,8.702,0.017,17.45,86.0,3018.0,2598.0],[43,59.99,5.254,2.679,8.718,0.018,17.32,86.0,3018.0,2598.0],[44,60.0,5.276,2.724,8.647,0.02,17.6,86.0,3018.0,2598.0],[45,60.0,5.287,2.755,8.602,0.022,17.76,86.0,3018.0,2598.0],[46,null,82.829,0.72,3.893,24.015,591.21,null,null,null],[47,null,3.733,0.096,13.469,0.017,39.26,null,null,null],[48,60.0,3.092,0.057,13.501,0.017,17.75,57.0,1188.0,1640.0],[49,60.0,3.077,0.055,13.519,0.017,17.84,57.0,1188.0,1640.0],[50,60.0,3.092,0.074,13.483,0.017,17.99,57.0,1188.0,1640.0],[51,60.0,3.105,0.053,13.492,0.017,17.94,57.0,1188.0,1640.0],[52,60.0,3.261,0.06,13.328,0.016,18.12,57.0,1188.0,1640.0],[53,60.0,3.065,0.061,13.524,0.017,18.04,57.0,1188.0,1640.0],[54,59.99,3.234,0.048,13.373,0.016,17.02,57.0,1188.0,1640.0]];const MARKS=[{"t": 2.554983439910911, "name": "c1a0", "load": 1.8783508403885387}, {"t": 24.28774507617063, "name": "c1a0e", "load": 2.1755201525959675}, {"t": 36.195149435159166, "name": "c1a0d", "load": 1.7069963921828835}, {"t": 47.15330227558188, "name": "c1a0a", "load": 0.8826258365326345}];
+const WT=[["draws", "Draws"], ["prims", "Prims"], ["pb_dwords", "PB KiB"], ["tex_binds", "Tex binds"], ["verts", "Verts"], ["v_studio", "Studio verts"], ["world_faces", "World faces"], ["studio_models", "Models"], ["lm_texels", "LM texels"], ["water_verts", "Water verts"], ["decals", "Decals"], ["particles", "Particles"]];const CORR=[{"name": "draws", "avg": 254.03932853717026, "peak": 903, "r_cpu": 0.8302310599762658, "r_gpu": 0.742575611220979}, {"name": "prims", "avg": 256.7232613908873, "peak": 907, "r_cpu": 0.8365296487263012, "r_gpu": 0.7500848798064225}, {"name": "pb_dwords", "avg": 6624.3386091127095, "peak": 10778, "r_cpu": 0.9064870897235731, "r_gpu": 0.8237975762881543}, {"name": "tex_binds", "avg": 128.80719424460432, "peak": 467, "r_cpu": 0.8124483376026482, "r_gpu": 0.7197834463692585}, {"name": "v_world", "avg": 3391.4575539568345, "peak": 11964, "r_cpu": 0.949278065502267, "r_gpu": 0.8976310741175202}, {"name": "v_studio", "avg": 3869.694964028777, "peak": 17118, "r_cpu": 0.9533856765956603, "r_gpu": 0.964806879719327}, {"name": "v_tri", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "v_2d", "avg": 9.099280575539568, "peak": 220, "r_cpu": 0.3086435159286297, "r_gpu": 0.25207904118240615}, {"name": "v_decal", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "world_faces", "avg": 288.74196642685854, "peak": 517, "r_cpu": 0.9565729474971314, "r_gpu": 0.9038141998373667}, {"name": "pvs_leaves", "avg": 149.5875299760192, "peak": 263, "r_cpu": 0.589442121541084, "r_gpu": 0.5135165941733673}, {"name": "studio_models", "avg": 1.8762589928057554, "peak": 4, "r_cpu": 0.9652409421616421, "r_gpu": 0.9675369760784241}, {"name": "studio_tris", "avg": 1289.8983213429256, "peak": 5706, "r_cpu": 0.9533856765956604, "r_gpu": 0.9648068797193269}, {"name": "lm_faces", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "lm_texels", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "water_verts", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "decals", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "particles", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "beams", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "sprites", "avg": 0.0, "peak": 0, "r_cpu": null, "r_gpu": null}, {"name": "verts", "avg": 7270.251798561151, "peak": 29086, "r_cpu": 0.9689354796005876, "r_gpu": 0.9543549495450331}];const TOPF=[{"seq": 600, "t": 21.582155881438016, "map": "c1a0", "total": 530.0690421366558, "cpu": 0.0, "gpu": 15.792797128367798, "work": {"draws": 733, "prims": 747, "pb_dwords": 10390, "tex_binds": 365, "v_world": 11964, "v_studio": 17118, "v_tri": 0, "v_2d": 4, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 5706, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 29086}}, {"seq": 285, "t": 11.08285550384576, "map": "c1a0", "total": 34.024390350694844, "cpu": 13.490695993815745, "gpu": 9.856198436749047, "work": {"draws": 366, "prims": 373, "pb_dwords": 10229, "tex_binds": 182, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 0, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14541}}, {"seq": 97, "t": 4.815044168765424, "map": "c1a0", "total": 35.20078954680701, "cpu": 13.169198362014649, "gpu": 9.44389628645863, "work": {"draws": 369, "prims": 376, "pb_dwords": 10472, "tex_binds": 185, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 220, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14761}}, {"seq": 55, "t": 3.4129611855811994, "map": "c1a0", "total": 36.92518903473098, "cpu": 12.806097560749809, "gpu": 9.252096797960677, "work": {"draws": 369, "prims": 376, "pb_dwords": 10472, "tex_binds": 185, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 220, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14761}}, {"seq": 86, "t": 4.4494175768870035, "map": "c1a0", "total": 33.72748998431664, "cpu": 13.164795181504031, "gpu": 9.244197254851972, "work": {"draws": 369, "prims": 376, "pb_dwords": 10472, "tex_binds": 185, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 220, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14761}}, {"seq": 281, "t": 10.949013744045827, "map": "c1a0", "total": 34.08838987714415, "cpu": 12.970194784746926, "gpu": 9.243297255119236, "work": {"draws": 366, "prims": 373, "pb_dwords": 10229, "tex_binds": 182, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 0, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14541}}, {"seq": 294, "t": 11.38272811525042, "map": "c1a0", "total": 33.9948894503645, "cpu": 13.925795410063582, "gpu": 9.2248977151286, "work": {"draws": 366, "prims": 373, "pb_dwords": 10229, "tex_binds": 182, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 0, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14541}}, {"seq": 282, "t": 10.983102133922971, "map": "c1a0", "total": 33.17399014868343, "cpu": 13.130494282599084, "gpu": 9.205798629891156, "work": {"draws": 366, "prims": 373, "pb_dwords": 10229, "tex_binds": 182, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 0, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14541}}, {"seq": 82, "t": 4.316150416461894, "map": "c1a0", "total": 33.61829001674456, "cpu": 12.972896147581094, "gpu": 9.204696812036532, "work": {"draws": 369, "prims": 376, "pb_dwords": 10472, "tex_binds": 185, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 220, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14761}}, {"seq": 58, "t": 3.5162744539922985, "map": "c1a0", "total": 33.81508995830304, "cpu": 13.470196454448724, "gpu": 9.170397276767543, "work": {"draws": 369, "prims": 376, "pb_dwords": 10472, "tex_binds": 185, "v_world": 5982, "v_studio": 8559, "v_tri": 0, "v_2d": 220, "v_decal": 0, "world_faces": 517, "pvs_leaves": 150, "studio_models": 4, "studio_tris": 2853, "lm_faces": 0, "lm_texels": 0, "water_verts": 0, "decals": 0, "particles": 0, "beams": 0, "sprites": 0, "verts": 14761}}];
+(function(){
+  const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const f=(x,d=1)=>x==null?'\u2013':x.toFixed(d);
+  const mmss=s=>Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0');
+  const st=[[f(SESSION.minutes)+' min','session'],[SESSION.loads,'map loads'],[f(SESSION.avg_fps),'avg fps in play'],
+    [SESSION.frames.toLocaleString('en-US'),'frames recorded'],
+    [SESSION.free_min==null?'\u2013':f(SESSION.free_min)+'\u2013'+f(SESSION.free_max),'MiB free at map start'],
+    [SESSION.load_min==null?'\u2013':f(SESSION.load_min)+'\u2013'+f(SESSION.load_max)+' s','load times']];
+  document.getElementById('stats').innerHTML=st.map(([v,l])=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
+  const cls=(v,g,b)=>v>=g?'ok':v>=b?'warn':'crit';
+  let sel=-1;
+  const tb=document.getElementById('rows');
+  ROWS.forEach((r,k)=>{
+    const tr=document.createElement('tr');
+    if(!r.frames){tr.innerHTML=`<td>${r.map}</td><td colspan="15" style="text-align:left;color:var(--muted)">no frames in play</td>`;tb.appendChild(tr);return;}
+    const p60=100*(r.over60-r.over30)/r.frames, p30=100*r.over30/r.frames, pok=100-p60-p30;
+    tr.innerHTML=`<td>${r.map}</td><td>${mmss(r.seconds)}</td><td class="${cls(r.avg_fps,59,45)}">${f(r.avg_fps)}</td><td>${f(r.min_fps)}</td><td>${f(r.max_fps)}</td>
+      <td class="${cls(r.low1_fps,55,29)}">${f(r.low1_fps)}</td><td>${f(r.worst_ms)}</td><td>${f(r.cpu_ms,2)}</td><td>${f(r.gpu_ms,2)}</td><td>${f(r.gpu_bound_pct)}%</td>
+      <td>${f(100*r.over60/r.frames)}%</td><td>${f(100*r.over30/r.frames)}%</td>
+      <td><span class="dist" title="${f(pok)}% under 16.7 ms, ${f(p60)}% 16.7-33.3 ms, ${f(p30)}% over 33.3 ms"><i style="width:${pok}%;background:var(--accent)"></i><i style="width:${p60}%;background:var(--warn)"></i><i style="width:${p30}%;background:var(--crit)"></i></span></td>
+      <td title="frames that wrote the file: mean / worst ms">${r.flush_frames?r.flush_frames+' &middot; '+f(r.flush_frame_ms)+' / '+f(r.flush_worst_ms)+' ms':'0'}</td>
+      <td>${f(r.load_s,2)}</td><td>${f(r.free_before)} / ${f(r.free_after)}</td>`;
+    tr.onclick=()=>{sel=sel===k?-1:k;[...tb.children].forEach((e,j)=>e.classList.toggle('on',j===sel));draw();};
+    tb.appendChild(tr);
+  });
+  // Segment k of the table spans [MARKS[k'].t, next) - the row order equals the marker order,
+  // offset by one when the file starts before its first map.
+  const off=ROWS.length-MARKS.length;
+  const T=TL.length?TL[TL.length-1][0]+1:1;
+  function span(k){const m=k-off;if(m<0)return[0,MARKS.length?MARKS[0].t:T];return[MARKS[m].t,m+1<MARKS.length?MARKS[m+1].t:T];}
+  const sh=v=>v==null?'\u2013':v<1000?(v>=10||v===Math.round(v)?v.toFixed(0):v.toFixed(1)):v<1e6?(v/1e3).toFixed(1)+'k':(v/1e6).toFixed(2)+'M';
+  const wv=(k,v)=>k==='pb_dwords'&&v!=null?v*4/1024:v;
+  if(SESSION.counters.length){
+    document.getElementById('work').hidden=false;document.getElementById('workchart').hidden=false;
+    const cols=WT.filter(([k])=>SESSION.counters.includes(k));
+    let h='<thead><tr><th>Map</th>'+cols.map(([,t])=>`<th>${t}</th>`).join('')+'</tr></thead><tbody>';
+    ROWS.forEach(r=>{if(!r.work_avg)return;h+=`<tr><td>${r.map}</td>`+cols.map(([k])=>`<td>${sh(wv(k,r.work_avg[k]))} / ${sh(wv(k,r.work_peak[k]))}</td>`).join('')+'</tr>';});
+    document.getElementById('worktab').innerHTML=h+'</tbody>';
+    const rc=v=>v==null?'\u2013':`<span class="${Math.abs(v)>=.5?'crit':Math.abs(v)>=.3?'warn':''}">${v.toFixed(2)}</span>`;
+    h='<thead><tr><th>Counter</th><th>Mean</th><th>Peak</th><th>r vs CPU</th><th>r vs GPU wait</th></tr></thead><tbody>';
+    CORR.forEach(c=>{h+=`<tr><td>${c.name}</td><td>${sh(c.avg)}</td><td>${sh(c.peak)}</td><td>${rc(c.r_cpu)}</td><td>${rc(c.r_gpu)}</td></tr>`;});
+    document.getElementById('corrtab').innerHTML=h+'</tbody>';
+    const hk=['draws','prims','pb_dwords','tex_binds','verts','v_studio','lm_texels'].filter(k=>SESSION.counters.includes(k));
+    h='<thead><tr><th>Map</th><th>GPU-bound frames</th>'+hk.map(k=>`<th>${k==='pb_dwords'?'PB KiB':k}<br>bound / rest</th>`).join('')+'</tr></thead><tbody>';
+    ROWS.forEach(r=>{if(!r.work_avg)return;h+=`<tr><td>${r.map}</td><td>${r.gpu_hi_frames} of ${r.frames}</td>`+hk.map(k=>`<td>${r.work_gpu_hi?sh(wv(k,r.work_gpu_hi[k])):'\u2013'} / ${r.work_gpu_lo?sh(wv(k,r.work_gpu_lo[k])):'\u2013'}</td>`).join('')+'</tr>';});
+    document.getElementById('hitab').innerHTML=h+'</tbody>';
+    const tk=['draws','prims','pb_dwords','tex_binds','verts','studio_models','lm_texels'].filter(k=>SESSION.counters.includes(k));
+    h='<thead><tr><th>At</th><th>Map</th><th>Frame ms</th><th>CPU</th><th>GPU wait</th>'+tk.map(k=>`<th>${k==='pb_dwords'?'PB KiB':k}</th>`).join('')+'</tr></thead><tbody>';
+    TOPF.forEach(t=>{h+=`<tr><td>${mmss(t.t)}</td><td>${t.map}</td><td>${f(t.total)}</td><td>${f(t.cpu,2)}</td><td>${f(t.gpu,2)}</td>`+tk.map(k=>`<td>${sh(wv(k,t.work[k]))}</td>`).join('')+'</tr>';});
+    document.getElementById('toptab').innerHTML=h+'</tbody>';
+  }
+  function setup(c){const dpr=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight||260;c.width=w*dpr;c.height=h*dpr;const g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);return[g,w,h];}
+  const L=44,R=10,TOP=10,B=24;
+  function frame(g,w,h,ymax,ylab,div=4){
+    g.clearRect(0,0,w,h);g.font='11px '+css('--mono');g.fillStyle=css('--muted');g.strokeStyle=css('--rule');g.lineWidth=1;
+    for(let i=0;i<=div;i++){const v=ymax*i/div,y=TOP+(h-TOP-B)*(1-i/div);g.beginPath();g.moveTo(L,y);g.lineTo(w-R,y);g.stroke();g.fillText(ylab(v),4,y+4);}
+    const step=T>1800?300:T>600?120:T>180?60:15;
+    for(let s=0;s<=T;s+=step){const x=L+(w-L-R)*s/T;g.fillText(mmss(s),x-12,h-6);}
+    MARKS.forEach(m=>{const x=L+(w-L-R)*m.t/T;if(m.load){const x0=L+(w-L-R)*Math.max(0,m.t-m.load)/T;g.fillStyle=css('--load');g.globalAlpha=.18;g.fillRect(x0,TOP,Math.max(1,x-x0),h-TOP-B);g.globalAlpha=1;}
+      g.strokeStyle=css('--load');g.beginPath();g.moveTo(x,TOP);g.lineTo(x,h-B);g.stroke();g.fillStyle=css('--load');g.fillText(m.name,x+3,TOP+10);});
+    if(sel>=0){const[a,b]=span(sel);g.fillStyle=css('--ink');g.globalAlpha=.07;g.fillRect(L+(w-L-R)*a/T,TOP,(w-L-R)*(b-a)/T,h-TOP-B);g.globalAlpha=1;}
+  }
+  function hline(g,w,h,v,ymax,col){const y=TOP+(h-TOP-B)*(1-v/ymax);g.strokeStyle=col;g.setLineDash([5,4]);g.beginPath();g.moveTo(L,y);g.lineTo(w-R,y);g.stroke();g.setLineDash([]);}
+  function draw(){
+    let [g,w,h]=setup(document.getElementById('c1'));
+    const fmax=Math.max(80,Math.ceil(Math.max(...TL.map(r=>r[1]||0))/20)*20);
+    frame(g,w,h,fmax,v=>v.toFixed(0));
+    hline(g,w,h,60,fmax,css('--g60'));hline(g,w,h,30,fmax,css('--crit'));
+    g.strokeStyle=css('--ink');g.lineWidth=1.5;g.beginPath();let pen=false;
+    TL.forEach(r=>{if(r[1]==null){pen=false;return;}const x=L+(w-L-R)*(r[0]+.5)/T,y=TOP+(h-TOP-B)*(1-r[1]/fmax);if(pen)g.lineTo(x,y);else g.moveTo(x,y);pen=true;});g.stroke();g.lineWidth=1;
+    [g,w,h]=setup(document.getElementById('c2'));
+    const mmax=50;frame(g,w,h,mmax,v=>v.toFixed(0)+'ms',5);
+    const cols=[css('--cpu'),css('--gpu'),css('--wait'),css('--other')];
+    const bw=Math.max(1,(w-L-R)/T);
+    TL.forEach(r=>{let y=h-B;const x=L+(w-L-R)*r[0]/T;for(let j=0;j<4;j++){const v=r[2+j],hh=Math.min(y-TOP,(h-TOP-B)*v/mmax);g.fillStyle=cols[j];g.fillRect(x,y-hh,bw+.5,hh);y-=hh;}});
+    hline(g,w,h,1000/60,mmax,css('--g60'));hline(g,w,h,1000/30,mmax,css('--crit'));
+    if(!SESSION.counters.length)return;
+    [g,w,h]=setup(document.getElementById('c3'));
+    frame(g,w,h,100,v=>v.toFixed(0)+'%');
+    const wc=[css('--w1'),css('--w2'),css('--w3')];
+    for(let j=0;j<3;j++){
+      const pk=Math.max(0,...TL.map(r=>r[7+j]||0));if(!pk)continue;
+      g.strokeStyle=wc[j];g.lineWidth=1.5;g.beginPath();let pen=false;
+      TL.forEach(r=>{const v=r[7+j];if(v==null){pen=false;return;}const x=L+(w-L-R)*(r[0]+.5)/T,y=TOP+(h-TOP-B)*(1-v/pk);if(pen)g.lineTo(x,y);else g.moveTo(x,y);pen=true;});
+      g.stroke();g.lineWidth=1;
+    }
+  }
+  function hover(id,ro,fn){const c=document.getElementById(id);const h=e=>{const r=c.getBoundingClientRect();const x=(e.touches?e.touches[0].clientX:e.clientX)-r.left;const s=Math.floor((x-L)/(r.width-L-R)*T);const row=TL.find(q=>q[0]===s);let m='';MARKS.forEach(k=>{if(k.t<=s)m=k.name;});document.getElementById(ro).textContent=row?fn(row,m):'';};c.addEventListener('mousemove',h);c.addEventListener('touchstart',h,{passive:true});}
+  hover('c1','ro1',(r,m)=>`${mmss(r[0])}  ${m}  ${r[1]==null?'load/menu':r[1].toFixed(1)+' fps'}  worst ${r[6].toFixed(1)} ms`);
+  hover('c2','ro2',(r,m)=>`${mmss(r[0])}  ${m}  cpu ${r[2].toFixed(1)}  gpu ${r[3].toFixed(1)}  wait ${r[4].toFixed(1)}  other ${r[5].toFixed(1)} ms`);
+  hover('c3','ro3',(r,m)=>r[7]==null?`${mmss(r[0])}  ${m}  load/menu`:`${mmss(r[0])}  ${m}  draws ${sh(r[7])}  verts ${sh(r[8])}  pushbuffer ${sh(r[9])} dwords per frame`);
+  draw();window.addEventListener('resize',draw);
+  if(window.matchMedia)matchMedia('(prefers-color-scheme: dark)').addEventListener('change',draw);
+})();
+</script>
+</body>
+</html>

@@ -21,6 +21,9 @@ GNU General Public License for more details.
 #include "sound.h"
 #include "input.h" // touch
 #include "platform/platform.h" // GL_UpdateSwapInterval
+#if XASH_XBOX
+#include "platform/xbox/xbox_frametime.h" // docs/r3d/divergences.md #141
+#endif
 
 /*
 ===============
@@ -552,6 +555,11 @@ void V_PostRender( void )
 		SCR_DrawPos();
 		SCR_DrawEnts();
 		SCR_DrawNetGraph();
+#if XASH_XBOX
+		// Resonance3D (docs/r3d/divergences.md #141): the frame-time
+		// overlay (host_frametime_analysis 2), over the HUD, under the console.
+		Xbox_FrameTime_DrawOverlay();
+#endif
 		SCR_DrawUserCmd();
 		Joy_DrawDebug();
 		IN_GyroDrawDebug();

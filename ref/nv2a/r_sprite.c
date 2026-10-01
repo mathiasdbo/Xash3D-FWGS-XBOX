@@ -36,6 +36,7 @@ pushes; two fields were added to that shadow for this file
 #include "r_studio_bridge.h"
 #include "r_warp.h" /* X9-X item 14 step 11: R_WarpAllowFog */
 #include "r_sprite.h"
+#include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
 
 /* nv2a_sprite_util.h's mirrors of const.h, pinned here where const.h is
    available (the nv_regs.h mirrors are pinned in r_context.c). */
@@ -599,6 +600,7 @@ void R_DrawSpriteModel( cl_entity_t *e )
 		return; // sprite culled
 
 	nv2a_sprite_stats.c_sprite_models_drawn++;
+	NV2A_FT_ADD( XBOX_FT_W_SPRITES, 1 );
 
 	if( e->curstate.rendermode == kRenderGlow || e->curstate.rendermode == kRenderTransAdd )
 		R_AllowFog( false );

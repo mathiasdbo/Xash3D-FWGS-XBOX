@@ -1,0 +1,333 @@
+"""Tests for tools/frametime-report.py.
+
+Run through tools/host-tests/run.sh, which first builds and runs
+tools/host-tests/xbox_frametime_util_host_test.c: that test writes two
+recordings through the recorder's own encoders (xbox_frametime_util.c) -
+a version-2 file with work counters to FRAMETIME_FIXTURE and the same
+session as a version-1 file to FRAMETIME_FIXTURE_V1 - and every
+expectation below is derived from what that C test wrote (see its
+write_fixture), not from this parser.
+
+    FRAMETIME_FIXTURE=.sweep/host-tests/frametime_fixture.bin \
+    FRAMETIME_FIXTURE_V1=.sweep/host-tests/frametime_fixture_v1.bin python tools/test_frametime_report.py
+"""
+import importlib.util
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SPEC = importlib.util.spec_from_file_location("frametime_report", os.path.join(_HERE, "frametime-report.py"))
+fr = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(fr)
+
+FIXTURE = os.environ.get("FRAMETIME_FIXTURE", "")
+FIXTURE_V1 = os.environ.get("FRAMETIME_FIXTURE_V1", "")
+
+
+def _read(path, var):
+    if not path or not os.path.isfile(path):
+        raise unittest.SkipTest("%s not set - run tools/host-tests/run.sh" % var)
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _fixture_bytes():
+    return _read(FIXTURE, "FRAMETIME_FIXTURE")
+
+
+def _fixture_v1_bytes():
+    return _read(FIXTURE_V1, "FRAMETIME_FIXTURE_V1")
+
+
+# A minimal DOM for running the report's own script under node: enough
+# for every call it makes, recording what it writes into each element.
+_DOM_STUB = r"""
+const els = {};
+function mk(id) {
+  return els[id] || (els[id] = { id, innerHTML: '', hidden: true, children: [], textContent: '',
+    appendChild(c) { this.children.push(c); }, classList: { toggle() {} },
+    clientWidth: 800, clientHeight: 260, width: 0, height: 0,
+    getContext() { return new Proxy({}, { get: (t, k) => k in t ? t[k] : (() => {}), set: (t, k, v) => { t[k] = v; return true; } }); },
+    addEventListener() {}, getBoundingClientRect() { return { left: 0, width: 800 }; } });
+}
+var document = { getElementById: mk, createElement: () => ({ innerHTML: '', classList: { toggle() {} } }), documentElement: {} };
+var window = { devicePixelRatio: 1, addEventListener() {}, matchMedia: null };
+function getComputedStyle() { return { getPropertyValue: () => '#000' }; }
+"""
+
+
+def run_page_script(page):
+    """Runs the page's <script> under node against _DOM_STUB and returns
+    {element id: innerHTML} as JSON-decoded by node's stdout; skips the
+    test when node is not installed."""
+    node = shutil.which("node")
+    if not node:
+        raise unittest.SkipTest("node not installed")
+    js = re.search(r"<script>(.*)</script>", page, re.S).group(1)
+    js = _DOM_STUB + js + "\nconsole.log(JSON.stringify(Object.fromEntries(Object.entries(els).map(([k, v]) => [k, {html: v.innerHTML, hidden: v.hidden}]))));"
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
+        f.write(js)
+        path = f.name
+    try:
+        out = subprocess.run([node, path], capture_output=True, text=True, timeout=60)
+    finally:
+        os.unlink(path)
+    if out.returncode != 0:
+        raise AssertionError("the report's script failed under node:\n" + out.stderr)
+    import json
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+class ParseFixtureV1(unittest.TestCase):
+    """The version-1 file: no counters, no flush frames - the times and
+    the statistics exactly as before version 2."""
+    def setUp(self):
+        self.data = _fixture_v1_bytes()
+        self.rec = fr.parse(self.data)
+
+    def test_header_and_calibration(self):
+        r = self.rec
+        self.assertEqual(r["version"], 1)
+        self.assertEqual(r["counters"], [])
+        self.assertEqual(fr.work_names(r), [])
+        self.assertEqual(r["frames"][0][8], ())
+        self.assertEqual(r["build"], "fixture")
+        self.assertEqual(r["ring_frames"], 1024)
+        self.assertEqual(r["mode"], 1)
+        self.assertEqual(len(r["calibs"]), 2)
+        self.assertAlmostEqual(r["tsc_hz"], 1e6)
+        self.assertFalse(r["truncated"])
+        self.assertEqual(r["end"], {"tsc": 6000000, "lost": 1})
+
+    def test_frames_maps_and_gap(self):
+        r = self.rec
+        self.assertEqual(len(r["frames"]), 49)          # 0..19, 21..39, 40..49
+        self.assertEqual(r["gaps"], 1)
+        self.assertEqual(r["lost_frames"], 1)            # seq 20
+        self.assertEqual([m["name"] for m in r["maps"]], ["c1a0", "c1a0e"])
+        self.assertEqual([m["frame"] for m in r["maps"]], [0, 39])
+        self.assertEqual(r["frames"][20][0], 21)
+
+    def test_map_stats(self):
+        segs = fr.segments(self.rec)
+        self.assertEqual([s["name"] for s in segs], ["c1a0", "c1a0e"])
+        a = fr.segment_stats(self.rec, segs[0])
+        # 39 active frames, the first 30 left out: seq 31..39, one of them 50 ms.
+        self.assertEqual(a["frames"], 9)
+        self.assertAlmostEqual(a["avg_fps"], 9 / 0.210)
+        self.assertAlmostEqual(a["worst_ms"], 50.0)
+        self.assertAlmostEqual(a["low1_fps"], 20.0)      # rank ceil(9 * .99) = 9: the 50 ms frame
+        self.assertEqual(a["over60"], 9)
+        self.assertEqual(a["over30"], 1)
+        self.assertAlmostEqual(a["cpu_ms"], (8 * 16 + 46) / 9)
+        self.assertAlmostEqual(a["gpu_ms"], 3.0)
+        self.assertAlmostEqual(a["other_ms"], 1.0)
+        self.assertAlmostEqual(a["gpu_bound_pct"], 100.0)
+        self.assertAlmostEqual(a["load_s"], 2.5)
+        self.assertAlmostEqual(a["free_before"], 6000 * 4096 / 2 ** 20)
+        self.assertAlmostEqual(a["free_after"], 5500 * 4096 / 2 ** 20)
+        self.assertIsNone(a["min_fps"])                  # 210 ms of play: no full one-second window
+        # The second map: 10 frames, all inside the warm-up (one is a menu frame).
+        b = fr.segment_stats(self.rec, segs[1])
+        self.assertEqual(b["frames"], 0)
+        self.assertEqual(b["all_frames"], 10)
+
+    def test_session_and_timeline(self):
+        rows = [fr.segment_stats(self.rec, s) for s in fr.segments(self.rec)]
+        s = fr.session_stats(self.rec, rows)
+        self.assertEqual(s["frames"], 49)
+        self.assertEqual(s["loads"], 2)
+        self.assertEqual(s["lost"], 1)                   # the gap and the END count are the same frame
+        self.assertTrue(s["clean_end"])
+        self.assertAlmostEqual(s["minutes"], (38 * 20 + 50 + 10 * 10) / 60000.0)
+        tl = fr.timeline(self.rec)
+        self.assertEqual(len(tl), 1)
+        self.assertIsNone(tl[0][1])                      # a menu frame in the window: not "play"
+        marks = fr.map_markers(self.rec)
+        self.assertAlmostEqual(marks[1]["t"], 0.81)
+
+    def test_report_renders(self):
+        rows = [fr.segment_stats(self.rec, s) for s in fr.segments(self.rec)]
+        s = fr.session_stats(self.rec, rows)
+        page = fr.render_html(self.rec, rows, s, ["fixture.bin"], source="xemu")
+        self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
+        self.assertIn("Recorded in xemu", page)
+        self.assertIn("c1a0e", page)
+        self.assertIn("Version-1 file", page)
+        text = fr.summary_text(self.rec, rows, s)
+        self.assertIn("c1a0", text)
+        self.assertIn("no work counters", text)
+        self.assertEqual(fr.work_correlation(self.rec), [])
+        els = run_page_script(page)
+        self.assertTrue(els.get("work", {"hidden": True})["hidden"])  # no counters: the work section is never shown
+
+    def test_cut_short_keeps_complete_frames(self):
+        # Cut 10 bytes into the 6th frame of the first FRAMES chunk:
+        # header 128 + MAP 104 + chunk head 16 + 5 frames.
+        cut = 128 + 104 + 16 + 5 * 32 + 10
+        r = fr.parse(self.data[:cut])
+        self.assertTrue(r["truncated"])
+        self.assertEqual(len(r["frames"]), 5)
+        self.assertIsNone(r["end"])
+        rows = [fr.segment_stats(r, s) for s in fr.segments(r)]
+        self.assertFalse(fr.session_stats(r, rows)["clean_end"])
+
+
+# The version-2 fixture: the v1 session plus, for frame seq i, counter j =
+# 100 * (j + 1) + i; frame 35 has 10x the draws; frame 33 is a flush frame.
+MEASURED = [31, 32, 34, 35, 36, 37, 38, 39]     # c1a0's in-play frames past the warm-up, 33 (flush) left out
+
+
+class ParseFixtureV2(unittest.TestCase):
+    def setUp(self):
+        self.data = _fixture_bytes()
+        self.rec = fr.parse(self.data)
+        self.segs = fr.segments(self.rec)
+
+    def test_header_and_counters(self):
+        r = self.rec
+        self.assertEqual(r["version"], 2)
+        self.assertEqual(len(r["counters"]), 20)
+        self.assertEqual(r["counters"][0], "draws")
+        self.assertEqual(r["counters"][2], "pb_dwords")
+        self.assertEqual(r["counters"][-1], "sprites")
+        self.assertEqual(fr.work_names(r)[-1], fr.VERTS)
+        self.assertEqual(len(r["frames"]), 49)
+        f21 = r["frames"][20]
+        self.assertEqual(f21[0], 21)
+        self.assertEqual(f21[8][0], 121)
+        self.assertEqual(f21[8][19], 2021)
+        self.assertEqual(r["end"], {"tsc": 6000000, "lost": 1})
+
+    def test_flush_frames_left_out_by_default(self):
+        a = fr.segment_stats(self.rec, self.segs[0])
+        self.assertEqual(a["frames"], 8)
+        self.assertEqual(a["flush_frames"], 1)
+        self.assertAlmostEqual(a["flush_frame_ms"], 20.0)
+        self.assertAlmostEqual(a["avg_fps"], 8 / 0.190)
+        self.assertAlmostEqual(a["worst_ms"], 50.0)
+        b = fr.segment_stats(self.rec, self.segs[0], include_flush=True)
+        self.assertEqual(b["frames"], 9)
+        self.assertEqual(b["flush_frames"], 1)
+        self.assertAlmostEqual(b["avg_fps"], 9 / 0.210)
+        self.assertAlmostEqual(b["work_avg"]["draws"], (2297 + 133) / 9)
+        s = fr.session_stats(self.rec, [a], False)
+        self.assertEqual(s["flush_frames"], 1)
+        self.assertFalse(s["flush_included"])
+
+    def test_work_per_map(self):
+        a = fr.segment_stats(self.rec, self.segs[0])
+        # draws: 100 + seq, frame 35 ten times that.
+        self.assertAlmostEqual(a["work_avg"]["draws"], (131 + 132 + 134 + 1350 + 136 + 137 + 138 + 139) / 8)
+        self.assertEqual(a["work_peak"]["draws"], 1350)
+        self.assertAlmostEqual(a["work_avg"]["prims"], sum(200 + i for i in MEASURED) / 8)
+        self.assertEqual(a["work_peak"]["sprites"], 2039)
+        # verts = the five v_* counters (j = 4..8): 3500 + 5 * seq.
+        self.assertAlmostEqual(a["work_avg"][fr.VERTS], sum(3500 + 5 * i for i in MEASURED) / 8)
+        # Every frame waited 3 ms on the GPU: all of them are GPU-bound.
+        self.assertEqual(a["gpu_hi_frames"], 8)
+        self.assertIsNone(a["work_gpu_lo"])
+        self.assertAlmostEqual(a["work_gpu_hi"]["draws"], a["work_avg"]["draws"])
+
+    def test_correlation_and_top_frames(self):
+        corr = {c["name"]: c for c in fr.work_correlation(self.rec)}
+        self.assertEqual(len(corr), 21)
+        # The 50 ms frame (46 ms CPU) is the one with 10x the draws.
+        self.assertGreater(corr["draws"]["r_cpu"], 0.9)
+        self.assertIsNone(corr["draws"]["r_gpu"])       # the GPU wait never varies
+        self.assertEqual(corr["draws"]["peak"], 1350)
+        top = fr.top_frames(self.rec, "total", 3)
+        self.assertEqual(top[0]["seq"], 35)
+        self.assertAlmostEqual(top[0]["total"], 50.0)
+        self.assertEqual(top[0]["work"]["draws"], 1350)
+        self.assertAlmostEqual(top[0]["t"], (34 * 20) / 1000.0)  # 34 frames of 20 ms before it (seq 20 lost)
+        self.assertEqual(len(fr.top_frames(self.rec, "gpu", 10)), 8)
+        self.assertEqual(len(fr.top_frames(self.rec, "gpu", 10, include_flush=True)), 9)
+
+    def test_timeline_work_columns(self):
+        tl = fr.timeline(self.rec)
+        self.assertEqual(len(tl[0]), 10)
+        self.assertIsNone(tl[0][7])                      # the window holds a menu frame: not play
+
+    def test_report_renders(self):
+        rows = [fr.segment_stats(self.rec, s) for s in self.segs]
+        s = fr.session_stats(self.rec, rows)
+        page = fr.render_html(self.rec, rows, s, ["fixture.bin"], source="xemu")
+        self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
+        self.assertIn("Work per frame", page)
+        self.assertIn("they are the same in xemu as on the console", page)
+        self.assertIn("<b>left out</b> of the statistics", page)
+        page = fr.render_html(self.rec, rows, s, ["fixture.bin"], include_flush=True)
+        self.assertIn("<b>kept</b> in the statistics", page)
+        text = fr.summary_text(self.rec, rows, s)
+        self.assertIn("work per frame", text)
+        self.assertIn("1 flush frame(s)", text)
+
+    def test_page_script_runs(self):
+        # The page's own script, run: a name clash or a typo in it blanks
+        # the whole report in a browser while every string check passes.
+        rows = [fr.segment_stats(self.rec, s) for s in self.segs]
+        page = fr.render_html(self.rec, rows, fr.session_stats(self.rec, rows), ["fixture.bin"])
+        els = run_page_script(page)
+        self.assertFalse(els["work"]["hidden"])
+        self.assertIn("c1a0", els["worktab"]["html"])
+        self.assertIn("1.4k", els["worktab"]["html"])      # the draws peak, 1350
+        self.assertIn("draws", els["corrtab"]["html"])
+        self.assertEqual(els["toptab"]["html"].count("<tr>"), 9)  # header + 8 frames
+
+    def test_cut_short_keeps_complete_frames(self):
+        # header 128 + COUNTERS (8 + 4 + 20 x 16) + MAP 104 + chunk head 16
+        # + 5 frames of 112 bytes, then 10 bytes into the 6th.
+        cut = 128 + 332 + 104 + 16 + 5 * 112 + 10
+        r = fr.parse(self.data[:cut])
+        self.assertTrue(r["truncated"])
+        self.assertEqual(len(r["frames"]), 5)
+        self.assertEqual(r["frames"][4][8][1], 204)
+
+    def test_fewer_names_than_counters(self):
+        # A COUNTERS chunk naming 19 of the 20 counters: the last one gets a
+        # placeholder name rather than being dropped or misread.
+        data = bytearray(self.data)
+        data[128 + 8] = 19
+        r = fr.parse(bytes(data))
+        self.assertEqual(len(r["counters"]), 20)
+        self.assertEqual(r["counters"][18], "beams")
+        self.assertEqual(r["counters"][19], "c19")
+
+
+class FailurePaths(unittest.TestCase):
+    def test_not_a_recording(self):
+        with self.assertRaises(fr.FormatError):
+            fr.parse(b"x" * 200)
+        with self.assertRaises(fr.FormatError):
+            fr.parse(b"R3DFTIME")
+
+    def test_wrong_version(self):
+        data = bytearray(_fixture_bytes())
+        data[8] = 99
+        with self.assertRaises(fr.FormatError):
+            fr.parse(bytes(data))
+
+    def test_bad_frame_size(self):
+        data = bytearray(_fixture_bytes())
+        data[16] = 113                                   # not 32 + a whole number of counters
+        with self.assertRaises(fr.FormatError):
+            fr.parse(bytes(data))
+
+    def test_percentile(self):
+        self.assertEqual(fr.percentile_ms([], 0.99), 0.0)
+        v = sorted([10.0] * 99 + [40.0])
+        self.assertEqual(fr.percentile_ms(v, 0.99), 10.0)   # rank 99
+        self.assertEqual(fr.percentile_ms(v, 0.995), 40.0)  # rank 100
+
+
+if __name__ == "__main__":
+    res = unittest.main(exit=False, verbosity=1).result
+    # A skipped fixture is a broken run, not a pass.
+    if res.skipped or not res.wasSuccessful():
+        sys.exit(1)

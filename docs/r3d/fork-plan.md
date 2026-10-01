@@ -9570,6 +9570,65 @@ Measured in xemu: `disposal` now loads with 2.7 MiB to spare, `pool_party`
         probe patched into `r_context.c` for item 12's hardware session,
         which no longer applies to the current code, and `cl_showfps`,
         which only gives a one-second average.
+       - **Done (branch `x9-x-frametime`, 2026-09-30; divergence #141).**
+         `host_frametime_analysis` 0/1/2 (not archived: set per session in
+         `userconfig.d`). Engine recorder `engine/platform/xbox/
+         xbox_frametime.c` (rdtsc around `Host_Frame`, calibrated against
+         `KeQueryPerformanceCounter`); ref/nv2a times its `pb_busy`,
+         `pb_wait_for_vbl` and `pb_finished` waits into `xbox_ft_waits`.
+         File `frametime/ft_NNN.bin` in the engine's write directory
+         (`E:\UDATA\<title id>\valve\valve\`), v1 format documented in
+         `xbox_frametime_util.h`; `tools/frametime-report.py` fetches (FTP,
+         `--host` required, or xemu's disk via `tools/xemu_hdd.py`),
+         summarises and writes the HTML report. How-to:
+         `docs/r3d/frametime-recorder.md`. The `r_context.c` probe of item
+         12 is superseded; `cl_showfps` is unchanged.
+       - GPU time is the CPU's wait on `pb_busy()` (the GPU's excess over
+         the CPU), not the GPU's busy time: pbkit binds no context DMA for
+         `NV097_GET_REPORT` or the back-end semaphore, so there is no GPU
+         timestamp to read.
+       - Measured in xemu (-O2, the emulator's timings, not a Pentium III):
+         route c1a0 -> c1a0e -> c1a0d -> c1a0a by `changelevel`, mode 1:
+         2247 frames, four map changes detected with names, loads
+         1.23-1.73 s, 19.0-22.7 MiB free at map start, clean END chunk;
+         per-map avg 51.4/58.0/58.5/59.7 fps (xemu caps at the 60 Hz
+         refresh). Report: `docs/r3d/reports/x9-step13-xemu-route-frametimes.html`.
+         Mode 2: c1a0e firing 32.1 fps, CPU 12.9 ms, GPU wait 4.5 ms,
+         93.5% of frames over 16.7 ms and 42.5% over 33.3 ms; c1a0d 59.9
+         fps, CPU 6.7 ms, GPU wait 2.0 ms. Overlay draw 1.00-1.07 ms per
+         frame average, 1.65 ms worst (xemu); the frames that flush the
+         file run 2.4-11 ms longer in xemu. Mode 0: no overlay, no file,
+         the recorder state untouched (read over the gdb stub). A file cut
+         by killing xemu parses up to its last flush.
+       - First look found the guidelines hard to see (1 px lines on
+         fractional rows, under ~33 ms bars): now 2 px, wider than the
+         graph and labelled 60/30.
+       - **Format v2, work counters (2026-10-01).** ref/nv2a adds 20
+         per-frame counts to `xbox_ft_work` (same pattern as the waits):
+         draws, BEGIN/END blocks, pushbuffer dwords, texture binds,
+         vertices by source (world, studio, TriAPI, 2D, decal), visible
+         world faces, PVS leaves, studio models and triangles, lightmap
+         faces and texels, water vertices, decals, particles, beams,
+         sprites. Counts are the same in xemu as on the console, so an
+         xemu run is now a valid measurement of the work. COUNTERS chunk +
+         112-byte records; the report reads v1 and v2, shows the counters
+         per map, their correlation with CPU/GPU time, GPU-bound frames
+         against the rest and the top GPU-wait frames, and leaves the
+         flush frames out unless `--include-flush`. Overlay: legend under
+         the graph, three counter lines, 40 columns of 3 frames (slowest
+         of each), text formatted 4x a second; cost on the same c1a0d view
+         in xemu 1.080 -> 0.867 ms mean (p90 1.237 -> 0.928).
+       - Measured in xemu (v2, -O2): the same route, 2247 frames, clean
+         END, 8 flush frames left out. Work per frame in play: c1a0 366
+         draws, 10.4k pushbuffer dwords, 183 texture binds, 14.6k
+         vertices, 516 world faces; c1a0e 451 draws, 233 binds, 8.6k
+         vertices; c1a0d 86 draws, 3.0k vertices; c1a0a 57 draws, 1.2k
+         vertices. Firing in c1a0e (mode 2): 464 draws, 11.5k dwords,
+         5.0k studio vertices, 3 models. Report:
+         `docs/r3d/reports/x9-step13-xemu-route-frametimes.html`.
+       - Not measured: real hardware (the owner's run gives the Pentium
+         III numbers, the overlay's real cost and the flush/`fsync` cost
+         on the console's drive).
 
 15. **Optional: reflective water (enhancement, off by default).** Once
     item 14's water warp is in and X11's profiling shows frame time to

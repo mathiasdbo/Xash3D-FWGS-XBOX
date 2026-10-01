@@ -88,6 +88,7 @@ calls and memset.
 #include "bspfile.h"     /* TEX_WORLD_LUXELS, TEX_EXTRA_LIGHTMAP, SURF_DRAWTILED */
 #include "nv2a_lightmap_util.h"
 #include "r_lightmap.h"
+#include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
 
 /* engine/common/mod_local.h:24-25 (not visible to ref modules; ref/gl
    keeps its own copy of the first, gl_local.h:54). */
@@ -366,6 +367,8 @@ static void nv2a_lm_build( msurface_t *surf, const nv2a_lm_block_t *blk, qboolea
 
 	nv2a_lm_stats.faces_built++;
 	nv2a_lm_stats.luxels_built += (uint32_t)size;
+	NV2A_FT_ADD( XBOX_FT_W_LM_FACES, 1 );
+	NV2A_FT_ADD( XBOX_FT_W_LM_TEXELS, size );
 	lm_budget -= size;
 }
 

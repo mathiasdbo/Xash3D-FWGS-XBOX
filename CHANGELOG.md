@@ -5,6 +5,42 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - frame-time recorder and overlay on Xbox (`host_frametime_analysis`)
+
+One cvar, `host_frametime_analysis`, selects the frame analysis: `0` off
+(the default, and it costs one compare per frame), `1` record, `2` record and
+draw an overlay. Recording times every frame with the CPU's time-stamp
+counter and splits it into the engine's CPU work, the time the CPU waited
+for the GPU, the vblank/swap waits and the time between frames; it also
+records each map change (name, load time, free memory). Frames go into an
+in-memory ring written to `frametime/ft_NNN.bin` in the engine's write
+directory every 5 seconds, at each map start and on quit. The overlay draws
+a stacked CPU/GPU graph of the last 120 frames with 60 and 30 fps lines, and
+the current, map-average and 1% low figures, over the HUD.
+`tools/frametime-report.py` fetches the files from the console over FTP (or
+from xemu's disk image, `tools/xemu_hdd.py`) and writes an HTML report: per
+map average/min/max/1% low fps, worst frame, CPU and GPU share, frames over
+16.7 and 33.3 ms, load times and free memory, and timelines. The GPU figure
+is how long the GPU held the CPU up, not the GPU's busy time: pbkit exposes
+no GPU timestamp. How-to and file format: `docs/r3d/frametime-recorder.md`.
+Replaces the temporary probe used for the item 12 hardware run; divergence
+#141.
+
+Format version 2 adds 20 per-frame work counters from ref/nv2a - draws,
+BEGIN/END blocks, pushbuffer dwords, texture binds, vertices (world,
+studio, TriAPI, 2D, decals), visible world faces, PVS leaves, studio
+models and triangles, lightmap faces and texels rebuilt, water vertices,
+decals, particles, beams, sprites. They are counts, so a run in xemu
+measures them exactly as the console would. The overlay shows them under a
+colour legend for the graph and costs less: 0.87 ms instead of 1.08 ms per
+frame in xemu on the same view, with the counters added (the graph draws 40
+columns of three frames, the slowest of each, and the text is formatted 4
+times a second). The report shows the counters per map (mean / peak), their
+correlation with CPU time and GPU wait, the GPU-bound frames against the
+rest and the ten frames with the most GPU wait; it reads version-1 files
+too. The frames that wrote the file are flagged and left out of the
+statistics unless `--include-flush` is given.
+
 ### Fixed - decals no longer vanish right after loading a save
 
 Loading a savegame restored its decals and then the engine wiped them all

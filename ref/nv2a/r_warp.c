@@ -78,6 +78,7 @@ Where it departs from ref/gl (docs/r3d/divergences.md #138):
 #include "nv2a_tri_util.h"
 #include "r_studio_bridge.h"
 #include "r_warp.h"
+#include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
 
 /* A cap on one map's water pieces: the largest retail map needs 0.64 MiB
    in this layout, 652348 bytes (disposal: 928 faces, 12410 pieces,
@@ -372,6 +373,7 @@ static void R_WarpEmitSurface( const msurface_t *warp, qboolean reverse, float s
 
 		nv2a_warp_stats.polys++;
 		nv2a_warp_stats.verts += n;
+		NV2A_FT_ADD( XBOX_FT_W_WATER_VERTS, n );
 		end = first;
 	}
 }

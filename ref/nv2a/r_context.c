@@ -96,6 +96,8 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include <pbkit/pbkit.h>
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
+#include "platform/xbox/xbox_frametime.h" /* X9-X item 14 step 13: the frame-time recorder's wait counters (divergences.md #141) */
+#include "nv2a_ft.h" /* ... and its work counters (format v2) */
 
 /* gEngfuncs/gpGlobals and GetRefAPI itself are ref/common/ref_context.c's
    job (it does `*funcs = gReffuncs;` against the plain, non-static table
@@ -1414,6 +1416,8 @@ static void nv2a_draw_index_range( uint32_t begin, uint32_t end )
 {
 	uint32_t i = begin;
 
+	NV2A_FT_ADD( XBOX_FT_W_DRAWS, 1 );
+	NV2A_FT_ADD( XBOX_FT_W_VERTS_WORLD, ( end - begin ) * 2u ); /* two 16-bit indices per dword */
 	while( i < end )
 	{
 		uint32_t *p;
@@ -1428,6 +1432,7 @@ static void nv2a_draw_index_range( uint32_t begin, uint32_t end )
 		p += batch;
 		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
 		pb_end( p );
+		NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
 
 		i += batch;
 	}
@@ -1486,6 +1491,8 @@ static void nv2a_draw_exact_indices( uint32_t begin, uint32_t end )
 {
 	const uint16_t *idx16 = (const uint16_t *)nv2a_map_index_dwords;
 
+	NV2A_FT_ADD( XBOX_FT_W_DRAWS, 1 );
+	NV2A_FT_ADD( XBOX_FT_W_VERTS_WORLD, end > begin ? end - begin : 0 );
 	while( begin < end )
 	{
 		uint32_t *p;
@@ -1515,6 +1522,7 @@ static void nv2a_draw_exact_indices( uint32_t begin, uint32_t end )
 			p = pb_push1( p, NV097_ARRAY_ELEMENT32, idx16[k] );
 		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
 		pb_end( p );
+		NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
 
 		begin += n;
 	}
@@ -1629,6 +1637,7 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 	p = pb_begin();
 	tex_phys = ( (uint32_t)nv2a_map_texture_data + (uint32_t)tex->physOffset ) & 0x03ffffff;
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, tex_phys );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
 	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
 		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
@@ -2004,6 +2013,7 @@ static qboolean nv2a_bind_lightmap_stage1( qboolean lit )
 
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET + 0x40, phys );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1 + 0x40, pitch << 16 );
 	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT + 0x40, ( w << 16 ) | h );
 	pb_end( p );
@@ -2272,6 +2282,7 @@ static qboolean nv2a_bind_flat_color_stage0( byte r, byte g, byte b, byte a )
 	phys = (uint32_t)nv2a_flat_color_page & 0x03ffffff;
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, phys );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
 	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
 		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
@@ -2459,6 +2470,7 @@ static void nv2a_enter_lit_state( void )
 	p = pb_begin();
 	tex_phys = (uint32_t)nv2a_map_lightmap & 0x03ffffff;
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET + 0x40, tex_phys );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
 	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT + 0x40,
 		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR ) /* see nv2a_bind_map_texture_stage0 */
@@ -5355,6 +5367,13 @@ static intptr_t RefGetParm( int parm, int arg )
    by the engine's own loader into msurface_t - so a marksurface pointer's
    offset from world->surfaces is directly a valid nv2a_map_faces index,
    no translation table needed. */
+/* Frame-time work counters (nv2a_ft.h): the leaves in the PVS at its
+   last recompute, and where this frame's pushbuffer writes began. */
+static uint32_t nv2a_ft_pvs_leaves;
+static uint32_t *nv2a_ft_pb_frame_start;
+static uint32_t nv2a_ft_models_frame_start;
+uint32_t nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_TRI;
+
 static void nv2a_mark_leaves( const vec3_t vieworigin )
 {
 	const model_t *world = gp_cl->models[1];
@@ -5526,6 +5545,7 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 	nv2a_visbytes_valid = true;
 
 	memset( nv2a_map_face_visible, 0, (size_t)nv2a_map_face_count );
+	nv2a_ft_pvs_leaves = 0;
 
 	for( i = 0; i < (uint32_t)world->numleafs; i++ )
 	{
@@ -5534,6 +5554,7 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 
 		if( !NV2A_CHECKVISBIT( nv2a_visbytes, i ))
 			continue;
+		nv2a_ft_pvs_leaves++;
 
 		/* leafs[0] is the shared CONTENTS_SOLID leaf and carries no
 		   visdata bit of its own - bit i always names leafs[i+1], the
@@ -5844,6 +5865,7 @@ static qboolean nv2a_decal_bind_texture( int texnum )
 
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, phys );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
 	p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
 		MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
 		| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
@@ -5964,6 +5986,9 @@ void nv2a_decal_gpu_draw( int texture, const float *v, int numverts, const msurf
 		| MASK( NV097_DRAW_ARRAYS_START_INDEX, nv2a_decal_vb_used ));
 	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
 	pb_end( p );
+	NV2A_FT_ADD( XBOX_FT_W_DRAWS, 1 );
+	NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
+	NV2A_FT_ADD( XBOX_FT_W_VERTS_DECAL, numverts );
 
 	nv2a_decal_vb_used += (uint32_t)numverts;
 }
@@ -6816,6 +6841,7 @@ static void nv2a_2d_emit_draw_arrays( uint32_t start, uint32_t count, void *ctx 
 		| MASK( NV097_DRAW_ARRAYS_START_INDEX, start ));
 	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
 	pb_end( p );
+	NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
 }
 
 /* Which space nv2a_2d_flush() last actually re-entered the GPU state for -
@@ -7072,6 +7098,7 @@ static void nv2a_2d_flush( void )
 		}
 
 		p = pb_push1( p, NV097_SET_TEXTURE_OFFSET, nv2a_2d_batch_key.offset );
+		NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
 		p = pb_push1( p, NV097_SET_TEXTURE_FORMAT,
 			MASK( NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA, 2 )
 			| MASK( NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE, NV097_SET_TEXTURE_FORMAT_BORDER_SOURCE_COLOR )
@@ -7095,6 +7122,7 @@ static void nv2a_2d_flush( void )
 		nv2a_2d_draw_ctx_t ctx;
 		ctx.op = nv2a_2d_batch_state.op;
 		nv2a_tri_chunk( nv2a_2d_ring_pending_verts, nv2a_2d_op_verts_per_prim( ctx.op ), nv2a_2d_emit_draw_arrays, &ctx );
+		NV2A_FT_ADD( XBOX_FT_W_DRAWS, 1 );
 	}
 
 	/* X9-X step 6: a glow sprite's depth test off and the sprite
@@ -7147,11 +7175,69 @@ void nv2a_tri_append_3d( qboolean quads, nv2a_tri_vert_t *v, uint32_t n )
 	nv2a_2d_append( NV2A_IMM_SPACE_3D, quads ? NV097_SET_BEGIN_END_OP_QUADS : NV097_SET_BEGIN_END_OP_TRIANGLES, v, n );
 }
 
+/* X9-X item 14 step 13 (divergences.md #141): every place this renderer
+   blocks on the GPU or the display goes through one of these three, so
+   the frame-time recorder (engine/platform/xbox/xbox_frametime.c) can
+   split a frame into CPU work and waiting. With the recorder off each is
+   the plain wait plus one load and branch. The GPU wait is the time the
+   GPU still had queued work when the CPU needed it idle - its excess over
+   the CPU, not its busy time (pbkit exposes no GPU-side timestamp; the
+   recorder's header comment has the detail). */
+static void nv2a_wait_gpu_idle( void )
+{
+	uint64_t t0;
+
+	if( !xbox_ft_waits.active )
+	{
+		while( pb_busy())
+			;
+		return;
+	}
+
+	t0 = xbox_ft_rdtsc();
+	while( pb_busy())
+		;
+	xbox_ft_waits.gpu += xbox_ft_rdtsc() - t0;
+}
+
+static void nv2a_wait_vblank( void )
+{
+	uint64_t t0;
+
+	if( !xbox_ft_waits.active )
+	{
+		pb_wait_for_vbl();
+		return;
+	}
+
+	t0 = xbox_ft_rdtsc();
+	pb_wait_for_vbl();
+	xbox_ft_waits.vblank += xbox_ft_rdtsc() - t0;
+}
+
+/* pb_finished() returns 1 while all three back buffers are still queued
+   for display (pbkit.c:2010-2015): a wait on scan-out, not on drawing. */
+static void nv2a_wait_swap( void )
+{
+	uint64_t t0;
+
+	if( !xbox_ft_waits.active )
+	{
+		while( pb_finished())
+			;
+		return;
+	}
+
+	t0 = xbox_ft_rdtsc();
+	while( pb_finished())
+		;
+	xbox_ft_waits.swap += xbox_ft_rdtsc() - t0;
+}
+
 void nv2a_2d_flush_and_wait( void )
 {
 	nv2a_2d_flush();
-	while( pb_busy())
-		;
+	nv2a_wait_gpu_idle();
 }
 
 /* X9-X step 4 Part C: the one append path both spaces share - refactored
@@ -7203,8 +7289,7 @@ static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *ver
 	if( nv2a_2d_ring_write_offset + bytes > NV2A_2D_VERTEX_RING_BYTES )
 	{
 		nv2a_2d_flush();
-		while( pb_busy())
-			;
+		nv2a_wait_gpu_idle();
 		nv2a_2d_ring_write_offset = 0;
 		nv2a_2d_dirty = true;
 	}
@@ -7241,6 +7326,7 @@ static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *ver
 	memcpy( (byte *)nv2a_2d_ring + nv2a_2d_ring_write_offset, verts, bytes );
 	nv2a_2d_ring_write_offset += bytes;
 	nv2a_2d_ring_pending_verts += n;
+	NV2A_FT_ADD( space == NV2A_IMM_SPACE_2D ? XBOX_FT_W_VERTS_2D : nv2a_ft_imm3d_counter, n );
 }
 
 /* C4: appends one quad (4 vertices, texel-unit s/t already resolved by
@@ -7786,15 +7872,20 @@ static void R_BeginFrame( qboolean clearScene )
 	nv2a_view_captured_this_frame = false;
 	nv2a_world_drawn_this_frame = false;
 
-	pb_wait_for_vbl();
+	nv2a_wait_vblank();
 	pb_reset();
+	/* pbkit's pb_begin() (pbkit.c:1786) only returns the write pointer
+	   when DBG is off, as it is (pbkit.c:14): no block is opened. Taken
+	   right after the reset to the head, the whole frame's pushbuffer
+	   is the span from here to R_EndFrame's own reading. */
+	nv2a_ft_pb_frame_start = pb_begin();
+	nv2a_ft_models_frame_start = nv2a_studio_models_drawn();
 	pb_target_back_buffer();
 
 	pb_erase_depth_stencil_buffer( 0, 0, nv2a_width, nv2a_height );
 	pb_fill( 0, 0, nv2a_width, nv2a_height, 0x00000000 );
 
-	while( pb_busy())
-		;
+	nv2a_wait_gpu_idle();
 
 	nv2a_frame_open = true;
 	nv2a_lit_state_current = false; /* only the world pass (or a brush entity) establishes it within a frame */
@@ -7831,11 +7922,16 @@ static void R_EndFrame( void )
 	   R_EndFrame does (gl_rmain.c:1125). */
 	R_Set2DMode( false );
 
-	while( pb_busy())
-		;
+	/* The frame's work counters that are states rather than events
+	   (nv2a_ft.h). */
+	if( nv2a_ft_pb_frame_start )
+		NV2A_FT_SET( XBOX_FT_W_PB_DWORDS, pb_begin() - nv2a_ft_pb_frame_start );
+	NV2A_FT_SET( XBOX_FT_W_WORLD_FACES, nv2a_world_drawn_this_frame ? nv2a_cull_faces_visible : 0 );
+	NV2A_FT_SET( XBOX_FT_W_PVS_LEAVES, nv2a_world_drawn_this_frame ? nv2a_ft_pvs_leaves : 0 );
+	NV2A_FT_SET( XBOX_FT_W_STUDIO_MODELS, nv2a_studio_models_drawn() - nv2a_ft_models_frame_start );
 
-	while( pb_finished())
-		;
+	nv2a_wait_gpu_idle();
+	nv2a_wait_swap();
 }
 
 /* X9-T: the engine has freed the map archive by the time it calls this

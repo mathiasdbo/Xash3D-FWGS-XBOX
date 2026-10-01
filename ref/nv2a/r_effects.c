@@ -44,6 +44,7 @@ Where it departs from ref/gl (docs/r3d/divergences.md #133):
 #include "r_warp.h" /* X9-X item 14 step 11: R_WarpAllowFog */
 #include "r_sprite.h"    /* TriSpriteTexture (gl_triapi.c:242) */
 #include "r_effects.h"
+#include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
 
 #define NOISE_DIVISIONS	NV2A_EFX_NOISE_DIVISIONS // gl_beams.c:25
 
@@ -1223,6 +1224,7 @@ static void R_BeamDraw( BEAM *pbeam, float frametime )
 
 	GL_Cull_Front();
 	nv2a_efx_stats.c_view_beams_count++;
+	NV2A_FT_ADD( XBOX_FT_W_BEAMS, 1 );
 }
 
 /*
@@ -1384,6 +1386,7 @@ void CL_DrawBeams( int fTrans, BEAM *active_beams )
 
 		R_BeamDrawCustomEntity( currentbeam );
 		nv2a_efx_stats.c_view_beams_count++;
+		NV2A_FT_ADD( XBOX_FT_W_BEAMS, 1 );
 	}
 
 	// draw temporary entity beams
@@ -1486,6 +1489,7 @@ void CL_DrawParticles( double frametime, particle_t *cl_active_particles, float 
 			TexCoord2f( 1.0f, 1.0f );
 			Vertex3f( p->org[0] - right[0] - up[0], p->org[1] - right[1] - up[1], p->org[2] - right[2] - up[2] );
 			nv2a_efx_stats.c_particle_count++;
+			NV2A_FT_ADD( XBOX_FT_W_PARTICLES, 1 );
 		}
 
 		gEngfuncs.CL_ThinkParticle( frametime, p );
