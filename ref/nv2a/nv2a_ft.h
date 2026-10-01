@@ -34,6 +34,12 @@ which keep their own lifetimes and are unchanged.
 
 #include "platform/xbox/xbox_frametime.h"
 
+/* The per-subsystem CPU spans (M2, xbox_ft_spans) are timed with
+   XBOX_FT_SPAN / xbox_ft_span_begin+end from xbox_frametime.h: k_lm,
+   k_world, k_efx, k_tri_hooks (r_context.c), k_client_studio,
+   k_studio_points (r_studio.c), k_skin_read (r_image.c). Unlike the
+   counts these test the recorder first - two rdtsc are not free. */
+
 #define NV2A_FT_ADD( id, n )  ( xbox_ft_work.c[( id )] += (uint32_t)( n ))
 #define NV2A_FT_SET( id, v )  ( xbox_ft_work.c[( id )] = (uint32_t)( v ))
 

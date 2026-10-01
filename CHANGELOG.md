@@ -5,6 +5,26 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - frame-time recorder: per-subsystem CPU spans (M2)
+
+The recording now says where each frame's CPU time goes, so the next
+Xbox optimisation (studio skinning on the GPU, the HL client's bone
+setup, or the server game DLL) can be picked from a measurement. 24
+nested spans cover every call `Host_Frame` makes: server (usercmds, game
+DLL think/physics, delta encoding), client DLL frame, packet reading,
+prediction, entity emit, the whole screen update (3D scene, lightmaps,
+world, the client's studio-model draws and our studio skinning/lighting
+inside them, skin reads, effects, HUD, `R_EndFrame`) and the sound mixer.
+Each span leaves out the GPU waits inside it, so the spans plus an
+"unattributed" rest add up to the frame's CPU time. They are stored as
+named counters plus a new optional chunk, so the file stays version 2 and
+older readers still open it. The overlay gets a line with the six largest
+spans, and `tools/frametime-report.py` gets a per-map span table and the
+frames with the most game-DLL and studio time. The spans cost two
+time-stamp reads each, only while recording. `host_frametime_spans 0`
+switches them off to measure that cost. With the recorder off, each site
+costs one load and branch.
+
 ### Added - `tools/xbox-build-nxdk.sh`: nxdk's libraries at -O2, reproducibly
 
 nxdk's own libraries (its C library, pbkit, SDL2, libc++...) were built

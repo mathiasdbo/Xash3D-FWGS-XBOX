@@ -24,6 +24,11 @@ GNU General Public License for more details.
 #include "vid_common.h"
 #include "pm_local.h"
 #include "multi_emulator.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt
+#endif
 
 #define CL_CONNECTION_TIMEOUT 15.0f
 #define CL_CONNECTION_RETRIES 5
@@ -3905,13 +3910,13 @@ void Host_ClientFrame( void )
 	// the incoming messages have been read
 	if( !SV_Active( )) CL_SendCommand ();
 
-	clgame.dllFuncs.pfnFrame( host.frametime );
+	XBOX_FT_SPAN( XBOX_FT_S_CL_DLL, clgame.dllFuncs.pfnFrame( host.frametime ));
 
 	// remember last received framenum
 	CL_SetLastUpdate ();
 
 	// read updates from server
-	CL_ReadPackets ();
+	XBOX_FT_SPAN( XBOX_FT_S_CL_READ, CL_ReadPackets ());
 
 #if XASH_XBOX
 	// XM.1 item 10: cl.paused is current for this frame now that packets
@@ -3927,13 +3932,13 @@ void Host_ClientFrame( void )
 
 	// do prediction again in case we got
 	// a new portion updates from server
-	CL_RedoPrediction ();
+	XBOX_FT_SPAN( XBOX_FT_S_CL_PRED, CL_RedoPrediction ());
 
 	// update voice
 	Voice_Idle( host.frametime );
 
 	// emit visible entities
-	CL_EmitEntities ();
+	XBOX_FT_SPAN( XBOX_FT_S_CL_EMIT, CL_EmitEntities ());
 
 	// in case we lost connection
 	CL_CheckForResend ();
@@ -3951,10 +3956,10 @@ void Host_ClientFrame( void )
 	VID_CheckChanges();
 
 	// update the screen
-	SCR_UpdateScreen ();
+	XBOX_FT_SPAN( XBOX_FT_S_SCR, SCR_UpdateScreen ());
 
 	// update audio
-	SND_UpdateSound ();
+	XBOX_FT_SPAN( XBOX_FT_S_SND, SND_UpdateSound ());
 
 	// play avi-files
 	SCR_RunCinematic ();

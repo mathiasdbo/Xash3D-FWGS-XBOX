@@ -80,7 +80,7 @@ frame (blue-grey: vblank, swap, and the time between host frames). The
 cyan line (labelled `60`) is 16.7 ms, the red one (`30`) 33.3 ms. Under the
 graph a legend: a square in each bar colour (drawn with `FillRGBA`, so it
 keeps its colour - the console font tints its text orange) and its label,
-`CPU`, `GPU wait`, `waits/vsync`. Then six lines, refreshed four times a
+`CPU`, `GPU wait`, `waits/vsync`. Then seven lines, refreshed four times a
 second:
 
 - `now` - the average of the last 30 frames: fps, ms, CPU, GPU wait, the
@@ -97,7 +97,17 @@ second:
   rebuilt, `water` vertices warped, `dec` decals, `part` particles,
   `beam`, `spr` sprites;
 - the map, the file being written, and the overlay's own drawing time
-  (the half-second mean).
+  (the half-second mean);
+- `self ms` - the six CPU spans (see "CPU spans" below) with the most time
+  of their own (a span minus the spans inside it), largest first, then
+  `none`: CPU that no span saw. The shown values, the other spans' own
+  times and `none` add up to the `now` line's `cpu`. Short labels, since
+  each glyph is a quad: `game` (sv_game), `pts` (studio_points), `cstud`
+  (client_studio), `scene` (r_scene), `world`, `lm`, `skin` (skin_read),
+  `efx`, `tri` (tri_hooks), `hud`, `rend` (r_end), `snd`, `sndx`
+  (snd_extra), `svread`, `send`, `cldll`, `clread`, `pred`, `emit`,
+  `input`, `clbeg`, and the parents `sv`, `cl`, `scr`. With
+  `host_frametime_spans 0` it reads `spans off`.
 
 The counters are the same half-second (30-frame) means as the `now` line.
 
@@ -205,6 +215,75 @@ engine draws from outside `Host_Frame` in that span - and the next frame
 counts none (the screen is disabled). In a recording this is the one
 frame per map whose counters are double, next to its 250-530 ms time.
 
+## CPU spans (M2, 2026-10-01)
+
+The perf report's step M2 (`docs/r3d/reports/perf-research/xbox-cpu-bound-o2.md`,
+"M2: per-subsystem `rdtsc` spans on hardware") is implemented here. It asks
+where a frame's CPU goes, by subsystem, so the next optimisation can be
+chosen from a measurement. A **span** is the TSC time inside one call,
+added up over the frame, minus the GPU, vblank and swap waits that happened
+inside it. So a span is CPU work, and the spans add up against the frame's
+`cpu`, not its `host` time. The recorder stores each as a work counter in
+kilocycles (TSC ticks / 1000, rounded per frame; 1.36 us at 733 MHz),
+named `k_*`. The report's `sv_game_kcyc` is `k_sv_game`: a counter name
+has at most 15 characters, and `client_studio_kcyc` does not fit.
+
+Spans **nest**. A parent's time includes its children's, and the file's
+SPANS chunk names each span's parent. The top level wraps every call
+`Host_Frame` makes except `Host_GetCommands` (a dedicated server's input),
+`HTTP_Run` and `XRcon_Frame`. So `cpu - (sum of the top-level spans)` is
+**unattributed**: those three, the recorder itself and the frame
+boundary. The report shows it per map, and the overlay shows it as `none`.
+
+| span | parent | measured around | site |
+|---|---|---|---|
+| `k_input` | - | `Host_InputFrame` | `engine/common/host.c:670` |
+| `k_cl_begin` | - | `Host_ClientBegin`: `Cbuf_Execute`, `CL_SendCommand` (client.dll `CL_CreateMove`, client prediction) | `host.c:671` |
+| `k_sv` | - | `Host_ServerFrame` | `host.c:673` |
+| `k_sv_read` | `k_sv` | `SV_ReadPackets`: the client's usercmds, i.e. the player's movement and `PlayerPreThink`/`PostThink` | `engine/server/sv_main.c:692` |
+| `k_sv_game` | `k_sv` | `SV_Physics` (both calls in `SV_RunGameFrame`): game DLL think, physics, AI | `sv_main.c:613`, `:624` |
+| `k_sv_send` | `k_sv` | `SV_SendClientMessages`: entity packing, delta encoding | `sv_main.c:707` |
+| `k_cl` | - | `Host_ClientFrame` | `host.c:674` |
+| `k_cl_dll` | `k_cl` | `clgame.dllFuncs.pfnFrame` | `engine/client/cl_main.c:3913` |
+| `k_cl_read` | `k_cl` | `CL_ReadPackets` | `cl_main.c:3919` |
+| `k_cl_pred` | `k_cl` | `CL_RedoPrediction` | `cl_main.c:3935` |
+| `k_cl_emit` | `k_cl` | `CL_EmitEntities` | `cl_main.c:3941` |
+| `k_scr` | `k_cl` | `SCR_UpdateScreen`: all rendering | `cl_main.c:3959` |
+| `k_r_scene` | `k_scr` | `GL_RenderFrame` in `V_RenderView`: the 3D scene | `engine/client/cl_view.c:422` |
+| `k_lm` | `k_r_scene` | `nv2a_update_dynamic_lightmaps` (`R_LightmapUpdate` and its brush-entity gather) | `ref/nv2a/r_context.c:6414` |
+| `k_world` | `k_r_scene` | `nv2a_draw_sky`, `nv2a_draw_map_geometry`, `R_DecalDrawWorld` | `r_context.c:6420-6427` |
+| `k_client_studio` | `k_r_scene` | `R_StudioDrawModelInternal`: `pStudioDraw->StudioDrawModel/Player`, i.e. HL's `StudioModelRenderer` with its bone setup (or the built-in renderer when it is selected) | `ref/nv2a/r_studio.c:3121-3144` |
+| `k_studio_points` | `k_client_studio` | `R_StudioDrawPoints`: our CPU skinning, lighting and TriAPI emit. A wrapper around the function, not a call site: the client calls it through `api->StudioDrawPoints` | `r_studio.c:2224` |
+| `k_skin_read` | `k_studio_points` | `nv2a_tex_upload_skin` in `nv2a_tex_resolve_skin`: a skin's lazy disk read and decode | `ref/nv2a/r_image.c:978` |
+| `k_efx` | `k_r_scene` | both `CL_DrawEFX` calls: beams, particles, tracers | `r_context.c:6469`, `:6482` |
+| `k_tri_hooks` | `k_r_scene` | `pfnDrawNormalTriangles`, `pfnDrawTransparentTriangles` (client.dll) | `r_context.c:6471`, `:6473` |
+| `k_hud` | `k_scr` | `CL_DrawHUD( CL_ACTIVE )`: the client's `HUD_Redraw` | `cl_view.c:540` |
+| `k_snd_extra` | `k_scr` | `S_ExtraUpdate` in `V_PostRender`: a second mixer pass | `cl_view.c:580` |
+| `k_r_end` | `k_scr` | `R_EndFrame` in `V_PostRender`: 2D flush, pushbuffer kick, present | `cl_view.c:586` |
+| `k_snd` | `k_cl` | `SND_UpdateSound`: the mixer | `cl_main.c:3962` |
+
+Spans not listed under a parent stay in that parent's **own** time.
+Examples: the overlay's drawing (inside `k_scr`; it also has its own field)
+and `nv2a_draw_solid_entities`' brush entities (inside `k_r_scene`). A
+child that also runs outside its parent would push the parent's own time
+below zero. The report and the overlay clamp it at 0. One case is a skin
+bound outside a studio draw (`R_StudioSetupSkin` is also in the studio
+API the client can call). As with the counters, the frame that runs a
+`changelevel` also carries the loading screen's spans, which run outside
+`Host_Frame`. The report leaves those frames out anyway.
+
+Engine-side, the spans are one macro per call site, `XBOX_FT_SPAN( id,
+call )` (`engine/platform/xbox/xbox_frametime.h`). Each engine file
+includes the header under `#if XASH_XBOX && !XASH_DEDICATED` (client
+files: `#if XASH_XBOX`) and otherwise defines the macro as the bare call,
+so a non-Xbox build compiles the upstream line unchanged. ref/nv2a writes
+into the shared `xbox_ft_spans` global the same way it writes the
+counters, so the ref API does not change.
+
+**In xemu** the spans are the emulator's times on a PC. A run there shows
+that they are recorded and add up, not what the Pentium III spends. The
+numbers for the decision come from the owner's hardware route.
+
 ## Cost
 
 - **Off:** one float compare per `Host_Frame`; in ref/nv2a one load and
@@ -212,11 +291,33 @@ frame per map whose counters are double, next to its 250-530 ms time.
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~130 KiB (ring 1024 x 112 B = 112 KiB, the overlay's histogram
-  4 KiB, a 14 KiB encode buffer); a few `rdtsc` per frame; a ~33 KiB
-  write and `fsync` every 5 s (those frames are flagged); about 6.6 KiB
-  per second of play on disk at 60 fps (23 MiB an hour; the file stops at
-  64 MiB, ~2.7 hours).
+- **On:** ~243 KiB (ring 1024 x 212 B = 212 KiB, the overlay's histogram
+  4 KiB, a 26.5 KiB encode buffer); a few `rdtsc` per frame plus two per
+  span closed (below); a ~62 KiB write and `fsync` every 5 s (those
+  frames are flagged); about 12.4 KiB per second of play on disk at 60 fps
+  (44 MiB an hour; the file stops at 64 MiB, ~1.4 hours). Before the spans
+  it was ~130 KiB and 6.6 KiB/s.
+- **Spans, off** (recorder off, or `host_frametime_spans 0`): one load
+  and branch of `xbox_ft_spans.on` per span site, plus a branch on a
+  stack local at its end.
+- **Spans, on:** per closed span, two `rdtsc`, three 64-bit wait loads
+  at each end and two adds. The file counts the closures per frame
+  (`span_calls`). The fixed sites close ~20 a frame; `k_client_studio`
+  closes once per studio draw, `k_studio_points` once per body part
+  drawn, `k_skin_read` once per skin read. In xemu (spans build 6ABEBB7E,
+  nxdk at -O2): 20-47 closures a frame on c1a0c, c1a0e and c1a0d. With
+  `host_frametime_spans` toggled mid-session on one c1a0c view, mean CPU
+  was 10.47 ms with spans on, 10.53 off and 10.29 on again (709, 1495 and
+  1494 frames): no cost visible above the scene's own variation.
+  Against the build before the spans (PR #173's -O2 XBE 6ABEA057) on the
+  static c1a0d view in mode 2, CPU was 4.07 vs 3.93 ms. 0.10 ms of that
+  is the overlay's extra line, which leaves ~0.04 ms for the spans and
+  the larger records. These are emulator times, and the Pentium III's
+  `rdtsc` cost was not measured here. The owner's
+  `host_frametime_spans 0`/`1` A/B on one view on the console is the
+  number to quote. In every xemu recording with spans on, the top-level spans
+  plus `unattributed` matched `cpu`: 0.009 ms unattributed on average,
+  0.18 ms at worst in a frame, never negative.
 - **Overlay:** at most 120 `FillRGBA` quads for the graph (40 columns x 3
   segments, empty ones skipped), a few for the panel, lines and legend,
   and one quad per glyph of text (~300; spaces are free). Its drawing
@@ -227,7 +328,11 @@ frame per map whose counters are double, next to its 250-530 ms time.
   while drawing three more lines (the counters) and the legend. The graph
   went from up to 360 quads to up to 120 and the text is formatted 4 times
   a second instead of every frame; the ~300 glyphs are now most of the
-  cost. The console's figure comes from the owner's run.
+  cost. The console's figure comes from the owner's run. The spans line
+  (2026-10-01, ~70 glyphs) took it from **0.519 ms (median 0.515, p90
+  0.632) to 0.615 ms (median 0.623, p90 0.735)**, +0.10 ms. Same static
+  c1a0d view in xemu, 1157 overlay frames each: PR #173's -O2 XBE
+  against the spans build.
 
 ## File format
 
@@ -236,10 +341,15 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 112 bytes with today's
-20), MAP, CALIB (TSC, performance counter) and END (written on a clean
-stop; a file without it was cut short). The reader finds counters by name,
-so a later version can add some without breaking it. Version 1 is the same
+frame records of 32 bytes plus one u32 per counter - 212 bytes with today's
+45: the 20 counts, `span_calls` and the 24 spans; 112 before the spans),
+SPANS (from 2026-10-01, right after COUNTERS: each span's name and its
+parent's, 16 bytes each, "" for the top level), MAP, CALIB (TSC,
+performance counter) and END (written on a clean stop; a file without it
+was cut short). The reader finds counters by name, so a later version can
+add some without breaking it. The spans used that: they are counters plus
+an optional chunk, which a reader that does not know it skips by its
+length, so the version stayed 2. Version 1 is the same
 file without COUNTERS and with 32-byte records; the report reads both. The authoritative field-by-field
 layout is the comment at the top of
 `engine/platform/xbox/xbox_frametime_util.h`; `parse()` in

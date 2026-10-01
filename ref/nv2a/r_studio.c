@@ -2002,7 +2002,7 @@ R_StudioDrawPoints
 
 ===============
 */
-static void R_StudioDrawPoints( void )
+static void R_StudioDrawPointsInternal( void )
 {
 	int              i, j, k, m_skinnum;
 	float            shellscale = 0.0f;
@@ -2212,6 +2212,16 @@ static void R_StudioDrawPoints( void )
 		nv2a_studio_ctx.blend = oldblend;
 	}
 	nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_TRI;
+}
+
+/* M2 span k_studio_points (#141). A wrapper, not a span at a call site:
+   the game client calls this through the studio API
+   (api->StudioDrawPoints, R_StudioFillAPI below) from its own
+   StudioRenderFinal, so R_StudioRenderFinal's call is only the built-in
+   renderer's path. */
+static void R_StudioDrawPoints( void )
+{
+	XBOX_FT_SPAN( XBOX_FT_S_STUDIO_POINTS, R_StudioDrawPointsInternal());
 }
 
 /*
@@ -3102,6 +3112,13 @@ R_StudioDrawModelInternal
 */
 static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 {
+	/* M2 span k_client_studio (#141): every studio draw, almost always the
+	   game client's StudioModelRenderer (bone setup, its calls back into
+	   R_StudioDrawPoints below); the built-in renderer's ports when it is
+	   selected or for the menu preview. */
+	xbox_ft_span_t span;
+
+	xbox_ft_span_begin( &span );
 	if( !FBitSet( nv2a_studio_ctx.rvp_flags, RF_DRAW_WORLD ))
 	{
 		if( e->player )
@@ -3124,6 +3141,7 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 		else
 			pStudioDraw->StudioDrawModel( flags );
 	}
+	xbox_ft_span_end( &span, XBOX_FT_S_CLIENT_STUDIO );
 }
 
 static cl_entity_t *R_FindParentEntity( cl_entity_t *e, cl_entity_t **entities, uint num_entities )

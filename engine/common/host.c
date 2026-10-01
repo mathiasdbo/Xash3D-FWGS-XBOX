@@ -40,6 +40,8 @@ GNU General Public License for more details.
 #include "platform/platform.h"
 #if XASH_XBOX && !XASH_DEDICATED
 #include "platform/xbox/xbox_frametime.h" // docs/r3d/divergences.md #141
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt // the frame-time recorder's CPU spans: Xbox only (#141)
 #endif
 
 host_parm_t host;	// host parms
@@ -665,11 +667,11 @@ void Host_Frame( double time )
 	if( host.framecount == 0 )
 		Con_DPrintf( "Time to first frame: %.3f seconds\n", t1 - host.starttime );
 
-	Host_InputFrame ();  // input frame
-	Host_ClientBegin (); // begin client
+	XBOX_FT_SPAN( XBOX_FT_S_INPUT, Host_InputFrame ());  // input frame
+	XBOX_FT_SPAN( XBOX_FT_S_CL_BEGIN, Host_ClientBegin ()); // begin client
 	Host_GetCommands (); // dedicated in
-	Host_ServerFrame (); // server frame
-	Host_ClientFrame (); // client frame
+	XBOX_FT_SPAN( XBOX_FT_S_SV, Host_ServerFrame ()); // server frame
+	XBOX_FT_SPAN( XBOX_FT_S_CL, Host_ClientFrame ()); // client frame
 	HTTP_Run();			 // both server and client
 	XRcon_Frame();
 

@@ -16,6 +16,11 @@ write_fixture), not from this parser.
 The level-change fixtures (class LevelChange) are the same session written
 with the recorder's LOAD flag (v2) and without it (v1, as recorders before
 2026-10-01 wrote it); see write_fixture_level_change in the C test.
+
+FRAMETIME_FIXTURE is a version-2 file as a recorder from before the CPU
+spans wrote it (20 counters, no SPANS chunk). FRAMETIME_FIXTURE_SPANS
+(class Spans) is a current one: every counter, the SPANS chunk and known
+span times; see write_fixture_spans in the C test.
 """
 import importlib.util
 import os
@@ -35,6 +40,7 @@ FIXTURE = os.environ.get("FRAMETIME_FIXTURE", "")
 FIXTURE_V1 = os.environ.get("FRAMETIME_FIXTURE_V1", "")
 FIXTURE_LC = os.environ.get("FRAMETIME_FIXTURE_LC", "")
 FIXTURE_LC_V1 = os.environ.get("FRAMETIME_FIXTURE_LC_V1", "")
+FIXTURE_SPANS = os.environ.get("FRAMETIME_FIXTURE_SPANS", "")
 
 
 def _read(path, var):
@@ -433,6 +439,117 @@ class LevelChange(unittest.TestCase):
                                   "--include-level-change"], capture_output=True, text=True, timeout=60)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn("kept in the statistics; --include-level-change is on", out.stdout)
+
+
+class Spans(unittest.TestCase):
+    """write_fixture_spans: 1 MHz TSC (a kilocycle is a millisecond), map
+    c1a0c, seq 0..49 at 20 ms (CPU 16) with spans input 1, cl_begin 1,
+    sv 6 (sv_read 1, sv_game 4, sv_send 1), cl 7 (cl_read 1, scr 5 (r_scene
+    4 (world 1, client_studio 2 (studio_points 1)), r_end 1), snd 1): top
+    level 15, 1 ms unattributed. seq 40: sv_game 10, sv 12, CPU 22. seq 41:
+    client_studio 5, studio_points 3, r_scene 7, scr 8, cl 10, CPU 19. The
+    statistics use seq 30..49 (the first 30 in play are the warm-up)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data = _read(FIXTURE_SPANS, "FRAMETIME_FIXTURE_SPANS")
+        cls.rec = fr.parse(cls.data)
+        cls.segs = fr.segments(cls.rec)
+        cls.rows = [fr.segment_stats(cls.rec, s) for s in cls.segs]
+        cls.row = [r for r in cls.rows if r["map"] == "c1a0c"][0]
+
+    def test_spans_chunk(self):
+        r = self.rec
+        self.assertEqual(r["version"], 2)
+        self.assertEqual(len(r["counters"]), 45)
+        self.assertEqual(r["counters"][20], "span_calls")
+        self.assertEqual(len(r["spans"]), 24)
+        self.assertEqual(r["spans"][0], ("k_input", ""))
+        parent = dict(r["spans"])
+        self.assertEqual(parent["k_sv_game"], "k_sv")
+        self.assertEqual(parent["k_studio_points"], "k_client_studio")
+        self.assertEqual(parent["k_client_studio"], "k_r_scene")
+        self.assertEqual(parent["k_scr"], "k_cl")
+        self.assertEqual(r["unknown_chunks"], 0)
+        self.assertEqual(fr.span_depth(r)["k_skin_read"], 5)
+
+    def test_span_averages(self):
+        a = self.row
+        self.assertEqual(a["frames"], 20)
+        self.assertAlmostEqual(a["cpu_ms"], (18 * 16 + 22 + 19) / 20.0)
+        ms = a["span_ms"]
+        self.assertAlmostEqual(ms["k_sv_game"], (19 * 4 + 10) / 20.0)
+        self.assertAlmostEqual(ms["k_sv"], (19 * 6 + 12) / 20.0)
+        self.assertAlmostEqual(ms["k_client_studio"], (19 * 2 + 5) / 20.0)
+        self.assertAlmostEqual(ms["k_studio_points"], (19 * 1 + 3) / 20.0)
+        self.assertAlmostEqual(ms["k_lm"], 0.0)
+        own = a["span_own_ms"]
+        self.assertAlmostEqual(own["k_sv"], 0.0)
+        self.assertAlmostEqual(own["k_r_scene"], 1.0)     # 4 = world 1 + client_studio 2 + 1 (7 = 1 + 5 + 1)
+        self.assertAlmostEqual(own["k_client_studio"], 1.05)
+        self.assertAlmostEqual(own["k_scr"], 0.0)
+        # The invariant the recorder is built on: top level + unattributed = CPU.
+        self.assertAlmostEqual(a["span_top_ms"] + a["unattributed_ms"], a["cpu_ms"])
+        self.assertAlmostEqual(a["unattributed_ms"], 1.0)
+        self.assertAlmostEqual(a["span_calls"], 300.0)
+
+    def test_own_clamps_at_zero(self):
+        incl = dict.fromkeys(fr.span_names(self.rec), 0.0)
+        incl.update({"k_studio_points": 1.0, "k_skin_read": 2.0})
+        own = fr.span_own(self.rec, incl)
+        self.assertEqual(own["k_studio_points"], 0.0)
+        self.assertEqual(own["k_skin_read"], 2.0)
+
+    def test_top_frames_by_span(self):
+        top = fr.top_frames(self.rec, "k_sv_game", 3)
+        self.assertEqual(top[0]["seq"], 40)
+        self.assertAlmostEqual(top[0]["spans"]["k_sv_game"], 10.0)
+        self.assertAlmostEqual(top[0]["cpu"], 22.0)
+        self.assertEqual(fr.top_frames(self.rec, "k_client_studio", 1)[0]["seq"], 41)
+        self.assertEqual(fr.top_frames(self.rec, "k_studio_points", 1)[0]["seq"], 41)
+
+    def test_spans_are_not_in_the_count_correlation(self):
+        names = [c["name"] for c in fr.work_correlation(self.rec)]
+        self.assertIn("studio_models", names)
+        self.assertIn("span_calls", names)
+        self.assertFalse([n for n in names if n.startswith("k_")])
+
+    def test_summary_and_page(self):
+        s = fr.session_stats(self.rec, self.rows)
+        text = fr.summary_text(self.rec, self.rows, s)
+        self.assertIn("CPU spans", text)
+        self.assertIn("unattributed", text)
+        self.assertIn("top frames by k_sv_game", text)
+        self.assertRegex(text, r"\n  sv_game +4\.30/4\.30 +26%")       # depth 1: two spaces
+        page = fr.render_html(self.rec, self.rows, s, ["spans.bin"], source="xemu")
+        self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
+        self.assertIn('id="spans"', page)
+        self.assertIn("CPU by subsystem", page)
+        self.assertIn("Recorded in xemu:</b> these are the emulator", page)
+        self.assertIn("The ten frames with the most sv_game", page)
+        run_page_script(page)
+
+    def test_without_spans_chunk(self):
+        # The same file with its SPANS chunk cut out reads as a reader that
+        # does not know the chunk sees it: the k_* are plain counters.
+        off = 128
+        ctype, clen = fr.struct.unpack_from("<II", self.data, off)
+        self.assertEqual(ctype, fr.CHUNK_COUNTERS)
+        off += 8 + clen
+        ctype, clen = fr.struct.unpack_from("<II", self.data, off)
+        self.assertEqual(ctype, fr.CHUNK_SPANS)
+        r = fr.parse(self.data[:off] + self.data[off + 8 + clen:])
+        self.assertEqual(r["spans"], [])
+        self.assertIn("k_sv_game", r["counters"])
+        self.assertEqual(len(r["frames"]), 50)
+        st = fr.segment_stats(r, fr.segments(r)[0])
+        self.assertNotIn("span_ms", st)
+        self.assertEqual(fr.spans_section_html(r, [st]), "")
+
+    def test_pre_span_v2_file(self):
+        r = fr.parse(_fixture_bytes())
+        self.assertEqual(r["spans"], [])
+        self.assertEqual(len(r["counters"]), 20)
 
 
 if __name__ == "__main__":

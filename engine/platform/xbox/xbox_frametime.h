@@ -37,6 +37,11 @@ add, cheaper than testing whether the recorder is on - and the recorder
 zeroes the array at Host_Frame start and copies it into the frame record
 when the frame closes. With the recorder off nobody zeroes it and the
 counts just wrap. The list and its meaning are in xbox_frametime_util.h.
+
+The third, xbox_ft_spans, holds the per-subsystem CPU spans (M2): the
+engine (host.c, sv_main.c, cl_main.c, cl_view.c) and ref/nv2a wrap a call
+in XBOX_FT_SPAN below, and the recorder stores the frame's totals as
+kilocycle work counters.
 */
 
 #ifndef XBOX_FRAMETIME_H
@@ -67,6 +72,21 @@ typedef struct xbox_ft_work_s
 
 extern xbox_ft_work_t xbox_ft_work;
 
+/* The third shared object (2026-10-01): the per-subsystem CPU spans
+   (XBOX_FT_S_*, xbox_frametime_util.h), accumulated in ticks over the
+   frame; the recorder zeroes them at Host_Frame start and stores them as
+   kilocycle work counters. Unlike the counts above, a span costs two
+   rdtsc, so every site tests `on` first: with the recorder off (or
+   host_frametime_spans 0) a span is one load and branch. */
+typedef struct xbox_ft_spans_s
+{
+	volatile uint32_t on;   /* recording and host_frametime_spans: set at Host_Frame start only */
+	uint32_t calls;         /* span closures this frame (XBOX_FT_W_SPAN_CALLS) */
+	uint64_t t[XBOX_FT_S_COUNT];
+} xbox_ft_spans_t;
+
+extern xbox_ft_spans_t xbox_ft_spans;
+
 /* The time-stamp counter (Pentium III: the core clock, 733 MHz on a
    retail unit; the recorder calibrates it against the kernel's
    performance counter rather than assuming the rate). */
@@ -77,6 +97,56 @@ static inline uint64_t xbox_ft_rdtsc( void )
 	__asm__ __volatile__( "rdtsc" : "=a"( lo ), "=d"( hi ));
 	return ( (uint64_t)hi << 32 ) | lo;
 }
+
+/* One open span: its start and the renderer's waits so far. */
+typedef struct xbox_ft_span_s
+{
+	uint64_t t0;    /* 0: not timing (the recorder was off at the start) */
+	uint64_t w0;
+} xbox_ft_span_t;
+
+static inline uint64_t xbox_ft_wait_ticks( void )
+{
+	return xbox_ft_waits.gpu + xbox_ft_waits.vblank + xbox_ft_waits.swap;
+}
+
+static inline void xbox_ft_span_begin( xbox_ft_span_t *s )
+{
+	s->t0 = 0;
+	if( xbox_ft_spans.on )
+	{
+		s->w0 = xbox_ft_wait_ticks();
+		s->t0 = xbox_ft_rdtsc();
+	}
+}
+
+/* Adds the span's time minus the waits inside it: a span is CPU work, so
+   the GPU wait R_EndFrame or a full vertex ring spends inside the scene
+   is not charged to it (it is the frame's GPU wait already). */
+static inline void xbox_ft_span_end( const xbox_ft_span_t *s, int id )
+{
+	if( s->t0 )
+	{
+		const uint64_t d = xbox_ft_rdtsc() - s->t0;
+		const uint64_t w = xbox_ft_wait_ticks() - s->w0;
+
+		xbox_ft_spans.t[id] += d > w ? d - w : 0;
+		xbox_ft_spans.calls++;
+	}
+}
+
+/* Times one statement as span `id` (XBOX_FT_S_*). Engine files that use
+   it include this header under #if XASH_XBOX && !XASH_DEDICATED and
+   define XBOX_FT_SPAN( id, stmt ) as plain `stmt` otherwise
+   (docs/r3d/divergences.md #141), so a non-Xbox build compiles the
+   upstream statement unchanged. */
+#define XBOX_FT_SPAN( id, stmt ) \
+	do { \
+		xbox_ft_span_t xbox_ft_span_; \
+		xbox_ft_span_begin( &xbox_ft_span_ ); \
+		stmt; \
+		xbox_ft_span_end( &xbox_ft_span_, ( id )); \
+	} while( 0 )
 
 /* Engine side (xbox_frametime.c). */
 void Xbox_FrameTime_Init( void );          /* registers the cvar */

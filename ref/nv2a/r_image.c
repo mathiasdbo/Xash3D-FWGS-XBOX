@@ -40,6 +40,7 @@ Ported from, in order of how closely each piece is followed:
 #include "nv2a_skin_cache.h"
 #include "nv2a_studio_util.h" /* NV2A_STUDIO_NF_MASKED, pinned to studio.h in r_studio.c */
 #include "nv2a_2d_util.h" /* texel classification and DXT sizes (divergences.md #131) */
+#include "nv2a_ft.h" /* the frame-time recorder's k_skin_read span (divergences.md #141) */
 
 /* ------------------------------------------------------------------ */
 /* Table storage.                                                      */
@@ -961,6 +962,7 @@ static unsigned int nv2a_tex_resolve_skin( unsigned int texnum )
 {
 	nv2a_texture_t *tex = &nv2a_textures[texnum];
 	qboolean permanent;
+	qboolean uploaded;
 
 	if( tex->has_skin_storage )
 	{
@@ -971,7 +973,10 @@ static unsigned int nv2a_tex_resolve_skin( unsigned int texnum )
 	if( !nv2a_skin_cache || tex->skin->failed )
 		return nv2a_texnum_white;
 
-	if( nv2a_tex_upload_skin( tex, &permanent ))
+	/* M2 span k_skin_read (#141): the lazy read off the disc and the
+	   decode into the skin cache. */
+	XBOX_FT_SPAN( XBOX_FT_S_SKIN_READ, uploaded = nv2a_tex_upload_skin( tex, &permanent ));
+	if( uploaded )
 		return texnum;
 
 	if( permanent )

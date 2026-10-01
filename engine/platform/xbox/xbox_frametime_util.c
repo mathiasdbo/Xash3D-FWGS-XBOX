@@ -28,7 +28,73 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"studio_models", "studio_tris",
 	"lm_faces", "lm_texels", "water_verts",
 	"decals", "particles", "beams", "sprites",
+	"span_calls",
+	/* XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_*, in that enum's order */
+	"k_input", "k_cl_begin",
+	"k_sv", "k_sv_read", "k_sv_game", "k_sv_send",
+	"k_cl", "k_cl_dll", "k_cl_read", "k_cl_pred", "k_cl_emit",
+	"k_scr", "k_r_scene", "k_lm", "k_world", "k_client_studio", "k_studio_points", "k_skin_read",
+	"k_efx", "k_tri_hooks", "k_hud", "k_snd_extra", "k_r_end",
+	"k_snd",
 };
+
+/* A name list one short (or one long) of the enum is a compile error,
+   not a shifted file. */
+typedef char xbox_ft_names_match_enum[( sizeof( xbox_ft_work_names ) / sizeof( xbox_ft_work_names[0] ) == XBOX_FT_W_COUNT ) ? 1 : -1];
+
+const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT] =
+{
+	[XBOX_FT_S_INPUT]         = -1,
+	[XBOX_FT_S_CL_BEGIN]      = -1,
+	[XBOX_FT_S_SV]            = -1,
+	[XBOX_FT_S_SV_READ]       = XBOX_FT_S_SV,
+	[XBOX_FT_S_SV_GAME]       = XBOX_FT_S_SV,
+	[XBOX_FT_S_SV_SEND]       = XBOX_FT_S_SV,
+	[XBOX_FT_S_CL]            = -1,
+	[XBOX_FT_S_CL_DLL]        = XBOX_FT_S_CL,
+	[XBOX_FT_S_CL_READ]       = XBOX_FT_S_CL,
+	[XBOX_FT_S_CL_PRED]       = XBOX_FT_S_CL,
+	[XBOX_FT_S_CL_EMIT]       = XBOX_FT_S_CL,
+	[XBOX_FT_S_SCR]           = XBOX_FT_S_CL,
+	[XBOX_FT_S_R_SCENE]       = XBOX_FT_S_SCR,
+	[XBOX_FT_S_LM]            = XBOX_FT_S_R_SCENE,
+	[XBOX_FT_S_WORLD]         = XBOX_FT_S_R_SCENE,
+	[XBOX_FT_S_CLIENT_STUDIO] = XBOX_FT_S_R_SCENE,
+	[XBOX_FT_S_STUDIO_POINTS] = XBOX_FT_S_CLIENT_STUDIO,
+	[XBOX_FT_S_SKIN_READ]     = XBOX_FT_S_STUDIO_POINTS,
+	[XBOX_FT_S_EFX]           = XBOX_FT_S_R_SCENE,
+	[XBOX_FT_S_TRI_HOOKS]     = XBOX_FT_S_R_SCENE,
+	[XBOX_FT_S_HUD]           = XBOX_FT_S_SCR,
+	[XBOX_FT_S_SND_EXTRA]     = XBOX_FT_S_SCR,
+	[XBOX_FT_S_R_END]         = XBOX_FT_S_SCR,
+	[XBOX_FT_S_SND]           = XBOX_FT_S_CL,
+};
+
+uint32_t xbox_ft_span_kcyc( uint64_t ticks )
+{
+	uint64_t k = ( ticks + 500u ) / 1000u;
+
+	return k > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)k;
+}
+
+uint64_t xbox_ft_span_self( const uint64_t *span, uint64_t *self )
+{
+	uint64_t children[XBOX_FT_S_COUNT];
+	uint64_t top = 0;
+	int i;
+
+	memset( children, 0, sizeof( children ));
+	for( i = 0; i < XBOX_FT_S_COUNT; i++ )
+	{
+		if( xbox_ft_span_parent[i] < 0 )
+			top += span[i];
+		else
+			children[xbox_ft_span_parent[i]] += span[i];
+	}
+	for( i = 0; i < XBOX_FT_S_COUNT; i++ )
+		self[i] = span[i] > children[i] ? span[i] - children[i] : 0;
+	return top;
+}
 
 void xbox_ft_ring_init( xbox_ft_ring_t *ring, xbox_ft_frame_t *storage, uint32_t capacity )
 {
@@ -271,6 +337,30 @@ size_t xbox_ft_encode_counters( uint8_t *out, uint32_t counters )
 	p = put_u32( p, counters );
 	for( i = 0; i < counters; i++ )
 		p = put_name( p, xbox_ft_work_names[i], XBOX_FT_COUNTER_NAME_BYTES );
+	return (size_t)( p - out );
+}
+
+size_t xbox_ft_encode_spans( uint8_t *out, uint32_t counters )
+{
+	uint8_t *p = out;
+	uint32_t i, n;
+
+	if( counters > XBOX_FT_W_COUNT )
+		counters = XBOX_FT_W_COUNT;
+	if( counters <= XBOX_FT_W_SPAN_FIRST )
+		return 0;
+	n = counters - XBOX_FT_W_SPAN_FIRST;
+
+	p = put_u32( p, XBOX_FT_CHUNK_SPANS );
+	p = put_u32( p, 4u + n * 2u * XBOX_FT_COUNTER_NAME_BYTES );
+	p = put_u32( p, n );
+	for( i = 0; i < n; i++ )
+	{
+		const int parent = xbox_ft_span_parent[i];
+
+		p = put_name( p, xbox_ft_work_names[XBOX_FT_W_SPAN_FIRST + i], XBOX_FT_COUNTER_NAME_BYTES );
+		p = put_name( p, parent < 0 ? "" : xbox_ft_work_names[XBOX_FT_W_SPAN_FIRST + parent], XBOX_FT_COUNTER_NAME_BYTES );
+	}
 	return (size_t)( p - out );
 }
 

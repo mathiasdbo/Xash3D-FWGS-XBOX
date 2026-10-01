@@ -23,6 +23,8 @@ GNU General Public License for more details.
 #include "platform/platform.h" // GL_UpdateSwapInterval
 #if XASH_XBOX
 #include "platform/xbox/xbox_frametime.h" // docs/r3d/divergences.md #141
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt // the recorder's CPU spans: Xbox only (#141)
 #endif
 
 /*
@@ -417,7 +419,7 @@ void V_RenderView( void )
 			ref.dllFuncs.R_ClearScreen();
 		}
 
-		GL_RenderFrame( &rvp );
+		XBOX_FT_SPAN( XBOX_FT_S_R_SCENE, GL_RenderFrame( &rvp ));
 		S_UpdateFrame( &rvp );
 		viewnum++;
 
@@ -535,7 +537,7 @@ void V_PostRender( void )
 	if( cls.state == ca_active && cls.signon == SIGNONS && cls.scrshot_action != scrshot_mapshot )
 	{
 		SCR_TileClear();
-		CL_DrawHUD( CL_ACTIVE );
+		XBOX_FT_SPAN( XBOX_FT_S_HUD, CL_DrawHUD( CL_ACTIVE ));
 		VGui_Paint();
 	}
 
@@ -575,13 +577,13 @@ void V_PostRender( void )
 		Touch_Draw();
 		OSK_Draw();
 
-		S_ExtraUpdate();
+		XBOX_FT_SPAN( XBOX_FT_S_SND_EXTRA, S_ExtraUpdate());
 	}
 
 	SCR_MakeScreenShot();
 	ref.dllFuncs.R_AllowFog( true );
 	Platform_SetTimer( 0.0f );
-	ref.dllFuncs.R_EndFrame();
+	XBOX_FT_SPAN( XBOX_FT_S_R_END, ref.dllFuncs.R_EndFrame());
 
 	V_CheckGammaEnd();
 }

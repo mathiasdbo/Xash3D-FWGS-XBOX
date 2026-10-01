@@ -6,7 +6,8 @@
    (v2) and without it (v1, as recorders before 2026-10-01 wrote it) -
    which tools/test_frametime_report.py then parses: the parser's fixtures
    come from the encoder the recorder runs, not from a hand-written copy
-   of the format. */
+   of the format. The spans fixture (2026-10-01) is a current recording:
+   every counter, the SPANS chunk, and known span times. */
 
 #include <stdio.h>
 #include <string.h>
@@ -138,15 +139,18 @@ static void test_stats( void )
 
 static void test_encoders( void )
 {
-	uint8_t buf[512];
+	uint8_t buf[2048];
 	xbox_ft_frame_t f;
 	uint32_t i;
 
-	/* Version 2: 112-byte records (32 + 20 counters). */
-	CHECK( XBOX_FT_W_COUNT == 20 );
-	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 112 && xbox_ft_frame_bytes( 0 ) == 32 );
+	/* Version 2: 212-byte records (32 + 20 counts, span_calls and 24
+	   spans); 112 bytes for a file from before the spans (20). */
+	CHECK( XBOX_FT_W_SPAN_CALLS == 20 && XBOX_FT_W_SPAN_FIRST == 21 && XBOX_FT_S_COUNT == 24 );
+	CHECK( XBOX_FT_W_COUNT == 45 );
+	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 212 && xbox_ft_frame_bytes( 0 ) == 32 );
+	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_SPAN_CALLS ) == 112 );
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", XBOX_FT_W_COUNT ) == XBOX_FT_HEADER_BYTES );
-	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 112 );
+	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 212 );
 	/* Version 1 is the same header without counters. */
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", 0 ) == XBOX_FT_HEADER_BYTES );
 	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 );
@@ -172,22 +176,26 @@ static void test_encoders( void )
 	CHECK( xbox_ft_encode_frame( buf, &f, 0 ) == XBOX_FT_FRAME_BYTES );
 	CHECK( rd32( buf ) == 7 && buf[4] == 0xDD && buf[7] == 0xAA && rd32( buf + 24 ) == 6 );
 	CHECK( buf[28] == 0x01 && buf[29] == 0x80 && buf[30] == 0 && buf[31] == 0 );
-	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 112 );
+	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 212 );
 	CHECK( rd32( buf ) == 7 && buf[28] == 0x01 && buf[29] == 0x80 );
 	CHECK( rd32( buf + 32 ) == 0x01000000u && rd32( buf + 32 + 4 * XBOX_FT_W_LM_TEXELS ) == 0x01000000u + XBOX_FT_W_LM_TEXELS );
-	CHECK( rd32( buf + 108 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
+	CHECK( rd32( buf + 208 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
 
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, 0 ) == 16 );
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_FRAMES && rd32( buf + 4 ) == 8 + 3 * 32 && rd32( buf + 8 ) == 10 && rd32( buf + 12 ) == 3 );
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, XBOX_FT_W_COUNT ) == 16 );
-	CHECK( rd32( buf + 4 ) == 8 + 3 * 112 );
+	CHECK( rd32( buf + 4 ) == 8 + 3 * 212 );
 
 	/* The COUNTERS chunk: every name, NUL-padded to 16 bytes. */
 	CHECK( xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ) == 8 + 4 + XBOX_FT_W_COUNT * 16 );
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_COUNTERS && rd32( buf + 4 ) == 4 + XBOX_FT_W_COUNT * 16 && rd32( buf + 8 ) == XBOX_FT_W_COUNT );
 	CHECK( strcmp( (const char *)buf + 12, "draws" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PB_DWORDS, "pb_dwords" ) == 0 );
-	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_COUNT - 1 ), "sprites" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SPRITES, "sprites" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SPAN_CALLS, "span_calls" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SV_GAME ), "k_sv_game" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_CLIENT_STUDIO ), "k_client_studio" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_COUNT - 1 ), "k_snd" ) == 0 );
 	for( i = 0; i < XBOX_FT_W_COUNT; i++ )
 		CHECK( xbox_ft_work_names[i] && strlen( xbox_ft_work_names[i] ) < XBOX_FT_COUNTER_NAME_BYTES && buf[12 + 16 * i + 15] == 0 );
 
@@ -202,6 +210,68 @@ static void test_encoders( void )
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_END && rd64( buf + 8 ) == 11 && rd32( buf + 16 ) == 12 );
 }
 
+/* The spans: their names, the parent table, kilocycle rounding, the
+   own-time split and the SPANS chunk. */
+static void test_spans( void )
+{
+	uint8_t buf[2048];
+	uint64_t span[XBOX_FT_S_COUNT], self[XBOX_FT_S_COUNT];
+	uint32_t i;
+
+	for( i = 0; i < XBOX_FT_S_COUNT; i++ )
+	{
+		const char *name = xbox_ft_work_names[XBOX_FT_W_SPAN_FIRST + i];
+
+		CHECK( name[0] == 'k' && name[1] == '_' );
+		/* A parent always comes first, so one pass in order sees it. */
+		CHECK( xbox_ft_span_parent[i] < (int)i );
+	}
+	/* The tree the report and the docs describe. */
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_INPUT] == -1 && xbox_ft_span_parent[XBOX_FT_S_CL_BEGIN] == -1 );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SV] == -1 && xbox_ft_span_parent[XBOX_FT_S_CL] == -1 );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SV_GAME] == XBOX_FT_S_SV );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SCR] == XBOX_FT_S_CL && xbox_ft_span_parent[XBOX_FT_S_SND] == XBOX_FT_S_CL );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_CLIENT_STUDIO] == XBOX_FT_S_R_SCENE );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_STUDIO_POINTS] == XBOX_FT_S_CLIENT_STUDIO );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SKIN_READ] == XBOX_FT_S_STUDIO_POINTS );
+
+	/* Kilocycles, rounded half up, saturating. */
+	CHECK( xbox_ft_span_kcyc( 0 ) == 0 && xbox_ft_span_kcyc( 499 ) == 0 && xbox_ft_span_kcyc( 500 ) == 1 );
+	CHECK( xbox_ft_span_kcyc( 1499 ) == 1 && xbox_ft_span_kcyc( 733333333u ) == 733333 );
+	CHECK( xbox_ft_span_kcyc( (uint64_t)1 << 50 ) == 0xFFFFFFFFu );
+
+	/* Own time: a parent minus its children; the sum of the top level. */
+	memset( span, 0, sizeof( span ));
+	span[XBOX_FT_S_SV] = 600;
+	span[XBOX_FT_S_SV_GAME] = 400;
+	span[XBOX_FT_S_SV_SEND] = 50;
+	span[XBOX_FT_S_CL] = 1000;
+	span[XBOX_FT_S_SCR] = 900;
+	span[XBOX_FT_S_R_SCENE] = 700;
+	span[XBOX_FT_S_CLIENT_STUDIO] = 300;
+	span[XBOX_FT_S_STUDIO_POINTS] = 120;
+	span[XBOX_FT_S_SKIN_READ] = 200; /* ran outside its parent too: more than it */
+	span[XBOX_FT_S_INPUT] = 7;
+	CHECK( xbox_ft_span_self( span, self ) == 600 + 1000 + 7 );
+	CHECK( self[XBOX_FT_S_SV] == 150 && self[XBOX_FT_S_SV_GAME] == 400 );
+	CHECK( self[XBOX_FT_S_CL] == 100 && self[XBOX_FT_S_SCR] == 200 && self[XBOX_FT_S_R_SCENE] == 400 );
+	CHECK( self[XBOX_FT_S_CLIENT_STUDIO] == 180 );
+	CHECK( self[XBOX_FT_S_STUDIO_POINTS] == 0 ); /* clamped, not negative */
+	CHECK( self[XBOX_FT_S_SKIN_READ] == 200 && self[XBOX_FT_S_INPUT] == 7 && self[XBOX_FT_S_SND] == 0 );
+
+	/* The SPANS chunk: { span, parent } name pairs, "" at the top. */
+	CHECK( xbox_ft_encode_spans( buf, XBOX_FT_W_COUNT ) == XBOX_FT_SPANS_CHUNK_BYTES );
+	CHECK( XBOX_FT_SPANS_CHUNK_BYTES == 8 + 4 + 24 * 32 );
+	CHECK( rd32( buf ) == XBOX_FT_CHUNK_SPANS && rd32( buf + 4 ) == 4 + 24 * 32 && rd32( buf + 8 ) == 24 );
+	CHECK( strcmp( (const char *)buf + 12, "k_input" ) == 0 && buf[12 + 16] == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 32 * XBOX_FT_S_STUDIO_POINTS, "k_studio_points" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 32 * XBOX_FT_S_STUDIO_POINTS + 16, "k_client_studio" ) == 0 );
+	/* A file whose records stop before the spans has no SPANS chunk; one
+	   cut inside them names only the ones it carries. */
+	CHECK( xbox_ft_encode_spans( buf, XBOX_FT_W_SPAN_FIRST ) == 0 && xbox_ft_encode_spans( buf, 0 ) == 0 );
+	CHECK( xbox_ft_encode_spans( buf, XBOX_FT_W_SPAN_FIRST + 3 ) == 8 + 4 + 3 * 32 && rd32( buf + 8 ) == 3 );
+}
+
 /* A recording the Python parser test knows the contents of: 1 MHz TSC
    (a tick is a microsecond), map "c1a0" loaded in 2.5 s with 6000 free
    pages before and 5500 after, then 40 frames of 20 ms (16 CPU, 3 GPU),
@@ -213,7 +283,7 @@ static void test_encoders( void )
    mode-1 file write), with the same times. */
 static int write_fixture( const char *path, uint32_t counters )
 {
-	uint8_t buf[512];
+	uint8_t buf[2048];
 	xbox_ft_frame_t f;
 	uint32_t i, j;
 	FILE *fp = fopen( path, "wb" );
@@ -289,7 +359,7 @@ static int write_fixture( const char *path, uint32_t counters )
    counters; otherwise version 1. */
 static int write_fixture_level_change( const char *path, int flagged )
 {
-	uint8_t buf[512];
+	uint8_t buf[2048];
 	xbox_ft_frame_t f;
 	uint32_t i, counters = flagged ? XBOX_FT_W_COUNT : 0;
 	FILE *fp = fopen( path, "wb" );
@@ -299,7 +369,10 @@ static int write_fixture_level_change( const char *path, int flagged )
 
 	fwrite( buf, 1, xbox_ft_encode_header( buf, 1024, 1000000u, 1000000u, 0, 0, 1, "levelchange", counters ), fp );
 	if( counters )
+	{
 		fwrite( buf, 1, xbox_ft_encode_counters( buf, counters ), fp );
+		fwrite( buf, 1, xbox_ft_encode_spans( buf, counters ), fp );
+	}
 	fwrite( buf, 1, xbox_ft_encode_map( buf, 1000000u, 2000000u, 6000, 5500, 16384, 0, "c1a0" ), fp );
 	fwrite( buf, 1, xbox_ft_encode_frames_chunk_head( buf, 0, 45, counters ), fp );
 	for( i = 0; i < 45; i++ )
@@ -352,15 +425,99 @@ static int write_fixture_level_change( const char *path, int flagged )
 	return fclose( fp ) != 0;
 }
 
+/* The spans session (tools/test_frametime_report.py, class Spans): 1 MHz
+   TSC, so a kilocycle is a millisecond. The recorder's own header,
+   COUNTERS and SPANS chunks; map "c1a0c", seq 0..49 in play, total 20 ms,
+   host 19 ms, GPU 3 ms (CPU 16 ms), span_calls 300, and spans (ms):
+     input 1, cl_begin 1,
+     sv 6 = sv_read 1 + sv_game 4 + sv_send 1,
+     cl 7 = cl_read 1 + scr 5 + snd 1,
+       scr 5 = r_scene 4 + r_end 1,
+         r_scene 4 = world 1 + client_studio 2 + 1 own,
+           client_studio 2 = studio_points 1 + 1 own
+   - top level 15, so 1 ms of CPU no span saw. Two frames differ:
+     seq 40  sv_game 10 (sv 12), host 25 ms, total 26 ms: CPU 22, still 1 unattributed;
+     seq 41  client_studio 5 with studio_points 3 (r_scene 7, scr 8, cl 10),
+             host 22 ms, total 23 ms: CPU 19, still 1 unattributed.
+   Clean END. */
+static int write_fixture_spans( const char *path )
+{
+	uint8_t buf[2048];
+	xbox_ft_frame_t f;
+	uint32_t i;
+	FILE *fp = fopen( path, "wb" );
+
+	if( !fp )
+		return 1;
+
+	fwrite( buf, 1, xbox_ft_encode_header( buf, 1024, 1000000u, 1000000u, 0, 0, 1, "spans", XBOX_FT_W_COUNT ), fp );
+	fwrite( buf, 1, xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ), fp );
+	fwrite( buf, 1, xbox_ft_encode_spans( buf, XBOX_FT_W_COUNT ), fp );
+	fwrite( buf, 1, xbox_ft_encode_map( buf, 1000000u, 2000000u, 6000, 5500, 16384, 0, "c1a0c" ), fp );
+	fwrite( buf, 1, xbox_ft_encode_frames_chunk_head( buf, 0, 50, XBOX_FT_W_COUNT ), fp );
+	for( i = 0; i < 50; i++ )
+	{
+		uint32_t *k;
+
+		memset( &f, 0, sizeof( f ));
+		f.seq = i;
+		f.total = 20000;
+		f.host = 19000;
+		f.gpu = 3000;
+		f.flags = XBOX_FT_F_ACTIVE;
+		f.work[XBOX_FT_W_STUDIO_MODELS] = 10;
+		f.work[XBOX_FT_W_SPAN_CALLS] = 300;
+		k = &f.work[XBOX_FT_W_SPAN_FIRST];
+		k[XBOX_FT_S_INPUT] = 1;
+		k[XBOX_FT_S_CL_BEGIN] = 1;
+		k[XBOX_FT_S_SV] = 6;
+		k[XBOX_FT_S_SV_READ] = 1;
+		k[XBOX_FT_S_SV_GAME] = 4;
+		k[XBOX_FT_S_SV_SEND] = 1;
+		k[XBOX_FT_S_CL] = 7;
+		k[XBOX_FT_S_CL_READ] = 1;
+		k[XBOX_FT_S_SCR] = 5;
+		k[XBOX_FT_S_R_SCENE] = 4;
+		k[XBOX_FT_S_WORLD] = 1;
+		k[XBOX_FT_S_CLIENT_STUDIO] = 2;
+		k[XBOX_FT_S_STUDIO_POINTS] = 1;
+		k[XBOX_FT_S_R_END] = 1;
+		k[XBOX_FT_S_SND] = 1;
+		if( i == 40 )
+		{
+			k[XBOX_FT_S_SV_GAME] = 10;
+			k[XBOX_FT_S_SV] = 12;
+			f.host = 25000;
+			f.total = 26000;
+		}
+		else if( i == 41 )
+		{
+			k[XBOX_FT_S_CLIENT_STUDIO] = 5;
+			k[XBOX_FT_S_STUDIO_POINTS] = 3;
+			k[XBOX_FT_S_R_SCENE] = 7;
+			k[XBOX_FT_S_SCR] = 8;
+			k[XBOX_FT_S_CL] = 10;
+			f.host = 22000;
+			f.total = 23000;
+		}
+		fwrite( buf, 1, xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ), fp );
+	}
+	fwrite( buf, 1, xbox_ft_encode_end( buf, 9000000u, 0 ), fp );
+	return fclose( fp ) != 0;
+}
+
 int main( int argc, char **argv )
 {
 	test_ring();
 	test_units();
 	test_stats();
 	test_encoders();
+	test_spans();
 
-	/* argv[1]: the version-2 fixture; argv[2]: the version-1 one. */
-	if( argc > 1 && write_fixture( argv[1], XBOX_FT_W_COUNT ))
+	/* argv[1]: the version-2 fixture, as a recorder from before the spans
+	   wrote it (the 20 counts, no SPANS chunk); argv[2]: the version-1
+	   one. */
+	if( argc > 1 && write_fixture( argv[1], XBOX_FT_W_SPAN_CALLS ))
 	{
 		fprintf( stderr, "could not write %s\n", argv[1] );
 		failures++;
@@ -380,6 +537,12 @@ int main( int argc, char **argv )
 	if( argc > 4 && write_fixture_level_change( argv[4], 0 ))
 	{
 		fprintf( stderr, "could not write %s\n", argv[4] );
+		failures++;
+	}
+	/* argv[5]: the spans session. */
+	if( argc > 5 && write_fixture_spans( argv[5] ))
+	{
+		fprintf( stderr, "could not write %s\n", argv[5] );
 		failures++;
 	}
 

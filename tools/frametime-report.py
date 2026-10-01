@@ -27,8 +27,17 @@ What the numbers mean (the recorder's header comment has the detail):
   work    (format v2) the renderer's per-frame work counters: draws,
           BEGIN/END blocks, pushbuffer dwords, texture binds, vertices by
           source, lightmap texels rebuilt, models, decals, particles...
+  spans   (recorders from 2026-10-01: the SPANS chunk) per-subsystem CPU
+          time, k_* counters in kilocycles: game DLL, delta encoding,
+          client DLL, the scene, studio models, the mixer... Each span is
+          its call's time minus the renderer's waits inside it, so the
+          top-level spans plus "unattributed" add up to cpu. Spans nest
+          (the SPANS chunk names each one's parent); "own" is a span's
+          time minus its children's.
 Recordings made in xemu time the emulator on the PC, not a Pentium III;
-the work counters are counts, the same in xemu as on the console.
+the work counters are counts, the same in xemu as on the console. The
+spans are times: in xemu they only show that they are recorded and add
+up, not what the console spends.
 
 Frames that wrote the file (flag FLUSH: every 5 s, and at each map start)
 include the write in their time. They are flagged and left out of the
@@ -61,6 +70,8 @@ HEADER_BYTES = 128
 FRAME_BYTES = 32            # the fixed part of a frame record
 COUNTER_NAME_BYTES = 16
 CHUNK_FRAMES, CHUNK_MAP, CHUNK_CALIB, CHUNK_END, CHUNK_COUNTERS = 1, 2, 3, 4, 5
+CHUNK_SPANS = 6             # span name -> parent span name (recorders from 2026-10-01)
+SPAN_CALLS = "span_calls"   # the counter of span closures in a frame (the spans' own cost)
 
 F_ACTIVE, F_MENU, F_FLUSH, F_SATURATED, F_OVERLAY = 0x1, 0x2, 0x4, 0x8, 0x10
 F_LOAD = 0x20               # the frame's Host_Frame queued a load (recorders from 2026-10-01)
@@ -118,7 +129,7 @@ def parse(data):
         "qpc_hz": qpc_hz, "tsc_open": tsc_open, "qpc_open": qpc_open, "mode": mode,
         "build": build, "frames": [], "maps": [], "calibs": [], "end": None,
         "truncated": False, "gaps": 0, "lost_frames": 0, "unknown_chunks": 0,
-        "counters": [],
+        "counters": [], "spans": [],
     }
     frames = rec["frames"]
     off = header_bytes
@@ -173,6 +184,16 @@ def parse(data):
             q = body + 4
             rec["counters"] = [data[q + i * COUNTER_NAME_BYTES:q + (i + 1) * COUNTER_NAME_BYTES]
                                .split(b"\0", 1)[0].decode("latin-1") for i in range(n)]
+        elif ctype == CHUNK_SPANS:
+            n, = struct.unpack_from("<I", data, body)
+            if clen < 4 + n * 2 * COUNTER_NAME_BYTES:
+                raise FormatError("SPANS chunk at %d: length %d for %d spans" % (off, clen, n))
+            q = body + 4
+
+            def _name(at):
+                return data[at:at + COUNTER_NAME_BYTES].split(b"\0", 1)[0].decode("latin-1")
+            rec["spans"] = [(_name(q + i * 2 * COUNTER_NAME_BYTES), _name(q + (i * 2 + 1) * COUNTER_NAME_BYTES))
+                            for i in range(n)]
         else:
             rec["unknown_chunks"] += 1
         off = body + clen
@@ -183,6 +204,13 @@ def parse(data):
     names = rec["counters"][:ncount]
     names += ["c%d" % i for i in range(len(names), ncount)]
     rec["counters"] = names
+    # Spans the records actually carry, in the chunk's order (a parent
+    # before its children); a parent the file does not carry becomes the
+    # top level.
+    have = set(names)
+    spans = [(s, p) for s, p in rec["spans"] if s in have]
+    known = set(s for s, _ in spans)
+    rec["spans"] = [(s, p if p in known else "") for s, p in spans]
     rec["tsc_hz"] = tsc_rate(rec)
     return rec
 
@@ -256,6 +284,51 @@ def frame_work(rec, fr):
     if VERTS in work_names(rec):
         w.append(sum(v for n, v in zip(rec["counters"], w) if n.startswith("v_")))
     return w
+
+
+def span_names(rec):
+    """The span counters (k_*) in the SPANS chunk's order; empty for a file
+    without one."""
+    return [s for s, _ in rec["spans"]]
+
+
+def span_children(rec):
+    """{span: [child spans]}, "" for the top level."""
+    out = {"": []}
+    for s, p in rec["spans"]:
+        out.setdefault(p, []).append(s)
+        out.setdefault(s, [])
+    return out
+
+
+def span_depth(rec):
+    parent = dict(rec["spans"])
+    out = {}
+    for s, _ in rec["spans"]:
+        d, p = 0, parent[s]
+        while p:
+            d, p = d + 1, parent.get(p, "")
+        out[s] = d
+    return out
+
+
+def span_own(rec, incl):
+    """{span: own ms} from {span: inclusive ms}: a span minus its
+    children, never below zero (a child that also ran outside its parent,
+    a skin read outside a studio draw - the recorder's overlay clamps the
+    same way, xbox_ft_span_self)."""
+    kids = span_children(rec)
+    return {s: max(0.0, incl[s] - sum(incl[c] for c in kids.get(s, []))) for s in incl}
+
+
+def frame_span_ms(rec, fr):
+    """{span: inclusive ms} for one frame."""
+    if not rec["spans"]:
+        return {}
+    k = 1e6 / rec["tsc_hz"]  # kilocycles -> ms
+    idx = {n: i for i, n in enumerate(rec["counters"])}
+    w = fr[8] if len(fr) > 8 else ()
+    return {s: (w[idx[s]] * k if idx[s] < len(w) else 0.0) for s in span_names(rec)}
 
 
 def play_frames(rec, seg):
@@ -365,6 +438,8 @@ def segment_stats(rec, seg, include_flush=False, include_level_change=False):
     flush_ms, lc_ms = [], []
     lc = level_change_frames(rec)
     names = work_names(rec)
+    snames = span_names(rec)
+    span_sum = dict.fromkeys(snames, 0.0)
     work, work_hi, work_lo = [], [], []
     for fr, (t, c, g, w, o, ov) in play_frames(rec, seg):
         flags = fr[7]
@@ -386,6 +461,9 @@ def segment_stats(rec, seg, include_flush=False, include_level_change=False):
             gpu_bound += 1
         if flags & F_OVERLAY:
             ovl.append(ov)
+        if snames:
+            for s, v in frame_span_ms(rec, fr).items():
+                span_sum[s] += v
         if names:
             fw = frame_work(rec, fr)
             work.append(fw)
@@ -439,6 +517,18 @@ def segment_stats(rec, seg, include_flush=False, include_level_change=False):
         st["gpu_hi_frames"] = len(work_hi)
         st["work_gpu_hi"] = {k: sum(v) / len(work_hi) for k, v in zip(names, zip(*work_hi))} if work_hi else None
         st["work_gpu_lo"] = {k: sum(v) / len(work_lo) for k, v in zip(names, zip(*work_lo))} if work_lo else None
+    if snames:
+        incl = {s: v / n for s, v in span_sum.items()}
+        top = sum(incl[s] for s, p in rec["spans"] if not p)
+        st["span_ms"] = incl
+        st["span_own_ms"] = span_own(rec, incl)
+        st["span_top_ms"] = top
+        # CPU no span saw: HTTP_Run, XRcon_Frame, the recorder itself.
+        # Negative only through rounding (each span is rounded to a
+        # kilocycle per frame) or a span that ran outside Host_Frame.
+        st["unattributed_ms"] = st["cpu_ms"] - top
+        if SPAN_CALLS in rec["counters"]:
+            st["span_calls"] = st["work_avg"][SPAN_CALLS]
     return st
 
 
@@ -463,6 +553,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
     names = work_names(rec)
     if not names:
         return []
+    timed = set(span_names(rec))  # the spans are times, not counts: their own table
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -476,6 +567,8 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
             work.append(frame_work(rec, fr))
     out = []
     for i, k in enumerate(names):
+        if k in timed:
+            continue
         col = [fw[i] for fw in work]
         out.append({"name": k, "avg": _avg(col), "peak": max(col) if col else None,
                     "r_cpu": pearson(col, cpu), "r_gpu": pearson(col, gpu)})
@@ -483,9 +576,10 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
 
 
 def top_frames(rec, key="gpu", n=10, include_flush=False, include_level_change=False):
-    """The n in-play frames with the most GPU wait (key 'gpu') or the
-    longest total ('total'): seconds into the session, map, the times and
-    the work counters."""
+    """The n in-play frames with the most GPU wait (key 'gpu'), the
+    longest total ('total') or the most time in one span (its name,
+    k_*): seconds into the session, map, the times, the work counters and
+    the spans (ms)."""
     start_s = _start_seconds(rec)
     names = work_names(rec)
     lc = level_change_frames(rec)
@@ -496,10 +590,17 @@ def top_frames(rec, key="gpu", n=10, include_flush=False, include_level_change=F
                 continue
             if fr[0] in lc and not include_level_change:
                 continue
-            cand.append((g if key == "gpu" else t, fr, t, c, g, seg["name"]))
+            if key == "gpu":
+                v = g
+            elif key == "total":
+                v = t
+            else:
+                v = frame_span_ms(rec, fr).get(key, 0.0)
+            cand.append((v, fr, t, c, g, seg["name"]))
     cand.sort(key=lambda r: -r[0])
     return [{"seq": fr[0], "t": start_s[fr[0]], "map": name, "total": t, "cpu": c, "gpu": g,
-             "work": dict(zip(names, frame_work(rec, fr))) if names else {}}
+             "work": dict(zip(names, frame_work(rec, fr))) if names else {},
+             "spans": frame_span_ms(rec, fr)}
             for _, fr, t, c, g, name in cand[:n]]
 
 
@@ -521,7 +622,7 @@ def session_stats(rec, rows, include_flush=False, include_level_change=False):
         "lost": max(rec["lost_frames"], rec["end"]["lost"] if rec["end"] else 0),
         "clean_end": rec["end"] is not None, "truncated": rec["truncated"],
         "tsc_mhz": rec["tsc_hz"] / 1e6, "build": rec["build"],
-        "version": rec["version"], "counters": work_names(rec),
+        "version": rec["version"], "counters": work_names(rec), "spans": rec["spans"],
         "flush_frames": sum(r.get("flush_frames", 0) for r in rows),
         "flush_included": include_flush,
         "level_change": level_change_list(rec),
@@ -667,7 +768,65 @@ def summary_text(rec, rows, sess):
             lines.append("%-18s " % r["map"][:18] + " ".join(cells))
     elif sess.get("version") == 1:
         lines.append("version-1 recording: no work counters")
+    lines.extend(spans_text(rec, rows))
     return "\n".join(lines)
+
+
+# Spans the "top frames" tables rank by, when the file has them.
+SPAN_TOP_KEYS = ["k_sv_game", "k_client_studio", "k_studio_points"]
+
+
+def span_rows(rec, rows):
+    """The spans table: one row per span in tree order (with its depth),
+    then CPU, the top-level sum and the unattributed rest; for every map
+    with frames in play, the inclusive ms, the own ms and the % of CPU."""
+    maps = [r for r in rows if r.get("frames") and "span_ms" in r]
+    if not maps:
+        return [], []
+    depth = span_depth(rec)
+    out = []
+    for s in span_names(rec):
+        out.append({"name": s, "depth": depth[s],
+                    "cells": [(r["span_ms"][s], r["span_own_ms"][s],
+                               100.0 * r["span_ms"][s] / r["cpu_ms"] if r["cpu_ms"] else 0.0) for r in maps]})
+    out.append({"name": "unattributed", "depth": 0, "derived": True,
+                "cells": [(r["unattributed_ms"], r["unattributed_ms"],
+                           100.0 * r["unattributed_ms"] / r["cpu_ms"] if r["cpu_ms"] else 0.0) for r in maps]})
+    out.append({"name": "cpu", "depth": 0, "derived": True,
+                "cells": [(r["cpu_ms"], None, 100.0) for r in maps]})
+    return maps, out
+
+
+def spans_text(rec, rows):
+    maps, table = span_rows(rec, rows)
+    if not maps:
+        return []
+    lines = ["", "CPU spans, ms per in-play frame: inclusive / own (a span minus its children); "
+             "top-level spans + unattributed = cpu. Times: only the console's are the console's."]
+    lines.append("%-22s " % "span" + " ".join("%17s" % r["map"][:17] for r in maps))
+    for row in table:
+        label = ("  " * row["depth"] + row["name"].replace("k_", "", 1))[:22]
+        cells = []
+        for incl, own, pct in row["cells"]:
+            if own is None:
+                cells.append("%17s" % ("%.2f" % incl))
+            else:
+                cells.append("%17s" % ("%.2f/%.2f %3.0f%%" % (incl, own, pct)))
+        lines.append("%-22s " % label + " ".join(cells))
+    calls = [r.get("span_calls") for r in maps]
+    if any(c is not None for c in calls):
+        lines.append("%-22s " % "span calls/frame" + " ".join("%17s" % fmt(c, 0) for c in calls))
+    for key in SPAN_TOP_KEYS:
+        if key not in span_names(rec):
+            continue
+        top = top_frames(rec, key, 5)
+        if not top or not top[0]["spans"].get(key):
+            continue
+        lines.append("")
+        lines.append("top frames by %s (ms): t s, map, total, cpu, %s" % (key, key))
+        for r in top:
+            lines.append("%8.1f  %-12s %7.1f %7.1f %7.2f" % (r["t"], r["map"][:12], r["total"], r["cpu"], r["spans"][key]))
+    return lines
 
 
 def short(v):
@@ -803,6 +962,7 @@ __BANNER__
     <tbody id="rows"></tbody>
   </table></div>
 </section>
+__SPANSECTION__
 <section class="panel">
   <h2>Level changes and stalls</h2>
   __LCSECTION__
@@ -931,6 +1091,64 @@ const WT=__WORKTABLE__;const CORR=__CORR__;const TOPF=__TOP__;
 """
 
 
+def spans_section_html(rec, rows, source="xbox", include_flush=False, include_level_change=False):
+    """The CPU-span tables, rendered here (no script). Empty for a file
+    without spans."""
+    maps, table = span_rows(rec, rows)
+    if not maps:
+        return ""
+    esc = html.escape
+    caveat = (" <b>Recorded in xemu:</b> these are the emulator's times on a PC. They show that the spans are "
+              "recorded and add up, not what the Pentium III spends - that needs a recording on the console."
+              if source == "xemu" else "")
+    parts = ['<section class="panel" id="spans">', '<h2>CPU by subsystem</h2>',
+             '<p class="lede" style="font-size:13.5px;margin-bottom:10px">Milliseconds per in-play frame, the same '
+             'frames as the per-map table. Each span is the time inside one call (<code>SV_Physics</code>, '
+             '<code>SCR_UpdateScreen</code>, the client\'s <code>StudioDrawModel</code>...) minus the renderer\'s '
+             'GPU/vblank/swap waits inside it, so it is CPU work. Spans nest, shown by indentation: <b>incl</b> '
+             'includes the spans under it, <b>own</b> is what is left without them, <b>%%</b> is incl as a share '
+             'of the frame\'s CPU. The top-level spans cover every call <code>Host_Frame</code> makes; '
+             '<b>unattributed</b> is CPU that no span saw. Where each span is measured: '
+             '<code>docs/r3d/frametime-recorder.md</code>.%s</p>' % caveat,
+             '<div class="table-box"><table class="small"><thead><tr><th>Span</th>']
+    for r in maps:
+        parts.append('<th colspan="3">%s</th>' % esc(r["map"]))
+    parts.append("</tr><tr><th></th>" + "<th>incl</th><th>own</th><th>%</th>" * len(maps) + "</tr></thead><tbody>")
+    for row in table:
+        label = esc(row["name"].replace("k_", "", 1))
+        style = "padding-left:%dpx" % (6 + 16 * row["depth"])
+        if row.get("derived"):
+            label = "<b>%s</b>" % label
+        parts.append('<tr><td style="%s;text-align:left">%s</td>' % (style, label))
+        for incl, own, pct in row["cells"]:
+            parts.append("<td>%.2f</td><td>%s</td><td>%.0f%%</td>" % (incl, "" if own is None else "%.2f" % own, pct))
+        parts.append("</tr>")
+    calls = [r.get("span_calls") for r in maps]
+    if any(c is not None for c in calls):
+        parts.append('<tr><td style="text-align:left">span calls / frame</td>' +
+                     "".join('<td colspan="3">%s</td>' % fmt(c, 0) for c in calls) + "</tr>")
+    parts.append("</tbody></table></div>")
+    for key in SPAN_TOP_KEYS:
+        if key not in span_names(rec):
+            continue
+        top = top_frames(rec, key, 10, include_flush, include_level_change)
+        if not top or not top[0]["spans"].get(key):
+            continue
+        parts.append('<h3 class="sub">The ten frames with the most %s</h3>' % esc(key.replace("k_", "", 1)))
+        parts.append('<div class="table-box"><table class="small"><thead><tr><th>s</th><th>Map</th><th>Total ms</th>'
+                     '<th>CPU ms</th><th>%s ms</th><th>sv ms</th><th>scr ms</th><th>Models</th></tr></thead><tbody>'
+                     % esc(key.replace("k_", "", 1)))
+        for r in top:
+            sp = r["spans"]
+            parts.append("<tr><td>%.1f</td><td>%s</td><td>%.1f</td><td>%.1f</td><td>%.2f</td><td>%s</td><td>%s</td>"
+                         "<td>%s</td></tr>" % (r["t"], esc(r["map"]), r["total"], r["cpu"], sp.get(key, 0.0),
+                                               fmt(sp.get("k_sv"), 2), fmt(sp.get("k_scr"), 2),
+                                               fmt(r["work"].get("studio_models"), 0)))
+        parts.append("</tbody></table></div>")
+    parts.append("</section>")
+    return "\n".join(parts)
+
+
 def lc_section_html(sess):
     """The level-change and stall tables, rendered here (no script)."""
     esc = html.escape
@@ -977,7 +1195,7 @@ def render_html(rec, rows, sess, files, title=None, source="xbox", lede=None, in
                   'console\'s clock, and its GPU wait says nothing about the real GPU. The <b>work counters</b> '
                   '(draws, vertices, pushbuffer, texture binds, lightmap texels...) are counts, not times: they '
                   'are the same as on the console, so they can drive an optimisation decision from an xemu run; '
-                  'the times and their correlation with the counters need the console.</div>')
+                  'the times, the CPU spans and their correlation with the counters need the console.</div>')
         src = "xemu (emulator timings)"
     else:
         banner = ""
@@ -1018,6 +1236,7 @@ def render_html(rec, rows, sess, files, title=None, source="xbox", lede=None, in
         "__CORR__": json.dumps(work_correlation(rec, include_flush, include_level_change)),
         "__TOP__": json.dumps(top_frames(rec, "gpu", 10, include_flush, include_level_change)),
         "__LCSECTION__": lc_section_html(sess),
+        "__SPANSECTION__": spans_section_html(rec, rows, source, include_flush, include_level_change),
     }.items():
         out = out.replace(k, v)
     return out

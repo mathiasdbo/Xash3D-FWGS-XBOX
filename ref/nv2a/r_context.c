@@ -6402,23 +6402,29 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   menu: V_PostRender, cl_view.c:529-573) and would draw over it. */
 	if( nv2a_frame_open && nv2a_map_ready )
 	{
+		xbox_ft_span_t world_span;
+
 		/* X9-X step 8: lightstyles and dynamic lights, written into the
 		   atlas BEFORE this frame's first draw that samples it (the world,
 		   then brush entities below). Safe against the GPU: R_EndFrame
 		   and R_BeginFrame both spun on pb_busy(), so every draw of the
 		   previous frame has retired, and only 2D (no atlas) has been
-		   pushed since R_BeginFrame. */
-		nv2a_update_dynamic_lightmaps();
+		   pushed since R_BeginFrame. M2 span k_lm (#141): the rebuild
+		   and its brush-entity gather. */
+		XBOX_FT_SPAN( XBOX_FT_S_LM, nv2a_update_dynamic_lightmaps());
 		/* X9-X item 14 step 9: this frame's animation time (and, on a new
 		   map's first frame, its tables), for the world and the brush
 		   entities drawn after it. */
 		nv2a_texanim_begin_frame( gp_cl->models[1] == nv2a_map_owner ? gp_cl->models[1] : NULL );
+		/* M2 span k_world (#141): sky, world and world decals. */
+		xbox_ft_span_begin( &world_span );
 		/* X9-X item 14 step 10: the skybox, before the world (#137). */
 		nv2a_draw_sky();
 		nv2a_draw_map_geometry(); /* ends with the world's opaque water (r_warp.c) */
 		/* X9-X item 14 step 12: R_DrawWorld's DrawDecalsBatch, after the
 		   texture chains (gl_rsurf.c:3707-3711). */
 		R_DecalDrawWorld();
+		xbox_ft_span_end( &world_span, XBOX_FT_S_WORLD );
 		nv2a_world_drawn_this_frame = true;
 	}
 
@@ -6460,11 +6466,11 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		   CL_DrawEFX (cl_efx.c:2079) frees dead beams and calls back
 		   CL_DrawBeams (r_effects.c). */
 		if( !FBitSet( rvp->flags, RF_ONLY_CLIENTDRAW ))
-			gEngfuncs.CL_DrawEFX( rvp_frametime, false );
+			XBOX_FT_SPAN( XBOX_FT_S_EFX, gEngfuncs.CL_DrawEFX( rvp_frametime, false ));
 
-		gEngfuncs.pfnDrawNormalTriangles();
+		XBOX_FT_SPAN( XBOX_FT_S_TRI_HOOKS, gEngfuncs.pfnDrawNormalTriangles());
 		nv2a_draw_trans_entities( world );
-		gEngfuncs.pfnDrawTransparentTriangles();
+		XBOX_FT_SPAN( XBOX_FT_S_TRI_HOOKS, gEngfuncs.pfnDrawTransparentTriangles());
 
 		/* X9-X step 7: translucent beams, particles and tracers
 		   (gl_rmain.c:919-924), after the client's own translucent
@@ -6473,7 +6479,7 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		if( !FBitSet( rvp->flags, RF_ONLY_CLIENTDRAW ))
 		{
 			R_WarpAllowFog( false );
-			gEngfuncs.CL_DrawEFX( rvp_frametime, true );
+			XBOX_FT_SPAN( XBOX_FT_S_EFX, gEngfuncs.CL_DrawEFX( rvp_frametime, true ));
 			R_WarpAllowFog( true );
 		}
 

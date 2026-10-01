@@ -17,6 +17,11 @@ GNU General Public License for more details.
 #include "server.h"
 #include "net_encode.h"
 #include "platform/platform.h"
+#if XASH_XBOX && !XASH_DEDICATED
+#include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt
+#endif
 
 // server cvars
 CVAR_DEFINE_AUTO( sv_lan, "0", 0, "server is a lan server ( no heartbeat, no authentication, no non-class C addresses, 9999.0 rate, etc." );
@@ -605,7 +610,7 @@ static qboolean SV_RunGameFrame( void )
 		{
 			sv.frametime = fps;
 
-			SV_Physics();
+			XBOX_FT_SPAN( XBOX_FT_S_SV_GAME, SV_Physics());
 
 			sv.time_residual -= fps;
 			sv.time += fps;
@@ -616,7 +621,7 @@ static qboolean SV_RunGameFrame( void )
 	}
 	else
 	{
-		SV_Physics();
+		XBOX_FT_SPAN( XBOX_FT_S_SV_GAME, SV_Physics());
 		sv.time += sv.frametime;
 		return true;
 	}
@@ -684,7 +689,7 @@ void Host_ServerFrame( void )
 	SV_CheckCmdTimes ();
 
 	// read packets from clients
-	SV_ReadPackets ();
+	XBOX_FT_SPAN( XBOX_FT_S_SV_READ, SV_ReadPackets ());
 
 	// refresh physic movevars on the client side
 	SV_UpdateMovevars ( false );
@@ -699,7 +704,7 @@ void Host_ServerFrame( void )
 	if( !SV_RunGameFrame ()) return;
 
 	// send messages back to the clients that had packets read this frame
-	SV_SendClientMessages ();
+	XBOX_FT_SPAN( XBOX_FT_S_SV_SEND, SV_SendClientMessages ());
 
 	// clear edict flags for next frame
 	SV_PrepWorldFrame ();

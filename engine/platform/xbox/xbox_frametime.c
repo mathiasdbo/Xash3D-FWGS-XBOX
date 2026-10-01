@@ -74,19 +74,28 @@ seconds. tools/frametime-report.py fetches and reads it.
 static CVAR_DEFINE_AUTO( host_frametime_analysis, "0", FCVAR_FILTERABLE,
 	"frame-time analysis: 0 off, 1 record to frametime/ft_NNN.bin, 2 record and draw the overlay" );
 
+/* The per-subsystem CPU spans (M2): on by default whenever the recorder
+   is, so a recording has them; 0 measures what they cost (the same view
+   with and without - each closed span is two rdtsc, counted per frame in
+   span_calls). Read at each Host_Frame start. */
+static CVAR_DEFINE_AUTO( host_frametime_spans, "1", FCVAR_FILTERABLE,
+	"with host_frametime_analysis on: 1 time the per-subsystem CPU spans (k_* counters), 0 leave them at zero" );
+
 xbox_ft_waits_t xbox_ft_waits;
 xbox_ft_work_t xbox_ft_work;
+xbox_ft_spans_t xbox_ft_spans;
 
-/* 1024 frames x 112 bytes (32 + 20 work counters, format v2) = 112 KiB
-   ring, plus the per-map histogram (4 KiB) and a 14 KiB encode buffer:
-   ~130 KiB, allocated when recording starts and freed when it stops. At
-   72 fps (fps_max) the ring holds 14 s; a flush every 5 s or at half full
-   keeps it from overrunning unless a single flush stalls for 7 s. */
+/* 1024 frames x 212 bytes (32 + 45 work counters: 20 counts, span_calls
+   and 24 spans) = 212 KiB ring, plus the per-map histogram (4 KiB) and a
+   26.5 KiB encode buffer: ~243 KiB, allocated when recording starts and
+   freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush
+   every 5 s or at half full keeps it from overrunning unless a single
+   flush stalls for 7 s. */
 #define XBOX_FT_RING_FRAMES     1024u
 #define XBOX_FT_FLUSH_SECONDS   5u
 #define XBOX_FT_ENCODE_FRAMES   128u
 #define XBOX_FT_WARMUP_FRAMES   30u     /* left out of a map's statistics, as item 12's report did */
-#define XBOX_FT_MAX_FILE_BYTES  ( 64u * 1024u * 1024u )  /* ~9 hours at 60 fps */
+#define XBOX_FT_MAX_FILE_BYTES  ( 64u * 1024u * 1024u )  /* ~1.4 hours at 60 fps (12.4 KiB/s) */
 #define XBOX_FT_NOMINAL_TSC_HZ  733333333u /* until calibrated: the retail Pentium III clock */
 
 /* The overlay. The graph shows the last XBOX_FT_GRAPH_FRAMES frames as
@@ -102,7 +111,8 @@ xbox_ft_work_t xbox_ft_work;
 #define XBOX_FT_GRAPH_MS        50.0f   /* the graph's full height */
 #define XBOX_FT_NOW_FRAMES      30      /* the "now" line and the counters average the last half second */
 #define XBOX_FT_TEXT_FRAMES     15      /* the text is reformatted 4 times a second, not every frame */
-#define XBOX_FT_TEXT_LINES      6
+#define XBOX_FT_TEXT_LINES      7
+#define XBOX_FT_SPAN_LINE_TOP   6       /* the spans line: the six largest own times, then what no span saw */
 /* A load is credited to a LOAD-flagged frame at most this many frames
    before the first loading frame: the changelevel frame, then the one
    frame that still starts active (the client has not seen the reconnect
@@ -265,6 +275,7 @@ static void FT_Stop( void )
 	}
 
 	xbox_ft_waits.active = 0;
+	xbox_ft_spans.on = 0;
 	Z_Free( ft.block );
 	memset( &ft, 0, sizeof( ft ));
 }
@@ -273,6 +284,7 @@ static qboolean FT_Start( int mode )
 {
 	uint8_t header[XBOX_FT_HEADER_BYTES];
 	uint8_t counters[XBOX_FT_CHUNK_BYTES + 4 + XBOX_FT_W_COUNT * XBOX_FT_COUNTER_NAME_BYTES];
+	uint8_t spans[XBOX_FT_SPANS_CHUNK_BYTES];
 	char build[64];
 	size_t ring_bytes = XBOX_FT_RING_FRAMES * sizeof( xbox_ft_frame_t );
 	uint32_t total_pages;
@@ -319,7 +331,8 @@ static qboolean FT_Start( int mode )
 		(unsigned long)CURRENT_XBE_HEADER->TimeDateStamp );
 	xbox_ft_encode_header( header, XBOX_FT_RING_FRAMES, ft.tsc_hz, ft.qpc_hz, ft.tsc_open, ft.qpc_open, (uint32_t)mode, build, XBOX_FT_W_COUNT );
 	if( !FT_Write( header, sizeof( header ))
-		|| !FT_Write( counters, xbox_ft_encode_counters( counters, XBOX_FT_W_COUNT )))
+		|| !FT_Write( counters, xbox_ft_encode_counters( counters, XBOX_FT_W_COUNT ))
+		|| !FT_Write( spans, xbox_ft_encode_spans( spans, XBOX_FT_W_COUNT )))
 	{
 		FT_Stop();
 		return false;
@@ -387,7 +400,14 @@ static void FT_CloseFrame( uint64_t now )
 	f->gpu = xbox_ft_saturate( xbox_ft_waits.gpu, &f->flags );
 	f->vblank = xbox_ft_saturate( xbox_ft_waits.vblank, &f->flags );
 	f->swap = xbox_ft_saturate( xbox_ft_waits.swap, &f->flags );
-	memcpy( f->work, xbox_ft_work.c, sizeof( f->work ));
+	memcpy( f->work, xbox_ft_work.c, sizeof( xbox_ft_work.c ));
+	f->work[XBOX_FT_W_SPAN_CALLS] = xbox_ft_spans.calls;
+	{
+		int s;
+
+		for( s = 0; s < XBOX_FT_S_COUNT; s++ )
+			f->work[XBOX_FT_W_SPAN_FIRST + s] = xbox_ft_span_kcyc( xbox_ft_spans.t[s] );
+	}
 
 	xbox_ft_ring_push( &ft.ring, f );
 
@@ -409,6 +429,7 @@ static void FT_CloseFrame( uint64_t now )
 void Xbox_FrameTime_Init( void )
 {
 	Cvar_RegisterVariable( &host_frametime_analysis );
+	Cvar_RegisterVariable( &host_frametime_spans );
 	/* r3d_membench (#142) rides on this init rather than a call site of
 	   its own in host.c: the same platform, the same lifetime. */
 	Xbox_MemBench_Init();
@@ -464,6 +485,10 @@ void Xbox_FrameTime_BeginFrame( void )
 
 	xbox_ft_waits.gpu = xbox_ft_waits.vblank = xbox_ft_waits.swap = 0;
 	memset( &xbox_ft_work, 0, sizeof( xbox_ft_work ));
+	memset( xbox_ft_spans.t, 0, sizeof( xbox_ft_spans.t ));
+	xbox_ft_spans.calls = 0;
+	/* Only here, between frames, so no span is open when it changes. */
+	xbox_ft_spans.on = host_frametime_spans.value != 0.0f;
 	ft.frame_start = now;
 	ft.frame_end = now;
 	ft.in_frame = true;
@@ -516,6 +541,61 @@ static const char *FT_Count( char *buf, size_t size, uint32_t v )
 	else
 		Q_snprintf( buf, size, "%u.%02uM", v / 1000000u, ( v % 1000000u ) / 10000u );
 	return buf;
+}
+
+/* The spans line: the XBOX_FT_SPAN_LINE_TOP spans with the most time of
+   their own (a span's time minus its children's) over the same half
+   second, in ms, largest first, then `none`: CPU no span saw. Own times,
+   not inclusive ones, so the line adds up: the shown values plus the
+   rest of the spans plus `none` is the `now` line's cpu. Short labels -
+   each glyph is a quad. */
+static void FT_FormatSpans( const uint64_t *work, uint64_t cpu_ticks, uint32_t n )
+{
+	static const char *const label[] =
+	{
+		"input", "clbeg", "sv", "svread", "game", "send",
+		"cl", "cldll", "clread", "pred", "emit",
+		"scr", "scene", "lm", "world", "cstud", "pts", "skin",
+		"efx", "tri", "hud", "sndx", "rend", "snd",
+	};
+	/* A span added without a label is a compile error, not a NULL. */
+	STATIC_ASSERT( ARRAYSIZE( label ) == XBOX_FT_S_COUNT, "one overlay label per span" );
+	uint64_t span[XBOX_FT_S_COUNT], self[XBOX_FT_S_COUNT], top;
+	char *out = ft.text[XBOX_FT_TEXT_LINES - 1];
+	const size_t size = sizeof( ft.text[0] );
+	size_t len;
+	uint32_t i, k;
+
+	for( i = 0; i < XBOX_FT_S_COUNT; i++ )
+		span[i] = work[XBOX_FT_W_SPAN_FIRST + i];
+	top = xbox_ft_span_self( span, self );
+	if( !top )
+	{
+		Q_snprintf( out, size, "spans off (host_frametime_spans 0)" );
+		return;
+	}
+
+	/* Q_snprintf returns -1 when it truncates (crtlib.c Q_vsnprintf), so
+	   the length is re-read rather than summed. */
+	Q_strncpy( out, "self ms", size );
+	len = Q_strlen( out );
+	for( k = 0; k < XBOX_FT_SPAN_LINE_TOP && len + 1 < size; k++ )
+	{
+		uint32_t best = XBOX_FT_S_COUNT;
+
+		for( i = 0; i < XBOX_FT_S_COUNT; i++ )
+		{
+			if( self[i] && ( best == XBOX_FT_S_COUNT || self[i] > self[best] ))
+				best = i;
+		}
+		if( best == XBOX_FT_S_COUNT )
+			break;
+		Q_snprintf( out + len, size - len, " %s %.1f", label[best], FT_Ms( self[best] * 1000u ) / n );
+		len = Q_strlen( out );
+		self[best] = 0;
+	}
+	if( len + 1 < size )
+		Q_snprintf( out + len, size - len, "  none %.1f", cpu_ticks > top * 1000u ? FT_Ms( cpu_ticks - top * 1000u ) / n : 0.0f );
 }
 
 /* The overlay's text, formatted into ft.text every XBOX_FT_TEXT_FRAMES
@@ -598,6 +678,8 @@ static void FT_FormatText( void )
 
 		Q_snprintf( ft.text[5], sizeof( ft.text[5] ), "%s  %s  overlay %.2f ms", ft.map_name, file ? file + 1 : ft.filename, FT_Ms( overlay ) / n );
 	}
+
+	FT_FormatSpans( work, cpu, n );
 }
 
 /* The overlay: the frame-time graph (CPU, GPU wait, and the rest of the

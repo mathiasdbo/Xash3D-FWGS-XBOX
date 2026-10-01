@@ -58,6 +58,13 @@ still write it when given zero counters (the tests' v1 fixture).
               record, in order (xbox_ft_work_names below). A reader
               finds counters by name, so a later version may append or
               reorder them without breaking it.
+    6 SPANS   (2026-10-01, right after COUNTERS) u32 count, then count x
+              { char[16] span, char[16] parent }, NUL-padded: which work
+              counters are CPU-time spans (k_*, kilocycles, XBOX_FT_S_*
+              below) and the span each one is nested in ("" for a span
+              directly inside Host_Frame). A reader without it skips the
+              chunk by its length and sees the spans as plain counters,
+              so the version stays 2.
   frame record, XBOX_FT_FRAME_BYTES (32) + 4 x counters:
     0  u32 sequence number (consecutive; a gap is frames lost)
     4  u32 total ticks, Host_Frame start to the next Host_Frame start
@@ -69,7 +76,9 @@ still write it when given zero counters (the tests' v1 fixture).
     28 u16 flags (XBOX_FT_F_*), u16 reserved
     32 u32 work counters[count] (v2): this frame's renderer work, see
        XBOX_FT_W_* - counts of things submitted, so unlike the times
-       they are the same in xemu and on the console
+       they are the same in xemu and on the console - and, from
+       2026-10-01, the per-subsystem CPU spans (k_*, kilocycles: TSC
+       ticks / 1000, rounded), which ARE times (hardware only)
   Every tick count saturates at 0xFFFFFFFF (5.8 s at 733 MHz) and sets
   XBOX_FT_F_SATURATED. CPU = host - gpu - vblank - swap; the rest of
   total (total - host) is the time between host frames: the engine's
@@ -98,6 +107,7 @@ still write it when given zero counters (the tests' v1 fixture).
 #define XBOX_FT_CHUNK_CALIB    3u
 #define XBOX_FT_CHUNK_END      4u
 #define XBOX_FT_CHUNK_COUNTERS 5u
+#define XBOX_FT_CHUNK_SPANS    6u
 
 /* Per-frame work counters (v2). ref/nv2a adds to them where the work is
    submitted (xbox_frametime.h's xbox_ft_work); the recorder zeroes them
@@ -127,12 +137,71 @@ enum
 	XBOX_FT_W_PARTICLES,     /* particles drawn (#161) */
 	XBOX_FT_W_BEAMS,         /* beams drawn (#161) */
 	XBOX_FT_W_SPRITES,       /* sprite models drawn */
-	XBOX_FT_W_COUNT
+	XBOX_FT_W_SPAN_CALLS,    /* span closures timed this frame (the spans' own cost: two rdtsc each) */
+	XBOX_FT_W_SPAN_FIRST     /* then the XBOX_FT_S_COUNT spans below, kilocycles each */
 };
 
+/* Per-subsystem CPU spans (M2 of docs/r3d/reports/perf-research/
+   xbox-cpu-bound-o2.md). Each is the TSC time spent inside one call
+   site, accumulated over the frame, MINUS the GPU/vblank/swap waits that
+   happened inside it (xbox_ft_waits) - so a span is CPU work, and the
+   spans add up against the frame's CPU, not its host time. Stored in the
+   frame record as work counter XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_*, in
+   kilocycles. Spans nest: xbox_ft_span_parent says in which one (-1 =
+   directly inside Host_Frame); a parent's time includes its children's.
+   The top-level spans cover every call Host_Frame makes, so CPU minus
+   their sum is what no span saw (HTTP_Run, XRcon_Frame, the recorder).
+   Where each is measured: docs/r3d/frametime-recorder.md, "Spans". */
+enum
+{
+	XBOX_FT_S_INPUT = 0,     /* Host_InputFrame */
+	XBOX_FT_S_CL_BEGIN,      /* Host_ClientBegin: Cbuf_Execute, CL_SendCommand (client.dll CL_CreateMove, prediction) */
+	XBOX_FT_S_SV,            /* Host_ServerFrame */
+	XBOX_FT_S_SV_READ,       /*   SV_ReadPackets: client usercmds - player movement, PlayerPreThink/PostThink */
+	XBOX_FT_S_SV_GAME,       /*   SV_Physics (SV_RunGameFrame): game DLL think, physics, AI */
+	XBOX_FT_S_SV_SEND,       /*   SV_SendClientMessages: entity packing, delta encoding */
+	XBOX_FT_S_CL,            /* Host_ClientFrame */
+	XBOX_FT_S_CL_DLL,        /*   clgame.dllFuncs.pfnFrame */
+	XBOX_FT_S_CL_READ,       /*   CL_ReadPackets */
+	XBOX_FT_S_CL_PRED,       /*   CL_RedoPrediction */
+	XBOX_FT_S_CL_EMIT,       /*   CL_EmitEntities */
+	XBOX_FT_S_SCR,           /*   SCR_UpdateScreen: all rendering */
+	XBOX_FT_S_R_SCENE,       /*     GL_RenderFrame (V_RenderView): the 3D scene */
+	XBOX_FT_S_LM,            /*       ref/nv2a lightstyle/dlight lightmap rebuild */
+	XBOX_FT_S_WORLD,         /*       ref/nv2a sky, world and world decals */
+	XBOX_FT_S_CLIENT_STUDIO, /*       R_StudioDrawModelInternal: the client's StudioDraw* incl. bone setup */
+	XBOX_FT_S_STUDIO_POINTS, /*         R_StudioDrawPoints: our CPU skinning, lighting, TriAPI emit */
+	XBOX_FT_S_SKIN_READ,     /*           a studio skin's lazy disk read and decode */
+	XBOX_FT_S_EFX,           /*       CL_DrawEFX, solid and translucent: beams, particles, tracers */
+	XBOX_FT_S_TRI_HOOKS,     /*       pfnDrawNormalTriangles + pfnDrawTransparentTriangles (client.dll) */
+	XBOX_FT_S_HUD,           /*     CL_DrawHUD( CL_ACTIVE ): the client's HUD_Redraw */
+	XBOX_FT_S_SND_EXTRA,     /*     S_ExtraUpdate in V_PostRender: a second mixer pass */
+	XBOX_FT_S_R_END,         /*     R_EndFrame: 2D flush, pushbuffer kick, present */
+	XBOX_FT_S_SND,           /*   SND_UpdateSound: the mixer */
+	XBOX_FT_S_COUNT
+};
+
+#define XBOX_FT_W_COUNT ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_COUNT )
+
 /* The COUNTERS chunk's names, indexed by XBOX_FT_W_*; each fits in
-   XBOX_FT_COUNTER_NAME_BYTES with its NUL. */
+   XBOX_FT_COUNTER_NAME_BYTES with its NUL. The spans are named k_* (the
+   perf report's `sv_game_kcyc` is `k_sv_game`; `client_studio_kcyc`
+   would not fit in 15 characters). */
 extern const char *const xbox_ft_work_names[XBOX_FT_W_COUNT];
+
+/* Each span's parent span (XBOX_FT_S_*), -1 for one directly inside
+   Host_Frame. Every parent comes before its children. */
+extern const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT];
+
+/* Rounds a span's accumulated ticks to the frame record's kilocycles
+   (saturating: 2^32 kilocycles is ~1.6 hours at 733 MHz). */
+uint32_t xbox_ft_span_kcyc( uint64_t ticks );
+/* From span kilocycles indexed by XBOX_FT_S_* (one frame's, or a sum
+   over frames): each span's own time into `self` - its kilocycles minus
+   its children's, 0 if they add up to more (a child that also ran
+   outside its parent, e.g. a skin read outside a studio draw) - and
+   returns the sum of the top-level spans. */
+uint64_t xbox_ft_span_self( const uint64_t *span, uint64_t *self );
 
 /* Frame flags. */
 #define XBOX_FT_F_ACTIVE     0x0001u /* in game: cls.state == ca_active, signon complete */
@@ -245,6 +314,11 @@ size_t xbox_ft_frame_bytes( uint32_t counters );
 size_t xbox_ft_encode_header( uint8_t *out, uint32_t ring_frames, uint64_t tsc_hz, uint64_t qpc_hz, uint64_t tsc_open, uint64_t qpc_open, uint32_t mode, const char *build, uint32_t counters );
 /* The COUNTERS chunk: chunk head, count, then xbox_ft_work_names[0..counters). */
 size_t xbox_ft_encode_counters( uint8_t *out, uint32_t counters );
+/* The SPANS chunk, for the spans among the first `counters` counters:
+   nothing (0 bytes) when `counters` stops before the first span. At most
+   XBOX_FT_SPANS_CHUNK_BYTES. */
+#define XBOX_FT_SPANS_CHUNK_BYTES ( XBOX_FT_CHUNK_BYTES + 4u + XBOX_FT_S_COUNT * 2u * XBOX_FT_COUNTER_NAME_BYTES )
+size_t xbox_ft_encode_spans( uint8_t *out, uint32_t counters );
 size_t xbox_ft_encode_frames_chunk_head( uint8_t *out, uint32_t first_seq, uint32_t count, uint32_t counters );
 size_t xbox_ft_encode_frame( uint8_t *out, const xbox_ft_frame_t *frame, uint32_t counters );
 size_t xbox_ft_encode_map( uint8_t *out, uint64_t tsc, uint64_t load_ticks, uint32_t free_before, uint32_t free_after, uint32_t total_pages, uint32_t flags, const char *name );
