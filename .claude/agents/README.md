@@ -37,6 +37,11 @@ sense inside that workflow's own control flow, though each carries a
 sensible default `model`/`effort` in its frontmatter in case it's ever
 invoked directly.
 
+`perf-research-planner` is the closing stage of
+`.claude/workflows/perf-research.js` (`docs/r3d/perf-research.md`), a read-only
+performance research workflow that fans out over the specialists above, has
+`reference-renderer-specialist` referee their claims, and writes one report.
+
 `.claude/workflows/fast-loop.js` (the reduced loop, `docs/r3d/fast-loop.md`)
 reuses `loop-implementer` for its one thinking stage (research and
 implementation in one call) and runs every other stage through
