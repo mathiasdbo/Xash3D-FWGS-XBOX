@@ -9,7 +9,8 @@
     python tools/frametime-report.py summary recordings/ft_000.bin
     # 3. the HTML report
     python tools/frametime-report.py report recordings/ft_000.bin -o ft_000.html
-    #    (--include-flush keeps the frames that wrote the file in the statistics)
+    #    (--include-flush keeps the frames that wrote the file in the statistics;
+    #     --include-level-change keeps the frames whose time is a level load)
 
 The file is written by engine/platform/xbox/xbox_frametime.c; its byte
 layout is documented in engine/platform/xbox/xbox_frametime_util.h (and
@@ -32,6 +33,18 @@ the work counters are counts, the same in xemu as on the console.
 Frames that wrote the file (flag FLUSH: every 5 s, and at each map start)
 include the write in their time. They are flagged and left out of the
 statistics unless --include-flush is given.
+
+Level-change frames: the frame whose Host_Frame queued a changelevel (or a
+map or savegame load) still starts in play, but the engine runs the load
+before the next Host_Frame (engine/common/host_state.c:205-224), so that
+load - 0.4 to 1 s on the console - is this frame's "other" time. Recorders
+from 2026-10-01 flag it (LOAD, 0x20); for older files the report finds it
+by its shape: one of the last two in-play frames of a map that a load
+follows, with at least LC_OTHER_MS between host frames. Either way it is
+listed as a level-change frame and left out of the map's play statistics
+(--include-level-change keeps it). What remains over STALL_MS is listed
+as a stall, with its CPU share: a stall inside Host_Frame (an autosave, a
+synchronous read) is CPU; one between frames is not the game's.
 """
 import argparse
 import ftplib
@@ -50,12 +63,16 @@ COUNTER_NAME_BYTES = 16
 CHUNK_FRAMES, CHUNK_MAP, CHUNK_CALIB, CHUNK_END, CHUNK_COUNTERS = 1, 2, 3, 4, 5
 
 F_ACTIVE, F_MENU, F_FLUSH, F_SATURATED, F_OVERLAY = 0x1, 0x2, 0x4, 0x8, 0x10
+F_LOAD = 0x20               # the frame's Host_Frame queued a load (recorders from 2026-10-01)
 MAP_F_NO_LOAD_START = 0x1
 
 GUIDE_60_MS = 1000.0 / 60.0
 GUIDE_30_MS = 1000.0 / 30.0
 WARMUP_FRAMES = 30          # left out of a map's statistics (the overlay does the same)
 GPU_BOUND_MS = 1.0          # a frame whose GPU wait exceeds this was held up by the GPU
+LC_OTHER_MS = 100.0         # unflagged files: a level-change frame has at least this between host frames
+LC_TAIL_FRAMES = 2          # ... and is one of the last this-many in-play frames before the load
+STALL_MS = 250.0            # an in-play frame longer than this is listed as a stall
 VERTS = "verts"             # derived counter: the sum of every v_* counter
 # The counters the per-map table shows, in order, with their headings.
 WORK_TABLE = [("draws", "Draws"), ("prims", "Prims"), ("pb_dwords", "PB KiB"), ("tex_binds", "Tex binds"),
@@ -256,23 +273,105 @@ def play_frames(rec, seg):
         yield fr, frame_ms(rec, fr)
 
 
+def _in_play(flags):
+    return bool(flags & F_ACTIVE) and not (flags & F_MENU)
+
+
+def level_change_frames(rec):
+    """{frame seq: info} for every in-play frame whose time is a level
+    load, in frame order. A file with any LOAD-flagged frame is a
+    recorder that flags them, so the flag alone decides ("flag"); an
+    older file has none, and a frame qualifies by its shape ("shape"):
+    one of the last LC_TAIL_FRAMES in-play frames of a segment that
+    another map follows, with at least LC_OTHER_MS between host frames.
+    Cached in rec."""
+    if "_lc" in rec:
+        return rec["_lc"]
+    frames = rec["frames"]
+    segs = segments(rec)
+    flagged = any(fr[7] & F_LOAD for fr in frames)
+    out = {}
+    for si, seg in enumerate(segs):
+        nxt = segs[si + 1]["name"] if si + 1 < len(segs) else None
+        play = [i for i in range(seg["start"], seg["end"]) if _in_play(frames[i][7])]
+        if flagged:
+            cand = [i for i in play if frames[i][7] & F_LOAD]
+        elif nxt is not None:
+            cand = [i for i in play[-LC_TAIL_FRAMES:] if frame_ms(rec, frames[i])[4] >= LC_OTHER_MS]
+        else:
+            cand = []
+        for i in cand:
+            out[frames[i][0]] = {"index": i, "map": seg["name"], "next": nxt,
+                                 "source": "flag" if flagged else "shape"}
+    rec["_lc"] = out
+    return out
+
+
+def _start_seconds(rec):
+    """{frame seq: seconds into the session at the frame's start}."""
+    k = 1000.0 / rec["tsc_hz"]
+    start_s, acc = {}, 0.0
+    for fr in rec["frames"]:
+        start_s[fr[0]] = acc / 1000.0
+        acc += fr[1] * k
+    return start_s
+
+
+def level_change_list(rec):
+    """The level-change frames as rows: seconds into the session, the map
+    left and the next one, the times, and how the frame was found."""
+    start_s = _start_seconds(rec)
+    out = []
+    for seq, lc in level_change_frames(rec).items():
+        fr = rec["frames"][lc["index"]]
+        t, c, g, w, o, ov = frame_ms(rec, fr)
+        out.append({"seq": seq, "t": start_s[seq], "map": lc["map"], "next": lc["next"],
+                    "total": t, "cpu": c, "other": o, "source": lc["source"]})
+    return out
+
+
+def stall_list(rec, include_level_change=False):
+    """In-play frames past the warm-up longer than STALL_MS, level-change
+    frames left out (unless include_level_change), flush frames kept and
+    marked: seconds into the session, map, the times and the CPU share
+    of the frame. A stall that is mostly CPU happened inside Host_Frame
+    (an autosave, a synchronous read)."""
+    start_s = _start_seconds(rec)
+    lc = level_change_frames(rec)
+    out = []
+    for seg in segments(rec):
+        for fr, (t, c, g, w, o, ov) in play_frames(rec, seg):
+            if t <= STALL_MS or (fr[0] in lc and not include_level_change):
+                continue
+            out.append({"seq": fr[0], "t": start_s[fr[0]], "map": seg["name"], "total": t, "cpu": c,
+                        "cpu_pct": 100.0 * c / t if t else 0.0, "gpu": g, "other": o,
+                        "flush": bool(fr[7] & F_FLUSH), "level_change": fr[0] in lc})
+    return out
+
+
 def _avg(values):
     return sum(values) / len(values) if values else None
 
 
-def segment_stats(rec, seg, include_flush=False):
+def segment_stats(rec, seg, include_flush=False, include_level_change=False):
     """Per-map numbers over the segment's in-play frames: ACTIVE, not MENU,
-    after the first WARMUP_FRAMES active frames, and - unless
-    include_flush - not a frame that wrote the file (FLUSH): its time
-    includes the write, which the game itself never does."""
+    after the first WARMUP_FRAMES active frames, not a level-change frame
+    (its time is the next map's load; include_level_change keeps it) and
+    - unless include_flush - not a frame that wrote the file (FLUSH): its
+    time includes the write, which the game itself never does."""
     frames = rec["frames"][seg["start"]:seg["end"]]
     totals, cpu_s, gpu_s, wait_s, other_s, ovl = [], 0.0, 0.0, 0.0, 0.0, []
     gpu_bound = flushes = 0
-    flush_ms = []
+    flush_ms, lc_ms = [], []
+    lc = level_change_frames(rec)
     names = work_names(rec)
     work, work_hi, work_lo = [], [], []
     for fr, (t, c, g, w, o, ov) in play_frames(rec, seg):
         flags = fr[7]
+        if fr[0] in lc:
+            lc_ms.append(t)
+            if not include_level_change:
+                continue
         if flags & F_FLUSH:
             flushes += 1
             flush_ms.append(t)
@@ -295,7 +394,9 @@ def segment_stats(rec, seg, include_flush=False):
     m = seg["map"]
     st = {"map": seg["name"], "frames": n, "all_frames": len(frames),
           "flush_frames": flushes, "flush_frame_ms": _avg(flush_ms),
-          "flush_worst_ms": max(flush_ms) if flush_ms else None, "flush_included": include_flush}
+          "flush_worst_ms": max(flush_ms) if flush_ms else None, "flush_included": include_flush,
+          "lc_frames": len(lc_ms), "lc_ms": max(lc_ms) if lc_ms else None,
+          "lc_included": include_level_change}
     if m:
         st["load_s"] = None if m["flags"] & MAP_F_NO_LOAD_START else m["load_ticks"] / rec["tsc_hz"]
         st["free_before"] = m["free_before"] * PAGE_BYTES / 2 ** 20 if m["free_before"] else None
@@ -354,7 +455,7 @@ def pearson(xs, ys):
     return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / math.sqrt(sxx * syy)
 
 
-def work_correlation(rec, include_flush=False):
+def work_correlation(rec, include_flush=False, include_level_change=False):
     """Over every in-play frame of the session: for each counter, its mean,
     peak and Pearson r against the frame's CPU ms and GPU-wait ms. On the
     console this says which work the time follows; in xemu the times are
@@ -363,9 +464,12 @@ def work_correlation(rec, include_flush=False):
     if not names:
         return []
     cpu, gpu, work = [], [], []
+    lc = level_change_frames(rec)
     for seg in segments(rec):
         for fr, (t, c, g, w, o, ov) in play_frames(rec, seg):
             if (fr[7] & F_FLUSH) and not include_flush:
+                continue
+            if fr[0] in lc and not include_level_change:
                 continue
             cpu.append(c)
             gpu.append(g)
@@ -378,20 +482,19 @@ def work_correlation(rec, include_flush=False):
     return out
 
 
-def top_frames(rec, key="gpu", n=10, include_flush=False):
+def top_frames(rec, key="gpu", n=10, include_flush=False, include_level_change=False):
     """The n in-play frames with the most GPU wait (key 'gpu') or the
     longest total ('total'): seconds into the session, map, the times and
     the work counters."""
-    k = 1000.0 / rec["tsc_hz"]
-    start_s, acc = {}, 0.0
-    for fr in rec["frames"]:
-        start_s[fr[0]] = acc / 1000.0
-        acc += fr[1] * k
+    start_s = _start_seconds(rec)
     names = work_names(rec)
+    lc = level_change_frames(rec)
     cand = []
     for seg in segments(rec):
         for fr, (t, c, g, w, o, ov) in play_frames(rec, seg):
             if (fr[7] & F_FLUSH) and not include_flush:
+                continue
+            if fr[0] in lc and not include_level_change:
                 continue
             cand.append((g if key == "gpu" else t, fr, t, c, g, seg["name"]))
     cand.sort(key=lambda r: -r[0])
@@ -400,7 +503,7 @@ def top_frames(rec, key="gpu", n=10, include_flush=False):
             for _, fr, t, c, g, name in cand[:n]]
 
 
-def session_stats(rec, rows, include_flush=False):
+def session_stats(rec, rows, include_flush=False, include_level_change=False):
     k = 1000.0 / rec["tsc_hz"]
     total_ms = sum(fr[1] for fr in rec["frames"]) * k
     play = [r for r in rows if r.get("frames")]
@@ -421,6 +524,9 @@ def session_stats(rec, rows, include_flush=False):
         "version": rec["version"], "counters": work_names(rec),
         "flush_frames": sum(r.get("flush_frames", 0) for r in rows),
         "flush_included": include_flush,
+        "level_change": level_change_list(rec),
+        "lc_included": include_level_change,
+        "stalls": stall_list(rec, include_level_change),
     }
 
 
@@ -522,6 +628,28 @@ def summary_text(rec, rows, sess):
         lines.append("%d flush frame(s) (the recorder writing its file) %s the statistics; --include-flush %s"
                      % (fl, "kept in" if sess.get("flush_included") else "left out of",
                         "is on" if sess.get("flush_included") else "keeps them"))
+    lcs = sess.get("level_change", [])
+    if lcs:
+        lines.append("")
+        lines.append("level-change frames: %d (the frame that queued a changelevel or load; its time between host "
+                     "frames is the load) %s the statistics; --include-level-change %s"
+                     % (len(lcs), "kept in" if sess.get("lc_included") else "left out of",
+                        "is on" if sess.get("lc_included") else "keeps them"))
+        lines.append("%8s  %-24s %8s %7s %8s  %s" % ("t s", "map -> next", "total", "cpu", "between", "found by"))
+        for r in lcs:
+            lines.append("%8.1f  %-24s %8.1f %7.1f %8.1f  %s" % (
+                r["t"], ("%s -> %s" % (r["map"], r["next"] or "?"))[:24], r["total"], r["cpu"], r["other"],
+                "LOAD flag" if r["source"] == "flag" else "shape (unflagged file)"))
+    stalls = sess.get("stalls", [])
+    lines.append("")
+    lines.append("stalls: %d in-play frame(s) over %.0f ms (level-change frames %s; flush frames marked)"
+                 % (len(stalls), STALL_MS, "included" if sess.get("lc_included") else "excluded"))
+    if stalls:
+        lines.append("%8s  %-12s %8s %7s %5s %7s %8s  %s" % ("t s", "map", "total", "cpu", "cpu%", "gpu", "between", ""))
+        for r in stalls:
+            lines.append("%8.1f  %-12s %8.1f %7.1f %4.0f%% %7.1f %8.1f  %s" % (
+                r["t"], r["map"][:12], r["total"], r["cpu"], r["cpu_pct"], r["gpu"], r["other"],
+                " ".join(x for x, on in (("flush", r["flush"]), ("level-change", r["level_change"])) if on)))
     if sess.get("counters"):
         lines.append("")
         lines.append("work per frame in play, avg/peak (counts: the same in xemu and on the console)")
@@ -675,6 +803,10 @@ __BANNER__
     <tbody id="rows"></tbody>
   </table></div>
 </section>
+<section class="panel">
+  <h2>Level changes and stalls</h2>
+  __LCSECTION__
+</section>
 <section class="panel" id="work" hidden>
   <h2>Work per frame</h2>
   <p class="lede" style="font-size:13.5px;margin-bottom:10px">What the renderer submitted in each in-play frame, counted where ref/nv2a submits it: mean / peak per map. These are counts, not times, so <b>they are the same in xemu as on the console</b> &mdash; an xemu run measures them exactly. Draws are draw submissions (a world run, a 2D/TriAPI batch, a decal); prims the BEGIN/END blocks they split into; PB KiB the pushbuffer written in the frame; verts every vertex or index submitted (world, studio, TriAPI, 2D, decals); LM texels the lightmap texels rebuilt on the CPU.</p>
@@ -799,7 +931,46 @@ const WT=__WORKTABLE__;const CORR=__CORR__;const TOPF=__TOP__;
 """
 
 
-def render_html(rec, rows, sess, files, title=None, source="xbox", lede=None, include_flush=False):
+def lc_section_html(sess):
+    """The level-change and stall tables, rendered here (no script)."""
+    esc = html.escape
+    lcs, stalls = sess.get("level_change", []), sess.get("stalls", [])
+    parts = ['<p class="lede" style="font-size:13.5px;margin-bottom:10px">A <b>level-change frame</b> is the frame '
+             'whose <code>Host_Frame</code> queued a changelevel or a load: it still starts in play, but the engine '
+             'runs the load before the next <code>Host_Frame</code>, so the load is this frame\'s time between host '
+             'frames. %d in this file, %s the per-map statistics (<code>--include-level-change</code> %s). Found by '
+             'the recorder\'s LOAD flag, or in a file recorded before it existed by their shape: one of the last %d '
+             'in-play frames before a load, with at least %.0f ms between host frames.</p>'
+             % (len(lcs), "<b>kept</b> in" if sess.get("lc_included") else "<b>left out</b> of",
+                "is on" if sess.get("lc_included") else "keeps them", LC_TAIL_FRAMES, LC_OTHER_MS)]
+    if lcs:
+        parts.append('<div class="table-box"><table class="small"><thead><tr><th>s</th><th>Map &rarr; next</th>'
+                     '<th>Total ms</th><th>CPU ms</th><th>Between ms</th><th>Found by</th></tr></thead><tbody>')
+        for r in lcs:
+            parts.append("<tr><td>%.1f</td><td>%s &rarr; %s</td><td>%.1f</td><td>%.1f</td><td>%.1f</td><td>%s</td></tr>"
+                         % (r["t"], esc(r["map"]), esc(r["next"] or "?"), r["total"], r["cpu"], r["other"],
+                            "LOAD flag" if r["source"] == "flag" else "shape"))
+        parts.append("</tbody></table></div>")
+    parts.append('<h3 class="sub">Stalls: in-play frames over %.0f ms</h3><p class="lede" style="font-size:13.5px;'
+                 'margin-bottom:10px">Level-change frames %s. A stall that is mostly CPU happened inside '
+                 '<code>Host_Frame</code> (an autosave, a synchronous read); frames that wrote the recording are '
+                 'marked.</p>' % (STALL_MS, "included" if sess.get("lc_included") else "left out"))
+    if stalls:
+        parts.append('<div class="table-box"><table class="small"><thead><tr><th>s</th><th>Map</th><th>Total ms</th>'
+                     '<th>CPU ms</th><th>CPU share</th><th>GPU ms</th><th>Between ms</th><th></th></tr></thead><tbody>')
+        for r in stalls:
+            note = " ".join(x for x, on in (("flush", r["flush"]), ("level change", r["level_change"])) if on)
+            parts.append("<tr><td>%.1f</td><td>%s</td><td>%.1f</td><td>%.1f</td><td>%.0f%%</td><td>%.1f</td>"
+                         "<td>%.1f</td><td>%s</td></tr>" % (r["t"], esc(r["map"]), r["total"], r["cpu"],
+                                                           r["cpu_pct"], r["gpu"], r["other"], note))
+        parts.append("</tbody></table></div>")
+    else:
+        parts.append("<p>None.</p>")
+    return "\n".join(parts)
+
+
+def render_html(rec, rows, sess, files, title=None, source="xbox", lede=None, include_flush=False,
+                include_level_change=False):
     if source == "xemu":
         banner = ('<div class="banner"><b>Recorded in xemu.</b> The times are the emulator\'s on a PC, not a '
                   'Pentium III and an NV2A: xemu caps presentation at the 60 Hz refresh, its TSC is not the '
@@ -844,17 +1015,18 @@ def render_html(rec, rows, sess, files, title=None, source="xbox", lede=None, in
         "__MARKS__": json.dumps(map_markers(rec)),
         "__FLUSHNOTE__": flushnote, "__WORKNOTE__": worknote, "__CORRNOTE__": corrnote,
         "__WORKTABLE__": json.dumps(WORK_TABLE),
-        "__CORR__": json.dumps(work_correlation(rec, include_flush)),
-        "__TOP__": json.dumps(top_frames(rec, "gpu", 10, include_flush)),
+        "__CORR__": json.dumps(work_correlation(rec, include_flush, include_level_change)),
+        "__TOP__": json.dumps(top_frames(rec, "gpu", 10, include_flush, include_level_change)),
+        "__LCSECTION__": lc_section_html(sess),
     }.items():
         out = out.replace(k, v)
     return out
 
 
-def analyse(path, include_flush=False):
+def analyse(path, include_flush=False, include_level_change=False):
     rec = load_file(path)
-    rows = [segment_stats(rec, s, include_flush) for s in segments(rec)]
-    return rec, rows, session_stats(rec, rows, include_flush)
+    rows = [segment_stats(rec, s, include_flush, include_level_change) for s in segments(rec)]
+    return rec, rows, session_stats(rec, rows, include_flush, include_level_change)
 
 
 # --------------------------------------------------------------------------
@@ -943,10 +1115,14 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("--include-flush", action="store_true",
                    help="keep the frames that wrote the file in the statistics (left out by default)")
+    p.add_argument("--include-level-change", action="store_true",
+                   help="keep the frames whose time is a level load in the statistics (left out by default)")
     p = sub.add_parser("report", help="write the HTML report")
     p.add_argument("file")
     p.add_argument("--include-flush", action="store_true",
                    help="keep the frames that wrote the file in the statistics (left out by default)")
+    p.add_argument("--include-level-change", action="store_true",
+                   help="keep the frames whose time is a level load in the statistics (left out by default)")
     p.add_argument("-o", "--output")
     p.add_argument("--title")
     p.add_argument("--lede", help="the paragraph under the title (HTML allowed)")
@@ -960,7 +1136,7 @@ def main(argv=None):
         xemu_fetch(a.qcow2, a.out)
     else:
         try:
-            rec, rows, sess = analyse(a.file, a.include_flush)
+            rec, rows, sess = analyse(a.file, a.include_flush, a.include_level_change)
         except (FormatError, OSError) as e:
             print("frametime-report: %s: %s" % (a.file, e), file=sys.stderr)
             return 1
@@ -969,7 +1145,8 @@ def main(argv=None):
         else:
             out = a.output or os.path.splitext(a.file)[0] + ".html"
             with open(out, "w", encoding="utf-8") as f:
-                f.write(render_html(rec, rows, sess, [a.file], a.title, a.source, a.lede, a.include_flush))
+                f.write(render_html(rec, rows, sess, [a.file], a.title, a.source, a.lede, a.include_flush,
+                                    a.include_level_change))
             print(summary_text(rec, rows, sess))
             print("wrote %s" % out)
     return 0

@@ -57,6 +57,19 @@ code). `cl_showfps` is unchanged.
    their mean and worst time, and **left out of the statistics**:
    `--include-flush` keeps them.
 
+   **Level-change frames** are left out too (`--include-level-change`
+   keeps them) and listed in their own table: the frame whose `Host_Frame`
+   queued a `changelevel` (or a map or savegame load) still starts in
+   play, but the engine runs the load before the next `Host_Frame`
+   (`engine/common/host_state.c:205-224`), so that frame's time between
+   host frames *is* the load - 0.4 to 1 s on the console. Recordings from
+   2026-10-01 flag it (`LOAD`); for older files the report recognises it
+   by its shape: one of the last two in-play frames of a map that a load
+   follows, with at least 100 ms between host frames. Then a **stalls**
+   table lists every in-play frame still over 250 ms with its CPU share:
+   a stall that is nearly all CPU happened inside `Host_Frame` (an
+   autosave, a synchronous read).
+
 ## The overlay (mode 2)
 
 Top left, over the HUD and under the console: the last 120 frames as 40
@@ -122,19 +135,34 @@ than 1 ms of it.
 **Map changes.** A load is the run of frames in which the client is
 connecting or connected but not yet active (or the loading plaque is up).
 The recorder writes a MAP chunk at the first active frame with the map
-name, the load time (from the start of the frame before the first loading
-frame - the frame that ran the `changelevel`/`map` and the server spawn -
-to the first active frame; so it includes one ordinary frame), free memory
+name, the load time (from the start of the frame that queued the load -
+flagged `LOAD`, see below - to the first active frame, so it includes that
+frame's own `Host_Frame`; without such a frame in the two before the first
+loading frame, from the start of the frame before it), free memory
 at map start (`MmQueryStatistics().AvailablePages`, after everything is
 loaded), and free memory at the last flush before the load (up to 5 s
 earlier). The first map after recording starts has no load time.
 
 **Frame flags** mark frames in play (active, no menu or pause), frames that
 wrote the file (their time includes the write and `fsync`), frames with the
-overlay, and saturated counters (a frame over 5.8 s at 733 MHz). The report
-and the overlay use in-play frames only and skip each map's first 30; the
+overlay, saturated counters (a frame over 5.8 s at 733 MHz) and, from
+2026-10-01, `LOAD` (0x20): the frame's `Host_Frame` left
+`GameState->nextstate` other than `STATE_RUNFRAME` - it queued a
+changelevel, a load, a new game or a disconnect, which runs before the
+next `Host_Frame` and so lands in this frame's time. The in-play flags
+describe the state a frame *starts* in, so that frame still reads as in
+play; the flag is what says it is not. It used a reserved bit, so the
+format version did not change. The report and the overlay use in-play
+frames only, skip each map's first 30 and leave out `LOAD` frames; the
 report also leaves out the frames that wrote the file (`--include-flush`
 keeps them).
+
+Before the flag existed, recordings showed this as "one 350-1000 ms spike
+on every map": in the owner's -O2 route (`ft_002.bin`, PR #169's v1 file)
+15 of the 22 in-play frames over 250 ms are these frames (CPU 0-12 ms,
+390-980 ms between host frames, the second-to-last in-play frame of
+each map), 6 are 616-752 ms of CPU inside `Host_Frame` that line up with the maps'
+`trigger_autosave`s, and the last is the session's final in-play frame.
 
 ## Work counters (format version 2)
 

@@ -10,6 +10,10 @@
 #
 # Verified working 2026-09-05: 19 libraries, including libSDL2, libpbkit,
 # libpdclib, libnxdk_hal, libSDL_ttf and libc++.
+#
+# That command passes no CFLAGS, so the libraries are -O0. To build them at
+# -O2 (or any level) and record the level for the link check, run
+# `bash tools/xbox-build-nxdk.sh` instead (it wraps the same make).
 
 # --- Which shell -------------------------------------------------------------
 #

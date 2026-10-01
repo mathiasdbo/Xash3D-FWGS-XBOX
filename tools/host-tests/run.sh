@@ -120,15 +120,23 @@ run_test nv2a_decal_util nv2a_decal_util
 # encoders; the C test also writes a recording through those encoders,
 # which the report tool's own test then parses.
 xbox_frametime_util() {
+	# Stale fixtures from an earlier run must not stand in for ones this
+	# run failed to write.
+	rm -f "$OUT"/frametime_fixture*.bin
 	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
 		tools/host-tests/xbox_frametime_util_host_test.c engine/platform/xbox/xbox_frametime_util.c \
-		-o "$OUT/xbox_frametime_util_test" && "$OUT/xbox_frametime_util_test" "$OUT/frametime_fixture.bin" "$OUT/frametime_fixture_v1.bin"
+		-o "$OUT/xbox_frametime_util_test" && "$OUT/xbox_frametime_util_test" "$OUT/frametime_fixture.bin" "$OUT/frametime_fixture_v1.bin" \
+		"$OUT/frametime_fixture_lc.bin" "$OUT/frametime_fixture_lc_v1.bin"
 }
 run_test xbox_frametime_util xbox_frametime_util
 
 frametime_report() {
-	[ -f "$OUT/frametime_fixture.bin" ] && [ -f "$OUT/frametime_fixture_v1.bin" ] || { echo "host-tests: no fixtures - the C test above did not write them" >&2; return 1; }
-	FRAMETIME_FIXTURE="$OUT/frametime_fixture.bin" FRAMETIME_FIXTURE_V1="$OUT/frametime_fixture_v1.bin" python tools/test_frametime_report.py
+	for f in frametime_fixture.bin frametime_fixture_v1.bin frametime_fixture_lc.bin frametime_fixture_lc_v1.bin; do
+		[ -f "$OUT/$f" ] || { echo "host-tests: no fixture $f - the C test above did not write it" >&2; return 1; }
+	done
+	FRAMETIME_FIXTURE="$OUT/frametime_fixture.bin" FRAMETIME_FIXTURE_V1="$OUT/frametime_fixture_v1.bin" \
+	FRAMETIME_FIXTURE_LC="$OUT/frametime_fixture_lc.bin" FRAMETIME_FIXTURE_LC_V1="$OUT/frametime_fixture_lc_v1.bin" \
+		python tools/test_frametime_report.py
 }
 run_test frametime_report frametime_report
 
@@ -141,6 +149,22 @@ printf_test() {
 		tools/host-tests/printf_host_test.c "$OUT/xp.o" -o "$OUT/printf_test" && "$OUT/printf_test"
 }
 run_test printf printf_test
+
+# tools/host-tests/string_fast_host_test.c, header (divergence #142): the
+# Xbox's memcpy/memmove/memset/memcmp/strlen against the host C library.
+# The implementation is compiled as the Xbox compiles it (-ffreestanding
+# -fno-builtin) so neither compiler can turn its loops back into calls to
+# the library it is checked against; once with gcc and once with clang,
+# the Xbox's own compiler family.
+string_fast() {
+	local cc="$1"
+	local extra=""
+	[ "$cc" = gcc ] && extra="-fno-tree-loop-distribute-patterns"
+	$cc $HOST_CFLAGS -Wall -std=c99 -ffreestanding -fno-builtin $extra -DR3D_STRING_FAST_HOST_TEST 		-c compat/xbox/xbox_string_fast.c -o "$OUT/sf_$cc.o" &&
+	$cc $HOST_CFLAGS -Wall -std=c99 tools/host-tests/string_fast_host_test.c "$OUT/sf_$cc.o" 		-o "$OUT/string_fast_test_$cc" && "$OUT/string_fast_test_$cc"
+}
+run_test string_fast_gcc string_fast gcc
+run_test string_fast_clang string_fast clang
 
 if [ "$ran" -eq 0 ]; then
 	echo "host-tests: ran zero tests - that is a broken script, not a pass" >&2

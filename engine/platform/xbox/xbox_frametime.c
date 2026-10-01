@@ -23,6 +23,11 @@ records every frame.
   host_frametime_analysis 1  record every frame to frametime/ft_NNN.bin
   host_frametime_analysis 2  record, and draw the overlay over the HUD
 
+Each frame is flagged by the state it starts in (in play, menu), plus
+XBOX_FT_F_LOAD when its Host_Frame queued a changelevel or other load:
+the load then runs before the next Host_Frame, inside this frame's
+"between frames" time, so such a frame is load time, not play.
+
 What a frame record holds (the byte layout is xbox_frametime_util.h):
   total   Host_Frame start to the next Host_Frame start (TSC)
   host    Host_Frame start to its end
@@ -98,6 +103,11 @@ xbox_ft_work_t xbox_ft_work;
 #define XBOX_FT_NOW_FRAMES      30      /* the "now" line and the counters average the last half second */
 #define XBOX_FT_TEXT_FRAMES     15      /* the text is reformatted 4 times a second, not every frame */
 #define XBOX_FT_TEXT_LINES      6
+/* A load is credited to a LOAD-flagged frame at most this many frames
+   before the first loading frame: the changelevel frame, then the one
+   frame that still starts active (the client has not seen the reconnect
+   yet), then the loading frames. */
+#define XBOX_FT_TRIGGER_FRAMES  2u
 
 typedef struct xbox_ft_state_s
 {
@@ -123,6 +133,13 @@ typedef struct xbox_ft_state_s
 	/* Map tracking. */
 	qboolean was_active, was_loading, load_seen;
 	uint64_t load_begin;
+	/* The last frame flagged XBOX_FT_F_LOAD: where the load it queued
+	   began, and the frame count when it was flagged. A load that starts
+	   within XBOX_FT_TRIGGER_FRAMES frames is timed from it. */
+	qboolean trigger_pending;
+	uint64_t trigger_start;
+	uint32_t trigger_frame;
+	uint32_t frames_begun;
 	uint32_t free_before;       /* free pages at the last flush before the load */
 	uint32_t last_free_pages;
 	uint32_t map_frames;        /* active frames since the map started */
@@ -324,7 +341,15 @@ static void FT_TrackMap( uint64_t now, qboolean active )
 
 	if( loading && !ft.was_loading )
 	{
-		ft.load_begin = ft.in_frame ? ft.frame_start : now; /* the frame being closed: the one before this */
+		/* From the frame that queued the load when there is one: its
+		   time after Host_Frame is the load itself (#142, the M0
+		   finding). Otherwise the frame being closed - the one before
+		   this. */
+		if( ft.trigger_pending && ft.frames_begun - ft.trigger_frame <= XBOX_FT_TRIGGER_FRAMES )
+			ft.load_begin = ft.trigger_start;
+		else
+			ft.load_begin = ft.in_frame ? ft.frame_start : now;
+		ft.trigger_pending = false;
 		ft.free_before = ft.last_free_pages;
 		ft.load_seen = true;
 	}
@@ -366,7 +391,10 @@ static void FT_CloseFrame( uint64_t now )
 
 	xbox_ft_ring_push( &ft.ring, f );
 
-	if( FBitSet( f->flags, XBOX_FT_F_ACTIVE ) && !FBitSet( f->flags, XBOX_FT_F_MENU ))
+	/* The frame that queued a load is load time, not play (its time after
+	   Host_Frame is the load): out of the overlay's map statistics, as
+	   the report leaves it out of its own. */
+	if( FBitSet( f->flags, XBOX_FT_F_ACTIVE ) && !FBitSet( f->flags, XBOX_FT_F_MENU | XBOX_FT_F_LOAD ))
 	{
 		if( ++ft.map_frames > XBOX_FT_WARMUP_FRAMES )
 		{
@@ -381,6 +409,9 @@ static void FT_CloseFrame( uint64_t now )
 void Xbox_FrameTime_Init( void )
 {
 	Cvar_RegisterVariable( &host_frametime_analysis );
+	/* r3d_membench (#142) rides on this init rather than a call site of
+	   its own in host.c: the same platform, the same lifetime. */
+	Xbox_MemBench_Init();
 }
 
 void Xbox_FrameTime_BeginFrame( void )
@@ -415,8 +446,10 @@ void Xbox_FrameTime_BeginFrame( void )
 	if( ft.in_frame )
 		FT_CloseFrame( now );
 
-	/* The next frame. Its flags describe the state it starts in. */
+	/* The next frame. Its flags describe the state it starts in (and
+	   XBOX_FT_F_LOAD, set at its end, what it queued). */
 	memset( &ft.cur, 0, sizeof( ft.cur ));
+	ft.frames_begun++;
 	active = cls.state == ca_active && cls.signon == SIGNONS;
 	if( active )
 		ft.cur.flags |= XBOX_FT_F_ACTIVE;
@@ -438,8 +471,22 @@ void Xbox_FrameTime_BeginFrame( void )
 
 void Xbox_FrameTime_EndFrame( void )
 {
-	if( ft.mode )
-		ft.frame_end = xbox_ft_rdtsc();
+	if( !ft.mode )
+		return;
+
+	ft.frame_end = xbox_ft_rdtsc();
+
+	/* Host_RunFrame acts on nextstate right after Host_Frame returns, and
+	   COM_Frame runs the load before the next Host_Frame
+	   (engine/common/host_state.c:151-180, :205-224): flag this frame as
+	   the one whose remaining time is that load. */
+	if( GameState->nextstate != STATE_RUNFRAME )
+	{
+		ft.cur.flags |= XBOX_FT_F_LOAD;
+		ft.trigger_pending = true;
+		ft.trigger_start = ft.frame_start;
+		ft.trigger_frame = ft.frames_begun;
+	}
 }
 
 void Xbox_FrameTime_Shutdown( void )

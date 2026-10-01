@@ -841,6 +841,18 @@ LIBS=(
 	"$NXDK_DIR/lib/libc++.lib"
 )
 
+# The level nxdk's own libraries were built at: tools/xbox-build-nxdk.sh
+# writes $NXDK_DIR/lib/r3d-nxdk-opt.txt after a complete build; without
+# it they came from a plain `make NXDK_ONLY=y`, which passes no -O flag
+# (-O0). Printed so a measurement can name it (docs/r3d/lessons.md: write
+# the level next to the number); informational, not a gate.
+NXDK_OPT_STAMP="$NXDK_DIR/lib/r3d-nxdk-opt.txt"
+if [ -f "$NXDK_OPT_STAMP" ]; then
+	echo "xbox-link-check: nxdk libraries built at $(sed -n 's/^opt=//p' "$NXDK_OPT_STAMP") ($NXDK_OPT_STAMP)." >&2
+else
+	echo "xbox-link-check: nxdk libraries unstamped - a plain 'make NXDK_ONLY=y', -O0 (tools/xbox-build-nxdk.sh stamps a level)." >&2
+fi
+
 # Response file, not a raw command line: found in review, X1, 2026-09-09,
 # adding the menu module's 82 objects to the already-large engine +
 # third-party set pushed the full nxdk-link invocation past the OS
@@ -884,6 +896,18 @@ if [ -z "$PRINTF_OBJ_LINE" ] || [ -z "$PDCLIB_LINE" ] || [ "$PRINTF_OBJ_LINE" -g
 	exit 1
 fi
 echo "xbox-link-check: compat printf override present (line $PRINTF_OBJ_LINE) and ahead of libpdclib.lib (line $PDCLIB_LINE)." >&2
+
+# Divergence #142: compat/xbox/xbox_string_fast.c overrides pdclib's -O0
+# memcpy/memmove/memset/memcmp/strlen the same way, and the same single
+# silent failure applies - the object missing from the link brings the
+# byte loops back with no error. Same assertion.
+STRFAST_OBJ_LINE=$(grep -n 'compat_xbox_xbox_string_fast\.obj' "$RESPONSE" | head -n 1 | cut -d: -f1)
+if [ -z "$STRFAST_OBJ_LINE" ] || [ "$STRFAST_OBJ_LINE" -ge "$PDCLIB_LINE" ]; then
+	echo "xbox-link-check: compat_xbox_xbox_string_fast.obj must be in the response file and precede libpdclib.lib (divergence #142)." >&2
+	echo "  string object at line ${STRFAST_OBJ_LINE:-<absent>}, libpdclib.lib at line ${PDCLIB_LINE:-<absent>} of $RESPONSE" >&2
+	exit 1
+fi
+echo "xbox-link-check: compat string override present (line $STRFAST_OBJ_LINE) and ahead of libpdclib.lib (line $PDCLIB_LINE)." >&2
 
 LOG="$SCRATCH/link-check.txt"
 # 1 MiB main-thread stack, overriding nxdk-link's own -stack:65536 default -

@@ -225,4 +225,23 @@ int __stdcall SystemParametersInfoA( unsigned int action, unsigned int param, vo
 #define GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS       0x00000004
 #endif
 
+/* Small fixed-size copies inline again (docs/r3d/divergences.md #142).
+ * Both compile drivers pass -ffreestanding, which in clang implies
+ * -fno-builtin (measured: the two produce identical code), so every
+ * memcpy/memset/memmove - even a 4-byte one - is a call. The __builtin_
+ * spellings are honoured in freestanding mode: clang inlines a constant
+ * size up to 32 bytes (memcpy) / 64 (memset) as plain moves, and emits a
+ * call to the library function - compat/xbox/xbox_string_fast.c - for
+ * anything else, exactly as before. Same semantics, no call for the
+ * small ones. C only: in C++ a function-like macro would break
+ * `std::memcpy(`. <string.h> first, so its declarations are not
+ * rewritten. R3D_NO_BUILTIN_STRING turns it off for one compile (the
+ * implementation file defines the real names and #undefs these). */
+#if !defined( __cplusplus ) && !defined( R3D_NO_BUILTIN_STRING )
+#include <string.h>
+#define memcpy( d, s, n )  __builtin_memcpy(( d ), ( s ), ( n ))
+#define memset( d, c, n )  __builtin_memset(( d ), ( c ), ( n ))
+#define memmove( d, s, n ) __builtin_memmove(( d ), ( s ), ( n ))
+#endif
+
 #endif /* R3D_XBOX_PRELUDE_H */

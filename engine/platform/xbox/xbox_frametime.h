@@ -85,4 +85,8 @@ void Xbox_FrameTime_EndFrame( void );      /* Host_Frame, last */
 void Xbox_FrameTime_DrawOverlay( void );   /* V_PostRender, the 2D pass */
 void Xbox_FrameTime_Shutdown( void );      /* Host_ShutdownWithReason */
 
+/* xbox_membench.c (#142): registers `r3d_membench`; called from
+   Xbox_FrameTime_Init. */
+void Xbox_MemBench_Init( void );
+
 #endif /* XBOX_FRAMETIME_H */

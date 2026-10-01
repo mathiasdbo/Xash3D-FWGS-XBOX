@@ -140,6 +140,16 @@ extern const char *const xbox_ft_work_names[XBOX_FT_W_COUNT];
 #define XBOX_FT_F_FLUSH      0x0004u /* this frame wrote the file (its time includes the write) */
 #define XBOX_FT_F_SATURATED  0x0008u /* a tick count did not fit in 32 bits */
 #define XBOX_FT_F_OVERLAY    0x0010u /* the overlay was drawn in this frame */
+/* This frame's Host_Frame queued a host state change - a changelevel, a
+   map or savegame load, a new game, a disconnect (GameState->nextstate
+   left != STATE_RUNFRAME, engine/common/host_state.c). The state machine
+   runs it at the start of the next COM_Frame, before that frame's
+   Host_Frame (host_state.c:205-224), so the whole load lands in THIS
+   frame's time between host frames (total - host), while the frame still
+   started in play. A reserved bit until 2026-10-01: older files leave it
+   clear, and tools/frametime-report.py finds those frames by their shape
+   instead. Not a format change - readers ignore flags they do not know. */
+#define XBOX_FT_F_LOAD       0x0020u
 
 #define XBOX_FT_MAP_F_NO_LOAD_START 0x0001u
 

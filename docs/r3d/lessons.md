@@ -53,8 +53,14 @@ estimates - came from an -O0 build: `tools/xbox-cc.sh` and
 Nothing chose -O0; it was an omission that every measurement inherited.
 At -O2 the same lightmap workload costs 0.54x the cycles and the XBE
 is 20% smaller. **Before a performance number goes into a report, read
-the exact flags of the compile (and of the prebuilt libraries it links -
-nxdk's are still -O0) and write the level next to the number.**
+the exact flags of the compile (and of the prebuilt libraries it links)
+and write the level next to the number.** nxdk's libraries are their own
+level: a plain `make NXDK_ONLY=y` is -O0; `tools/xbox-build-nxdk.sh`
+builds them at a chosen level and stamps it in
+`deps/nxdk/lib/r3d-nxdk-opt.txt`, and `tools/xbox-link-check.sh` prints
+the stamp on every link - copy that line next to the number. `deps/nxdk`
+is shared by every worktree, so its level can change under a branch that
+never touched it.
 
 ### ALWAYS diff the picture from a second optimisation level before trusting "no visual change"
 

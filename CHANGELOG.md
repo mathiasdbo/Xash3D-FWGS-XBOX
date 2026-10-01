@@ -5,6 +5,51 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - `tools/xbox-build-nxdk.sh`: nxdk's libraries at -O2, reproducibly
+
+nxdk's own libraries (its C library, pbkit, SDL2, libc++...) were built
+with no optimisation flag at all. The script rebuilds them from a clean
+state at a chosen level (-O2 by default) with nxdk's own makefile and
+flags plus the level, without editing anything inside `deps/nxdk`, and
+writes the level to `deps/nxdk/lib/r3d-nxdk-opt.txt`, which the link
+check prints on every link. On top of the faster string functions, in
+xemu (emulator timing, ratios only): CPU per frame on the busy c1a0e scene
+7.55 to 6.83 ms, the c1a0e load 2.86 to 2.06 s, and the XBE 516 KiB
+smaller. `deps/nxdk` is shared by every worktree, so rebuilding it
+changes what every branch links.
+
+### Changed - fast memcpy, memmove, memset, memcmp and strlen on Xbox
+
+nxdk's C library ships these as unoptimised byte loops, and every memory
+copy in the game went through them - the renderer's 72-byte copy per
+triangle, struct copies, buffer copies. The Xbox build now links its own
+(`compat/xbox/xbox_string_fast.c`): dword moves for small blocks and the
+CPU's string instructions for large ones. Small fixed-size copies in C code
+are also inlined again instead of being calls. In xemu (emulator timing:
+the ratios are the result, not the milliseconds) a 72-byte copy is about
+10 times faster and a 64 KiB copy about 17 times, and the CPU time per
+frame on a busy scene (c1a0e, firing) dropped from 12.3 to 7.6 ms with
+the same rendered work. A new console command, `r3d_membench`, checks the
+functions on the console and times them; its output also goes to
+`membench.txt`. Divergence #142.
+
+### Changed - frame-time recordings separate level loads and list stalls
+
+The frame that runs a `changelevel` still starts in play, but the engine
+loads the next map before the following frame, so that frame's time is the
+load: on the console it showed up as "one 400-1000 ms spike on every map"
+and counted against the map being left. The recorder now flags it (`LOAD`,
+a previously reserved frame-flag bit, so files stay readable by older and
+newer tools alike), keeps it out of the overlay's map figures, and starts
+the map's recorded load time at it instead of one frame later.
+`tools/frametime-report.py` leaves these frames out of each map's
+statistics (`--include-level-change` keeps them), lists them in their own
+table, finds them by their shape in recordings made before the flag, and
+adds a "stalls" table: every in-play frame still over 250 ms with its CPU
+share. On the owner's hardware route recording that is 15 level-change
+frames, and 7 stalls of which 6 are 616-752 ms of CPU mid-map that line
+up with the maps' autosaves. Divergence #141.
+
 ### Added - frame-time recorder and overlay on Xbox (`host_frametime_analysis`)
 
 One cvar, `host_frametime_analysis`, selects the frame analysis: `0` off

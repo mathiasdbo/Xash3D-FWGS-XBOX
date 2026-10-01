@@ -9,7 +9,13 @@ expectation below is derived from what that C test wrote (see its
 write_fixture), not from this parser.
 
     FRAMETIME_FIXTURE=.sweep/host-tests/frametime_fixture.bin \
-    FRAMETIME_FIXTURE_V1=.sweep/host-tests/frametime_fixture_v1.bin python tools/test_frametime_report.py
+    FRAMETIME_FIXTURE_V1=.sweep/host-tests/frametime_fixture_v1.bin \
+    FRAMETIME_FIXTURE_LC=.sweep/host-tests/frametime_fixture_lc.bin \
+    FRAMETIME_FIXTURE_LC_V1=.sweep/host-tests/frametime_fixture_lc_v1.bin python tools/test_frametime_report.py
+
+The level-change fixtures (class LevelChange) are the same session written
+with the recorder's LOAD flag (v2) and without it (v1, as recorders before
+2026-10-01 wrote it); see write_fixture_level_change in the C test.
 """
 import importlib.util
 import os
@@ -27,6 +33,8 @@ _SPEC.loader.exec_module(fr)
 
 FIXTURE = os.environ.get("FRAMETIME_FIXTURE", "")
 FIXTURE_V1 = os.environ.get("FRAMETIME_FIXTURE_V1", "")
+FIXTURE_LC = os.environ.get("FRAMETIME_FIXTURE_LC", "")
+FIXTURE_LC_V1 = os.environ.get("FRAMETIME_FIXTURE_LC_V1", "")
 
 
 def _read(path, var):
@@ -324,6 +332,107 @@ class FailurePaths(unittest.TestCase):
         v = sorted([10.0] * 99 + [40.0])
         self.assertEqual(fr.percentile_ms(v, 0.99), 10.0)   # rank 99
         self.assertEqual(fr.percentile_ms(v, 0.995), 40.0)  # rank 100
+
+
+class LevelChange(unittest.TestCase):
+    """write_fixture_level_change: c1a0 seq 0..39 in play at 20 ms; seq 35
+    a 600 ms stall inside Host_Frame; seq 38 the changelevel frame (500 ms,
+    490 between host frames; LOAD-flagged in the v2 file); seq 39 the last
+    frame starting in play (100 ms, 90 between - under the shape rule);
+    seq 40..44 loading; c1a0e seq 45..84 at 10 ms, seq 83 300 ms between
+    host frames with no load after it. 1 MHz TSC: a tick is a microsecond."""
+
+    def _recs(self):
+        return [("flag", fr.parse(_read(FIXTURE_LC, "FRAMETIME_FIXTURE_LC"))),
+                ("shape", fr.parse(_read(FIXTURE_LC_V1, "FRAMETIME_FIXTURE_LC_V1")))]
+
+    def test_versions(self):
+        (_, flagged), (_, older) = self._recs()
+        self.assertEqual(flagged["version"], 2)
+        self.assertEqual(older["version"], 1)
+        self.assertEqual(flagged["frames"][38][7], fr.F_ACTIVE | fr.F_LOAD)
+        self.assertEqual(older["frames"][38][7], fr.F_ACTIVE)
+
+    def test_detected_by_flag_and_by_shape(self):
+        for source, rec in self._recs():
+            lc = fr.level_change_frames(rec)
+            self.assertEqual(sorted(lc), [38], source)
+            self.assertEqual(lc[38]["source"], source)
+            self.assertEqual((lc[38]["map"], lc[38]["next"]), ("c1a0", "c1a0e"))
+            rows = fr.level_change_list(rec)
+            self.assertEqual(len(rows), 1)
+            r = rows[0]
+            self.assertAlmostEqual(r["total"], 500.0)
+            self.assertAlmostEqual(r["cpu"], 7.0)          # host 10 - GPU 3
+            self.assertAlmostEqual(r["other"], 490.0)
+            self.assertAlmostEqual(r["t"], (37 * 20 + 600) / 1000.0)
+
+    def test_flag_decides_when_present(self):
+        (_, flagged), _ = self._recs()
+        # A file with LOAD flags is trusted alone: flag a mid-map frame
+        # and it is a level change, whatever its shape...
+        flagged["frames"][20] = flagged["frames"][20][:7] + (flagged["frames"][20][7] | fr.F_LOAD,) + flagged["frames"][20][8:]
+        self.assertEqual(sorted(fr.level_change_frames(flagged)), [20, 38])
+        # ... and with every flag cleared, the shape rule finds the same frame.
+        (_, again), _ = self._recs()
+        again["frames"] = [f[:7] + (f[7] & ~fr.F_LOAD,) + f[8:] for f in again["frames"]]
+        self.assertEqual(sorted(fr.level_change_frames(again)), [38])
+
+    def test_left_out_of_play_stats(self):
+        for source, rec in self._recs():
+            seg = fr.segments(rec)[0]
+            a = fr.segment_stats(rec, seg)
+            # In play past the 30-frame warm-up: seq 30..39, minus 38.
+            self.assertEqual(a["frames"], 9, source)
+            self.assertEqual(a["lc_frames"], 1)
+            self.assertAlmostEqual(a["lc_ms"], 500.0)
+            self.assertAlmostEqual(a["worst_ms"], 600.0)    # the stall stays: it is play
+            b = fr.segment_stats(rec, seg, include_level_change=True)
+            self.assertEqual(b["frames"], 10)
+            self.assertAlmostEqual(b["seconds"], a["seconds"] + 0.5)
+            top = fr.top_frames(rec, "total", 3)
+            self.assertNotIn(38, [t["seq"] for t in top])
+            self.assertIn(38, [t["seq"] for t in fr.top_frames(rec, "total", 3, include_level_change=True)])
+
+    def test_stalls(self):
+        for source, rec in self._recs():
+            st = fr.stall_list(rec)
+            self.assertEqual([s["seq"] for s in st], [35, 83], source)
+            self.assertAlmostEqual(st[0]["cpu"], 596.0)    # host 599 - GPU 3: inside Host_Frame
+            self.assertAlmostEqual(st[0]["cpu_pct"], 100.0 * 596 / 600)
+            self.assertEqual(st[0]["map"], "c1a0")
+            self.assertAlmostEqual(st[1]["cpu"], 9.5)      # host 10 - GPU 0.5
+            self.assertAlmostEqual(st[1]["other"], 290.0)  # between frames, no load after it
+            self.assertEqual(st[1]["map"], "c1a0e")
+            self.assertFalse(st[1]["level_change"])
+            st = fr.stall_list(rec, include_level_change=True)
+            self.assertEqual([s["seq"] for s in st], [35, 38, 83])
+            self.assertTrue(st[1]["level_change"])
+
+    def test_summary_and_page(self):
+        for source, rec in self._recs():
+            rows = [fr.segment_stats(rec, s) for s in fr.segments(rec)]
+            s = fr.session_stats(rec, rows)
+            self.assertEqual(len(s["level_change"]), 1)
+            self.assertEqual(len(s["stalls"]), 2)
+            text = fr.summary_text(rec, rows, s)
+            self.assertIn("level-change frames: 1", text)
+            self.assertIn("stalls: 2 in-play frame(s) over 250 ms", text)
+            self.assertIn("c1a0 -> c1a0e", text)
+            self.assertIn("LOAD flag" if source == "flag" else "shape (unflagged file)", text)
+            page = fr.render_html(rec, rows, s, ["lc.bin"])
+            self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
+            self.assertIn("Level changes and stalls", page)
+            self.assertIn("c1a0 &rarr; c1a0e", page)
+            run_page_script(page)
+
+    def test_cli(self):
+        for path in (FIXTURE_LC, FIXTURE_LC_V1):
+            _read(path, "FRAMETIME_FIXTURE_LC")
+            out = subprocess.run([sys.executable, os.path.join(_HERE, "frametime-report.py"), "summary", path,
+                                  "--include-level-change"], capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("kept in the statistics; --include-level-change is on", out.stdout)
 
 
 if __name__ == "__main__":

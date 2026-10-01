@@ -1,10 +1,12 @@
 /* Host test for engine/platform/xbox/xbox_frametime_util.c - the frame
    ring, the statistics (1% low, guideline counts) and the file encoders.
-   With path arguments it also writes two small recordings through the
-   same encoders - a version-2 file with work counters and a version-1
-   file without - which tools/test_frametime_report.py then parses: the
-   parser's fixtures come from the encoder the recorder runs, not from a
-   hand-written copy of the format. */
+   With path arguments it also writes small recordings through the same
+   encoders - a version-2 file with work counters and a version-1 file
+   without, and a level-change session both with the recorder's LOAD flag
+   (v2) and without it (v1, as recorders before 2026-10-01 wrote it) -
+   which tools/test_frametime_report.py then parses: the parser's fixtures
+   come from the encoder the recorder runs, not from a hand-written copy
+   of the format. */
 
 #include <stdio.h>
 #include <string.h>
@@ -272,6 +274,84 @@ static int write_fixture( const char *path, uint32_t counters )
 	return fclose( fp ) != 0;
 }
 
+/* The level-change session (tools/test_frametime_report.py, class
+   LevelChange): 1 MHz TSC. Map "c1a0", seq 0..39 in play at 20 ms (host
+   19 ms, GPU 3 ms), except
+     seq 35  a 600 ms stall inside Host_Frame (host 599 ms): an autosave;
+     seq 38  the changelevel frame: 500 ms, host 10 ms - 490 ms between
+             host frames, the load; flagged XBOX_FT_F_LOAD when `flagged`;
+     seq 39  the last frame still starting in play: 100 ms, host 10 ms -
+             90 ms between frames, under the report's 100 ms shape rule.
+   Then seq 40..44 loading (no flags), 100 ms each; map "c1a0e" with seq
+   45..84 in play at 10 ms (host 8 ms), except seq 83, 300 ms with host
+   10 ms: a long frame between host frames that no load follows - a stall,
+   not a level change. Clean END. `flagged` writes version 2 with
+   counters; otherwise version 1. */
+static int write_fixture_level_change( const char *path, int flagged )
+{
+	uint8_t buf[512];
+	xbox_ft_frame_t f;
+	uint32_t i, counters = flagged ? XBOX_FT_W_COUNT : 0;
+	FILE *fp = fopen( path, "wb" );
+
+	if( !fp )
+		return 1;
+
+	fwrite( buf, 1, xbox_ft_encode_header( buf, 1024, 1000000u, 1000000u, 0, 0, 1, "levelchange", counters ), fp );
+	if( counters )
+		fwrite( buf, 1, xbox_ft_encode_counters( buf, counters ), fp );
+	fwrite( buf, 1, xbox_ft_encode_map( buf, 1000000u, 2000000u, 6000, 5500, 16384, 0, "c1a0" ), fp );
+	fwrite( buf, 1, xbox_ft_encode_frames_chunk_head( buf, 0, 45, counters ), fp );
+	for( i = 0; i < 45; i++ )
+	{
+		memset( &f, 0, sizeof( f ));
+		f.seq = i;
+		f.total = 20000;
+		f.host = 19000;
+		f.gpu = 3000;
+		f.flags = XBOX_FT_F_ACTIVE;
+		if( i == 35 )
+		{
+			f.total = 600000;
+			f.host = 599000;
+		}
+		else if( i == 38 )
+		{
+			f.total = 500000;
+			f.host = 10000;
+			if( flagged )
+				f.flags |= XBOX_FT_F_LOAD;
+		}
+		else if( i == 39 )
+		{
+			f.total = 100000;
+			f.host = 10000;
+		}
+		else if( i >= 40 )
+		{
+			f.total = 100000;
+			f.host = 90000;
+			f.gpu = 0;
+			f.flags = 0;
+		}
+		fwrite( buf, 1, xbox_ft_encode_frame( buf, &f, counters ), fp );
+	}
+	fwrite( buf, 1, xbox_ft_encode_map( buf, 3000000u, 1500000u, 5500, 5400, 16384, 0, "c1a0e" ), fp );
+	fwrite( buf, 1, xbox_ft_encode_frames_chunk_head( buf, 45, 40, counters ), fp );
+	for( i = 45; i < 85; i++ )
+	{
+		memset( &f, 0, sizeof( f ));
+		f.seq = i;
+		f.total = ( i == 83 ) ? 300000 : 10000;
+		f.host = ( i == 83 ) ? 10000 : 8000;
+		f.gpu = 500;
+		f.flags = XBOX_FT_F_ACTIVE;
+		fwrite( buf, 1, xbox_ft_encode_frame( buf, &f, counters ), fp );
+	}
+	fwrite( buf, 1, xbox_ft_encode_end( buf, 9000000u, 0 ), fp );
+	return fclose( fp ) != 0;
+}
+
 int main( int argc, char **argv )
 {
 	test_ring();
@@ -288,6 +368,18 @@ int main( int argc, char **argv )
 	if( argc > 2 && write_fixture( argv[2], 0 ))
 	{
 		fprintf( stderr, "could not write %s\n", argv[2] );
+		failures++;
+	}
+	/* argv[3]: the level-change session with LOAD flags (v2); argv[4]:
+	   the same without them (v1, an older recorder). */
+	if( argc > 3 && write_fixture_level_change( argv[3], 1 ))
+	{
+		fprintf( stderr, "could not write %s\n", argv[3] );
+		failures++;
+	}
+	if( argc > 4 && write_fixture_level_change( argv[4], 0 ))
+	{
+		fprintf( stderr, "could not write %s\n", argv[4] );
 		failures++;
 	}
 
