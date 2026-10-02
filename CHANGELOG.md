@@ -5,6 +5,26 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox GPU studio path: resident vertex programs, muzzle flashes on the GPU (R2)
+
+All four vertex programs now stay in the NV2A's program memory at once
+and a switch is a single register write, instead of re-sending the
+program through the pushbuffer every time the renderer moves between
+the world, the HUD, the TriAPI and studio models. Studio constants are
+only sent when they change, and each mesh's state goes out in one
+pushbuffer block. Models lit by up to two entity lights (muzzle flashes,
+and the controller's, gargantua's and nihilanth's lights) are now
+skinned and lit on the GPU too; more lights, nihilanth's green light
+and a few edge cases keep the CPU path. In xemu the 9mmAR firing scene
+went from 73 to 66-67 KiB of pushbuffer a frame (peak 113 to 86-105
+over three runs), studio skinning and lighting from 0.98 to 0.78 ms of
+CPU (emulator timing), and its CPU-drawn studio vertices peaked at 1.0k
+instead of 1.9k; the rest are the view model's chrome, still on the CPU. With a muzzle flash
+lighting the view model, about 98% of the lit pixels match the CPU path
+exactly and most others by one level; a handful of single pixels on
+tiny triangles can differ more where a vertex sits right on the edge of
+the light. The console's numbers need a hardware run.
+
 ### Added - studio models skinned and lit on the Xbox GPU (R1)
 
 Studio models (NPCs, the view model, items) are now transformed and lit

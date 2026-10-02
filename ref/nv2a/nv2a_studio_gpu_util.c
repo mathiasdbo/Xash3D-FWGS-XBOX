@@ -651,3 +651,288 @@ void nv2a_sgpu_vp_color( const float lut[NV2A_SGPU_LUT_REGS][4], float ambient, 
 		out[c] = (uint8_t)b;
 	}
 }
+
+/* ------------------------------------------------------------------ */
+/* Local lights (elights)                                              */
+/* ------------------------------------------------------------------ */
+
+void nv2a_sgpu_elight_gamma_reg( float gamma, float out[4] )
+{
+	out[0] = gamma;
+	out[1] = 1.0f / gamma;
+	out[2] = (float)( pow( 255.75, (double)gamma ) / 1023.0 );
+	out[3] = 1023.0f;
+}
+
+void nv2a_sgpu_elight_consts( const nv2a_sgpu_elights_t *el, const float gamma_reg[4], float out[NV2A_SGPU_ELIGHT_REGS][4] )
+{
+	int i, n = el->count;
+
+	if( n < 0 )
+		n = 0;
+	if( n > (int)NV2A_SGPU_MAX_ELIGHTS )
+		n = (int)NV2A_SGPU_MAX_ELIGHTS;
+
+	memset( out, 0, sizeof( float ) * 4 * NV2A_SGPU_ELIGHT_REGS );
+	for( i = 0; i < n; i++ )
+	{
+		out[i * 2][0] = el->origin[i][0];
+		out[i * 2][1] = el->origin[i][1];
+		out[i * 2][2] = el->origin[i][2];
+		out[i * 2 + 1][0] = el->color[i][0];
+		out[i * 2 + 1][1] = el->color[i][1];
+		out[i * 2 + 1][2] = el->color[i][2];
+		out[i * 2 + 1][3] = el->r2[i];
+		/* R_LightLambert's r = -dot( normal, light ), or +dot for a
+		   flipped view model; 0 turns the light off (r is then never
+		   above 0). */
+		out[5][i] = el->flip ? -1.0f : 1.0f;
+	}
+	memcpy( out[4], gamma_reg, sizeof( float ) * 4 );
+	out[5][2] = NV2A_SGPU_ELIGHT_TINY;
+}
+
+int nv2a_sgpu_elights_fit( const nv2a_sgpu_elights_t *el )
+{
+	int i, c;
+
+	if( el->count < 0 || el->count > (int)NV2A_SGPU_MAX_ELIGHTS )
+		return 0;
+	for( i = 0; i < el->count; i++ )
+	{
+		for( c = 0; c < 3; c++ )
+		{
+			if( !( el->color[i][c] >= NV2A_SGPU_ELIGHT_MIN_COLOR ))
+				return 0;
+		}
+	}
+	return 1;
+}
+
+static int sgpu_power_table_ok( const uint32_t *table, double g )
+{
+	int i;
+
+	for( i = 0; i < 1024; i++ )
+	{
+		double want = floor( pow( i / 1023.0, g ) * 1023.0 );
+
+		if( fabs( (double)table[i] - want ) > 1.0 )
+			return 0;
+	}
+	return 1;
+}
+
+int nv2a_sgpu_fit_gamma( const uint32_t *linear, const uint32_t *screen, float *gamma )
+{
+	double g;
+
+	if( !linear || !screen )
+	{
+		*gamma = 1.0f;
+		return linear == screen; /* both NULL: the identity */
+	}
+
+	/* linear[i] = (int)( pow( i / 1023, g ) * 1023 ): a midpoint
+	   entry pins g to about 1e-3, then every entry of both tables is
+	   checked against it. */
+	if( linear[767] == 0 || linear[767] >= 1023 )
+		return 0;
+	g = log(( linear[767] + 0.5 ) / 1023.0 ) / log( 767.0 / 1023.0 );
+	if( !( g > 0.1 && g < 10.0 ))
+		return 0;
+	if( !sgpu_power_table_ok( linear, g ) || !sgpu_power_table_ok( screen, 1.0 / g ))
+		return 0;
+	*gamma = (float)g;
+	return 1;
+}
+
+static uint32_t sgpu_gamma_table( const uint32_t *table, uint32_t b )
+{
+	if( b >= 1024 )
+		return 0;
+	return table ? table[b] : b;
+}
+
+void nv2a_sgpu_ref_elight_color( const uint32_t *linear, const uint32_t *screen, const nv2a_sgpu_elights_t *el,
+	const float rows[3][4], const float localpos[3], const float normal[3], const float color[3], uint8_t out[3] )
+{
+	float light[NV2A_SGPU_MAX_ELIGHTS][4];
+	float finalLight[3] = { 0.0f, 0.0f, 0.0f };
+	int i, c;
+
+	/* R_LightStrength: Matrix3x4_VectorITransform( lighttransform[bone],
+	   el->origin, lightbonepos ) (public/matrixlib.c:35), then
+	   localpos - lightbonepos. */
+	for( i = 0; i < el->count; i++ )
+	{
+		float dir[3], lbp[3];
+
+		dir[0] = el->origin[i][0] - rows[0][3];
+		dir[1] = el->origin[i][1] - rows[1][3];
+		dir[2] = el->origin[i][2] - rows[2][3];
+		lbp[0] = dir[0] * rows[0][0] + dir[1] * rows[1][0] + dir[2] * rows[2][0];
+		lbp[1] = dir[0] * rows[0][1] + dir[1] * rows[1][1] + dir[2] * rows[2][1];
+		lbp[2] = dir[0] * rows[0][2] + dir[1] * rows[1][2] + dir[2] * rows[2][2];
+		light[i][0] = localpos[0] - lbp[0];
+		light[i][1] = localpos[1] - lbp[1];
+		light[i][2] = localpos[2] - lbp[2];
+		light[i][3] = 0.0f;
+	}
+
+	if( el->count == 0 )
+	{
+		for( c = 0; c < 3; c++ )
+			out[c] = (uint8_t)( color[c] * 255.0f );
+		return;
+	}
+
+	for( i = 0; i < el->count; i++ )
+	{
+		float r = normal[0] * light[i][0] + normal[1] * light[i][1] + normal[2] * light[i][2];
+
+		if( !el->flip )
+			r = -r;
+
+		if( r > 0.0f )
+		{
+			float temp;
+
+			if( light[i][3] == 0.0f )
+			{
+				float r2 = light[i][0] * light[i][0] + light[i][1] * light[i][1] + light[i][2] * light[i][2];
+
+				if( r2 > 0.0f )
+					light[i][3] = el->r2[i] / ( r2 * sqrt( r2 ));
+				else
+					light[i][3] = 0.0001f;
+			}
+
+			temp = r * light[i][3];
+			for( c = 0; c < 3; c++ )
+				finalLight[c] += el->color[i][c] + temp;
+		}
+	}
+
+	if( finalLight[0] != 0.0f || finalLight[1] != 0.0f || finalLight[2] != 0.0f )
+	{
+		for( c = 0; c < 3; c++ )
+		{
+			float v = finalLight[c] + sgpu_gamma_table( linear, (uint32_t)( color[c] * 1023.0f ));
+
+			if( v > 1023.0f )
+				out[c] = 255;
+			else
+				out[c] = (uint8_t)( sgpu_gamma_table( screen, (uint32_t)v ) >> 2 );
+		}
+	}
+	else
+	{
+		for( c = 0; c < 3; c++ )
+			out[c] = (uint8_t)( color[c] * 255.0f );
+	}
+}
+
+/* LIT's z: ( x > 0 ) ? y^w : 0 with x, y floored at 0 and w clamped to
+   +-( 128 - 1/256 ) (NV_vertex_program; xemu's _LIT evaluates the power
+   as exp2( w * log2( y ))). */
+static float sgpu_lit_z( float x, float y, float w )
+{
+	const float epsilon = 1.0f / 256.0f;
+
+	if( w < -( 128.0f - epsilon ))
+		w = -( 128.0f - epsilon );
+	if( w > 128.0f - epsilon )
+		w = 128.0f - epsilon;
+	if( y < 0.0f )
+		y = 0.0f;
+	return x > 0.0f ? exp2f( w * log2f( y )) : 0.0f;
+}
+
+void nv2a_sgpu_vp_elight_color( const float k[NV2A_SGPU_ELIGHT_REGS][4], const float rows[3][4],
+	const float localpos[3], const float normal[3], const float color[3], uint8_t out[3] )
+{
+	volatile float world[3], nw[3], d[2][3], r[2], l2[2], rs[2], t[2], m[2], fl[3], e;
+	volatile float base[3], p[3], cc[3], sg[3];
+	int i, c;
+
+	/* position block: R1 = bonestransform * v (DP4 with w = 1) */
+	for( c = 0; c < 3; c++ )
+		world[c] = localpos[0] * rows[c][0] + localpos[1] * rows[c][1] + localpos[2] * rows[c][2] + rows[c][3];
+
+	/* local lights. R_LightStrength's light vector is v - R^T ( o - t ),
+	   in the vertex bone's frame; for an orthonormal R, -L = R^T ( o - W )
+	   with W = R v + t, so r = dot( n, -L ) = dot( R n, o - W ) and
+	   |L|^2 = |o - W|^2. */
+	for( c = 0; c < 3; c++ )
+		nw[c] = normal[0] * rows[c][0] + normal[1] * rows[c][1] + normal[2] * rows[c][2];
+	for( i = 0; i < 2; i++ )
+	{
+		for( c = 0; c < 3; c++ )
+			d[i][c] = k[i * 2][c] - world[c];
+		r[i] = nw[0] * d[i][0] + nw[1] * d[i][1] + nw[2] * d[i][2];
+		l2[i] = d[i][0] * d[i][0] + d[i][1] * d[i][1] + d[i][2] * d[i][2];
+	}
+	for( i = 0; i < 2; i++ )
+	{
+		r[i] = r[i] * k[5][i];                         /* MUL: flip sign, or 0 for an unused light */
+		l2[i] = l2[i] > k[5][2] ? l2[i] : k[5][2];     /* MAX tiny */
+		rs[i] = 1.0f / sqrtf( l2[i] );                 /* RSQ */
+		t[i] = rs[i] * rs[i];
+		t[i] = t[i] * rs[i];
+		t[i] = t[i] * r[i];
+		m[i] = 0.0f < r[i] ? 1.0f : 0.0f;              /* SLT */
+	}
+	for( c = 0; c < 3; c++ )
+	{
+		volatile float a = t[0] * k[1][3] + k[1][c];   /* MAD: lc0 + temp0 */
+		volatile float b;
+
+		a = a * m[0];
+		b = t[1] * k[3][3] + k[3][c];
+		fl[c] = b * m[1] + a;
+	}
+	e = m[0] > m[1] ? m[0] : m[1];                     /* MAX: a light reached the vertex */
+
+	/* the base colour bytes, as without local lights */
+	for( c = 0; c < 3; c++ )
+	{
+		volatile float b = color[c] * 255.0f;
+		base[c] = b - ( b - floorf( b ));
+	}
+
+	/* LinearGammaTable( color * 1023 ) as 1023 * color^gamma, plus the
+	   lights, truncated as the table's (uint) index truncates it, then
+	   ScreenGammaTable(...) >> 2 as floor( 255.75 * ( c / 1023 )^( 1 / gamma )),
+	   evaluated as LIT( t * c, 1 / gamma ) with t = 255.75^gamma / 1023.
+	   The LIT chain carries each result into the next LIT's x (its gate,
+	   +tiny so a 0 result keeps the next channel open), which comes back
+	   out in y. */
+	p[0] = sgpu_lit_z( color[0], color[0], k[4][0] );
+	p[1] = sgpu_lit_z( p[0] + k[5][2], color[1], k[4][0] );
+	p[2] = sgpu_lit_z( p[1] + k[5][2], color[2], k[4][0] );
+	p[0] = p[0] + k[5][2];
+	p[1] = p[1] + k[5][2];
+	for( c = 0; c < 3; c++ )
+	{
+		volatile float v = p[c] * k[4][3] + fl[c];     /* MAD: * 1023 + the lights */
+		cc[c] = v - ( v - floorf( v ));                /* EXP .y, ADD */
+		cc[c] = cc[c] * k[4][2];                       /* * t */
+	}
+	sg[0] = sgpu_lit_z( cc[0], cc[0], k[4][1] );
+	sg[1] = sgpu_lit_z( sg[0] + k[5][2], cc[1], k[4][1] );
+	sg[2] = sgpu_lit_z( sg[1] + k[5][2], cc[2], k[4][1] );
+	sg[0] = sg[0] + k[5][2];
+	sg[1] = sg[1] + k[5][2];
+	for( c = 0; c < 3; c++ )
+	{
+		volatile float v = sg[c];
+		volatile float b = v - ( v - floorf( v ));
+		volatile float diff = b - base[c];
+		volatile float o = diff * e + base[c];
+
+		/* o[COL0] is clamped to [0, 1] on output (NV_vertex_program;
+		   xemu glsl/vsh.c clamps oD0): a byte above 255 is 255. */
+		out[c] = o > 255.0f ? 255 : (uint8_t)o;
+	}
+}

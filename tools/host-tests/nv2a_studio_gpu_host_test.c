@@ -7,8 +7,9 @@ Run from the repository root through tools/host-tests/run.sh, or:
       ref/nv2a/nv2a_studio_gpu_util.c ref/nv2a/nv2a_tri_util.c -lm -o /tmp/t && /tmp/t [model.mdl ...]
 
 Checks:
-  - the palette slots: 40 bones, 4 registers each, all inside the 192
-    hardware constants, none on c[0..31] (hardware 96..127), no overlap;
+  - the palette slots: 38 bones, 4 registers each, all inside the 192
+    hardware constants, none on c[0..31] (hardware 96..127), no overlap,
+    and the local lights' c[88..93] clear of all of them;
   - the geometry against the TriAPI's own assembler (nv2a_tri_util.c, the
     CPU path's triangle order and winding) on synthetic strips and fans
     and on every submodel of each .mdl named on the command line;
@@ -19,7 +20,11 @@ Checks:
     cvars and at the extremes the menu allows;
   - the program's lighting arithmetic against R_StudioLighting's
     (r_studio.c:1593-1645) colour bytes: never more than 1 apart, and how
-    often they differ.
+    often they differ;
+  - the local lights: the gamma fit against the engine's linear and
+    screen tables, and the program's R_LightLambert (one and two elights,
+    flipped or not) against the CPU path's colour bytes: how far apart,
+    and how often.
 Exit status is nonzero iff a check failed.
 */
 #include "nv2a_studio_gpu_util.h"
@@ -59,8 +64,18 @@ static void test_slots( void )
 	CHECK( ok, "palette slots: inside 0..191, off hardware 96..127, no overlap" );
 	CHECK( NV2A_SGPU_C_LUT + NV2A_SGPU_LUT_REGS == NV2A_SGPU_C_END, "LUT ends where the palette's upper block starts" );
 	{
-		uint32_t free_regs = 192u - NV2A_SGPU_C_END;
-		CHECK( free_regs == 4u * NV2A_SGPU_MAX_PALETTE, "every free register is a palette register" );
+		uint32_t free_regs = 192u - NV2A_SGPU_C_END, s;
+
+		CHECK( 4u * NV2A_SGPU_MAX_PALETTE + NV2A_SGPU_ELIGHT_REGS <= free_regs, "the palette and the local lights fit the free registers" );
+		ok = 1;
+		for( s = 0; s < NV2A_SGPU_ELIGHT_REGS; s++ )
+		{
+			uint32_t hw = NV2A_SGPU_HW_C0 + NV2A_SGPU_C_ELIGHT + s;
+
+			if( hw >= 192 || used[hw] )
+				ok = 0;
+		}
+		CHECK( ok && NV2A_SGPU_C_ELIGHT == 88u, "local lights at c[88..93], hardware 184..189, clear of the palette" );
 	}
 	CHECK( (int)nv2a_sgpu_matrix_slot( 0 ) - 96 >= -96 && (int)nv2a_sgpu_light_slot( NV2A_SGPU_MAX_PALETTE - 1 ) - 96 <= 95,
 		"A0 addresses stay in -96..95" );
@@ -576,6 +591,197 @@ static void test_consts( void )
 	CHECK( fixed[0][0] == (float)NV2A_SGPU_SHADE_LAMBERT - 1.0f && fixed[0][3] == 1.0f / 64.0f && fixed[2][0] == 64.0f, "fixed constants" );
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Local lights                                                        */
+/* ------------------------------------------------------------------ */
+
+/* engine/client/gamma.c:77-78: the linear and screen tables. */
+static void build_powtables( double gamma, uint32_t linear[1024], uint32_t screen[1024] )
+{
+	int i;
+
+	for( i = 0; i < 1024; i++ )
+	{
+		linear[i] = pow( i / 1023.0, gamma ) * 1023.0;
+		screen[i] = pow( i / 1023.0, 1.0 / gamma ) * 1023.0;
+	}
+}
+
+/* A random rotation (unit quaternion) and translation: bone matrices are
+   Matrix3x4_FromOriginQuat products, orthonormal up to rounding. */
+static void random_bone( float rows[3][4] )
+{
+	float q[4], len;
+	int i;
+
+	for( i = 0; i < 4; i++ )
+		q[i] = frand() * 2.0f - 1.0f;
+	len = sqrtf( q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3] );
+	for( i = 0; i < 4; i++ )
+		q[i] /= len;
+	rows[0][0] = 1.0f - 2.0f * ( q[1] * q[1] + q[2] * q[2] );
+	rows[1][0] = 2.0f * ( q[0] * q[1] + q[3] * q[2] );
+	rows[2][0] = 2.0f * ( q[0] * q[2] - q[3] * q[1] );
+	rows[0][1] = 2.0f * ( q[0] * q[1] - q[3] * q[2] );
+	rows[1][1] = 1.0f - 2.0f * ( q[0] * q[0] + q[2] * q[2] );
+	rows[2][1] = 2.0f * ( q[1] * q[2] + q[3] * q[0] );
+	rows[0][2] = 2.0f * ( q[0] * q[2] + q[3] * q[1] );
+	rows[1][2] = 2.0f * ( q[1] * q[2] - q[3] * q[0] );
+	rows[2][2] = 1.0f - 2.0f * ( q[0] * q[0] + q[1] * q[1] );
+	rows[0][3] = frand() * 2000.0f - 1000.0f;
+	rows[1][3] = frand() * 2000.0f - 1000.0f;
+	rows[2][3] = frand() * 400.0f - 200.0f;
+}
+
+static void test_fit_gamma( void )
+{
+	uint32_t lin[1024], scr[1024];
+	float g = 0.0f;
+	double gammas[3] = { 1.8, 2.5, 3.0 };
+	int i, ok = 1;
+
+	for( i = 0; i < 3; i++ )
+	{
+		build_powtables( gammas[i], lin, scr );
+		if( !nv2a_sgpu_fit_gamma( lin, scr, &g ) || fabs( g - gammas[i] ) > 0.01 )
+			ok = 0;
+	}
+	CHECK( ok, "gamma fit: recovers 1.8, 2.5 and 3.0 from the engine's tables" );
+	CHECK( nv2a_sgpu_fit_gamma( NULL, NULL, &g ) && g == 1.0f, "gamma fit: no tables (linear gamma space) is gamma 1" );
+	build_powtables( 2.5, lin, scr );
+	scr[300] += 5;
+	CHECK( !nv2a_sgpu_fit_gamma( lin, scr, &g ), "gamma fit: a screen table that is not the inverse power is refused" );
+	build_powtables( 2.5, lin, scr );
+	build_lightgamma( 2.5f, 0.0f, 2.5f, lin );
+	CHECK( !nv2a_sgpu_fit_gamma( lin, scr, &g ), "gamma fit: a table that is not a power (the light table) is refused" );
+}
+
+/* One configuration: `count` elights at the muzzle flash's colour and
+   radius (r_studio.c R_StudioEntityLight / the EF_MUZZLEFLASH elight,
+   255 192 64, radius 24) or random ones, around random vertices. */
+static void test_elight_case( double gamma, int identity, int count, int flip, int muzzle, int min_rgb, int gated, const char *name,
+	int max_diff, double max_mismatch_pct )
+{
+	uint32_t lin[1024], scr[1024];
+	const uint32_t *L = NULL, *S = NULL;
+	float g = 1.0f, k[NV2A_SGPU_ELIGHT_REGS][4], greg[4];
+	long n, lit = 0, mismatched = 0, samples = 0;
+	long hist[4] = { 0, 0, 0, 0 };
+	int worst = 0;
+	char msg[256];
+
+	if( !identity )
+	{
+		build_powtables( gamma, lin, scr );
+		L = lin;
+		S = scr;
+	}
+	if( !nv2a_sgpu_fit_gamma( L, S, &g ))
+	{
+		CHECK( 0, "elight case: gamma fit failed" );
+		return;
+	}
+	nv2a_sgpu_elight_gamma_reg( g, greg );
+
+	for( n = 0; n < 200000; n++ )
+	{
+		nv2a_sgpu_elights_t el;
+		float rows[3][4], pos[3], nrm[3], color[3], world[3], len;
+		uint8_t ref[3], vp[3];
+		int i, c;
+
+		random_bone( rows );
+		for( c = 0; c < 3; c++ )
+			pos[c] = frand() * 80.0f - 40.0f;
+		for( c = 0; c < 3; c++ )
+			nrm[c] = frand() * 2.0f - 1.0f;
+		len = sqrtf( nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2] );
+		if( len < 1e-3f )
+			continue;
+		for( c = 0; c < 3; c++ )
+			nrm[c] /= len;
+		for( c = 0; c < 3; c++ )
+			color[c] = frand() * frand(); /* lightcolor * lv: dark more often than not */
+		for( c = 0; c < 3; c++ )
+			world[c] = pos[0] * rows[c][0] + pos[1] * rows[c][1] + pos[2] * rows[c][2] + rows[c][3];
+
+		memset( &el, 0, sizeof( el ));
+		el.count = count;
+		el.flip = flip;
+		for( i = 0; i < count; i++ )
+		{
+			float radius = muzzle ? 24.0f : 10.0f + frand() * 290.0f;
+			int rgb[3] = { 255, 192, 64 };
+
+			if( !muzzle )
+				for( c = 0; c < 3; c++ )
+					rgb[c] = min_rgb + (int)( frand() * ( 256 - min_rgb ));
+			for( c = 0; c < 3; c++ )
+			{
+				el.origin[i][c] = world[c] + ( frand() * 2.0f - 1.0f ) * radius * 1.5f;
+				el.color[i][c] = (float)( L ? L[rgb[c] << 2] : (uint32_t)( rgb[c] << 2 ));
+			}
+			el.r2[i] = radius * radius;
+		}
+
+		if( gated && !nv2a_sgpu_elights_fit( &el ))
+			continue;
+		nv2a_sgpu_elight_consts( &el, greg, k );
+		nv2a_sgpu_ref_elight_color( L, S, &el, (const float (*)[4])rows, pos, nrm, color, ref );
+		nv2a_sgpu_vp_elight_color( (const float (*)[4])k, (const float (*)[4])rows, pos, nrm, color, vp );
+
+		{
+			uint8_t plain[3];
+			int changed = 0;
+
+			for( c = 0; c < 3; c++ )
+			{
+				plain[c] = (uint8_t)( color[c] * 255.0f );
+				if( ref[c] != plain[c] )
+					changed = 1;
+			}
+			lit += changed;
+		}
+		for( c = 0; c < 3; c++ )
+		{
+			int d = abs( (int)ref[c] - (int)vp[c] );
+
+			if( d > worst )
+				worst = d;
+			if( d )
+				mismatched++;
+			hist[d > 3 ? 3 : d]++;
+			samples++;
+		}
+	}
+
+	printf( "  elights %s: max diff %d, %.3f%% of colour bytes differ (1: %ld, 2: %ld, 3+: %ld of %ld), %ld of 200000 vertices lit\n",
+		name, worst, 100.0 * mismatched / samples, hist[1], hist[2], hist[3], samples, lit );
+	snprintf( msg, sizeof( msg ), "elights %s: colour bytes at most %d apart (got %d)", name, max_diff, worst );
+	CHECK( worst <= max_diff, msg );
+	snprintf( msg, sizeof( msg ), "elights %s: at most %.2f%% of colour bytes differ", name, max_mismatch_pct );
+	CHECK( 100.0 * mismatched / samples <= max_mismatch_pct, msg );
+}
+
+static void test_elights( void )
+{
+	test_fit_gamma();
+	CHECK( !nv2a_sgpu_elights_fit( &(nv2a_sgpu_elights_t){ .count = 3 } ), "three lights stay on the CPU" );
+	test_elight_case( 2.5, 0, 0, 0, 1, 0, 1, "none (gamma 2.5)", 0, 0.0 );
+	test_elight_case( 2.5, 0, 1, 0, 1, 0, 1, "one muzzle flash (gamma 2.5)", 2, 10.0 );
+	test_elight_case( 2.5, 0, 2, 0, 1, 0, 1, "two muzzle flashes (gamma 2.5)", 2, 13.0 );
+	test_elight_case( 2.5, 0, 2, 1, 1, 0, 1, "two muzzle flashes, flipped view model (gamma 2.5)", 2, 13.0 );
+	test_elight_case( 1.8, 0, 2, 0, 1, 0, 1, "two muzzle flashes (gamma 1.8)", 2, 13.0 );
+	test_elight_case( 3.0, 0, 2, 0, 1, 0, 1, "two muzzle flashes (gamma 3.0)", 2, 13.0 );
+	test_elight_case( 2.5, 0, 2, 0, 0, 0, 1, "two random lights the gate passes (gamma 2.5)", 2, 13.0 );
+	test_elight_case( 3.0, 0, 2, 0, 0, 0, 1, "two random lights the gate passes (gamma 3.0)", 2, 13.0 );
+	test_elight_case( 1.0, 1, 2, 0, 0, 0, 1, "two random lights the gate passes (linear gamma space)", 1, 6.0 );
+	/* Why the gate: without it a dark light can leave a lit vertex's sum
+	   near 0, where ScreenGammaTable is steepest. Reported, not gated. */
+	test_elight_case( 2.5, 0, 2, 0, 0, 0, 0, "two random lights, ungated (gamma 2.5)", 255, 100.0 );
+}
+
 int main( int argc, char **argv )
 {
 	uint32_t table[1024];
@@ -590,6 +796,7 @@ int main( int argc, char **argv )
 	test_lighting( NULL, "linear gamma space (identity table)", 0.01f, 1.0 );
 	build_lightgamma( 2.5f, 0.0f, 2.5f, table );
 	test_lighting( table, "default cvars (gamma 2.5, lightgamma 2.5, brightness 0)", 0.5f, 10.0 );
+	test_elights();
 
 	for( i = 1; i < argc; i++ )
 		test_model( argv[i] );

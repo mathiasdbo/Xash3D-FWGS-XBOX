@@ -2009,12 +2009,19 @@ R_StudioDrawPoints below hands a submodel's meshes to the NV2A's vertex
 unit (vs_studio.vp, r_context.c nv2a_sgpu_*) instead of transforming,
 lighting and submitting every vertex through the TriAPI. The program
 reproduces this file's arithmetic (Matrix3x4_VectorTransform,
-R_StudioLighting, R_LightLambert without local lights) on static
+R_StudioLighting, R_LightLambert with up to two local lights) on static
 per-submodel vertices (r_studio_gpu.c), with bonestransform and blightvec
 uploaded per draw. Everything else stays on the CPU path, unchanged
 (citations are ref/gl/gl_studio.c, the reference this file ports):
-  - entities lit by local lights (g_studio.numlocallights: R_LightLambert's
-    per-vertex elight sum, :1378-1427);
+  - entities lit by more than two local lights, by a light with a colour
+    channel below NV2A_SGPU_ELIGHT_MIN_COLOR, or whose lighttransform
+    differs from bonestransform (R_StudioFxTransform; the program finds
+    R_LightStrength's light vectors, :1449-1471, from the bone matrices
+    it has), a submodel whose vertex bones hold light positions another
+    model computed this framecount (a player's weapon model:
+    R_StudioGpuElightBones), and all of them while the engine's linear
+    and screen gamma tables are not the powers the program evaluates
+    (R_StudioGpuElights);
   - STUDIO_HAS_BONEWEIGHTS models (R_StudioComputeSkinMatrix, :1975-1993);
   - kRenderFxGlowShell (the shell's vertex offset, :2003-2009) and a forced
     chrome face (g_nForceFaceFlags);
@@ -2080,6 +2087,151 @@ static qboolean R_StudioGpuGamma( void )
 	return sgpu_lut_ok;
 }
 
+/* divergences.md #143, local lights: the gamma the program evaluates
+   LinearGammaTable and ScreenGammaTable with (nv2a_sgpu_fit_gamma),
+   refitted when either table changes (checked once a frame, as the light
+   gamma table is in R_StudioGpuGamma). */
+static float    sgpu_gamma_reg[4] = { 1.0f, 1.0f, (float)( 255.75 / 1023.0 ), 1023.0f }; /* c[92] at gamma 1 */
+static qboolean sgpu_gamma_ok;
+static uint32_t sgpu_gamma_hash;
+static uint32_t sgpu_gamma_frame = 0xFFFFFFFFu;
+static qboolean sgpu_gamma_built;
+
+static qboolean R_StudioGpuElightGamma( void )
+{
+	uint32_t frame = nv2a_current_frame_number();
+	const uint32_t *lin = NULL, *scr = NULL;
+	uint32_t h = 2166136261u;
+
+	if( frame == sgpu_gamma_frame )
+		return sgpu_gamma_ok;
+	sgpu_gamma_frame = frame;
+
+	if( !FBitSet( gp_host->features, ENGINE_LINEAR_GAMMA_SPACE ))
+	{
+		int i;
+
+		lin = (const uint32_t *)nv2a_studio_ctx.lineargammatable;
+		scr = (const uint32_t *)nv2a_studio_ctx.screengammatable;
+		if( !lin || !scr )
+			return sgpu_gamma_ok = false;
+		for( i = 0; i < 1024; i++ )
+			h = (( h ^ lin[i] ) * 16777619u ^ scr[i] ) * 16777619u;
+	}
+
+	if( !sgpu_gamma_built || h != sgpu_gamma_hash )
+	{
+		float g = 1.0f;
+
+		sgpu_gamma_ok = nv2a_sgpu_fit_gamma( lin, scr, &g ) ? true : false;
+		nv2a_sgpu_elight_gamma_reg( sgpu_gamma_ok ? g : 1.0f, sgpu_gamma_reg );
+		sgpu_gamma_hash = h;
+		sgpu_gamma_built = true;
+		if( !sgpu_gamma_ok )
+			gEngfuncs.Con_DPrintf( "ref_nv2a: the gamma tables are not powers the GPU studio path can evaluate - entities lit by elights stay on the CPU\n" );
+	}
+	return sgpu_gamma_ok;
+}
+
+/* The current entity's local lights as the program takes them
+   (R_StudioEntityLight's results, R_LightLambert's flip sign). */
+static void R_StudioGpuElightState( nv2a_sgpu_elights_t *el )
+{
+	int i, c;
+
+	memset( el, 0, sizeof( *el ));
+	el->count = Q_min( g_studio.numlocallights, (int)NV2A_SGPU_MAX_ELIGHTS );
+	for( i = 0; i < el->count; i++ )
+	{
+		for( c = 0; c < 3; c++ )
+		{
+			el->origin[i][c] = g_studio.locallight[i]->origin[c];
+			el->color[i][c] = (float)g_studio.locallightcolor[i][c];
+		}
+		el->r2[i] = g_studio.locallightR2[i];
+	}
+	el->flip = nv2a_studio_ctx.fFlipViewModel;
+}
+
+/* R_LightStrength's per-bone cache, kept for a submodel the program
+   lights (gl_studio.c:1453-1471). The reference computes a bone's light
+   positions once per g_studio.framecount, from whichever model reaches
+   the bone first, and a player's weapon model is drawn without a new
+   framecount (gl_studio.c:3088-3101; the HL client's
+   StudioModelRenderer.cpp:1540-1556 counts only the player), so the
+   weapon lights its vertices with positions computed from the PLAYER's
+   lighttransform of the same bone index. The program computes them from
+   this model's own bones, so it may only draw when no vertex bone of the
+   submodel holds such a position from another transform; and it stamps
+   the bones it computes, as the CPU path would have, so a later CPU draw
+   in the same framecount reuses exactly what the reference would.
+   Reviewed by reference-renderer-specialist. */
+static qboolean R_StudioGpuElightBones( void )
+{
+	const byte *pvertbone = (const byte *)m_pStudioHeader + m_pSubModel->vertinfoindex;
+	uint32_t seen[( MAXSTUDIOBONES + 31 ) / 32];
+	int i, k;
+
+	memset( seen, 0, sizeof( seen ));
+	for( i = 0; i < m_pSubModel->numverts; i++ )
+	{
+		int bone = pvertbone[i];
+
+		if( seen[bone >> 5] & ( 1u << ( bone & 31 )))
+			continue;
+		seen[bone >> 5] |= 1u << ( bone & 31 );
+
+		if( g_studio.lightage[bone] != g_studio.framecount )
+		{
+			for( k = 0; k < g_studio.numlocallights; k++ )
+				Matrix3x4_VectorITransform( g_studio.lighttransform[bone], g_studio.locallight[k]->origin, g_studio.lightbonepos[bone][k] );
+			g_studio.lightage[bone] = g_studio.framecount;
+		}
+		else
+		{
+			for( k = 0; k < g_studio.numlocallights; k++ )
+			{
+				vec3_t pos;
+
+				Matrix3x4_VectorITransform( g_studio.lighttransform[bone], g_studio.locallight[k]->origin, pos );
+				if( !VectorCompare( pos, g_studio.lightbonepos[bone][k] ))
+					return false;
+			}
+		}
+	}
+	return true;
+}
+
+/* Whether the program can light this entity's local lights (the list
+   above). */
+static qboolean R_StudioGpuElights( void )
+{
+	nv2a_sgpu_elights_t el;
+	int i;
+
+	if( g_studio.numlocallights <= 0 )
+		return true;
+	if( g_studio.numlocallights > (int)NV2A_SGPU_MAX_ELIGHTS )
+		return false;
+
+	R_StudioGpuElightState( &el );
+	el.count = g_studio.numlocallights;
+	if( !nv2a_sgpu_elights_fit( &el ))
+		return false;
+	if( !R_StudioGpuElightGamma())
+		return false;
+
+	/* R_LightStrength uses lighttransform; the program has bonestransform.
+	   They differ only where R_StudioFxTransform (or a client's own) edited
+	   bonestransform, and then the CPU path lights the entity. */
+	for( i = 0; i < m_pStudioHeader->numbones; i++ )
+	{
+		if( memcmp( g_studio.lighttransform[i], g_studio.bonestransform[i], sizeof( matrix3x4 )))
+			return false;
+	}
+	return true;
+}
+
 /* The submodel's GPU geometry when this entity's draw may use the GPU
    path at all (the list above), else NULL. */
 static const nv2a_sgpu_geometry_t *R_StudioGpuGeometry( mstudiotexture_t *ptexture, short *pskinref0 )
@@ -2090,7 +2242,7 @@ static const nv2a_sgpu_geometry_t *R_StudioGpuGeometry( mstudiotexture_t *ptextu
 		return NULL;
 	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ))
 		return NULL;
-	if( g_studio.numlocallights > 0 )
+	if( !R_StudioGpuElights())
 		return NULL;
 	if( e->curstate.renderfx == kRenderFxGlowShell || e->curstate.rendermode == kRenderTransAdd )
 		return NULL;
@@ -2099,8 +2251,14 @@ static const nv2a_sgpu_geometry_t *R_StudioGpuGeometry( mstudiotexture_t *ptextu
 	if( !R_StudioGpuGamma())
 		return NULL;
 
-	return nv2a_sgpu_cache_get( m_pStudioHeader, m_pSubModel, ptexture, m_pStudioHeader->numtextures,
-		pskinref0, m_pStudioHeader->numskinref, nv2a_current_frame_number());
+	{
+		const nv2a_sgpu_geometry_t *geo = nv2a_sgpu_cache_get( m_pStudioHeader, m_pSubModel, ptexture, m_pStudioHeader->numtextures,
+			pskinref0, m_pStudioHeader->numskinref, nv2a_current_frame_number());
+
+		if( geo && g_studio.numlocallights > 0 && !R_StudioGpuElightBones())
+			return NULL;
+		return geo;
+	}
 }
 
 /* One mesh through the GPU path: R_StudioDrawNormalMesh/
@@ -2323,14 +2481,20 @@ static void R_StudioDrawPointsInternal( void )
 
 	/* divergences.md #143: the submodel's per-draw constants (view
 	   projection for the current view-model depth range, light terms,
-	   gamma segments). False when nothing may draw this frame -
-	   the TriAPI's Begin would drop the CPU path's vertices the same way. */
+	   gamma segments, local lights - after the flip above, which
+	   R_LightLambert's sign reads). False when nothing may draw this
+	   frame - the TriAPI's Begin would drop the CPU path's vertices the
+	   same way. */
 	if( gpu )
 	{
-		float light[4];
+		float light[4], elights[NV2A_SGPU_ELIGHT_REGS][4];
+		nv2a_sgpu_elights_t el;
 
 		nv2a_sgpu_light_consts( g_studio.ambientlight, g_studio.shadelight, light, &gpu_flat_illum );
-		gpu_drawing = nv2a_sgpu_begin_submodel( gpu, light, (const float (*)[4])sgpu_lut, sgpu_lut_serial );
+		R_StudioGpuElightState( &el );
+		nv2a_sgpu_elight_consts( &el, sgpu_gamma_reg, elights );
+		gpu_drawing = nv2a_sgpu_begin_submodel( gpu, light, (const float (*)[4])sgpu_lut, sgpu_lut_serial,
+			(const float (*)[4])elights );
 	}
 
 	nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_STUDIO;

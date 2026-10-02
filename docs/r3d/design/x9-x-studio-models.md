@@ -88,6 +88,15 @@ vs_tri/vs_lit. The retail worst case per submodel after splitting
 oversized submodels into per-mesh palettes is 35 (view models), so no
 retail mesh falls back for lack of bones. See `ref/nv2a/vs_studio.vp`.
 
+**Update (R2, x9-perf-vp-resident):** the palette is 38 bones (rows and
+light vectors in 0..95 and 128..183); hardware 184..189 (c[88..93]) hold
+up to two local lights and the gamma, and vs_studio lights them
+(R_LightLambert's elight loop). The census split is the same at every
+budget from 35 to 40, so nothing moved to the CPU. vs_studio is 106
+instructions and, with vs_lit, vs_2d and vs_tri, fills the 136 program
+slots: all four are resident and switched with PROGRAM_START, so any
+instruction added to one needs one removed from another.
+
 ## 2. View-model depth range
 
 Reference: `R_DrawViewModel` (`gl_studio.c:3322`) calls
@@ -384,7 +393,11 @@ after.
   shows as pop-in. Both constants are first choices, not measurements.
 - 16-bit linear skins (`LU_IMAGE_R5G6B5`/`A1R5G5B5`) are register values
   this renderer has not pushed on hardware before.
-- The VP20 palette (40 bones, divergences.md #143) is compiled and runs
+- The VP20 palette (38 bones, divergences.md #143) is compiled and runs
   in xemu; reading constants below c[0] through a negative A0, EXP's
   .y as an exact frac and the colour's float-to-fixed conversion are
   not yet observed on hardware.
+- Resident programs switched by PROGRAM_START alone, LIT's power
+  precision (the elights' gamma powers; NV_vertex_program only promises
+  an approximation) and the colour output clamp to [0, 1] the elights
+  rely on for sums above 1023 (R2).

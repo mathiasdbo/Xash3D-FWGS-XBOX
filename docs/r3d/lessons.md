@@ -1965,3 +1965,18 @@ mode the loop calls. Both were found by a stand-in review on PR #155. A
 fixture is a claim about another component's output. Take it from a real
 run, or give that component a test of the exact mode its caller uses.
 
+
+### NEVER force-kill xemu before reading back files the game wrote to its hard disk
+
+An A/B run for the GPU studio path (x9-perf-vp-resident) read back 18
+screenshots that were all zeros or failed their PNG CRCs, after the game
+had written them and quit minutes earlier. The boot script stopped xemu
+with `Stop-Process -Force`; qcow2 keeps newly allocated clusters' table
+updates in xemu's memory until a flush, so data in clusters allocated
+during the run is lost with the process and `tools/xemu_hdd.py` reads
+unallocated (zero) clusters. Frame-time recordings had survived the same
+kill only because they reused clusters an earlier file had allocated.
+Closing the window (`CloseMainWindow`, then waiting for exit) made every
+file read back intact. **Close xemu gracefully and wait for it to exit
+before reading anything off its disk; a file that reads back once is no
+proof the method is sound.**

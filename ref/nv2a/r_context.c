@@ -1233,54 +1233,205 @@ static void *nv2a_2d_ring;
 static nv2a_lit_vertex_t *nv2a_decal_vb;
 static uint32_t           nv2a_decal_vb_used;
 
-/* X9-C: the diffuse x lightmap x 2 program pair (ref/nv2a/vs_lit.vs.cg,
-   ps_lit.ps.cg - both real, freshly-authored Cg sources compiled through
-   the same cgc/vp20compiler/fp20compiler pipeline vs.inl/ps.inl already
-   were, verified reproducible before being committed). The NV2A only
-   holds one active vertex/pixel program at a time, so whichever draw path
-   runs this frame re-uploads its OWN program right before drawing rather
-   than both programs staying resident together - simple and correct for
-   a bring-up slice with only two draw paths, at the cost of a small,
-   irrelevant-for-correctness re-upload every frame. Same shape as
-   tools/x4-triangle/main.c's own init_shader(). */
-static void nv2a_init_lit_shader( void )
+/* divergences.md #143 (resident programs): every vertex program this
+   renderer runs is held in the NV2A's transform program memory at once -
+   136 instruction slots (xemu hw/xbox/nv2a/nv2a_regs.h
+   NV2A_MAX_TRANSFORM_PROGRAM_LENGTH) - uploaded once, by
+   nv2a_upload_vertex_programs at R_Init, and a switch is one
+   NV097_SET_TRANSFORM_PROGRAM_START (nv_regs.h:770) naming the program's
+   first slot. xemu stores that slot in NV_PGRAPH_CSV0_C (pgraph/pgraph.c,
+   SET_TRANSFORM_PROGRAM_START) and runs from it up to the first
+   instruction carrying FLD_FINAL (pgraph/glsl/vsh.c
+   set_programmable_vsh_state); vp20compiler sets FLD_FINAL (dword 3,
+   bit 0: deps/nxdk/tools/vp20compiler/main.c:164) on each program's last
+   instruction only (main.c:549), so programs placed back to back each
+   stop where they should (checked on every .inl below). They are
+   position independent: VP1.1 has no branches, and constant addresses
+   are absolute or relative to A0, never to the program counter. This is
+   how the XDK keeps several vertex shaders resident
+   (LoadVertexShader/SelectVertexShader).
+
+   Before this, every program switch re-uploaded the program through the
+   pushbuffer: ~280 dwords for vs_studio, and for vs_lit/vs_2d/vs_tri one
+   pbkit block per instruction, each pb_end a write-combining flush and an
+   MMIO spin (pbkit.c pb_start/pb_cache_flush). On the console the
+   pushbuffer grew from 34 to 59 KiB a frame with the GPU studio path
+   (PR #175).
+
+   Nothing else writes program memory: SET_TRANSFORM_PROGRAM is pushed
+   only by nv2a_upload_vertex_programs, pbkit never pushes it (pb_init
+   included), and ref/nv2a never selects the fixed-function transform. A
+   future path that loads a program of its own must call
+   nv2a_upload_vertex_programs again afterwards. */
+static const uint32_t nv2a_vp_lit_words[] =
+{
+	#include "vs_lit.inl"
+};
+static const uint32_t nv2a_vp_2d_words[] =
+{
+	#include "vs_2d.inl"
+};
+static const uint32_t nv2a_vp_tri_words[] =
+{
+	#include "vs_tri.inl"
+};
+static const uint32_t nv2a_vp_studio_words[] =
+{
+	#include "vs_studio.inl"
+};
+
+typedef enum
+{
+	NV2A_VP_LIT,    /* the world and brush entities (vs_lit.vs.cg) */
+	NV2A_VP_2D,     /* the 2D pass (vs_2d.vs.cg) */
+	NV2A_VP_TRI,    /* the TriAPI in 3D (vs_tri.vs.cg) */
+	NV2A_VP_STUDIO, /* the GPU studio path (vs_studio.vp, divergences.md #143) */
+	NV2A_VP_COUNT   /* also "none selected yet" */
+} nv2a_vp_t;
+
+#define NV2A_VP_SLOTS 136u /* NV2A_MAX_TRANSFORM_PROGRAM_LENGTH */
+STATIC_ASSERT( sizeof( nv2a_vp_lit_words ) % 16 == 0 && sizeof( nv2a_vp_2d_words ) % 16 == 0
+	&& sizeof( nv2a_vp_tri_words ) % 16 == 0 && sizeof( nv2a_vp_studio_words ) % 16 == 0,
+	"a vertex program instruction is four dwords" );
+STATIC_ASSERT(( sizeof( nv2a_vp_lit_words ) + sizeof( nv2a_vp_2d_words ) + sizeof( nv2a_vp_tri_words )
+	+ sizeof( nv2a_vp_studio_words )) / 16 <= NV2A_VP_SLOTS,
+	"the resident vertex programs no longer fit the NV2A's 136 program slots together" );
+
+static const struct
+{
+	const uint32_t *words;
+	uint32_t       instructions;
+} nv2a_vp_table[NV2A_VP_COUNT] =
+{
+	{ nv2a_vp_lit_words,    sizeof( nv2a_vp_lit_words ) / 16 },
+	{ nv2a_vp_2d_words,     sizeof( nv2a_vp_2d_words ) / 16 },
+	{ nv2a_vp_tri_words,    sizeof( nv2a_vp_tri_words ) / 16 },
+	{ nv2a_vp_studio_words, sizeof( nv2a_vp_studio_words ) / 16 },
+};
+
+static uint32_t  nv2a_vp_start[NV2A_VP_COUNT]; /* each program's first slot */
+static nv2a_vp_t nv2a_vp_selected = NV2A_VP_COUNT;
+
+/* The register-combiner "pixel programs" (ps_*.inl) are state, not
+   memory: a switch re-pushes the whole set. Tracked so that a vertex
+   program switch between two users of the same combiners (vs_tri and
+   vs_studio both draw with ps_2d) pushes nothing for them. */
+typedef enum
+{
+	NV2A_PS_NONE,
+	NV2A_PS_LIT,
+	NV2A_PS_2D,
+	NV2A_PS_DECAL /* the decal pass pushes ps_decal.inl itself and records it */
+} nv2a_ps_t;
+
+static nv2a_ps_t nv2a_ps_selected = NV2A_PS_NONE;
+
+/* Loads every program into program memory, back to back from slot 0, in
+   blocks of up to 25 instructions (125 dwords: pbkit blocks stay under
+   128). The load pointer advances by one slot per four dwords whatever
+   the block boundaries (xemu pgraph/pgraph.c SET_TRANSFORM_PROGRAM).
+   The transform engine is put in program mode with context writes off
+   first, as every load sequence known to work on the console does
+   (nxdk's samples, tools/x4-triangle, this file before resident
+   programs): pb_init leaves it in its reset mode, and nothing documents
+   that the hardware accepts program writes in fixed-function mode
+   (nv2a-xbox-specialist review; xemu does not care). */
+static void nv2a_upload_vertex_programs( void )
 {
 	uint32_t *p;
-	int i;
-
-	nv2a_resident_program = NV2A_RESIDENT_NONE;
-	nv2a_sgpu_entered = false;
-
-	uint32_t vs_program[] =
-	{
-		#include "vs_lit.inl"
-	};
+	uint32_t slot = 0;
+	int v;
 
 	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
 	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
 		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
 		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
-	pb_end( p );
-
-	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
 	pb_end( p );
 
-	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); i++ )
+	for( v = 0; v < NV2A_VP_COUNT; v++ )
 	{
-		p = pb_begin();
-		pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
-		memcpy( p, &vs_program[i * 4], 4 * 4 );
-		p += 4;
-		pb_end( p );
+		uint32_t i = 0, count = nv2a_vp_table[v].instructions;
+
+		nv2a_vp_start[v] = slot;
+		while( i < count )
+		{
+			uint32_t n = count - i, k;
+
+			if( n > 25 )
+				n = 25;
+			p = pb_begin();
+			for( k = 0; k < n; k++ )
+			{
+				pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
+				memcpy( p, &nv2a_vp_table[v].words[( i + k ) * 4], 4 * 4 );
+				p += 4;
+			}
+			pb_end( p );
+			i += n;
+		}
+		slot += count;
 	}
 
+	nv2a_vp_selected = NV2A_VP_COUNT; /* the next select sets the execution mode too */
+}
+
+static void nv2a_select_vertex_program( nv2a_vp_t vp )
+{
+	uint32_t *p;
+
+	if( nv2a_vp_selected == vp )
+		return;
+
 	p = pb_begin();
-	#include "ps_lit.inl"
+	if( nv2a_vp_selected == NV2A_VP_COUNT )
+	{
+		p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
+			MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
+			| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
+		p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
+	}
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, nv2a_vp_start[vp] );
 	pb_end( p );
-	nv2a_fog_pushed_valid = false; /* ps_lit.inl just reset the final combiner to its unfogged form */
+	nv2a_vp_selected = vp;
+}
+
+/* ps_lit or ps_2d. Each upload resets the final combiner to its unfogged
+   form, so the fog is pushed again after one (nv2a_push_fog). */
+static void nv2a_select_pixel_program( nv2a_ps_t ps )
+{
+	uint32_t *p;
+
+	if( nv2a_ps_selected == ps )
+		return;
+
+	p = pb_begin();
+	if( ps == NV2A_PS_LIT )
+	{
+		#include "ps_lit.inl"
+	}
+	else
+	{
+		#include "ps_2d.inl"
+	}
+	pb_end( p );
+	nv2a_ps_selected = ps;
+	nv2a_fog_pushed_valid = false;
+}
+
+/* X9-C: the diffuse x lightmap x 2 program pair (ref/nv2a/vs_lit.vs.cg,
+   ps_lit.ps.cg - both real, freshly-authored Cg sources compiled through
+   the same cgc/vp20compiler/fp20compiler pipeline vs.inl/ps.inl already
+   were, verified reproducible before being committed). Selected, not
+   uploaded (nv2a_vp_table). */
+static void nv2a_init_lit_shader( void )
+{
+	nv2a_resident_program = NV2A_RESIDENT_NONE;
+	nv2a_sgpu_entered = false;
+
+	nv2a_select_vertex_program( NV2A_VP_LIT );
+	nv2a_select_pixel_program( NV2A_PS_LIT );
 }
 
 /* X9-X step 11: the GL fog state (nv2a_fog_current, r_warp.c) in
@@ -2444,9 +2595,9 @@ static void nv2a_enter_lit_state( void )
 
 	nv2a_set_3d_state();
 
-	/* This path's own two-texcoord/two-texture program, re-uploaded every
-	   time: the NV2A holds one resident program at a time, and the 2D/
-	   TriAPI pass uploads its own in between (nv2a_resident_program). */
+	/* This path's own two-texcoord/two-texture program and combiners,
+	   selected again: the 2D/TriAPI pass and the studio path select their
+	   own in between (resident programs, nv2a_vp_table). */
 	nv2a_init_lit_shader();
 	/* X9-X step 11: the world and brush entities are fogged like
 	   everything else 3D (R_DrawFog enables GL_FOG before R_DrawWorld). */
@@ -3546,6 +3697,13 @@ static qboolean R_Init( void )
 	pb_initialized = true;
 
 	pb_show_front_screen();
+
+	/* divergences.md #143: every vertex program, once (nv2a_vp_table).
+	   pb_init has just reset the GPU, so nothing is selected yet. */
+	nv2a_upload_vertex_programs();
+	nv2a_ps_selected = NV2A_PS_NONE;
+	nv2a_resident_program = NV2A_RESIDENT_NONE;
+	nv2a_sgpu_entered = false;
 
 	nv2a_width  = pb_back_buffer_width();
 	nv2a_height = pb_back_buffer_height();
@@ -5794,6 +5952,7 @@ int nv2a_decal_gpu_begin( const cl_entity_t *e, float blend )
 	p = pb_begin();
 	#include "ps_decal.inl"
 	pb_end( p );
+	nv2a_ps_selected = NV2A_PS_DECAL;
 	nv2a_resident_program = NV2A_RESIDENT_NONE;
 	nv2a_sgpu_entered = false;
 	nv2a_fog_pushed_valid = false;
@@ -6690,41 +6849,10 @@ qboolean nv2a_global_texture_nearest( void ) { return nv2a_r_texturenearest.valu
    nv2a_init_lit_shader() above. */
 static void nv2a_init_2d_shader( void )
 {
-	uint32_t *p;
-	int i;
-
-	uint32_t vs_program[] =
-	{
-		#include "vs_2d.inl"
-	};
-
 	nv2a_sgpu_entered = false;
 
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
-	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
-		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
-		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
-	pb_end( p );
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
-	pb_end( p );
-
-	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); i++ )
-	{
-		p = pb_begin();
-		pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
-		memcpy( p, &vs_program[i * 4], 4 * 4 );
-		p += 4;
-		pb_end( p );
-	}
-
-	p = pb_begin();
-	#include "ps_2d.inl"
-	pb_end( p );
-	nv2a_fog_pushed_valid = false; /* the final combiner is ps_2d.inl's again */
+	nv2a_select_vertex_program( NV2A_VP_2D );
+	nv2a_select_pixel_program( NV2A_PS_2D );
 }
 
 /* X9-X step 4 Part B: the TriAPI's own vertex program (vs_tri.vs.cg/
@@ -6736,41 +6864,10 @@ static void nv2a_init_2d_shader( void )
    nv2a_init_2d_shader() above. */
 static void nv2a_init_tri_shader( void )
 {
-	uint32_t *p;
-	int i;
-
-	uint32_t vs_program[] =
-	{
-		#include "vs_tri.inl"
-	};
-
 	nv2a_sgpu_entered = false;
 
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
-	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
-		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
-		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
-	pb_end( p );
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
-	pb_end( p );
-
-	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); i++ )
-	{
-		p = pb_begin();
-		pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
-		memcpy( p, &vs_program[i * 4], 4 * 4 );
-		p += 4;
-		pb_end( p );
-	}
-
-	p = pb_begin();
-	#include "ps_2d.inl"
-	pb_end( p );
-	nv2a_fog_pushed_valid = false; /* the final combiner is ps_2d.inl's again */
+	nv2a_select_vertex_program( NV2A_VP_TRI );
+	nv2a_select_pixel_program( NV2A_PS_2D );
 }
 
 static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
@@ -6828,9 +6925,11 @@ static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
 /* Stage 0 for a resolved batch key (nv2a_2d_resolve_batch_key): the
    TriAPI flush's own block, shared since divergences.md #143 with the GPU
    studio path, which binds the same skins. */
-static void nv2a_push_stage0( const nv2a_2d_batch_key_t *key )
+/* The texture stage 0 words for a batch key (NV2A_STAGE0_DWORDS of them),
+   appended at p; nv2a_push_stage0 pushes them as a block of their own. */
+#define NV2A_STAGE0_DWORDS 14u
+static uint32_t *nv2a_emit_stage0( uint32_t *p, const nv2a_2d_batch_key_t *key )
 {
-	uint32_t *p = pb_begin();
 	uint32_t base_size = 0;
 
 	/* divergences.md #131: a compressed texture (a baked DXT1 menu
@@ -6860,6 +6959,14 @@ static void nv2a_push_stage0( const nv2a_2d_batch_key_t *key )
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, key->address );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, key->control0 );
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, key->filter ); /* nv2a_2d_resolve_batch_key */
+	return p;
+}
+
+static void nv2a_push_stage0( const nv2a_2d_batch_key_t *key )
+{
+	uint32_t *p = pb_begin();
+
+	p = nv2a_emit_stage0( p, key );
 	pb_end( p );
 }
 
@@ -7197,18 +7304,19 @@ draws under is the same nv2a_2d_desired the TriAPI would have snapshot
 for it at append time, pushed immediately; the pending TriAPI batch is
 flushed first, so draw order is unchanged.
 
-What this path leaves behind for the others: its program (they re-upload
-theirs: nv2a_2d_dirty, nv2a_lit_state_current), its array pointers (the
+What this path leaves behind for the others: its program (they select
+theirs again: nv2a_2d_dirty, nv2a_lit_state_current), its array pointers (the
 TriAPI's re-entry repoints, nv2a_2d_pushed_base_valid), its render and
 stage-0 state (nv2a_2d_pushed_valid; the world's lit-state entry pushes
 its own), and the depth test/function restored exactly as the TriAPI
-flush restores them. It writes hardware constants 0..95 and 101..191,
+flush restores them. It writes hardware constants 0..95 and 101..189,
 which no other path reads; c[0..4] (96..100) are never touched.
 
 Invariants this path relies on (nv2a-xbox-specialist review): no other
 path writes hardware constants 101..127 (c[5..31]: the fixed constants
-and the gamma table, reloaded only on a serial change or once a frame)
-or 128..191 and 0..95 (the palette, reloaded per submodel). Hardware
+and the gamma table, reloaded only on a serial change or once a frame),
+128..183 and 0..95 (the palette, reloaded when its contents change) or
+184..189 (c[88..93], the local lights, likewise). Hardware
 0..95 is also where the NV2A keeps its fixed-function transform state:
 NV097_SET_COMPOSITE_MATRIX, MODEL_VIEW/INVERSE_MODEL_VIEW, texture
 matrices and texgen, EYE_POSITION, FOG_PLANE and VIEWPORT_OFFSET/SCALE
@@ -7222,119 +7330,155 @@ static const nv2a_sgpu_vertex_t *nv2a_sgpu_bound_vb;
 static uint32_t nv2a_sgpu_lut_serial_pushed;
 static qboolean nv2a_sgpu_lut_valid;
 
-/* nv2a_init_tri_shader's shape, with vs_studio (vs_studio.inl, the
-   vp20compiler output of vs_studio.vp) and the same ps_2d combiner. */
+/* Shadows of the constants this path last wrote (divergences.md #143,
+   constant traffic). The constants survive every other path (the
+   section comment above), so a value already in place is not pushed
+   again: c[13..15] once a frame, c[5..9] when the view-projection or the
+   entity's light terms change (not for every submodel of an entity),
+   c[10..12] when a mesh's differ from the previous mesh's, and each
+   palette bank when its bones' matrices or light vectors differ from
+   what it holds. All are invalidated at the start of each frame
+   (R_BeginFrame), as the gamma table already was, so no frame depends on
+   a value written by the one before. */
+static qboolean nv2a_sgpu_fixed_valid;
+static float    nv2a_sgpu_submodel_shadow[5][4];
+static qboolean nv2a_sgpu_submodel_valid;
+static float    nv2a_sgpu_elight_shadow[NV2A_SGPU_ELIGHT_REGS][4];
+static qboolean nv2a_sgpu_elight_valid;
+static float    nv2a_sgpu_mesh_shadow[NV2A_SGPU_MESH_REGS][4];
+static qboolean nv2a_sgpu_mesh_valid;
+static float    nv2a_sgpu_pal_rows_shadow[NV2A_SGPU_MAX_PALETTE * 3][4];
+static float    nv2a_sgpu_pal_lights_shadow[NV2A_SGPU_MAX_PALETTE][4];
+static uint32_t nv2a_sgpu_pal_valid_count; /* palette entries the shadow holds, from 0 */
+
+/* vs_studio (vs_studio.inl, the vp20compiler output of vs_studio.vp,
+   resident: nv2a_vp_table) with the TriAPI's ps_2d combiner. */
 static void nv2a_init_studio_shader( void )
 {
-	uint32_t *p;
-	int i;
-
-	uint32_t vs_program[] =
-	{
-		#include "vs_studio.inl"
-	};
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, 0 );
-	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
-		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
-		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
-	pb_end( p );
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
-	pb_end( p );
-
-	/* Up to 25 instructions a block (125 dwords) instead of one: each
-	   pb_end flushes the write-combining buffer and spins on the GPU's
-	   (pbkit.c pb_cache_flush), a cost xemu does not show (nv2a-xbox-
-	   specialist review). The program-load pointer advances by one
-	   instruction per four dwords whatever the block boundaries. */
-	for( i = 0; i < (int)( sizeof( vs_program ) / 16 ); )
-	{
-		int n = (int)( sizeof( vs_program ) / 16 ) - i, k;
-
-		if( n > 25 )
-			n = 25;
-		p = pb_begin();
-		for( k = 0; k < n; k++ )
-		{
-			pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
-			memcpy( p, &vs_program[( i + k ) * 4], 4 * 4 );
-			p += 4;
-		}
-		pb_end( p );
-		i += n;
-	}
-
-	p = pb_begin();
-	#include "ps_2d.inl"
-	pb_end( p );
-	nv2a_fog_pushed_valid = false; /* the final combiner is ps_2d.inl's again */
+	nv2a_select_vertex_program( NV2A_VP_STUDIO );
+	nv2a_select_pixel_program( NV2A_PS_2D );
 }
 
-/* Writes `count` vec4 constants from hardware slot `slot` on: one
-   SET_TRANSFORM_CONSTANT_LOAD per pbkit block, then up to three 8-vec4
-   SET_TRANSFORM_CONSTANT headers (the method's 32-dword window; the load
-   pointer advances across them) - 101 dwords, under the 128-dword block. */
-static void nv2a_sgpu_push_consts( uint32_t slot, const float (*v)[4], uint32_t count )
+/* An open pbkit block that several pushes share, so a mesh's constants,
+   render state and texture stage cost one pb_end (a write-combining
+   flush and an MMIO spin: pbkit.c pb_start) instead of three. Closed
+   and reopened before it would pass 128 dwords. `load_next` is the
+   constant slot the hardware's load pointer is at after the last
+   SET_TRANSFORM_CONSTANT in this block (it advances per vec4), so
+   contiguous ranges need no second SET_TRANSFORM_CONSTANT_LOAD. */
+typedef struct
+{
+	uint32_t *start;
+	uint32_t *p;
+	uint32_t load_next; /* 0xFFFFFFFF: unknown */
+} nv2a_pb_block_t;
+
+#define NV2A_PB_BLOCK_DWORDS 128u
+
+static void nv2a_blk_open( nv2a_pb_block_t *b )
+{
+	b->start = b->p = pb_begin();
+	b->load_next = 0xFFFFFFFFu;
+}
+
+static void nv2a_blk_close( nv2a_pb_block_t *b )
+{
+	/* pb_begin only reads the put pointer (pbkit.c:1786, DBG off), so an
+	   empty block needs no pb_end and costs nothing. */
+	if( b->p != b->start )
+		pb_end( b->p );
+	b->start = b->p;
+}
+
+static void nv2a_blk_room( nv2a_pb_block_t *b, uint32_t dwords )
+{
+	if((uint32_t)( b->p - b->start ) + dwords > NV2A_PB_BLOCK_DWORDS )
+	{
+		nv2a_blk_close( b );
+		nv2a_blk_open( b );
+	}
+}
+
+/* `count` vec4 constants from hardware slot `slot` on, 8 a
+   SET_TRANSFORM_CONSTANT header (the method's 32-dword window). */
+static void nv2a_blk_consts( nv2a_pb_block_t *b, uint32_t slot, const float (*v)[4], uint32_t count )
 {
 	while( count > 0 )
 	{
-		uint32_t *p = pb_begin();
-		int headers;
+		uint32_t n = count > 8 ? 8 : count;
 
-		p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, slot );
-		for( headers = 0; headers < 3 && count > 0; headers++ )
-		{
-			uint32_t n = count > 8 ? 8 : count;
-
-			pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, n * 4 );
-			memcpy( p, v, n * 16 );
-			p += n * 4;
-			slot += n;
-			v += n;
-			count -= n;
-		}
-		pb_end( p );
+		nv2a_blk_room( b, 3 + n * 4 );
+		if( b->load_next != slot )
+			b->p = pb_push1( b->p, NV097_SET_TRANSFORM_CONSTANT_LOAD, slot );
+		pb_push( b->p++, NV097_SET_TRANSFORM_CONSTANT, n * 4 );
+		memcpy( b->p, v, n * 16 );
+		b->p += n * 4;
+		slot += n;
+		v += n;
+		count -= n;
+		b->load_next = slot;
 	}
 }
 
+static void nv2a_sgpu_push_consts( uint32_t slot, const float (*v)[4], uint32_t count )
+{
+	nv2a_pb_block_t b;
+
+	nv2a_blk_open( &b );
+	nv2a_blk_consts( &b, slot, v, count );
+	nv2a_blk_close( &b );
+}
+
 /* The studio path's own GPU state, when another path took the GPU since
-   it last drew: program and combiner, stage 1 off, alpha function, every
+   it last drew: program and combiner (both resident or tracked, so
+   usually only a PROGRAM_START), stage 1 off, alpha function, every
    array format reset (then 0/1/2/9 pointed at the submodel's vertices by
-   the caller), and c[13..15]. The constants above c[4] survive other
-   paths, so the gamma table and the palette are not reloaded here. */
+   the caller), and c[13..15] once a frame. The constants above c[4]
+   survive other paths, so nothing else is reloaded here. */
 static void nv2a_sgpu_enter( void )
 {
-	float fixed[NV2A_SGPU_FIXED_REGS][4];
-	uint32_t *p;
+	nv2a_pb_block_t b;
 	int i;
 
 	nv2a_init_studio_shader();
 	nv2a_resident_program = NV2A_RESIDENT_STUDIO;
 
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
-	p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
-	pb_end( p );
-
-	p = pb_begin();
-	pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
+	nv2a_blk_open( &b );
+	b.p = pb_push1( b.p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
+	b.p = pb_push1( b.p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
+	pb_push( b.p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
 	for( i = 0; i < 16; i++ )
-		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
-	pb_end( p );
+		*( b.p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
 
-	nv2a_sgpu_fixed_consts( fixed );
-	nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_FIXED, (const float (*)[4])fixed, NV2A_SGPU_FIXED_REGS );
+	if( !nv2a_sgpu_fixed_valid )
+	{
+		float fixed[NV2A_SGPU_FIXED_REGS][4];
+
+		nv2a_sgpu_fixed_consts( fixed );
+		nv2a_blk_consts( &b, NV2A_SGPU_HW_C0 + NV2A_SGPU_C_FIXED, (const float (*)[4])fixed, NV2A_SGPU_FIXED_REGS );
+		nv2a_sgpu_fixed_valid = true;
+	}
+	nv2a_blk_close( &b );
 
 	nv2a_sgpu_bound_vb = NULL;
 	nv2a_sgpu_entered = true;
 }
 
+/* The frame's start (R_BeginFrame): every shadow above, and the gamma
+   table, are reloaded on first use. */
+static void nv2a_sgpu_invalidate_consts( void )
+{
+	nv2a_sgpu_lut_valid = false;
+	nv2a_sgpu_fixed_valid = false;
+	nv2a_sgpu_submodel_valid = false;
+	nv2a_sgpu_elight_valid = false;
+	nv2a_sgpu_mesh_valid = false;
+	nv2a_sgpu_pal_valid_count = 0;
+}
+
 qboolean nv2a_sgpu_begin_submodel( const nv2a_sgpu_geometry_t *geo, const float light[4],
-	const float lut[NV2A_SGPU_LUT_REGS][4], uint32_t lut_serial )
+	const float lut[NV2A_SGPU_LUT_REGS][4], uint32_t lut_serial,
+	const float elights[NV2A_SGPU_ELIGHT_REGS][4] )
 {
 	float block[5][4];
 
@@ -7365,14 +7509,51 @@ qboolean nv2a_sgpu_begin_submodel( const nv2a_sgpu_geometry_t *geo, const float 
 		memcpy( block, nv2a_map_viewproj, 16 * 4 );
 	}
 	memcpy( block[4], light, 4 * sizeof( float ));
-	nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_MVP, (const float (*)[4])block, 5 );
+
+	if( !nv2a_sgpu_submodel_valid || memcmp( block, nv2a_sgpu_submodel_shadow, sizeof( block )))
+	{
+		nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_MVP, (const float (*)[4])block, 5 );
+		memcpy( nv2a_sgpu_submodel_shadow, block, sizeof( block ));
+		nv2a_sgpu_submodel_valid = true;
+	}
+
+	/* c[88..93]: the entity's local lights, all-zero signs when it has
+	   none, so an entity without lights after one without lights pushes
+	   nothing. */
+	if( !nv2a_sgpu_elight_valid || memcmp( elights, nv2a_sgpu_elight_shadow, sizeof( nv2a_sgpu_elight_shadow )))
+	{
+		nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_ELIGHT, elights, NV2A_SGPU_ELIGHT_REGS );
+		memcpy( nv2a_sgpu_elight_shadow, elights, sizeof( nv2a_sgpu_elight_shadow ));
+		nv2a_sgpu_elight_valid = true;
+	}
 	return true;
+}
+
+/* Pushes the entries [first, first + n) of one palette bank's matrix rows
+   and light vectors when they differ from what the bank holds. */
+static void nv2a_sgpu_palette_range( nv2a_pb_block_t *b, const float (*rows)[4], const float (*lights)[4], uint32_t first, uint32_t n )
+{
+	qboolean held = nv2a_sgpu_pal_valid_count >= first + n;
+
+	if( n == 0 )
+		return;
+	if( !held || memcmp( nv2a_sgpu_pal_rows_shadow[first * 3], rows[first * 3], n * 3 * sizeof( float[4] )))
+	{
+		nv2a_blk_consts( b, nv2a_sgpu_matrix_slot( first ), &rows[first * 3], n * 3 );
+		memcpy( nv2a_sgpu_pal_rows_shadow[first * 3], rows[first * 3], n * 3 * sizeof( float[4] ));
+	}
+	if( !held || memcmp( nv2a_sgpu_pal_lights_shadow[first], lights[first], n * sizeof( float[4] )))
+	{
+		nv2a_blk_consts( b, nv2a_sgpu_light_slot( first ), &lights[first], n );
+		memcpy( nv2a_sgpu_pal_lights_shadow[first], lights[first], n * sizeof( float[4] ));
+	}
 }
 
 void nv2a_sgpu_load_palette( const nv2a_sgpu_palette_t *pal, const float (*bonestransform)[3][4], const float (*blightvec)[3] )
 {
 	static float rows[NV2A_SGPU_MAX_PALETTE * 3][4];
 	static float lights[NV2A_SGPU_MAX_PALETTE][4];
+	nv2a_pb_block_t b;
 	uint32_t e, low, n = pal->count;
 
 	if( n > NV2A_SGPU_MAX_PALETTE )
@@ -7387,19 +7568,22 @@ void nv2a_sgpu_load_palette( const nv2a_sgpu_palette_t *pal, const float (*bones
 	}
 
 	low = n < NV2A_SGPU_LOW_BONES ? n : NV2A_SGPU_LOW_BONES;
-	nv2a_sgpu_push_consts( nv2a_sgpu_matrix_slot( 0 ), (const float (*)[4])rows, low * 3 );
-	nv2a_sgpu_push_consts( nv2a_sgpu_light_slot( 0 ), (const float (*)[4])lights, low );
-	if( n > low )
-	{
-		nv2a_sgpu_push_consts( nv2a_sgpu_matrix_slot( low ), (const float (*)[4])rows[low * 3], ( n - low ) * 3 );
-		nv2a_sgpu_push_consts( nv2a_sgpu_light_slot( low ), (const float (*)[4])lights[low], n - low );
-	}
+	nv2a_blk_open( &b );
+	nv2a_sgpu_palette_range( &b, (const float (*)[4])rows, (const float (*)[4])lights, 0, low );
+	nv2a_sgpu_palette_range( &b, (const float (*)[4])rows, (const float (*)[4])lights, low, n - low );
+	nv2a_blk_close( &b );
+
+	/* Entries 0..n-1 now match the hardware; any past them that an
+	   earlier, larger palette loaded were not written, so they still do. */
+	if( n > nv2a_sgpu_pal_valid_count )
+		nv2a_sgpu_pal_valid_count = n;
 }
 
 void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_consts[NV2A_SGPU_MESH_REGS][4] )
 {
 	const nv2a_sgpu_mesh_t *m = &geo->meshes[mesh];
 	nv2a_2d_batch_key_t key;
+	nv2a_pb_block_t b;
 	uint32_t i, begin, end;
 	uint32_t *p;
 
@@ -7436,13 +7620,21 @@ void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_
 
 	/* The texture coordinates' scale, as Begin captures it for Vertex3f. */
 	nv2a_tex_coord_scale( nv2a_tex_get( nv2a_tex_current()), &mesh_consts[2][2], &mesh_consts[2][3] );
-	nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_MESH, (const float (*)[4])mesh_consts, NV2A_SGPU_MESH_REGS );
 
-	/* nv2a_2d_flush's 3D shadow push, from the desired state directly
+	/* One block: the mesh's constants when they changed, then
+	   nv2a_2d_flush's 3D shadow push, from the desired state directly
 	   (this draw is not deferred, so the desired state IS the state it
 	   was "appended" under), with the alpha function the TriAPI
-	   re-entry sets. */
-	p = pb_begin();
+	   re-entry sets, then the texture stage. */
+	nv2a_blk_open( &b );
+	if( !nv2a_sgpu_mesh_valid || memcmp( mesh_consts, nv2a_sgpu_mesh_shadow, sizeof( nv2a_sgpu_mesh_shadow )))
+	{
+		nv2a_blk_consts( &b, NV2A_SGPU_HW_C0 + NV2A_SGPU_C_MESH, (const float (*)[4])mesh_consts, NV2A_SGPU_MESH_REGS );
+		memcpy( nv2a_sgpu_mesh_shadow, mesh_consts, sizeof( nv2a_sgpu_mesh_shadow ));
+		nv2a_sgpu_mesh_valid = true;
+	}
+	nv2a_blk_room( &b, 22 + NV2A_STAGE0_DWORDS );
+	p = b.p;
 	p = pb_push1( p, NV097_SET_BLEND_ENABLE, nv2a_2d_desired.blend_enable ? 1 : 0 );
 	p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, nv2a_2d_desired.sfactor );
 	p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, nv2a_2d_desired.dfactor );
@@ -7454,9 +7646,9 @@ void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_
 	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, nv2a_2d_desired.cull_enable ? 1 : 0 );
 	p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, nv2a_2d_desired.depth_test_disable ? 0 : 1 );
 	p = pb_push1( p, NV097_SET_DEPTH_FUNC, nv2a_2d_desired.depth_func_equal ? NV097_SET_DEPTH_FUNC_V_EQUAL : NV097_SET_DEPTH_FUNC_V_LEQUAL );
-	pb_end( p );
+	b.p = nv2a_emit_stage0( p, &key );
+	nv2a_blk_close( &b );
 
-	nv2a_push_stage0( &key );
 	nv2a_push_fog( &nv2a_fog_current );
 
 	/* The mesh's triangles: whole dwords of two u16 indices, 120 a block
@@ -8229,7 +8421,7 @@ static void R_BeginFrame( qboolean clearScene )
 	nv2a_frame_open = true;
 	nv2a_lit_state_current = false; /* only the world pass (or a brush entity) establishes it within a frame */
 	nv2a_sgpu_entered = false; /* divergences.md #143: re-entered by the first GPU studio mesh */
-	nv2a_sgpu_lut_valid = false; /* ... and its gamma segments reloaded, once a frame */
+	nv2a_sgpu_invalidate_consts(); /* ... and its gamma segments and other constants reloaded, once a frame */
 
 	/* X9-X: releases whatever GL_FreeTexture/GL_UpdateTexture queued last
 	   frame (D4 - safe now, the pb_busy wait above proves the GPU is

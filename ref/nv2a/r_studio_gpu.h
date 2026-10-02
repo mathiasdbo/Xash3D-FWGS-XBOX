@@ -75,14 +75,15 @@ const nv2a_sgpu_geometry_t *nv2a_sgpu_cache_get( const studiohdr_t *hdr, const m
 	const mstudiotexture_t *ptexture, int numtextures, const short *pskinref, int numskinref, uint32_t frame );
 
 /* r_context.c */
-/* Starts a submodel: flushes the TriAPI's pending batch, enters this
-   path's GPU state if another path left it, points the arrays at the
-   submodel's vertices and loads c[5..9] (view-projection for the current
-   view-model depth range, the light terms) and, when lut_serial changed,
-   the gamma table. Returns false when nothing may be drawn (the TriAPI's
-   own Begin gate: renderer, frame or camera not ready). */
+/* Starts a submodel: loads c[5..9] (view-projection for the current
+   view-model depth range, the light terms) and c[88..93] (the entity's
+   local lights, nv2a_sgpu_elight_consts) when they differ from what the
+   hardware holds, and, when lut_serial changed, the gamma table. Returns
+   false when nothing may be drawn (the TriAPI's own Begin gate:
+   renderer, frame or camera not ready). */
 qboolean nv2a_sgpu_begin_submodel( const nv2a_sgpu_geometry_t *geo, const float light[4],
-	const float lut[NV2A_SGPU_LUT_REGS][4], uint32_t lut_serial );
+	const float lut[NV2A_SGPU_LUT_REGS][4], uint32_t lut_serial,
+	const float elights[NV2A_SGPU_ELIGHT_REGS][4] );
 /* Loads one palette: 3 matrix rows (bonestransform) and the light vector
    (blightvec) of every entry. */
 void nv2a_sgpu_load_palette( const nv2a_sgpu_palette_t *pal, const float (*bonestransform)[3][4], const float (*blightvec)[3] );
