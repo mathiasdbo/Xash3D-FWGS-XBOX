@@ -1278,6 +1278,48 @@ static void Delta_WriteField_( sizebuf_t *msg, delta_t *pField, const void *from
 	}
 }
 
+#if XASH_XBOX
+/*
+Resonance3D (docs/r3d/divergences.md #144): the unchanged-delta fast path.
+
+When `from` and `to` are byte-identical, every Delta_CompareField returns
+true: the integer kinds read the same raw value through the same multiplier
+and clamp, floats and angles compare raw bits, the time windows round the
+same float, strings compare the same bytes, and an inactive field is equal
+by definition. The custom encoder (Delta_CustomEncode) can only activate or
+deactivate fields, and a field equal in both is written as one 0 bit either
+way. So upstream's loop writes exactly numFields 0 bits, counts no change,
+and the caller rewinds to its start bit. Delta_WriteUnchangedFields writes
+those same 0 bits - 32 at a time instead of one Delta_CompareField and one
+MSG_WriteOneBit per field - so the buffer, its cursor and its overflow flag
+end up exactly as upstream leaves them, including the rewound bits a later
+write may not cover (they can reach the wire as the last byte's padding).
+Near the buffer's end, or once it has overflowed, it falls back to the
+per-bit writes: MSG_WriteUBitLong treats an overflowing write differently
+(no partial bits, cursor to the end) from MSG_WriteOneBit.
+*/
+static qboolean Delta_IsUnchanged( const void *from, const void *to, size_t size )
+{
+	return !memcmp( from, to, size );
+}
+
+static void Delta_WriteUnchangedFields( sizebuf_t *msg, int numFields )
+{
+	if( !msg->bOverflow && msg->iCurBit + numFields <= msg->nDataBits )
+	{
+		for( ; numFields >= 32; numFields -= 32 )
+			MSG_WriteUBitLong( msg, 0, 32 );
+
+		if( numFields > 0 )
+			MSG_WriteUBitLong( msg, 0, numFields );
+		return;
+	}
+
+	for( ; numFields > 0; numFields-- )
+		MSG_WriteOneBit( msg, 0 );
+}
+#endif // XASH_XBOX
+
 static qboolean Delta_WriteField( sizebuf_t *msg, delta_t *pField, const void *from, const void *to, double timebase )
 {
 	if( Delta_CompareField( pField, from, to ))
@@ -1709,6 +1751,18 @@ void MSG_WriteClientData( sizebuf_t *msg, const clientdata_t *from, const client
 
 	MSG_WriteOneBit( msg, 1 ); // have clientdata
 
+#if XASH_XBOX
+	// docs/r3d/divergences.md #144: what the loop below writes for an
+	// unchanged clientdata_t, without comparing field by field
+	if( Delta_IsUnchanged( from, to, sizeof( *to )))
+	{
+		Delta_WriteUnchangedFields( msg, dt->numFields );
+		MSG_SeekToBit( msg, startBit, SEEK_SET );
+		MSG_WriteOneBit( msg, 0 ); // no changes
+		return;
+	}
+#endif
+
 	// activate fields and call custom encode func
 	Delta_CustomEncode( dt, from, to );
 
@@ -1777,6 +1831,22 @@ void MSG_WriteWeaponData( sizebuf_t *msg, const weapon_data_t *from, const weapo
 
 	delta_t *pField = dt->pFields;
 	Assert( pField != NULL );
+
+#if XASH_XBOX
+	// docs/r3d/divergences.md #144: what the code below writes for an
+	// unchanged weapon_data_t (most of the MAX_LOCAL_WEAPONS slots, every
+	// frame), without comparing field by field
+	if( Delta_IsUnchanged( from, to, sizeof( *to )))
+	{
+		int unchangedStart = msg->iCurBit;
+
+		MSG_WriteOneBit( msg, 1 );
+		MSG_WriteUBitLong( msg, index, MAX_WEAPON_BITS );
+		Delta_WriteUnchangedFields( msg, dt->numFields );
+		MSG_SeekToBit( msg, unchangedStart, SEEK_SET );
+		return;
+	}
+#endif
 
 	// activate fields and call custom encode func
 	Delta_CustomEncode( dt, from, to );
@@ -1902,6 +1972,19 @@ void MSG_WriteDeltaEntity( const entity_state_t *from, const entity_state_t *to,
 
 	delta_t *pField = dt->pFields;
 	Assert( pField != NULL );
+
+#if XASH_XBOX
+	// docs/r3d/divergences.md #144: an entity that did not change since the
+	// frame it is deltaed from (most of a packet). The entity type bit above
+	// wrote 0 (same type, no force) and every field is unchanged, so upstream
+	// writes numFields 0 bits and, without force, rewinds to startBit.
+	if( !force && Delta_IsUnchanged( from, to, sizeof( *to )))
+	{
+		Delta_WriteUnchangedFields( msg, dt->numFields );
+		MSG_SeekToBit( msg, startBit, SEEK_SET );
+		return;
+	}
+#endif
 
 	if( delta_type == DELTA_STATIC )
 	{

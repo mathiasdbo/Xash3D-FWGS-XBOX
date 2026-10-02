@@ -461,15 +461,24 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 45)
+        self.assertEqual(len(r["counters"]), 56)
         self.assertEqual(r["counters"][20], "span_calls")
-        self.assertEqual(len(r["spans"]), 24)
+        self.assertEqual(len(r["spans"]), 35)
         self.assertEqual(r["spans"][0], ("k_input", ""))
         parent = dict(r["spans"])
         self.assertEqual(parent["k_sv_game"], "k_sv")
         self.assertEqual(parent["k_studio_points"], "k_client_studio")
         self.assertEqual(parent["k_client_studio"], "k_r_scene")
         self.assertEqual(parent["k_scr"], "k_cl")
+        self.assertEqual(parent["k_sv_emit_ents"], "k_sv_send")
+        self.assertEqual(parent["k_cl_predmove"], "k_cl_cmd")
+        self.assertEqual(fr.span_depth(r)["k_cl_predmove"], 2)
+        # Tree order: the appended round-trip spans sit under their parents.
+        order = fr.span_tree_order(r)
+        self.assertEqual(sorted(order), sorted(fr.span_names(r)))
+        self.assertLess(order.index("k_sv_send"), order.index("k_sv_emit_ents"))
+        self.assertLess(order.index("k_sv_emit_ents"), order.index("k_cl"))
+        self.assertEqual(order.index("k_cl_cmd") + 1, order.index("k_cl_predmove"))
         self.assertEqual(r["unknown_chunks"], 0)
         self.assertEqual(fr.span_depth(r)["k_skin_read"], 5)
 

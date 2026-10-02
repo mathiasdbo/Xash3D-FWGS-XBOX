@@ -301,6 +301,22 @@ def span_children(rec):
     return out
 
 
+def span_tree_order(rec):
+    """The spans depth first, each one's children after it in file order.
+    File order alone is not tree order: spans added later are appended to
+    the file (the round-trip ones, 2026-10-02, after k_snd) so the older
+    ones keep their indices."""
+    kids = span_children(rec)
+    out = []
+
+    def walk(p):
+        for s in kids.get(p, []):
+            out.append(s)
+            walk(s)
+    walk("")
+    return out
+
+
 def span_depth(rec):
     parent = dict(rec["spans"])
     out = {}
@@ -785,7 +801,7 @@ def span_rows(rec, rows):
         return [], []
     depth = span_depth(rec)
     out = []
-    for s in span_names(rec):
+    for s in span_tree_order(rec):
         out.append({"name": s, "depth": depth[s],
                     "cells": [(r["span_ms"][s], r["span_own_ms"][s],
                                100.0 * r["span_ms"][s] / r["cpu_ms"] if r["cpu_ms"] else 0.0) for r in maps]})

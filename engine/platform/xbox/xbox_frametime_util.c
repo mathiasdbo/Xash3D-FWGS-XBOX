@@ -36,6 +36,10 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"k_scr", "k_r_scene", "k_lm", "k_world", "k_client_studio", "k_studio_points", "k_skin_read",
 	"k_efx", "k_tri_hooks", "k_hud", "k_snd_extra", "k_r_end",
 	"k_snd",
+	"k_sv_reliable", "k_sv_fullpack", "k_sv_clientdata", "k_sv_emit_ents", "k_sv_xmit",
+	"k_sv_runcmd",
+	"k_cl_pkt_ents", "k_cl_clientdata",
+	"k_cl_cmd", "k_cl_predmove", "k_cl_wpacket",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,
@@ -68,6 +72,17 @@ const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT] =
 	[XBOX_FT_S_SND_EXTRA]     = XBOX_FT_S_SCR,
 	[XBOX_FT_S_R_END]         = XBOX_FT_S_SCR,
 	[XBOX_FT_S_SND]           = XBOX_FT_S_CL,
+	[XBOX_FT_S_SV_RELIABLE]   = XBOX_FT_S_SV_SEND,
+	[XBOX_FT_S_SV_FULLPACK]   = XBOX_FT_S_SV_SEND,
+	[XBOX_FT_S_SV_CLIENTDATA] = XBOX_FT_S_SV_SEND,
+	[XBOX_FT_S_SV_EMIT_ENTS]  = XBOX_FT_S_SV_SEND,
+	[XBOX_FT_S_SV_XMIT]       = XBOX_FT_S_SV_SEND,
+	[XBOX_FT_S_SV_RUNCMD]     = XBOX_FT_S_SV_READ,
+	[XBOX_FT_S_CL_PKT_ENTS]   = XBOX_FT_S_CL_READ,
+	[XBOX_FT_S_CL_CLIENTDATA] = XBOX_FT_S_CL_READ,
+	[XBOX_FT_S_CL_CMD]        = XBOX_FT_S_CL_BEGIN,
+	[XBOX_FT_S_CL_PREDMOVE]   = XBOX_FT_S_CL_CMD,
+	[XBOX_FT_S_CL_WPACKET]    = XBOX_FT_S_CL_BEGIN,
 };
 
 uint32_t xbox_ft_span_kcyc( uint64_t ticks )

@@ -106,8 +106,12 @@ second:
   (client_studio), `scene` (r_scene), `world`, `lm`, `skin` (skin_read),
   `efx`, `tri` (tri_hooks), `hud`, `rend` (r_end), `snd`, `sndx`
   (snd_extra), `svread`, `send`, `cldll`, `clread`, `pred`, `emit`,
-  `input`, `clbeg`, and the parents `sv`, `cl`, `scr`. With
-  `host_frametime_spans 0` it reads `spans off`.
+  `input`, `clbeg`, the round trip's `rel` (sv_reliable), `fpack`
+  (sv_fullpack), `scdat` (sv_clientdata), `sdelta` (sv_emit_ents),
+  `sxmit` (sv_xmit), `runcmd`, `cdelta` (cl_pkt_ents), `ccdat`
+  (cl_clientdata), `cmd`, `pmove` (cl_predmove), `wpkt` (cl_wpacket),
+  and the parents `sv`, `cl`, `scr`. With `host_frametime_spans 0` it
+  reads `spans off`.
 
 The counters are the same half-second (30-frame) means as the `now` line.
 
@@ -261,6 +265,22 @@ boundary. The report shows it per map, and the overlay shows it as `none`.
 | `k_snd_extra` | `k_scr` | `S_ExtraUpdate` in `V_PostRender`: a second mixer pass | `cl_view.c:580` |
 | `k_r_end` | `k_scr` | `R_EndFrame` in `V_PostRender`: 2D flush, pushbuffer kick, present | `cl_view.c:586` |
 | `k_snd` | `k_cl` | `SND_UpdateSound`: the mixer | `cl_main.c:3962` |
+| `k_sv_reliable` | `k_sv_send` | `SV_UpdateToReliableMessages` | `engine/server/sv_frame.c:824` |
+| `k_sv_fullpack` | `k_sv_send` | `SV_AddEntitiesToPacket`: the game DLL's `SetupVisibility`, then `AddToFullPack` for every edict (with the engine's `pfnCheckVisibility` leaf test inside it) | `sv_frame.c:627` |
+| `k_sv_clientdata` | `k_sv_send` | `SV_WriteClientdataToMessage`: the game DLL's `UpdateClientData` and `GetWeaponData`, the clientdata delta and 64 weapon-slot deltas | `sv_frame.c:693` |
+| `k_sv_emit_ents` | `k_sv_send` | `SV_EmitPacketEntities`: entity delta encoding (incl. the game DLL's `Entity_Encode`/`Player_Encode` callbacks) | `sv_frame.c:664` |
+| `k_sv_xmit` | `k_sv_send` | `Netchan_TransmitBits` of the client datagram: header, copy, loopback send | `sv_frame.c:723` |
+| `k_sv_runcmd` | `k_sv_read` | every `SV_RunCmd` in `SV_ParseClientMove`: `PM_Move` and the game DLL's `CmdStart`/`PlayerPreThink`/`PlayerPostThink`/`CmdEnd` | `engine/server/sv_client.c:3330`, `:3337`, `:3344` |
+| `k_cl_pkt_ents` | `k_cl_read` | `CL_ParsePacketEntities` (both message types): entity delta decoding, `CL_ProcessPacket` | `engine/client/parse/cl_parse.c:2667`, `:2672` |
+| `k_cl_clientdata` | `k_cl_read` | `CL_ParseClientData` | `cl_parse.c:2637` |
+| `k_cl_cmd` | `k_cl_begin` | `CL_CreateCmd`: client.dll `CL_CreateMove`, then prediction | `engine/client/cl_main.c:1060` |
+| `k_cl_predmove` | `k_cl_cmd` | `CL_PredictMovement( false )`: the client's `PM_Move` over the unacknowledged commands | `cl_main.c:850` |
+| `k_cl_wpacket` | `k_cl_begin` | `CL_WritePacket`: usercmd deltas and `Netchan_TransmitBits` | `cl_main.c:1063` |
+
+The last eleven (2026-10-02) break the local server/client round trip
+down; they come after `k_snd` in the file so the older spans keep their
+indices, and the SPANS chunk gives their parents. Each closes about once
+a frame (`k_sv_runcmd` once per usercmd).
 
 Spans not listed under a parent stay in that parent's **own** time.
 Examples: the overlay's drawing (inside `k_scr`; it also has its own field)
@@ -291,12 +311,13 @@ numbers for the decision come from the owner's hardware route.
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~243 KiB (ring 1024 x 212 B = 212 KiB, the overlay's histogram
-  4 KiB, a 26.5 KiB encode buffer); a few `rdtsc` per frame plus two per
-  span closed (below); a ~62 KiB write and `fsync` every 5 s (those
-  frames are flagged); about 12.4 KiB per second of play on disk at 60 fps
-  (44 MiB an hour; the file stops at 64 MiB, ~1.4 hours). Before the spans
-  it was ~130 KiB and 6.6 KiB/s.
+- **On:** ~292 KiB (ring 1024 x 256 B = 256 KiB, the overlay's histogram
+  4 KiB, a 32 KiB encode buffer); a few `rdtsc` per frame plus two per
+  span closed (below); a ~75 KiB write and `fsync` every 5 s (those
+  frames are flagged); about 15 KiB per second of play on disk at 60 fps
+  (53 MiB an hour; the file stops at 64 MiB, ~1.2 hours). Before the
+  round-trip spans (2026-10-02) it was ~243 KiB and 12.4 KiB/s; before
+  any spans, ~130 KiB and 6.6 KiB/s.
 - **Spans, off** (recorder off, or `host_frametime_spans 0`): one load
   and branch of `xbox_ft_spans.on` per span site, plus a branch on a
   stack local at its end.
@@ -341,8 +362,9 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 212 bytes with today's
-45: the 20 counts, `span_calls` and the 24 spans; 112 before the spans),
+frame records of 32 bytes plus one u32 per counter - 256 bytes with today's
+56: the 20 counts, `span_calls` and the 35 spans; 212 with the first 24
+spans, 112 before the spans),
 SPANS (from 2026-10-01, right after COUNTERS: each span's name and its
 parent's, 16 bytes each, "" for the top level), MAP, CALIB (TSC,
 performance counter) and END (written on a clean stop; a file without it

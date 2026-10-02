@@ -178,6 +178,20 @@ enum
 	XBOX_FT_S_SND_EXTRA,     /*     S_ExtraUpdate in V_PostRender: a second mixer pass */
 	XBOX_FT_S_R_END,         /*     R_EndFrame: 2D flush, pushbuffer kick, present */
 	XBOX_FT_S_SND,           /*   SND_UpdateSound: the mixer */
+	/* The local server <-> client round trip, broken down (2026-10-02).
+	   Appended rather than placed under their parents above so the older
+	   spans keep their indices; the parent table gives the nesting. */
+	XBOX_FT_S_SV_RELIABLE,   /*   in k_sv_send: SV_UpdateToReliableMessages */
+	XBOX_FT_S_SV_FULLPACK,   /*   in k_sv_send: SV_AddEntitiesToPacket - game DLL SetupVisibility + AddToFullPack per edict */
+	XBOX_FT_S_SV_CLIENTDATA, /*   in k_sv_send: SV_WriteClientdataToMessage - game DLL UpdateClientData/GetWeaponData + delta */
+	XBOX_FT_S_SV_EMIT_ENTS,  /*   in k_sv_send: SV_EmitPacketEntities - entity delta encoding */
+	XBOX_FT_S_SV_XMIT,       /*   in k_sv_send: Netchan_TransmitBits of the client datagram */
+	XBOX_FT_S_SV_RUNCMD,     /*   in k_sv_read: SV_RunCmd - player movement (PM_Move), PlayerPreThink/PostThink */
+	XBOX_FT_S_CL_PKT_ENTS,   /*   in k_cl_read: CL_ParsePacketEntities - entity delta decoding, CL_ProcessPacket */
+	XBOX_FT_S_CL_CLIENTDATA, /*   in k_cl_read: CL_ParseClientData */
+	XBOX_FT_S_CL_CMD,        /*   in k_cl_begin: CL_CreateCmd - client.dll CL_CreateMove, then prediction */
+	XBOX_FT_S_CL_PREDMOVE,   /*     in k_cl_cmd: CL_PredictMovement - client-side PM_Move */
+	XBOX_FT_S_CL_WPACKET,    /*   in k_cl_begin: CL_WritePacket - usercmd delta, Netchan_TransmitBits */
 	XBOX_FT_S_COUNT
 };
 

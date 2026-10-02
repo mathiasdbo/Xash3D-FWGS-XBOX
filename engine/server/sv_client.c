@@ -18,6 +18,11 @@ GNU General Public License for more details.
 #include "const.h"
 #include "server.h"
 #include "net_encode.h"
+#if XASH_XBOX && !XASH_DEDICATED
+#include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt
+#endif
 
 // challenges are valid for two consecutive windows of this size (max lifetime ~10s).
 #define CHALLENGE_WINDOW_SECONDS 5
@@ -3322,21 +3327,21 @@ static void SV_ParseClientMove( sv_client_t *cl, sizebuf_t *msg )
 	{
 		while( net_drop > numbackup )
 		{
-			SV_RunCmd( cl, &cl->lastcmd, 0 );
+			XBOX_FT_SPAN( XBOX_FT_S_SV_RUNCMD, SV_RunCmd( cl, &cl->lastcmd, 0 ));
 			net_drop--;
 		}
 
 		while( net_drop > 0 )
 		{
 			i = numcmds + net_drop - 1;
-			SV_RunCmd( cl, &cmds[i], cl->netchan.incoming_sequence - i );
+			XBOX_FT_SPAN( XBOX_FT_S_SV_RUNCMD, SV_RunCmd( cl, &cmds[i], cl->netchan.incoming_sequence - i ));
 			net_drop--;
 		}
 	}
 
 	for( i = numcmds - 1; i >= 0; i-- )
 	{
-		SV_RunCmd( cl, &cmds[i], cl->netchan.incoming_sequence - i );
+		XBOX_FT_SPAN( XBOX_FT_S_SV_RUNCMD, SV_RunCmd( cl, &cmds[i], cl->netchan.incoming_sequence - i ));
 	}
 
 	// was player kicked? stop here

@@ -5,6 +5,28 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: cheaper single-player network messages, and the round trip in the frame-time spans
+
+In single player the server and the client still talk through the
+network code every frame; on the console that round trip measured 2.8 ms
+of a 14.4 ms CPU frame. Eleven new frame-time spans break it down
+(entity packing in the game DLL, the clientdata and weapon deltas,
+entity delta encoding, the netchan send, the player's movement on both
+sides, the client's entity and clientdata parsing, the command packet),
+and the report now lists every span under its parent.
+
+The biggest engine-side part was delta encoding of things that had not
+changed: most entities in each update and most of the 64 weapon slots.
+Those are now recognised whole and written without comparing ~50 fields
+one by one, and the netchan no longer clears a 32 KiB buffer for every
+packet. What goes over the (loopback) wire is bit for bit the same: a
+verification build compared every such message with the original code
+through moving, firing, a save and load and a level change, with no
+difference in about 250,000 checks. In xemu the server's send went from
+0.60 to 0.28 ms a frame on c1a0c and from 0.59 to 0.28 ms while firing
+on c1a0e (emulator timing); the console's figure needs a hardware run.
+Movement prediction and the game DLL's own work are untouched.
+
 ### Changed - Xbox GPU studio path: resident vertex programs, muzzle flashes on the GPU (R2)
 
 All four vertex programs now stay in the NV2A's program memory at once

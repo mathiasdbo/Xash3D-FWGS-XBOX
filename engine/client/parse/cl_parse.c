@@ -21,6 +21,11 @@ GNU General Public License for more details.
 #include "shake.h"
 #include "input.h"
 #include "eiface.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt
+#endif
 
 #if XASH_LOW_MEMORY != 2
 int CL_UPDATE_BACKUP = SINGLEPLAYER_BACKUP;
@@ -2629,7 +2634,7 @@ void CL_ParseServerMessage( sizebuf_t *msg )
 			Delta_ParseTableField( msg );
 			break;
 		case svc_clientdata:
-			CL_ParseClientData( msg, PROTO_CURRENT );
+			XBOX_FT_SPAN( XBOX_FT_S_CL_CLIENTDATA, CL_ParseClientData( msg, PROTO_CURRENT ));
 			cl.frames[cl.parsecountmod].graphdata.client += MSG_GetNumBytesRead( msg ) - bufStart;
 			break;
 		case svc_resource:
@@ -2659,12 +2664,12 @@ void CL_ParseServerMessage( sizebuf_t *msg )
 			CL_ParseStaticDecal( msg );
 			break;
 		case svc_packetentities:
-			playerbytes = CL_ParsePacketEntities( msg, false, PROTO_CURRENT );
+			XBOX_FT_SPAN( XBOX_FT_S_CL_PKT_ENTS, playerbytes = CL_ParsePacketEntities( msg, false, PROTO_CURRENT ));
 			cl.frames[cl.parsecountmod].graphdata.players += playerbytes;
 			cl.frames[cl.parsecountmod].graphdata.entities += MSG_GetNumBytesRead( msg ) - bufStart - playerbytes;
 			break;
 		case svc_deltapacketentities:
-			playerbytes = CL_ParsePacketEntities( msg, true, PROTO_CURRENT );
+			XBOX_FT_SPAN( XBOX_FT_S_CL_PKT_ENTS, playerbytes = CL_ParsePacketEntities( msg, true, PROTO_CURRENT ));
 			cl.frames[cl.parsecountmod].graphdata.players += playerbytes;
 			cl.frames[cl.parsecountmod].graphdata.entities += MSG_GetNumBytesRead( msg ) - bufStart - playerbytes;
 			break;

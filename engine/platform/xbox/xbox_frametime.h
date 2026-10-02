@@ -39,7 +39,8 @@ when the frame closes. With the recorder off nobody zeroes it and the
 counts just wrap. The list and its meaning are in xbox_frametime_util.h.
 
 The third, xbox_ft_spans, holds the per-subsystem CPU spans (M2): the
-engine (host.c, sv_main.c, cl_main.c, cl_view.c) and ref/nv2a wrap a call
+engine (host.c, sv_main.c, sv_frame.c, sv_client.c, cl_main.c,
+cl_parse.c, cl_view.c) and ref/nv2a wrap a call
 in XBOX_FT_SPAN below, and the recorder stores the frame's totals as
 kilocycle work counters.
 */

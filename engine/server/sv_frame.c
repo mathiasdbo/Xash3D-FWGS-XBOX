@@ -17,6 +17,11 @@ GNU General Public License for more details.
 #include "server.h"
 #include "const.h"
 #include "net_encode.h"
+#if XASH_XBOX && !XASH_DEDICATED
+#include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt
+#endif
 
 typedef struct
 {
@@ -619,7 +624,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 
 	// add all the entities directly visible to the eye, which
 	// may include portal entities that merge other viewpoints
-	SV_AddEntitiesToPacket( cl->pViewEntity, cl->edict, frame, &frame_ents, true );
+	XBOX_FT_SPAN( XBOX_FT_S_SV_FULLPACK, SV_AddEntitiesToPacket( cl->pViewEntity, cl->edict, frame, &frame_ents, true ));
 
 	if( c_notsend != cl->ignored_ents )
 	{
@@ -656,7 +661,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 		frame->num_entities++;
 	}
 
-	SV_EmitPacketEntities( cl, frame, msg );
+	XBOX_FT_SPAN( XBOX_FT_S_SV_EMIT_ENTS, SV_EmitPacketEntities( cl, frame, msg ));
 	SV_EmitEvents( cl, frame, msg );
 	if( send_pings ) SV_EmitPings( msg );
 }
@@ -685,7 +690,7 @@ static void SV_SendClientDatagram( sv_client_t *cl )
 	MSG_BeginServerCmd( &msg, svc_time );
 	MSG_WriteFloat( &msg, sv.time );
 
-	SV_WriteClientdataToMessage( cl, &msg );
+	XBOX_FT_SPAN( XBOX_FT_S_SV_CLIENTDATA, SV_WriteClientdataToMessage( cl, &msg ));
 	SV_WriteEntitiesToClient( cl, &msg );
 
 	// copy the accumulated multicast datagram
@@ -715,7 +720,7 @@ static void SV_SendClientDatagram( sv_client_t *cl )
 	}
 
 	// send the datagram
-	Netchan_TransmitBits( &cl->netchan, MSG_GetNumBitsWritten( &msg ), MSG_GetData( &msg ));
+	XBOX_FT_SPAN( XBOX_FT_S_SV_XMIT, Netchan_TransmitBits( &cl->netchan, MSG_GetNumBitsWritten( &msg ), MSG_GetData( &msg )));
 }
 
 /*
@@ -816,7 +821,7 @@ void SV_SendClientMessages( void )
 	if( sv.state == ss_dead )
 		return;
 
-	SV_UpdateToReliableMessages ();
+	XBOX_FT_SPAN( XBOX_FT_S_SV_RELIABLE, SV_UpdateToReliableMessages ());
 
 	// send a message to each connected client
 	for( i = 0, sv.current_client = svs.clients; i < svs.maxclients; i++, sv.current_client++ )

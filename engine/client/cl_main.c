@@ -847,7 +847,7 @@ static void CL_CreateCmd( void )
 	if( !cls.demoplayback ) cl.cmd = pcmd->cmd;
 
 	// predict all unacknowledged movements
-	CL_PredictMovement( false );
+	XBOX_FT_SPAN( XBOX_FT_S_CL_PREDMOVE, CL_PredictMovement( false ));
 }
 
 void CL_WriteUsercmd( connprotocol_t proto, sizebuf_t *msg, int from, int to )
@@ -1057,10 +1057,10 @@ Called every frame to builds and sends a command packet to the server.
 static void CL_SendCommand( void )
 {
 	// we create commands even if a demo is playing,
-	CL_CreateCmd();
+	XBOX_FT_SPAN( XBOX_FT_S_CL_CMD, CL_CreateCmd());
 
 	// clc_move, userinfo etc
-	CL_WritePacket();
+	XBOX_FT_SPAN( XBOX_FT_S_CL_WPACKET, CL_WritePacket());
 }
 
 /*

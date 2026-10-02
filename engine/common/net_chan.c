@@ -1678,7 +1678,26 @@ void Netchan_TransmitBits( netchan_t *chan, int length, const byte *data )
 		}
 	}
 
+#if XASH_XBOX
+	{
+		// Resonance3D (docs/r3d/divergences.md #144): zero only the bytes
+		// this packet can touch instead of all of send_buf (~32 KiB with
+		// XASH_LOW_MEMORY 1, twice a frame in single player). Every write
+		// below is sequential from bit 0: the cookie (8 bytes), w1/w2 (8),
+		// the qport (2), up to MAX_STREAMS fragment headers (13 each), the
+		// reliable payload, the unreliable payload and at most 16 bytes of
+		// svc/clc_nop padding. A bit write reads and writes the 4-byte word
+		// that holds its last bit, so 8 bytes of slack cover that. Only
+		// MSG_GetNumBytesWritten bytes are munged and sent, so the packet
+		// is byte for byte what the full memset produced; nDataBits stays
+		// sizeof( send_buf ), so the overflow checks do not change either.
+		size_t clear = 8 + 8 + 2 + MAX_STREAMS * 13 + BitByte( chan->reliable_length ) + BitByte( length ) + 16 + 8;
+
+		memset( send_buf, 0, Q_min( clear, sizeof( send_buf )));
+	}
+#else
 	memset( send_buf, 0, sizeof( send_buf ));
+#endif
 	MSG_Init( &send, "NetSend", send_buf, sizeof( send_buf ));
 
 	// prepare the packet header
