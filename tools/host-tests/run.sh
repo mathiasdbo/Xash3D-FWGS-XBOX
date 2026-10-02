@@ -152,6 +152,25 @@ frametime_report() {
 }
 run_test frametime_report frametime_report
 
+# tools/host-tests/s_mix_host_test.c, header (divergence #145): the real
+# engine/client/sound/s_mix.c built with XASH_XBOX 0 and 1 against a stub
+# engine (tools/host-tests/s_mix_stub), and the two builds' pitched mixer
+# loops compared on the same calls; once with SSE2 doubles, once with x87
+# ones (-mfpmath=387, the Pentium III's arithmetic).
+s_mix() {
+	local fp="$1" tag="$2"
+	local inc="-Itools/host-tests/s_mix_stub -Iengine/client/sound -Iengine"
+	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 -Wno-unused-function $inc -DXASH_XBOX=0 \
+		-DS_MIX_TEST_ENTRY=mix_upstream -DS_PaintChannels=S_PaintChannels_up -DS_ClearBuffers=S_ClearBuffers_up \
+		-c tools/host-tests/s_mix_host_test_tu.c -o "$OUT/s_mix_up_$tag.o" &&
+	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 -Wno-unused-function $inc -DXASH_XBOX=1 -DS_MIX_TEST_ENTRY=mix_xbox \
+		-c tools/host-tests/s_mix_host_test_tu.c -o "$OUT/s_mix_xbox_$tag.o" &&
+	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 $inc tools/host-tests/s_mix_host_test.c \
+		"$OUT/s_mix_up_$tag.o" "$OUT/s_mix_xbox_$tag.o" -lm -o "$OUT/s_mix_test_$tag" && "$OUT/s_mix_test_$tag"
+}
+run_test s_mix_sse2 s_mix "" sse2
+run_test s_mix_x87 s_mix "-mfpmath=387" x87
+
 printf_test() {
 	gcc $HOST_CFLAGS -Wall -Wno-format -fstack-protector-all \
 		-Dvsnprintf=xb_vsnprintf -Dsnprintf=xb_snprintf -Dvsprintf=xb_vsprintf \

@@ -1980,3 +1980,14 @@ Closing the window (`CloseMainWindow`, then waiting for exit) made every
 file read back intact. **Close xemu gracefully and wait for it to exit
 before reading anything off its disk; a file that reads back once is no
 proof the method is sound.**
+
+### NEVER read an emulator's near-zero span as "cheap" before checking the work ran there
+
+The previous phase's xemu baseline put `k_snd` at 0.07 ms against 0.66 ms
+on the console, and nobody asked why. On this build xemu never runs the
+SDL audio callback (0 calls in a whole recording, x9-perf-sound,
+2026-10-02), so the mixer paints its mix-ahead once and then has nothing
+to do: every mixer span read about zero in xemu while the console spent
+1.5 ms there. **When a span is an order of magnitude smaller in the
+emulator than on hardware, first prove the workload runs there (count its
+calls or its samples), and only then compare times.**

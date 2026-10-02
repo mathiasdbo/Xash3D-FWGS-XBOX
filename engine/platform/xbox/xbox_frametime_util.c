@@ -40,6 +40,8 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"k_sv_runcmd",
 	"k_cl_pkt_ents", "k_cl_clientdata",
 	"k_cl_cmd", "k_cl_predmove", "k_cl_wpacket",
+	"k_snd_spatial", "k_snd_mix", "k_snd_dsp", "k_snd_out",
+	"k_sndx_mix", "k_sndx_dsp", "k_sndx_out",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,
@@ -83,6 +85,13 @@ const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT] =
 	[XBOX_FT_S_CL_CMD]        = XBOX_FT_S_CL_BEGIN,
 	[XBOX_FT_S_CL_PREDMOVE]   = XBOX_FT_S_CL_CMD,
 	[XBOX_FT_S_CL_WPACKET]    = XBOX_FT_S_CL_BEGIN,
+	[XBOX_FT_S_SND_SPATIAL]   = XBOX_FT_S_SND,
+	[XBOX_FT_S_SND_MIX]       = XBOX_FT_S_SND,
+	[XBOX_FT_S_SND_DSP]       = XBOX_FT_S_SND,
+	[XBOX_FT_S_SND_OUT]       = XBOX_FT_S_SND,
+	[XBOX_FT_S_SNDX_MIX]      = XBOX_FT_S_SND_EXTRA,
+	[XBOX_FT_S_SNDX_DSP]      = XBOX_FT_S_SND_EXTRA,
+	[XBOX_FT_S_SNDX_OUT]      = XBOX_FT_S_SND_EXTRA,
 };
 
 uint32_t xbox_ft_span_kcyc( uint64_t ticks )

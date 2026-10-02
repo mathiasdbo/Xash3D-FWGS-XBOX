@@ -5,6 +5,30 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: cheaper sound mixing, and the mixer in the frame-time spans
+
+Sound cost about 1.5 ms of a 15.4 ms CPU frame on the console. Seven new
+frame-time spans break the mixer down - per-channel spatialization,
+channel mixing, room effects, and the clear/volume/copy-out - once for
+the main mixer pass and once for the extra pass after rendering.
+
+Nearly all of it was channel mixing. Half-Life's sounds are 11 or 22 kHz
+and the mixer resamples them to 44.1 kHz, converting a floating-point
+position to an integer on every output sample - an expensive operation on
+the console's Pentium III. The mixer now steps through the source with
+integer arithmetic that lands on exactly the same samples, and a sound at
+normal pitch has each source sample's volume worked out once for the 2 or
+4 output samples it covers. The room-effect stereo delay also drops a
+division per sample. What is heard is bit for bit the same: a test builds
+the original and the new mixer side by side and compares 366,000 calls,
+and verification builds compared every resampled call in xemu (71,000
+calls) through speech, movement, firing, doors, save/load and level
+changes, with no difference. In xemu (with a stand-in audio clock,
+because xemu's audio callback never runs) channel mixing went from about
+0.40 to 0.05 ms a frame on c1a0c, from 0.17 to 0.05 ms while firing on
+c1a0e and from 0.25 to 0.02 ms with scientists talking on c1a0; the
+console's figure needs a hardware run.
+
 ### Changed - Xbox: cheaper single-player network messages, and the round trip in the frame-time spans
 
 In single player the server and the client still talk through the

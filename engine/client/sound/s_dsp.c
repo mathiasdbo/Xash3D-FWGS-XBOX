@@ -410,6 +410,11 @@ static void DLY_DoStereoDelay( portable_samplepair_t *paint, int count )
 				dly->xfade = 128;
 			}
 
+#if XASH_XBOX
+			// docs/r3d/divergences.md #145 (2): the same value without a
+			// division per sample when it is already in range (x % m == x)
+			if( (size_t)dly->idelayoutputxf >= dly->cdelaysamplesmax )
+#endif
 			dly->idelayoutputxf %= dly->cdelaysamplesmax;
 
 			// modify delay, if crossfading

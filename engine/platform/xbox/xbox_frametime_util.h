@@ -192,6 +192,16 @@ enum
 	XBOX_FT_S_CL_CMD,        /*   in k_cl_begin: CL_CreateCmd - client.dll CL_CreateMove, then prediction */
 	XBOX_FT_S_CL_PREDMOVE,   /*     in k_cl_cmd: CL_PredictMovement - client-side PM_Move */
 	XBOX_FT_S_CL_WPACKET,    /*   in k_cl_begin: CL_WritePacket - usercmd delta, Netchan_TransmitBits */
+	/* The mixer, broken down (2026-10-02, appended for the same reason).
+	   S_PaintChannels runs from both SND_UpdateSound and S_ExtraUpdate,
+	   so its three spans come twice, one set per caller. */
+	XBOX_FT_S_SND_SPATIAL,   /*   in k_snd: SND_UpdateSound before the mix - fade, ambients, every channel's SND_Spatialize, raw channels */
+	XBOX_FT_S_SND_MIX,       /*   in k_snd: S_MixNormalChannelsToRoombuffer + S_MixRawChannels - resampling, volume, VOX, lip sync */
+	XBOX_FT_S_SND_DSP,       /*   in k_snd: SX_RoomFX - room modulation, reverb, delay, stereo delay */
+	XBOX_FT_S_SND_OUT,       /*   in k_snd: S_ClearBuffers, S_MixBufferWithGain, S_TransferPaintBuffer */
+	XBOX_FT_S_SNDX_MIX,      /*   in k_snd_extra: the same as k_snd_mix */
+	XBOX_FT_S_SNDX_DSP,      /*   in k_snd_extra: the same as k_snd_dsp */
+	XBOX_FT_S_SNDX_OUT,      /*   in k_snd_extra: the same as k_snd_out */
 	XBOX_FT_S_COUNT
 };
 

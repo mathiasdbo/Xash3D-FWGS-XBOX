@@ -19,6 +19,9 @@ GNU General Public License for more details.
 #include "con_nprint.h"
 #include "pm_local.h"
 #include "platform/platform.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_frametime.h" // the mixer's CPU spans, docs/r3d/divergences.md #141
+#endif
 
 // structure used for fading in and out client sound volume.
 struct
@@ -1579,7 +1582,13 @@ Don't let sound skip if going slow
 void S_ExtraUpdate( void )
 {
 	if( !snd.initialized ) return;
+#if XASH_XBOX
+	xbox_ft_snd_extra = 1; // S_PaintChannels' spans go under k_snd_extra (#141)
+#endif
 	S_UpdateChannels ();
+#if XASH_XBOX
+	xbox_ft_snd_extra = 0;
+#endif
 }
 
 /*
@@ -1613,6 +1622,12 @@ void SND_UpdateSound( void )
 	if( clgame.soundFuncs.pfnS_UpdateSound )
 		clgame.soundFuncs.pfnS_UpdateSound();
 
+#if XASH_XBOX
+	// k_snd_spatial: everything before the mix (#141)
+	xbox_ft_span_t spatial_span;
+	xbox_ft_span_begin( &spatial_span );
+#endif
+
 	// if the loading plaque is up, clear everything
 	// out to make sure we aren't looping a dirty
 	// dma buffer while loading
@@ -1637,6 +1652,10 @@ void SND_UpdateSound( void )
 	}
 
 	S_SpatializeRawChannels();
+
+#if XASH_XBOX
+	xbox_ft_span_end( &spatial_span, XBOX_FT_S_SND_SPATIAL );
+#endif
 
 	// debugging output
 	if( s_show.value != 0.0f )

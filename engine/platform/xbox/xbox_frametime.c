@@ -84,6 +84,7 @@ static CVAR_DEFINE_AUTO( host_frametime_spans, "1", FCVAR_FILTERABLE,
 xbox_ft_waits_t xbox_ft_waits;
 xbox_ft_work_t xbox_ft_work;
 xbox_ft_spans_t xbox_ft_spans;
+int xbox_ft_snd_extra;
 
 /* 1024 frames x 212 bytes (32 + 45 work counters: 20 counts, span_calls
    and 24 spans) = 212 KiB ring, plus the per-map histogram (4 KiB) and a
@@ -441,6 +442,11 @@ void Xbox_FrameTime_BeginFrame( void )
 	uint64_t now;
 	qboolean active;
 
+	/* S_ExtraUpdate sets it around its mix; a Host_Error longjmp out of
+	   the mixer would leave it set and charge every later mix to the
+	   k_sndx_* spans. Frames start outside the mixer. */
+	xbox_ft_snd_extra = 0;
+
 	/* The whole cost when off. */
 	if( want == 0 && ft.mode == 0 )
 		return;
@@ -559,6 +565,7 @@ static void FT_FormatSpans( const uint64_t *work, uint64_t cpu_ticks, uint32_t n
 		"efx", "tri", "hud", "sndx", "rend", "snd",
 		"rel", "fpack", "scdat", "sdelta", "sxmit", "runcmd",
 		"cdelta", "ccdat", "cmd", "pmove", "wpkt",
+		"sspat", "smix", "sdsp", "sout", "xmix", "xdsp", "xout",
 	};
 	/* A span added without a label is a compile error, not a NULL. */
 	STATIC_ASSERT( ARRAYSIZE( label ) == XBOX_FT_S_COUNT, "one overlay label per span" );

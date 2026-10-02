@@ -461,9 +461,9 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 56)
+        self.assertEqual(len(r["counters"]), 63)
         self.assertEqual(r["counters"][20], "span_calls")
-        self.assertEqual(len(r["spans"]), 35)
+        self.assertEqual(len(r["spans"]), 42)
         self.assertEqual(r["spans"][0], ("k_input", ""))
         parent = dict(r["spans"])
         self.assertEqual(parent["k_sv_game"], "k_sv")
@@ -479,6 +479,12 @@ class Spans(unittest.TestCase):
         self.assertLess(order.index("k_sv_send"), order.index("k_sv_emit_ents"))
         self.assertLess(order.index("k_sv_emit_ents"), order.index("k_cl"))
         self.assertEqual(order.index("k_cl_cmd") + 1, order.index("k_cl_predmove"))
+        # The mixer's two sets: under k_snd and under k_snd_extra.
+        self.assertEqual(parent["k_snd_mix"], "k_snd")
+        self.assertEqual(parent["k_sndx_mix"], "k_snd_extra")
+        self.assertEqual(fr.span_depth(r)["k_sndx_dsp"], 3)
+        self.assertEqual(order.index("k_snd_extra") + 1, order.index("k_sndx_mix"))
+        self.assertLess(order.index("k_snd"), order.index("k_snd_spatial"))
         self.assertEqual(r["unknown_chunks"], 0)
         self.assertEqual(fr.span_depth(r)["k_skin_read"], 5)
 

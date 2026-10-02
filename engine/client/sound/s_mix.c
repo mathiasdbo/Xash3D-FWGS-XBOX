@@ -16,6 +16,13 @@ GNU General Public License for more details.
 #include "common.h"
 #include "sound.h"
 #include "client.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_frametime.h" // docs/r3d/divergences.md #141
+// S_PaintChannels' spans: one set under k_snd, one under k_snd_extra
+#define S_MIX_SPAN( id, id_extra, stmt ) XBOX_FT_SPAN( xbox_ft_snd_extra ? ( id_extra ) : ( id ), stmt )
+#else
+#define S_MIX_SPAN( id, id_extra, stmt ) stmt
+#endif
 
 static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAINTBUFFER_SIZE+1)];
 
@@ -108,10 +115,14 @@ S_MakeMixMono( 8 )
 S_MakeMixMono( 16 )
 S_MakeMixStereo( 8 )
 S_MakeMixStereo( 16 )
+#if !XASH_XBOX
 S_MakeMixMonoPitch( 8 )
 S_MakeMixMonoPitch( 16 )
 S_MakeMixStereoPitch( 8 )
 S_MakeMixStereoPitch( 16 )
+#else
+#include "platform/xbox/xbox_s_mix_pitch.h" // the same four without x87 truncation, docs/r3d/divergences.md #145 (1)
+#endif
 S_MakeMixMonoLerp( 8 )
 S_MakeMixMonoLerp( 16 )
 S_MakeMixStereoLerp( 8 )
@@ -555,21 +566,22 @@ void S_PaintChannels( int endtime )
 
 		const int num_samples = end - snd.paintedtime;
 
-		S_ClearBuffers( num_samples );
+		S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_ClearBuffers( num_samples ));
 
-		int room_channels = S_MixNormalChannelsToRoombuffer( roombuffer, end );
+		int room_channels;
+		S_MIX_SPAN( XBOX_FT_S_SND_MIX, XBOX_FT_S_SNDX_MIX, room_channels = S_MixNormalChannelsToRoombuffer( roombuffer, end ));
 
-		room_channels += S_MixRawChannels( end );
+		S_MIX_SPAN( XBOX_FT_S_SND_MIX, XBOX_FT_S_SNDX_MIX, room_channels += S_MixRawChannels( end ));
 
 		// now process DSP and mix result into paintbuffer
 		if( cls.key_dest != key_menu )
-			SX_RoomFX( roombuffer, num_samples );
+			S_MIX_SPAN( XBOX_FT_S_SND_DSP, XBOX_FT_S_SNDX_DSP, SX_RoomFX( roombuffer, num_samples ));
 
 		if( room_channels > 0 || cls.key_dest != key_menu )
-			S_MixBufferWithGain( paintbuffer, roombuffer, num_samples, gain );
+			S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_MixBufferWithGain( paintbuffer, roombuffer, num_samples, gain ));
 
 		// transfer out according to DMA format
-		S_TransferPaintBuffer( paintbuffer, end );
+		S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_TransferPaintBuffer( paintbuffer, end ));
 		snd.paintedtime = end;
 	}
 }

@@ -110,7 +110,9 @@ second:
   (sv_fullpack), `scdat` (sv_clientdata), `sdelta` (sv_emit_ents),
   `sxmit` (sv_xmit), `runcmd`, `cdelta` (cl_pkt_ents), `ccdat`
   (cl_clientdata), `cmd`, `pmove` (cl_predmove), `wpkt` (cl_wpacket),
-  and the parents `sv`, `cl`, `scr`. With `host_frametime_spans 0` it
+  the mixer's `sspat` (snd_spatial), `smix`, `sdsp`, `sout` (snd_mix,
+  snd_dsp, snd_out) and `xmix`, `xdsp`, `xout` (sndx_mix, sndx_dsp,
+  sndx_out), and the parents `sv`, `cl`, `scr`. With `host_frametime_spans 0` it
   reads `spans off`.
 
 The counters are the same half-second (30-frame) means as the `now` line.
@@ -276,11 +278,40 @@ boundary. The report shows it per map, and the overlay shows it as `none`.
 | `k_cl_cmd` | `k_cl_begin` | `CL_CreateCmd`: client.dll `CL_CreateMove`, then prediction | `engine/client/cl_main.c:1060` |
 | `k_cl_predmove` | `k_cl_cmd` | `CL_PredictMovement( false )`: the client's `PM_Move` over the unacknowledged commands | `cl_main.c:850` |
 | `k_cl_wpacket` | `k_cl_begin` | `CL_WritePacket`: usercmd deltas and `Netchan_TransmitBits` | `cl_main.c:1063` |
+| `k_snd_spatial` | `k_snd` | `SND_UpdateSound` before the mix: `S_UpdateSoundFade`, `S_FreeIdleRawChannels`, `S_UpdateAmbientSounds`, `SND_Spatialize` for every channel with a sound, `S_SpatializeRawChannels` | `engine/client/sound/s_main.c`, `SND_UpdateSound` |
+| `k_snd_mix` | `k_snd` | `S_MixNormalChannelsToRoombuffer` (per channel: resampling and volume, `VOX` words, lip sync) and `S_MixRawChannels` | `engine/client/sound/s_mix.c`, `S_PaintChannels` |
+| `k_snd_dsp` | `k_snd` | `SX_RoomFX`: room modulation, reverb, delay, stereo delay | `s_mix.c`, `S_PaintChannels` |
+| `k_snd_out` | `k_snd` | `S_ClearBuffers`, `S_MixBufferWithGain`, `S_TransferPaintBuffer` (clip to 16 bits into the DMA buffer) | `s_mix.c`, `S_PaintChannels` |
+| `k_sndx_mix`, `k_sndx_dsp`, `k_sndx_out` | `k_snd_extra` | the same three, when `S_ExtraUpdate` mixes | `s_mix.c`, `S_PaintChannels` |
 
-The last eleven (2026-10-02) break the local server/client round trip
-down; they come after `k_snd` in the file so the older spans keep their
-indices, and the SPANS chunk gives their parents. Each closes about once
-a frame (`k_sv_runcmd` once per usercmd).
+The eleven from `k_sv_reliable` to `k_cl_wpacket` (2026-10-02) break
+the local server/client round trip down; they come after `k_snd` in the
+file so the older spans keep their indices, and the SPANS chunk gives
+their parents. Each closes about once a frame (`k_sv_runcmd` once per
+usercmd).
+
+The last seven (2026-10-02, appended the same way) break the mixer down.
+`S_PaintChannels` runs from both `SND_UpdateSound` and `S_ExtraUpdate`,
+and a span has one parent, so its three spans come in two sets: `k_snd_*`
+under `k_snd` and `k_sndx_*` under `k_snd_extra`. `S_ExtraUpdate` sets
+`xbox_ft_snd_extra` while it mixes, and that picks the set. The time
+`S_UpdateChannels` spends in `SNDDMA_BeginPainting` (the SDL audio
+device lock, held by the audio thread while it copies a buffer out) and
+`S_StreamBackgroundTrack` stay in the parents' own time. A renderer
+calling `S_ExtraUpdate` through `CL_ExtraUpdate` would charge `k_sndx_*`
+outside `k_snd_extra`; ref/nv2a does not call it. The mixer paints only
+when the audio thread has consumed a block (1024 samples, 23 ms at
+44.1 kHz), so these spans close on roughly two frames in three and their
+per-frame average is the useful number. The SDL audio thread itself -
+the callback's copy, and SDL's conversion from the engine's 44.1 kHz to
+the Xbox's fixed 48 kHz - runs outside every span and lands in whichever
+span it interrupts. In xemu that thread's callback never runs (counted:
+0 calls over a whole recording, 2026-10-02), so the mixer paints its
+0.12 s mix-ahead once and then nothing, and the mixer spans read about
+zero there. To compare mixer changes in xemu, a never-committed harness
+build advanced `snd.samplepos` by whole 1024-sample blocks of wall-clock
+time in `SNDDMA_BeginPainting` (as the callback does on the console);
+the console's own numbers need a hardware run.
 
 Spans not listed under a parent stay in that parent's **own** time.
 Examples: the overlay's drawing (inside `k_scr`; it also has its own field)
@@ -311,13 +342,14 @@ numbers for the decision come from the owner's hardware route.
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~292 KiB (ring 1024 x 256 B = 256 KiB, the overlay's histogram
-  4 KiB, a 32 KiB encode buffer); a few `rdtsc` per frame plus two per
-  span closed (below); a ~75 KiB write and `fsync` every 5 s (those
-  frames are flagged); about 15 KiB per second of play on disk at 60 fps
-  (53 MiB an hour; the file stops at 64 MiB, ~1.2 hours). Before the
-  round-trip spans (2026-10-02) it was ~243 KiB and 12.4 KiB/s; before
-  any spans, ~130 KiB and 6.6 KiB/s.
+- **On:** ~324 KiB (ring 1024 x 284 B = 284 KiB, the overlay's histogram
+  4 KiB, a 35.5 KiB encode buffer); a few `rdtsc` per frame plus two per
+  span closed (below); a ~83 KiB write and `fsync` every 5 s (those
+  frames are flagged); about 16.6 KiB per second of play on disk at 60 fps
+  (58 MiB an hour; the file stops at 64 MiB, ~1.1 hours). Before the
+  mixer spans (2026-10-02) it was ~292 KiB and 15 KiB/s; before the
+  round-trip spans, ~243 KiB and 12.4 KiB/s; before any spans, ~130 KiB
+  and 6.6 KiB/s.
 - **Spans, off** (recorder off, or `host_frametime_spans 0`): one load
   and branch of `xbox_ft_spans.on` per span site, plus a branch on a
   stack local at its end.
@@ -362,9 +394,9 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 256 bytes with today's
-56: the 20 counts, `span_calls` and the 35 spans; 212 with the first 24
-spans, 112 before the spans),
+frame records of 32 bytes plus one u32 per counter - 284 bytes with today's
+63: the 20 counts, `span_calls` and the 42 spans; 256 with 35 spans, 212
+with the first 24, 112 before the spans),
 SPANS (from 2026-10-01, right after COUNTERS: each span's name and its
 parent's, 16 bytes each, "" for the top level), MAP, CALIB (TSC,
 performance counter) and END (written on a clean stop; a file without it

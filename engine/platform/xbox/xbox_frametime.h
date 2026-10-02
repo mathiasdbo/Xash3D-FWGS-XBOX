@@ -88,6 +88,12 @@ typedef struct xbox_ft_spans_s
 
 extern xbox_ft_spans_t xbox_ft_spans;
 
+/* Non-zero while S_ExtraUpdate mixes (engine/client/sound/s_main.c):
+   S_PaintChannels runs from both mixer entry points, and this picks its
+   spans' set - XBOX_FT_S_SND_* under k_snd, XBOX_FT_S_SNDX_* under
+   k_snd_extra (docs/r3d/frametime-recorder.md, "Spans"). */
+extern int xbox_ft_snd_extra;
+
 /* The time-stamp counter (Pentium III: the core clock, 733 MHz on a
    retail unit; the recorder calibrates it against the kernel's
    performance counter rather than assuming the rate). */
