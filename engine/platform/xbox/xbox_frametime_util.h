@@ -113,7 +113,8 @@ still write it when given zero counters (the tests' v1 fixture).
    submitted (xbox_frametime.h's xbox_ft_work); the recorder zeroes them
    at Host_Frame start and stores them in the frame record. Every one is a
    count, not a time, so it is identical in xemu and on the console.
-   Append new ones before XBOX_FT_W_COUNT and give them a name in
+   New ones go in the enum after the spans (below, before XBOX_FT_W_END)
+   so the older indices hold; give them a name in
    xbox_frametime_util.c. */
 enum
 {
@@ -202,10 +203,30 @@ enum
 	XBOX_FT_S_SNDX_MIX,      /*   in k_snd_extra: the same as k_snd_mix */
 	XBOX_FT_S_SNDX_DSP,      /*   in k_snd_extra: the same as k_snd_dsp */
 	XBOX_FT_S_SNDX_OUT,      /*   in k_snd_extra: the same as k_snd_out */
+	/* The 3D scene, broken down (2026-10-02, appended for the same
+	   reason): k_world's parts, and what k_r_scene spent of its own. */
+	XBOX_FT_S_PVS,           /*   in k_r_scene: ref/nv2a nv2a_mark_leaves - the PVS and visible-face list at a leaf change */
+	XBOX_FT_S_SKY,           /*   in k_world: nv2a_draw_sky - the sky faces' walk and the skybox */
+	XBOX_FT_S_WORLD_WALK,    /*   in k_world: nv2a_draw_map_geometry's batch and face walk - culling and index submission */
+	XBOX_FT_S_WARP_WORLD,    /*   in k_world: R_WarpDrawWorld - the world's opaque water, warped on the CPU */
+	XBOX_FT_S_WORLD_DECALS,  /*   in k_world: R_DecalDrawWorld */
+	XBOX_FT_S_BRUSH,         /*   in k_r_scene: nv2a_draw_brush_entity, every solid and translucent brush entity */
+	XBOX_FT_S_WARP_BRUSH,    /*     in k_brush: R_WarpDrawBrushEntity - a brush entity's water (func_water) */
+	XBOX_FT_S_WARP_TRANS,    /*   in k_r_scene: R_WarpDrawWaterSurfaces - the world's translucent water */
 	XBOX_FT_S_COUNT
 };
 
-#define XBOX_FT_W_COUNT ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_COUNT )
+/* Counts added after the spans existed (2026-10-02) go after them, so
+   every earlier counter and span keeps its place in the record; the
+   SPANS chunk names only the XBOX_FT_S_COUNT counters from
+   XBOX_FT_W_SPAN_FIRST. */
+enum
+{
+	XBOX_FT_W_WORLD_WALKED = XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_COUNT, /* faces the world pass's face loop visited (world_faces: what it drew) */
+	XBOX_FT_W_END
+};
+
+#define XBOX_FT_W_COUNT XBOX_FT_W_END
 
 /* The COUNTERS chunk's names, indexed by XBOX_FT_W_*; each fits in
    XBOX_FT_COUNTER_NAME_BYTES with its NUL. The spans are named k_* (the

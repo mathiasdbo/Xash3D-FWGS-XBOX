@@ -461,9 +461,13 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 63)
+        self.assertEqual(len(r["counters"]), 72)
         self.assertEqual(r["counters"][20], "span_calls")
-        self.assertEqual(len(r["spans"]), 42)
+        self.assertEqual(len(r["spans"]), 50)
+        # A count after the spans (2026-10-02) is a plain counter.
+        self.assertEqual(r["counters"][-1], "world_walked")
+        self.assertNotIn("world_walked", fr.span_names(r))
+        self.assertEqual(r["frames"][0][8][-1], 500)
         self.assertEqual(r["spans"][0], ("k_input", ""))
         parent = dict(r["spans"])
         self.assertEqual(parent["k_sv_game"], "k_sv")
@@ -485,6 +489,13 @@ class Spans(unittest.TestCase):
         self.assertEqual(fr.span_depth(r)["k_sndx_dsp"], 3)
         self.assertEqual(order.index("k_snd_extra") + 1, order.index("k_sndx_mix"))
         self.assertLess(order.index("k_snd"), order.index("k_snd_spatial"))
+        # The scene's breakdown: k_world's parts and k_r_scene's own.
+        self.assertEqual(parent["k_world_walk"], "k_world")
+        self.assertEqual(parent["k_warp_brush"], "k_brush")
+        self.assertEqual(parent["k_brush"], "k_r_scene")
+        self.assertEqual(fr.span_depth(r)["k_warp_brush"], 4)
+        self.assertLess(order.index("k_world"), order.index("k_world_walk"))
+        self.assertLess(order.index("k_world_walk"), order.index("k_client_studio"))
         self.assertEqual(r["unknown_chunks"], 0)
         self.assertEqual(fr.span_depth(r)["k_skin_read"], 5)
 

@@ -5,6 +5,33 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: the world pass visits only the faces in view of the player's area, and the 3D scene in the frame-time spans
+
+On the console the world pass cost 1.7-2.3 ms a frame on every map. Eight
+new frame-time spans split the 3D scene - the sky, the world's face walk,
+its water and decals, the visibility update, the brush entities and their
+water, and the translucent water - and a new count says how many faces
+the world walk visited. Nearly all of the world's time was the face walk,
+which looked at every face of the map every frame (6,120 on c1a1b, to
+draw 189) and ran its view-cone test even on faces already known to be
+out of sight.
+
+The renderer now keeps, for the area the player is in, the list of world
+faces that can be seen from it, rebuilt only when the player moves into
+another area, and the walk goes through that list. The view-cone test
+picks each plane's box corner once a frame instead of per face, and the
+back-face test reads each face's plane from a small table built once per
+map. Exactly the same faces are drawn in the same order: a verification
+build ran the old walk beside the new one every frame across seven map
+loads (the tram ride, doors, firing, save and load, a level change,
+visibility toggles) and compared every draw, texture change and counter
+- 4,500 frames, 417,226 draw events, no difference - and
+screenshots at fixed spots match the previous build wherever two boots of
+the previous build agree with each other. In xemu
+the walk went from 0.94 to 0.39 ms on c1a0c, 1.33 to 0.30 on c1a1f, 1.52
+to 0.21 on c1a1b, 0.43 to 0.08 on c1a1a and 2.24 to 0.31 on c2a2a; the
+console's figure needs a hardware run. It costs 5 bytes per map face.
+
 ### Changed - Xbox: cheaper sound mixing, and the mixer in the frame-time spans
 
 Sound cost about 1.5 ms of a 15.4 ms CPU frame on the console. Seven new

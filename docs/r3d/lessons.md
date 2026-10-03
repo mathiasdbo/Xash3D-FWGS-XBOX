@@ -28,6 +28,20 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### ALWAYS copy a reference file:line from the authoritative clone while writing the comment, not from the in-repo tree or from memory
+
+R3 (x9-perf-world, #146) committed new ref/nv2a comments whose
+reference citations the reference-renderer review then found wrong in
+five places. `mod_bmodel.c:3403-3424` was this tree's own engine file (upstream
+has the same lines at `:3323-3344`), `gl_cull.c:95`,
+`gl_frustum.c:104`, `gl_frustum.c:110-127` and `gl_rsurf.c:3797-3807` were plausible-looking ranges never opened, and
+the comment's summary of ref/gl ("never reaches a face outside the PVS")
+was stronger than `R_RecursiveWorldNode` + `R_CullSurface` actually do.
+A wrong line number makes a later divergence look intentional, which is
+what citations exist to prevent. **Open the cited line in
+`G:\Proyectos\Ferrum56\xash3d-fwgs` and paste the number you see; cite
+an engine file in our tree only when saying so ("in this tree").**
+
 ### NEVER script anything after a command the engine follows up through the command buffer
 
 X9-X step 12: a test config ran `save dectest`, then `wait`s, `load dectest`

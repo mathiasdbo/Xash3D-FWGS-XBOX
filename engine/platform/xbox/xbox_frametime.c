@@ -566,6 +566,7 @@ static void FT_FormatSpans( const uint64_t *work, uint64_t cpu_ticks, uint32_t n
 		"rel", "fpack", "scdat", "sdelta", "sxmit", "runcmd",
 		"cdelta", "ccdat", "cmd", "pmove", "wpkt",
 		"sspat", "smix", "sdsp", "sout", "xmix", "xdsp", "xout",
+		"pvs", "sky", "walk", "wwarp", "wdec", "brush", "bwarp", "twarp",
 	};
 	/* A span added without a label is a compile error, not a NULL. */
 	STATIC_ASSERT( ARRAYSIZE( label ) == XBOX_FT_S_COUNT, "one overlay label per span" );
@@ -667,10 +668,11 @@ static void FT_FormatText( void )
 	}
 
 	/* The work counters, averaged over the same half second. */
-	Q_snprintf( ft.text[2], sizeof( ft.text[2] ), "draws %s  prims %s  pb %s dw  tex %s  faces %s  leaves %s",
+	Q_snprintf( ft.text[2], sizeof( ft.text[2] ), "draws %s  prims %s  pb %s dw  tex %s  faces %s/%s  leaves %s",
 		FT_Count( a[0], sizeof( a[0] ), w[XBOX_FT_W_DRAWS] ), FT_Count( a[1], sizeof( a[1] ), w[XBOX_FT_W_PRIMS] ),
 		FT_Count( a[2], sizeof( a[2] ), w[XBOX_FT_W_PB_DWORDS] ), FT_Count( a[3], sizeof( a[3] ), w[XBOX_FT_W_TEX_BINDS] ),
-		FT_Count( a[4], sizeof( a[4] ), w[XBOX_FT_W_WORLD_FACES] ), FT_Count( a[5], sizeof( a[5] ), w[XBOX_FT_W_PVS_LEAVES] ));
+		FT_Count( a[4], sizeof( a[4] ), w[XBOX_FT_W_WORLD_FACES] ), FT_Count( a[5], sizeof( a[5] ), w[XBOX_FT_W_WORLD_WALKED] ),
+		FT_Count( a[6], sizeof( a[6] ), w[XBOX_FT_W_PVS_LEAVES] ));
 	Q_snprintf( ft.text[3], sizeof( ft.text[3] ), "verts world %s  studio %s  tri %s  2d %s  decal %s",
 		FT_Count( a[0], sizeof( a[0] ), w[XBOX_FT_W_VERTS_WORLD] ), FT_Count( a[1], sizeof( a[1] ), w[XBOX_FT_W_VERTS_STUDIO] ),
 		FT_Count( a[2], sizeof( a[2] ), w[XBOX_FT_W_VERTS_TRI] ), FT_Count( a[3], sizeof( a[3] ), w[XBOX_FT_W_VERTS_2D] ),

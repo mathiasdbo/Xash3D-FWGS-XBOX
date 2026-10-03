@@ -42,6 +42,10 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"k_cl_cmd", "k_cl_predmove", "k_cl_wpacket",
 	"k_snd_spatial", "k_snd_mix", "k_snd_dsp", "k_snd_out",
 	"k_sndx_mix", "k_sndx_dsp", "k_sndx_out",
+	"k_pvs", "k_sky", "k_world_walk", "k_warp_world", "k_world_decals",
+	"k_brush", "k_warp_brush", "k_warp_trans",
+	/* the counts after the spans */
+	"world_walked",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,
@@ -92,6 +96,14 @@ const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT] =
 	[XBOX_FT_S_SNDX_MIX]      = XBOX_FT_S_SND_EXTRA,
 	[XBOX_FT_S_SNDX_DSP]      = XBOX_FT_S_SND_EXTRA,
 	[XBOX_FT_S_SNDX_OUT]      = XBOX_FT_S_SND_EXTRA,
+	[XBOX_FT_S_PVS]           = XBOX_FT_S_R_SCENE,
+	[XBOX_FT_S_SKY]           = XBOX_FT_S_WORLD,
+	[XBOX_FT_S_WORLD_WALK]    = XBOX_FT_S_WORLD,
+	[XBOX_FT_S_WARP_WORLD]    = XBOX_FT_S_WORLD,
+	[XBOX_FT_S_WORLD_DECALS]  = XBOX_FT_S_WORLD,
+	[XBOX_FT_S_BRUSH]         = XBOX_FT_S_R_SCENE,
+	[XBOX_FT_S_WARP_BRUSH]    = XBOX_FT_S_BRUSH,
+	[XBOX_FT_S_WARP_TRANS]    = XBOX_FT_S_R_SCENE,
 };
 
 uint32_t xbox_ft_span_kcyc( uint64_t ticks )
@@ -374,6 +386,8 @@ size_t xbox_ft_encode_spans( uint8_t *out, uint32_t counters )
 	if( counters <= XBOX_FT_W_SPAN_FIRST )
 		return 0;
 	n = counters - XBOX_FT_W_SPAN_FIRST;
+	if( n > XBOX_FT_S_COUNT )
+		n = XBOX_FT_S_COUNT; /* the counts after the spans are not spans */
 
 	p = put_u32( p, XBOX_FT_CHUNK_SPANS );
 	p = put_u32( p, 4u + n * 2u * XBOX_FT_COUNTER_NAME_BYTES );

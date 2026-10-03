@@ -68,6 +68,12 @@ namespace formats {
     // r_context.c's ledger adds per FaceDrawCmd.
     constexpr uint64_t kNv2aLightmapFaceBytes = 9;
 
+    // R3 (divergences.md #146): ref/nv2a's visible-face list and per-face
+    // plane reference, a uint16_t each per face, and a "listable" byte
+    // (r_context.c NV2A_PVS_LIST_FACE_BYTES: nv2a_pvs_faces,
+    // nv2a_map_face_plane, nv2a_map_face_listable).
+    constexpr uint64_t kNv2aPvsListFaceBytes = 5;
+
     // MPAK v12: the bytes the engine is served as the map's .bsp - the
     // first sector plus every classic lump, each padded to a whole sector
     // (filesystem/mpak_layout.c's classicEnd; filesystem/mpak.c serves
@@ -89,9 +95,23 @@ namespace formats {
     // it builds the per-face bounds (nv2a_read_map_lumps: vec3, 3 floats).
     constexpr uint64_t kNv2aPositionBytes = 12;
 
+    // The renderer's per-map tables, which stay resident for the whole map:
+    // the index buffer, nv2a_map_faces, the PVS byte per face, the face
+    // remap, the lightmap tables and the visible-face list. Shared by the
+    // per-map ledger below and the whole-console fit check in
+    // PakManager.cpp, so the two gates count the same bytes.
+    inline uint64_t nv2aMapTableBytes(const MpakHeader6& h) {
+        const uint64_t faces = static_cast<uint64_t>(h.lenFaceDrawCmds / 8);
+        return ((static_cast<uint64_t>(h.iCount) + 1) / 2) * 4
+            + faces * kNv2aMapFaceBytes
+            + static_cast<uint64_t>(h.lenFaceDrawCmds) / 8
+            + static_cast<uint64_t>(h.lenFaceRemap) * 2
+            + faces * kNv2aLightmapFaceBytes
+            + faces * kNv2aPvsListFaceBytes;
+    }
+
     inline uint64_t nv2aMapLedgerBytes(const MpakHeader6& h) {
         const uint64_t vbBytes = static_cast<uint64_t>(h.vCount) * kNv2aLitVertexBytes;
-        const uint64_t idxBytes = ((static_cast<uint64_t>(h.iCount) + 1) / 2) * 4;
         // X9-T: the peak, as ref/nv2a now computes it - the tables live on,
         // the engine's buffer and the load's temporaries live only while
         // they are built, and the three GPU buffers are built after both
@@ -101,11 +121,7 @@ namespace formats {
         // of the load; X9-U builds the tables at R_NewMap, after the
         // engine has freed its copy of the map, so that copy is not in
         // either side any more.
-        const uint64_t tables = idxBytes
-            + static_cast<uint64_t>(h.lenFaceDrawCmds / 8) * kNv2aMapFaceBytes
-            + static_cast<uint64_t>(h.lenFaceDrawCmds) / 8
-            + static_cast<uint64_t>(h.lenFaceRemap) * 2
-            + static_cast<uint64_t>(h.lenFaceDrawCmds / 8) * kNv2aLightmapFaceBytes;
+        const uint64_t tables = nv2aMapTableBytes(h);
         const uint64_t gpu = vbBytes
             + static_cast<uint64_t>(h.lenTextureData)
             + static_cast<uint64_t>(h.lenLightmapAtlas);

@@ -89,7 +89,8 @@ second:
   in the report): average fps, 1% low, CPU and GPU ms, the share of frames
   over 16.7 and 33.3 ms, the worst frame;
 - `draws`, `prims`, `pb` (pushbuffer dwords), `tex` (texture binds),
-  `faces` (visible world faces), `leaves` (PVS leaves);
+  `faces` (world faces drawn / faces the world pass walked), `leaves`
+  (PVS leaves);
 - `verts` by source: `world`, `studio`, `tri` (other TriAPI: sprites,
   beams, particles, water, sky), `2d` (HUD, console, menus, this overlay),
   `decal`;
@@ -112,7 +113,9 @@ second:
   (cl_clientdata), `cmd`, `pmove` (cl_predmove), `wpkt` (cl_wpacket),
   the mixer's `sspat` (snd_spatial), `smix`, `sdsp`, `sout` (snd_mix,
   snd_dsp, snd_out) and `xmix`, `xdsp`, `xout` (sndx_mix, sndx_dsp,
-  sndx_out), and the parents `sv`, `cl`, `scr`. With `host_frametime_spans 0` it
+  sndx_out), the scene's `pvs`, `sky`, `walk` (world_walk), `wwarp`
+  (warp_world), `wdec` (world_decals), `brush`, `bwarp` (warp_brush),
+  `twarp` (warp_trans), and the parents `sv`, `cl`, `scr`. With `host_frametime_spans 0` it
   reads `spans off`.
 
 The counters are the same half-second (30-frame) means as the `now` line.
@@ -211,6 +214,7 @@ site is one add; nothing tests whether the recorder is on.
 | `decals` | decals drawn (#167) |
 | `particles`, `beams` | particles and beams drawn (#161) |
 | `sprites` | sprite models drawn |
+| `world_walked` | world faces `nv2a_draw_map_geometry`'s face loop visited (2026-10-02, after the spans in the record): every face of every batch before R3, the PVS's world faces after it. `world_faces` is how many of them it drew |
 
 The report adds `verts`, the sum of the five `v_*` counters.
 
@@ -283,6 +287,14 @@ boundary. The report shows it per map, and the overlay shows it as `none`.
 | `k_snd_dsp` | `k_snd` | `SX_RoomFX`: room modulation, reverb, delay, stereo delay | `s_mix.c`, `S_PaintChannels` |
 | `k_snd_out` | `k_snd` | `S_ClearBuffers`, `S_MixBufferWithGain`, `S_TransferPaintBuffer` (clip to 16 bits into the DMA buffer) | `s_mix.c`, `S_PaintChannels` |
 | `k_sndx_mix`, `k_sndx_dsp`, `k_sndx_out` | `k_snd_extra` | the same three, when `S_ExtraUpdate` mixes | `s_mix.c`, `S_PaintChannels` |
+| `k_pvs` | `k_r_scene` | `nv2a_mark_leaves`: the view leaf every frame; at a leaf change, the PVS row, the per-face visibility table and the visible-face list | `ref/nv2a/r_context.c`, `GL_RenderFrame` |
+| `k_sky` | `k_world` | `nv2a_draw_sky`: the sky batches' faces and the skybox | `r_context.c`, `GL_RenderFrame` |
+| `k_world_walk` | `k_world` | `nv2a_draw_map_geometry`'s batch and face walk: culling, texture binds and index submission, up to the water | `r_context.c`, `nv2a_draw_map_geometry` |
+| `k_warp_world` | `k_world` | `R_WarpDrawWorld` and its flush: the world's opaque water, warped on the CPU (#166) | `r_context.c`, `nv2a_draw_map_geometry` |
+| `k_world_decals` | `k_world` | `R_DecalDrawWorld` | `r_context.c`, `GL_RenderFrame` |
+| `k_brush` | `k_r_scene` | every `nv2a_draw_brush_entity` call of the solid and translucent passes: doors, trains, `func_wall`, `func_water` | `r_context.c`, `nv2a_draw_solid_entities` / `nv2a_draw_trans_entities` |
+| `k_warp_brush` | `k_brush` | `R_WarpDrawBrushEntity`: a brush entity's water | `r_context.c`, `nv2a_draw_brush_entity` |
+| `k_warp_trans` | `k_r_scene` | `R_WarpDrawWaterSurfaces`: the world's translucent water (`sv_wateralpha` below 1) | `r_context.c`, `GL_RenderFrame` |
 
 The eleven from `k_sv_reliable` to `k_cl_wpacket` (2026-10-02) break
 the local server/client round trip down; they come after `k_snd` in the
@@ -313,9 +325,19 @@ build advanced `snd.samplepos` by whole 1024-sample blocks of wall-clock
 time in `SNDDMA_BeginPainting` (as the callback does on the console);
 the console's own numbers need a hardware run.
 
+The last eight (2026-10-02, appended the same way) break the scene
+down for R3 (`docs/r3d/reports/perf-research/xbox-gpu-offload-sse.md`):
+`k_world` into the sky, the face walk, the opaque water and the decals,
+and three pieces of `k_r_scene`'s own time - the PVS, the brush
+entities (with their water) and the translucent world water. Each closes
+about once a frame; `k_brush` and `k_warp_brush` once per brush entity
+drawn. The face walk's count, `world_walked`, comes after the spans in
+the record for the same reason.
+
 Spans not listed under a parent stay in that parent's **own** time.
 Examples: the overlay's drawing (inside `k_scr`; it also has its own field)
-and `nv2a_draw_solid_entities`' brush entities (inside `k_r_scene`). A
+and the view setup and entity sorting of `GL_RenderFrame` (inside
+`k_r_scene`). A
 child that also runs outside its parent would push the parent's own time
 below zero. The report and the overlay clamp it at 0. One case is a skin
 bound outside a studio draw (`R_StudioSetupSkin` is also in the studio
@@ -342,12 +364,13 @@ numbers for the decision come from the owner's hardware route.
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~324 KiB (ring 1024 x 284 B = 284 KiB, the overlay's histogram
-  4 KiB, a 35.5 KiB encode buffer); a few `rdtsc` per frame plus two per
-  span closed (below); a ~83 KiB write and `fsync` every 5 s (those
-  frames are flagged); about 16.6 KiB per second of play on disk at 60 fps
-  (58 MiB an hour; the file stops at 64 MiB, ~1.1 hours). Before the
-  mixer spans (2026-10-02) it was ~292 KiB and 15 KiB/s; before the
+- **On:** ~364 KiB (ring 1024 x 320 B = 320 KiB, the overlay's histogram
+  4 KiB, a 40 KiB encode buffer); a few `rdtsc` per frame plus two per
+  span closed (below); a ~94 KiB write and `fsync` every 5 s (those
+  frames are flagged); about 18.8 KiB per second of play on disk at 60 fps
+  (66 MiB an hour; the file stops at 64 MiB, ~58 minutes). Before the
+  scene spans (2026-10-02) it was ~324 KiB and 16.6 KiB/s; before the
+  mixer spans, ~292 KiB and 15 KiB/s; before the
   round-trip spans, ~243 KiB and 12.4 KiB/s; before any spans, ~130 KiB
   and 6.6 KiB/s.
 - **Spans, off** (recorder off, or `host_frametime_spans 0`): one load
@@ -394,9 +417,9 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 284 bytes with today's
-63: the 20 counts, `span_calls` and the 42 spans; 256 with 35 spans, 212
-with the first 24, 112 before the spans),
+frame records of 32 bytes plus one u32 per counter - 320 bytes with today's
+72: the 20 counts, `span_calls`, the 50 spans and `world_walked`; 284
+with 42 spans, 256 with 35, 212 with the first 24, 112 before the spans),
 SPANS (from 2026-10-01, right after COUNTERS: each span's name and its
 parent's, 16 bytes each, "" for the top level), MAP, CALIB (TSC,
 performance counter) and END (written on a clean stop; a file without it

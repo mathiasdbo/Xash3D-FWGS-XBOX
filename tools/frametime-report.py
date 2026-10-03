@@ -87,7 +87,7 @@ STALL_MS = 250.0            # an in-play frame longer than this is listed as a s
 VERTS = "verts"             # derived counter: the sum of every v_* counter
 # The counters the per-map table shows, in order, with their headings.
 WORK_TABLE = [("draws", "Draws"), ("prims", "Prims"), ("pb_dwords", "PB KiB"), ("tex_binds", "Tex binds"),
-              (VERTS, "Verts"), ("v_studio", "Studio verts"), ("world_faces", "World faces"),
+              (VERTS, "Verts"), ("v_studio", "Studio verts"), ("world_faces", "World faces"), ("world_walked", "Faces walked"),
               ("studio_models", "Models"), ("lm_texels", "LM texels"), ("water_verts", "Water verts"),
               ("decals", "Decals"), ("particles", "Particles")]
 PAGE_BYTES = 4096

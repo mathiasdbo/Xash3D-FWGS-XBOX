@@ -510,6 +510,49 @@ static inline uint32_t nv2a_face_vertex_base( const nv2a_map_face_t *face )
 
 /* nv2a_frustum_cull_box takes float bounds. */
 qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs ); /* X9-X step 5: exposed for r_studio.c (R_CullModel), r_studio_bridge.h */
+
+/* R3 (divergences.md #146): one frustum plane as the world walk tests
+   it. GL_FrustumCullBox's signbits switch (gl_frustum.c:119-156, ported
+   in nv2a_frustum_cull_box) picks, per axis, mins when the normal's
+   component is negative and maxs otherwise; here that choice is made
+   once per frame as an index into the face's six bounds (0-2 mins, 3-5
+   maxs), so the per-face test has no indirect jump - the switch inside
+   the five-plane loop was one jump site with five targets in turn, a
+   misprediction per plane on the Pentium III. The sum is the switch
+   case's own, term for term and in the same order, so every result is
+   the same float compare. */
+typedef struct
+{
+	float   normal[3];
+	float   dist;
+	uint8_t corner[3];
+} nv2a_cull_plane_t;
+
+STATIC_ASSERT( offsetof( nv2a_map_face_t, maxs ) == offsetof( nv2a_map_face_t, mins ) + 3 * sizeof( int16_t ), "nv2a_frustum_face_outside reads mins and maxs as one array of six" );
+
+/* True when the face's box is entirely outside one of the first `count`
+   planes - nv2a_frustum_cull_box's answer for the same box with nocull
+   off (nv2a_frustum_prepare_planes gives the count). */
+static inline qboolean nv2a_frustum_face_outside( const nv2a_cull_plane_t *planes, uint32_t count, const nv2a_map_face_t *face )
+{
+	int16_t ib[6];
+	float b[6];
+	uint32_t i;
+
+	memcpy( ib, (const byte *)face + offsetof( nv2a_map_face_t, mins ), sizeof( ib ));
+	for( i = 0; i < 6; i++ )
+		b[i] = ib[i];
+
+	for( i = 0; i < count; i++ )
+	{
+		const nv2a_cull_plane_t *p = &planes[i];
+
+		if( p->normal[0] * b[p->corner[0]] + p->normal[1] * b[p->corner[1]] + p->normal[2] * b[p->corner[2]] < p->dist )
+			return true;
+	}
+	return false;
+}
+
 static inline qboolean nv2a_frustum_cull_face( const nv2a_map_face_t *face )
 {
 	const vec3_t mins = { face->mins[0], face->mins[1], face->mins[2] };
@@ -635,6 +678,53 @@ static CVAR_DEFINE_AUTO( nv2a_r_lockpvs, "0", 0, "ref_nv2a: freeze the PVS visib
    "fail open, draw it anyway" way nv2a_map_faces == NULL already does
    for frustum culling. */
 static byte *nv2a_map_face_visible;
+
+/* R3 (divergences.md #146): the world faces in the PVS, so the world
+   walk visits those instead of every face of the map each frame. ref/gl
+   never descends into a node R_MarkLeaves did not stamp
+   (R_RecursiveWorldNode, gl_rsurf.c:3463; the stamping loop is
+   gl_rsurf.c:3788-3801), and rejects a surface of a stamped node that no
+   visible leaf marked with one compare (CULL_VISFRAME, gl_cull.c:70-71);
+   its node boxes also frustum-cull whole subtrees (clipflags,
+   gl_rsurf.c:3465-3477), which this walk still does per face. Rebuilt by
+   nv2a_mark_leaves every time it rewrites nv2a_map_face_visible, so the
+   two always agree: the sorted indices i, ascending, with
+   nv2a_map_face_visible[i] set, not sky (nv2a_map_face_t::sky) and a
+   world face (nv2a_map_face_is_world) - the three per-face tests the
+   walk made before the frustum. The last two never change within a map,
+   so nv2a_map_face_listable holds them, one byte per face, and a rebuild
+   reads two byte arrays. Batches are a contiguous partition of
+   the faces in order (validated at load), so batch b's faces are the
+   slice [b ? end[b-1] : 0, end[b]). nv2a_pvs_faces_world is the world
+   the list was built for; NULL, or nv2a_r_novis, sends the walk over
+   every face as before. uint16_t indices: a map with more than 65,536
+   faces gets no list (BSP30's own limit is 65,535). */
+static uint16_t      *nv2a_pvs_faces;
+static byte          *nv2a_map_face_listable; /* !sky && world face; filled with nv2a_map_face_plane */
+static uint32_t       nv2a_pvs_batch_end[NV2A_MAP_MAX_BATCHES];
+static const model_t *nv2a_pvs_faces_world;
+
+/* R3 (#146): each sorted face's plane for the back-face test - an index
+   into world->planes with NV2A_FACE_PLANE_BACK for SURF_PLANEBACK, or
+   NV2A_FACE_PLANE_NONE where the walk makes no test (no surface, or a
+   null normal: R_CullSurface's VectorIsNull, gl_cull.c:83). Read from
+   the engine's msurface_t once per map (nv2a_fill_face_planes), because
+   following surface -> plane for every visible face every frame is two
+   dependent loads into large, unordered arrays. A surface's plane and
+   SURF_PLANEBACK are set once, by Mod_LoadSurfaces (mod_bmodel.c:3323-
+   3344 upstream, 3403-3424 in this tree), and never change. NV2A_FACE_PLANE_SURF: read the surface at
+   draw time, as before (a plane outside world->planes, or an index past
+   NV2A_FACE_PLANE_INDEX_MAX). Valid for nv2a_map_face_plane_world. */
+#define NV2A_FACE_PLANE_BACK      0x8000u
+#define NV2A_FACE_PLANE_INDEX_MAX 0x7FFDu
+#define NV2A_FACE_PLANE_SURF      0xFFFEu
+#define NV2A_FACE_PLANE_NONE      0xFFFFu
+static uint16_t      *nv2a_map_face_plane;
+static const model_t *nv2a_map_face_plane_world;
+
+/* The three tables' bytes per face, for nv2a_load_map_geometry's ledger
+   and Nv2aMapBudget.h's kNv2aPvsListFaceBytes. */
+#define NV2A_PVS_LIST_FACE_BYTES ( 2 * sizeof( uint16_t ) + 1 )
 
 /* The engine's own already-loaded world model's notion of "which leaf is
    the camera in right now" - mnode_s/mleaf_s (common/com_model.h),
@@ -1567,6 +1657,32 @@ qboolean nv2a_frustum_cull_box( const vec3_t mins, const vec3_t maxs )
 	}
 
 	return false;
+}
+
+/* R3 (#146): nv2a_frustum's planes for nv2a_frustum_face_outside, and how
+   many of them to test. nv2a_frustum_cull_box returns "not culled" at the
+   first plane whose signbits is out of range (its switch's default) -
+   unreachable, since SignbitsForPlane gives 0-7, but kept: the planes
+   from there on are not tested. */
+static uint32_t nv2a_frustum_prepare_planes( nv2a_cull_plane_t out[5] )
+{
+	uint32_t i;
+
+	for( i = 0; i < 5; i++ )
+	{
+		const mplane_t *p = &nv2a_frustum[i];
+
+		if( p->signbits > 7 )
+			break;
+		out[i].normal[0] = p->normal[0];
+		out[i].normal[1] = p->normal[1];
+		out[i].normal[2] = p->normal[2];
+		out[i].dist = p->dist;
+		out[i].corner[0] = ( p->signbits & 1 ) ? 0 : 3;
+		out[i].corner[1] = ( p->signbits & 2 ) ? 1 : 4;
+		out[i].corner[2] = ( p->signbits & 4 ) ? 2 : 5;
+	}
+	return i;
 }
 
 /* The existing X9-D batching loop, unchanged in shape, factored out so
@@ -2974,7 +3090,7 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 	   function's direct pushes (lessons.md: a draw that depends on state
 	   it never sets). */
 	nv2a_2d_dirty = true;
-	R_WarpDrawBrushEntity( e, blend, rotated );
+	XBOX_FT_SPAN( XBOX_FT_S_WARP_BRUSH, R_WarpDrawBrushEntity( e, blend, rotated ));
 }
 
 /* Brush's own direct constant-96 push (nv2a_draw_brush_entity) leaves the
@@ -3023,7 +3139,7 @@ static void nv2a_draw_solid_entities( const model_t *world )
 		else if( e->model->type == mod_brush && can_draw_brush )
 		{
 			nv2a_2d_flush();
-			nv2a_draw_brush_entity( world, e, 1.0f );
+			XBOX_FT_SPAN( XBOX_FT_S_BRUSH, nv2a_draw_brush_entity( world, e, 1.0f ));
 			nv2a_2d_dirty = true;
 			drew_brush = true;
 		}
@@ -3091,7 +3207,7 @@ static void nv2a_draw_trans_entities( const model_t *world )
 		else if( e->model->type == mod_brush && can_draw_brush )
 		{
 			nv2a_2d_flush();
-			nv2a_draw_brush_entity( world, e, blend );
+			XBOX_FT_SPAN( XBOX_FT_S_BRUSH, nv2a_draw_brush_entity( world, e, blend ));
 			nv2a_2d_dirty = true;
 			drew_brush = true;
 		}
@@ -3137,6 +3253,13 @@ static void nv2a_draw_map_geometry( void )
 {
 	uint32_t i, b;
 	qboolean world_alternate;
+	xbox_ft_span_t walk_span; /* k_world_walk: the batch/face walk below */
+	/* R3 (#146): the per-face tests' switches, read once - nothing the
+	   walk calls sets a cvar or rebuilds the PVS - and the frustum's
+	   planes in the walk's form. */
+	qboolean pvs_on, use_list, frustum_on, backface_on;
+	nv2a_cull_plane_t cull_planes[5];
+	uint32_t cull_plane_count;
 	/* X9-H: the engine's own already-loaded world model, read directly
 	   for its real per-surface plane/flags (backface test below) - the
 	   SAME model_t X9-G's nv2a_mark_leaves() already trusts, guarded the
@@ -3164,6 +3287,22 @@ static void nv2a_draw_map_geometry( void )
 	nv2a_cull_runs = 0;
 	nv2a_cull_dwords = 0;
 	nv2a_cull_faces_backface_only = 0;
+
+	xbox_ft_span_begin( &walk_span );
+
+	/* X9-G's PVS test: no table, or nv2a_r_novis, culls nothing. With the
+	   test on and a list built for this world, the walk visits the list
+	   (R3, #146): the faces the PVS, sky and world tests would let through,
+	   in the same order, so every later test, every run and every draw is
+	   the same. X9-F's frustum test is off under nv2a_r_nocull
+	   (gl_frustum.c:106), and X9-H's back-face test under either
+	   nv2a_r_nocullback or nv2a_r_nocull (gl_cull.c:76), or without the
+	   world or its face-order table. */
+	pvs_on = nv2a_map_face_visible != NULL && !nv2a_r_novis.value;
+	use_list = pvs_on && world != NULL && nv2a_pvs_faces_world == world;
+	frustum_on = !nv2a_r_nocull.value;
+	backface_on = world != NULL && !nv2a_r_nocullback.value && !nv2a_r_nocull.value && nv2a_map_face_orig != NULL;
+	cull_plane_count = nv2a_frustum_prepare_planes( cull_planes );
 
 	/* X9-K: one texture bind + one cull/run-merge pass PER BATCH, in
 	   directory order - see this function's own top-of-function comment
@@ -3249,7 +3388,6 @@ static void nv2a_draw_map_geometry( void )
 			uint32_t run_begin = 0, run_end = 0;
 			qboolean have_run = false;
 			qboolean stage0_bound = false;
-			uint32_t end_face = batch->startFace + batch->faceCount;
 			/* X9-X item 14 step 9: the entry this batch draws now
 			   (resolved at its first surviving face, so a batch nothing
 			   survives in costs no lookup), and the one bound. A '-'
@@ -3258,84 +3396,116 @@ static void nv2a_draw_map_geometry( void )
 			uint32_t batch_dir = NV2A_TEXANIM_NONE, bound_dir = NV2A_TEXANIM_NONE;
 			qboolean per_surface = false;
 
-			for( i = batch->startFace; i < end_face; i++ )
+			/* R3 (#146): the batch's slice of the visible-face list, or
+			   every face of the batch. */
+			const uint16_t *list = NULL;
+			uint32_t k, count;
+
+			if( use_list )
 			{
-				const nv2a_map_face_t *face = &nv2a_map_faces[i];
-				/* X9-G: a face is drawn only if it survives BOTH cull tests -
-				   frustum (X9-F, unchanged) and PVS (nv2a_map_face_visible,
-				   this slice). nv2a_map_face_visible == NULL (no table for
-				   this map) and nv2a_r_novis.value (the A/B toggle) both fall
-				   through to "not PVS-culled", matching nv2a_r_nocull's own
-				   already-established meaning for the frustum test. */
-				qboolean pvs_culled = nv2a_map_face_visible != NULL
-					&& !nv2a_r_novis.value
-					&& !nv2a_map_face_visible[i];
+				uint32_t first = b ? nv2a_pvs_batch_end[b - 1] : 0;
 
-				/* X9-K: a sky face is never drawn, regardless of frustum/PVS
-				   visibility - see nv2a_map_face_t::sky's own declaration
-				   comment for why (no real skybox exists in this file; this
-				   is the minimum "don't draw it wrong" fix, not a skybox
-				   implementation). Checked first - it's a single struct
-				   field, cheaper than the frustum box test. */
-				if( face->sky )
-					continue;
+				list = &nv2a_pvs_faces[first];
+				count = nv2a_pvs_batch_end[b] - first;
+			}
+			else
+			{
+				count = batch->faceCount;
+			}
 
-				/* X9-M: brush-entity faces (func_door, func_wall, ladders,
-				   triggers...) belong to the entity pass, which draws them
-				   at the entity's own origin/angles and render mode - see
-				   nv2a_draw_brush_entities(). ref/gl never draws them from
-				   the world either: R_RecursiveWorldNode draws each world
-				   node's own surface range (gl_rsurf.c:3507-3527; leaves
-				   only mark visibility), and world nodes cover only the
-				   world model's faces. Without the remap table
-				   there is no way to tell, so the world pass keeps drawing
-				   everything (fail open, never missing geometry). */
-				if( !nv2a_map_face_is_world( world, i ))
-					continue;
+			NV2A_FT_ADD( XBOX_FT_W_WORLD_WALKED, count );
+			for( k = 0; k < count; k++ )
+			{
+				const nv2a_map_face_t *face;
 
-				/* X9-H, nv2a-xbox-specialist review, real finding: the
-				   backface test (below) is the most expensive of the three -
-				   the only one with a pointer chase off this map's own
-				   arrays, into a separate, deduplicated plane pool - so it
-				   must not run on a face the cheaper frustum/PVS tests
-				   already reject. Short-circuit here, before paying for the
-				   plane fetch at all. */
-				if( nv2a_frustum_cull_face( face ) || pvs_culled )
-					continue;
+				i = list ? list[k] : batch->startFace + k;
+				face = &nv2a_map_faces[i];
 
-				/* X9-K: `i` here is a SORTED-order position (this batch's own
-				   index into nv2a_map_faces), NOT the ORIGINAL BSP face index
-				   world->surfaces itself is ordered by - the exact same
-				   order-mismatch nv2a_mark_leaves() translates through
-				   nv2a_map_face_remap, on the read side instead of the write
-				   side (see nv2a_map_face_orig's own declaration comment for
-				   the full account). nv2a_map_face_orig == NULL (no table for
-				   this map) fails open to "no backface test", same as
-				   world == NULL already does - never a wrong-surface read.
-				   The translated origIdx is bounds-checked against
-				   world->numsurfaces exactly like the untranslated index
-				   always was (X9-H's own "never trust a raw index past the
-				   engine's own real numsurfaces" discipline, unchanged). */
-				if( world != NULL && !nv2a_r_nocullback.value && !nv2a_r_nocull.value && nv2a_map_face_orig != NULL ) /* gl_cull.c:76: r_nocull returns before the backface test */
+				/* The listed faces have passed the next three tests
+				   already (nv2a_build_pvs_faces). */
+				if( !list )
 				{
-					uint32_t origIdx = nv2a_map_face_orig[i];
+					/* X9-K: a sky face is never drawn by this pass - see
+					   nv2a_map_face_t::sky; nv2a_draw_sky draws the
+					   skybox for it. Checked first - it's a single struct
+					   field. */
+					if( face->sky )
+						continue;
 
-					if( origIdx < (uint32_t)world->numsurfaces )
+					/* X9-M: brush-entity faces (func_door, func_wall,
+					   ladders, triggers...) belong to the entity pass,
+					   which draws them at the entity's own origin/angles
+					   and render mode - see nv2a_draw_brush_entity().
+					   ref/gl never draws them from the world either:
+					   R_RecursiveWorldNode draws each world node's own
+					   surface range (gl_rsurf.c:3507-3527; leaves only
+					   mark visibility), and world nodes cover only the
+					   world model's faces. Without the remap table there
+					   is no way to tell, so the world pass keeps drawing
+					   everything (fail open, never missing geometry). */
+					if( !nv2a_map_face_is_world( world, i ))
+						continue;
+
+					/* X9-G: PVS. R3 (#146): before the frustum test, which
+					   cost a face the PVS had already rejected a five-plane
+					   box test; both are pure, so the order changes no
+					   result. ref/gl rejects such a surface with one
+					   compare (CULL_VISFRAME, gl_cull.c:70-71), or never
+					   reaches it (gl_rsurf.c:3463). */
+					if( pvs_on && !nv2a_map_face_visible[i] )
+						continue;
+				}
+
+				/* X9-F: the frustum (GL_FrustumCullBox, gl_frustum.c:102,
+				   per face here rather than per node). */
+				if( frustum_on && nv2a_frustum_face_outside( cull_planes, cull_plane_count, face ))
+					continue;
+
+				/* X9-H: R_CullSurface's back-face test (gl_cull.c:83-110),
+				   last because it is the only one that reads outside this
+				   map's own arrays. `i` is a SORTED position, not the
+				   ORIGINAL BSP index world->surfaces is ordered by - X9-K's
+				   nv2a_map_face_orig translates it (see that table's
+				   declaration); R3 reads the plane through
+				   nv2a_map_face_plane, filled from the same surfaces. */
+				if( backface_on )
+				{
+					uint32_t ref = nv2a_map_face_plane_world == world ? nv2a_map_face_plane[i] : NV2A_FACE_PLANE_SURF;
+					const mplane_t *plane = NULL;
+					qboolean back = false;
+
+					if( ref == NV2A_FACE_PLANE_SURF )
 					{
-						const msurface_t *surf = &world->surfaces[origIdx];
+						uint32_t origIdx = nv2a_map_face_orig[i];
 
-						if( !VectorIsNull( surf->plane->normal ))
+						if( origIdx < (uint32_t)world->numsurfaces )
 						{
-							float dist = PlaneDiff( nv2a_eye_origin, surf->plane );
+							const msurface_t *surf = &world->surfaces[origIdx];
 
-							if( FBitSet( surf->flags, NV2A_SURF_PLANEBACK ))
-								dist = -dist;
-
-							if( dist <= BACKFACE_EPSILON )
+							if( !VectorIsNull( surf->plane->normal ))
 							{
-								nv2a_cull_faces_backface_only++;
-								continue;
+								plane = surf->plane;
+								back = FBitSet( surf->flags, NV2A_SURF_PLANEBACK ) != 0;
 							}
+						}
+					}
+					else if( ref != NV2A_FACE_PLANE_NONE )
+					{
+						plane = &world->planes[ref & ~NV2A_FACE_PLANE_BACK];
+						back = ( ref & NV2A_FACE_PLANE_BACK ) != 0;
+					}
+
+					if( plane != NULL )
+					{
+						float dist = PlaneDiff( nv2a_eye_origin, plane );
+
+						if( back )
+							dist = -dist;
+
+						if( dist <= BACKFACE_EPSILON )
+						{
+							nv2a_cull_faces_backface_only++;
+							continue;
 						}
 					}
 				}
@@ -3436,6 +3606,7 @@ static void nv2a_draw_map_geometry( void )
 			}
 		}
 	}
+	xbox_ft_span_end( &walk_span, XBOX_FT_S_WORLD_WALK );
 
 	/* X9-X item 14 step 11: the world's water, queued above, through the
 	   TriAPI - a full re-entry after the direct pushes above, submitted
@@ -3443,8 +3614,7 @@ static void nv2a_draw_map_geometry( void )
 	   R_DrawTextureChains. Translucent water stays queued for
 	   R_WarpDrawWaterSurfaces. */
 	nv2a_2d_dirty = true;
-	R_WarpDrawWorld();
-	nv2a_2d_flush();
+	XBOX_FT_SPAN( XBOX_FT_S_WARP_WORLD, { R_WarpDrawWorld(); nv2a_2d_flush(); } );
 
 	/* X9-X step 5, spec Part B item 1: brush/studio entities no longer
 	   draw from inside this function - GL_RenderFrame now calls
@@ -3595,6 +3765,11 @@ static void nv2a_free_map_resources( void )
 	if( nv2a_map_index_dwords )  { free( nv2a_map_index_dwords );                nv2a_map_index_dwords  = NULL; }
 	if( nv2a_map_faces )         { free( nv2a_map_faces );                       nv2a_map_faces         = NULL; }
 	if( nv2a_map_face_visible )  { free( nv2a_map_face_visible );                nv2a_map_face_visible  = NULL; }
+	if( nv2a_pvs_faces )         { free( nv2a_pvs_faces );                       nv2a_pvs_faces         = NULL; }
+	if( nv2a_map_face_plane )    { free( nv2a_map_face_plane );                  nv2a_map_face_plane    = NULL; }
+	if( nv2a_map_face_listable ) { free( nv2a_map_face_listable );               nv2a_map_face_listable = NULL; }
+	nv2a_pvs_faces_world = NULL;      /* R3 (#146): the world pointer can come back for */
+	nv2a_map_face_plane_world = NULL; /* the next map (fixed mod_known[0] storage, below) */
 	if( nv2a_map_texture_data )  { MmFreeContiguousMemory( nv2a_map_texture_data );  nv2a_map_texture_data  = NULL; }
 	if( nv2a_map_face_remap )    { free( nv2a_map_face_remap );                  nv2a_map_face_remap    = NULL; }
 	if( nv2a_map_face_orig )     { free( nv2a_map_face_orig );                   nv2a_map_face_orig     = NULL; }
@@ -4722,10 +4897,14 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 		   nv2a_map_face_lm here, r_lightmap.c's held flags and styled-face
 		   list at the first frame), mirrored by Nv2aMapBudget.h's
 		   kNv2aLightmapFaceBytes. */
+		/* R3 (#146): + the visible-face list, the face planes (a uint16_t
+		   each per face) and the listable bytes, mirrored by Nv2aMapBudget.h's
+		   kNv2aPvsListFaceBytes. */
 		const uint64_t tables = idx_bytes + (uint64_t)( geo.faceDrawCmds.length / 8 ) * sizeof( nv2a_map_face_t )
 			+ (uint64_t)geo.faceDrawCmds.length / 8
 			+ (uint64_t)geo.faceRemap.length * 2
-			+ (uint64_t)( geo.faceDrawCmds.length / 8 ) * NV2A_LM_FACE_BYTES;
+			+ (uint64_t)( geo.faceDrawCmds.length / 8 ) * NV2A_LM_FACE_BYTES
+			+ (uint64_t)( geo.faceDrawCmds.length / 8 ) * NV2A_PVS_LIST_FACE_BYTES;
 		const uint64_t gpu = vb_bytes + (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length;
 		const uint64_t load = (uint64_t)vert_count * 3 * sizeof( float )
 			+ (uint64_t)geo.faceDrawCmds.length + (uint64_t)geo.faceVertexBase.length + (uint64_t)geo.faceRemap.length
@@ -5321,6 +5500,23 @@ static qboolean nv2a_build_map_tables( const mpak_header_t *header, const nv2a_m
 				else
 					gEngfuncs.Con_Printf( "ref_nv2a: PVS visibility table allocation failed (%u bytes) - frustum culling only\n",
 						(unsigned int)face_count );
+
+				/* R3 (#146): the visible-face list and the per-map face tables,
+				   filled by nv2a_mark_leaves. Without them the walk visits
+				   every face, as it did before - slower, never different. */
+				if( nv2a_map_face_visible && nv2a_map_face_remap && nv2a_map_face_orig && face_count <= 0x10000u )
+				{
+					nv2a_pvs_faces = malloc( (size_t)face_count * sizeof( uint16_t ));
+					nv2a_map_face_plane = malloc( (size_t)face_count * sizeof( uint16_t ));
+					nv2a_map_face_listable = malloc( (size_t)face_count );
+					if( !nv2a_pvs_faces || !nv2a_map_face_plane || !nv2a_map_face_listable )
+					{
+						gEngfuncs.Con_Printf( "ref_nv2a: visible-face list allocation failed - the world pass walks every face\n" );
+						if( nv2a_pvs_faces ) { free( nv2a_pvs_faces ); nv2a_pvs_faces = NULL; }
+						if( nv2a_map_face_plane ) { free( nv2a_map_face_plane ); nv2a_map_face_plane = NULL; }
+						if( nv2a_map_face_listable ) { free( nv2a_map_face_listable ); nv2a_map_face_listable = NULL; }
+					}
+				}
 			}
 			else
 			{
@@ -5545,6 +5741,80 @@ static uint32_t *nv2a_ft_pb_frame_start;
 static uint32_t nv2a_ft_models_frame_start;
 uint32_t nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_TRI;
 
+/* R3 (#146): nv2a_map_face_plane and nv2a_map_face_listable for `world`,
+   once per map - see their declarations. Runs from nv2a_mark_leaves'
+   once-per-map check, after world->numsurfaces has been matched against
+   nv2a_map_face_count. */
+static void nv2a_fill_face_planes( const model_t *world )
+{
+	uint32_t i;
+
+	nv2a_map_face_plane_world = NULL;
+	if( !nv2a_map_face_plane || !nv2a_map_face_listable || !nv2a_map_face_orig || !nv2a_map_faces )
+		return;
+
+	for( i = 0; i < nv2a_map_face_count; i++ )
+	{
+		uint32_t orig = nv2a_map_face_orig[i];
+		uint16_t ref = NV2A_FACE_PLANE_NONE;
+
+		if( orig < (uint32_t)world->numsurfaces )
+		{
+			const msurface_t *surf = &world->surfaces[orig];
+
+			if( surf->plane >= world->planes && surf->plane < world->planes + world->numplanes
+				&& (uint32_t)( surf->plane - world->planes ) <= NV2A_FACE_PLANE_INDEX_MAX )
+			{
+				if( !VectorIsNull( surf->plane->normal ))
+					ref = (uint16_t)(( surf->plane - world->planes ) | ( FBitSet( surf->flags, NV2A_SURF_PLANEBACK ) ? NV2A_FACE_PLANE_BACK : 0 ));
+			}
+			else
+			{
+				ref = NV2A_FACE_PLANE_SURF;
+			}
+		}
+		nv2a_map_face_plane[i] = ref;
+		nv2a_map_face_listable[i] = !nv2a_map_faces[i].sky && nv2a_map_face_is_world( world, i );
+	}
+	nv2a_map_face_plane_world = world;
+}
+
+/* R3 (#146): nv2a_pvs_faces from nv2a_map_face_visible - see its
+   declaration. Called by nv2a_mark_leaves right after every rewrite of
+   that table. */
+static void nv2a_build_pvs_faces( const model_t *world )
+{
+	uint32_t b, i, n = 0;
+
+	nv2a_pvs_faces_world = NULL;
+	if( !nv2a_pvs_faces || !nv2a_map_faces || !nv2a_map_face_visible || nv2a_map_face_count > 0x10000u
+		|| nv2a_map_face_plane_world != world )
+		return;
+
+	for( b = 0; b < nv2a_map_batch_count; b++ )
+	{
+		const nv2a_map_batch_t *batch = &nv2a_map_batches[b];
+
+		/* A batch outside the face table is drawn whole, without the
+		   per-face walk; its slice stays empty. */
+		if( (uint64_t)batch->startFace + batch->faceCount <= (uint64_t)nv2a_map_face_count )
+		{
+			uint32_t end_face = batch->startFace + batch->faceCount;
+
+			for( i = batch->startFace; i < end_face; i++ )
+			{
+				if( !nv2a_map_face_visible[i] || !nv2a_map_face_listable[i] )
+					continue;
+				if( n >= nv2a_map_face_count )
+					return; /* overlapping batches - the load's validation rules them out; no list */
+				nv2a_pvs_faces[n++] = (uint16_t)i;
+			}
+		}
+		nv2a_pvs_batch_end[b] = n;
+	}
+	nv2a_pvs_faces_world = world;
+}
+
 static void nv2a_mark_leaves( const vec3_t vieworigin )
 {
 	const model_t *world = gp_cl->models[1];
@@ -5642,8 +5912,10 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 				world->numsurfaces, nv2a_map_face_count );
 			free( nv2a_map_face_visible );
 			nv2a_map_face_visible = NULL;
+			nv2a_pvs_faces_world = NULL; /* R3 (#146): no table, no list */
 			return;
 		}
+		nv2a_fill_face_planes( world ); /* R3 (#146) */
 	}
 
 	if( FBitSet( nv2a_r_novis.flags, FCVAR_CHANGED ))
@@ -5777,6 +6049,8 @@ static void nv2a_mark_leaves( const vec3_t vieworigin )
 			}
 		}
 	}
+
+	nv2a_build_pvs_faces( world ); /* R3 (#146): the walk's list, from the table just written */
 }
 
 /* X9-X step 8: r_lightmap.c's per-face visibility question - drawn by the
@@ -6377,7 +6651,7 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   nv2a_map_face_visible. No-ops cheaply when the camera has not
 	   crossed a leaf boundary - see nv2a_mark_leaves()'s own early
 	   return. */
-	nv2a_mark_leaves( rvp->vieworigin );
+	XBOX_FT_SPAN( XBOX_FT_S_PVS, nv2a_mark_leaves( rvp->vieworigin ));
 
 	/* X9-H: the real eye position nv2a_draw_map_geometry()'s own
 	   per-face backface test reads later this same frame (from
@@ -6592,11 +6866,11 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		/* M2 span k_world (#141): sky, world and world decals. */
 		xbox_ft_span_begin( &world_span );
 		/* X9-X item 14 step 10: the skybox, before the world (#137). */
-		nv2a_draw_sky();
+		XBOX_FT_SPAN( XBOX_FT_S_SKY, nv2a_draw_sky());
 		nv2a_draw_map_geometry(); /* ends with the world's opaque water (r_warp.c) */
 		/* X9-X item 14 step 12: R_DrawWorld's DrawDecalsBatch, after the
 		   texture chains (gl_rsurf.c:3707-3711). */
-		R_DecalDrawWorld();
+		XBOX_FT_SPAN( XBOX_FT_S_WORLD_DECALS, R_DecalDrawWorld());
 		xbox_ft_span_end( &world_span, XBOX_FT_S_WORLD );
 		nv2a_world_drawn_this_frame = true;
 	}
@@ -6663,7 +6937,7 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		/* X9-X item 14 step 11: R_DrawWaterSurfaces, after
 		   R_DrawEntitiesOnList (gl_rmain.c:977) - the translucent world
 		   water, when sv_wateralpha is below 1. */
-		R_WarpDrawWaterSurfaces( rvp->flags );
+		XBOX_FT_SPAN( XBOX_FT_S_WARP_TRANS, R_WarpDrawWaterSurfaces( rvp->flags ));
 
 		/* Ends the frame with nothing queued - the SDK's own tri hooks
 		   above may have batched TriAPI primitives that would otherwise

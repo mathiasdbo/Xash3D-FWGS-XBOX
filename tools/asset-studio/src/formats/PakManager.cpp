@@ -798,6 +798,7 @@ namespace formats {
             const uint64_t visBytes = static_cast<uint64_t>(header.lenFaceDrawCmds) / 8;
             const uint64_t remapBytes = static_cast<uint64_t>(header.lenFaceRemap) * 2;
             const uint64_t lmTableBytes = static_cast<uint64_t>(header.lenFaceDrawCmds / 8) * kNv2aLightmapFaceBytes;
+            const uint64_t pvsListBytes = static_cast<uint64_t>(header.lenFaceDrawCmds / 8) * kNv2aPvsListFaceBytes;
             const uint64_t texBytes = static_cast<uint64_t>(header.lenTextureData);
             const uint64_t lmBytes = static_cast<uint64_t>(header.lenLightmapAtlas);
             const uint64_t engineBytes = mpakClassicPrefixBytes(header); // MPAK v12: what the engine holds (reported only)
@@ -810,7 +811,7 @@ namespace formats {
                           << kNv2aMapBudgetBytes
                           << ") - this archive would not draw on the Xbox target. Failing the bake.\n"
                           << "  [vb=" << vbBytes << " idx=" << idxBytes << " faces=" << facesBytes
-                          << " vis=" << visBytes << " remap=" << remapBytes << " lmtab=" << lmTableBytes << " tex=" << texBytes
+                          << " vis=" << visBytes << " remap=" << remapBytes << " lmtab=" << lmTableBytes << " pvslist=" << pvsListBytes << " tex=" << texBytes
                           << " lm=" << lmBytes << " bsp=" << engineBytes << " file=" << fileSize << "]\n";
                 // The 512 caps above fail before any section is written, so
                 // they only ever leave a 2048-byte stub behind. This check
@@ -854,7 +855,9 @@ namespace formats {
                 if (mMiptexData.size() >= sizeof(textures))
                     std::memcpy(&textures, mMiptexData.data(), sizeof(textures));
                 lumps.textures = textures > 0 ? static_cast<uint32_t>(textures) : 0u;
-                const uint64_t tables = idxBytes + facesBytes + visBytes + remapBytes;
+                // The same resident tables the ledger counts, including the
+                // lightmap tables and the visible-face list.
+                const uint64_t tables = nv2aMapTableBytes(header);
                 const uint64_t temporaries = static_cast<uint64_t>(header.vCount) * kNv2aPositionBytes
                     + header.lenFaceDrawCmds + header.lenFaceVertexBase + header.lenFaceRemap + header.lenTextureDir + header.lenBatches;
                 const Nv2aFit fit = nv2aCheckArchive(lumps, engineBytes, tables, temporaries, vbBytes + texBytes + lmBytes);

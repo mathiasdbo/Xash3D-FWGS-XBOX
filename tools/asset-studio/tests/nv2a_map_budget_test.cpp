@@ -5,6 +5,7 @@
 // hide a term with the wrong coefficient behind one with the opposite
 // error.
 #include "formats/Nv2aMapBudget.h"
+#include "formats/Nv2aMapFit.h"
 #include <cstdio>
 #include <cstdint>
 #include <limits>
@@ -59,8 +60,10 @@ int main() {
         h.lenFaceDrawCmds = 15; // 15/8 = 1 face: 1*24 (faces term) + 15/8 (vis term, truncates to 1)
         // MPAK v12: plus the 15-byte lump itself, read in for the load.
         // X9-X step 8: plus one face's 9 bytes of lightmap tables.
+        // R3: plus its 5 bytes of visible-face list, plane reference and listable flag.
         CHECK(kNv2aLightmapFaceBytes == 9, "r_lightmap.h NV2A_LM_FACE_BYTES: 6-byte block + held byte + 2-byte styled entry");
-        CHECK(nv2aMapLedgerBytes(h) == 1 * 24 + 1 + 9 + 15, "lenFaceDrawCmds=15 must give one 24-byte face, vis=1 (integer truncation), 9 lightmap-table bytes and its 15-byte load copy");
+        CHECK(kNv2aPvsListFaceBytes == 5, "r_context.c NV2A_PVS_LIST_FACE_BYTES: a uint16_t list entry + a uint16_t plane reference + a listable byte");
+        CHECK(nv2aMapLedgerBytes(h) == 1 * 24 + 1 + 9 + 5 + 15, "lenFaceDrawCmds=15 must give one 24-byte face, vis=1 (integer truncation), 9 lightmap-table bytes, 5 list bytes and its 15-byte load copy");
     }
 
     // --- the vertex term uses kNv2aLitVertexBytes (28), the RUNTIME nv2a_lit_vertex_t
@@ -107,6 +110,30 @@ int main() {
         t.lenBatches = 20;
         t.lenFaceVertexBase = 4;
         CHECK(nv2aMapLedgerBytes(t) == 16 + 20 + 4, "the texture directory, batches and vertex bases are load temporaries");
+    }
+
+    // --- the resident tables, shared by the ledger and PakManager's fit check ---
+    {
+        MpakHeader6 h = zeroHeader();
+        h.lenFaceDrawCmds = 8 * 1000; // 1000 faces
+        h.iCount = 6;                 // 3 dwords = 12 bytes
+        h.lenFaceRemap = 10;          // 20 bytes
+        const uint64_t expected = 12 + 1000 * kNv2aMapFaceBytes + 1000 + 20
+            + 1000 * kNv2aLightmapFaceBytes + 1000 * kNv2aPvsListFaceBytes;
+        CHECK(nv2aMapTableBytes(h) == expected, "the tables include the lightmap tables and the visible-face list");
+        // Only temporaries otherwise: the ledger is the tables plus the load.
+        CHECK(nv2aMapLedgerBytes(h) == expected + 8 * 1000 + 10, "the ledger counts exactly nv2aMapTableBytes as its tables");
+
+        // Codex review of R3: the whole-console fit check must count the same
+        // tables. A map whose GPU buffers leave exactly room for the tables
+        // without the lightmap and list bytes must fail once they count.
+        Nv2aWorldLumps lumps;
+        lumps.faces = 1000 * 20;
+        const uint64_t withoutNew = expected - 1000 * (kNv2aLightmapFaceBytes + kNv2aPvsListFaceBytes);
+        const uint64_t room = kXboxFreeAtWorldLoadBytes - nv2aEngineWorldBytes(lumps) - kXboxPrecacheBytes - kXboxSteadyMarginBytes;
+        const uint64_t gpu = room - withoutNew;
+        CHECK(nv2aCheckArchive(lumps, 2048, withoutNew, 0, gpu).ok, "boundary: fits when the lightmap and list bytes are left out");
+        CHECK(!nv2aCheckArchive(lumps, 2048, nv2aMapTableBytes(h), 0, gpu).ok, "boundary: fails once the resident tables are counted in full");
     }
 
     if (failures) {
