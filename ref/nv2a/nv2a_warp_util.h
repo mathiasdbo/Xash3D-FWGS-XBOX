@@ -50,12 +50,12 @@ int nv2a_warp_subdivide( int numverts, float *verts, nv2a_warp_poly_fn emit, voi
 /* r_turbsin[i & 255] (gl_rsurf.c:24, engine/warpsin.h). */
 float nv2a_warp_turbsin( int i );
 
-/* EmitWaterPolys' wave height (gl_rsurf.c:959-964): the vertex's z moved
+/* EmitWaterPolys' wave height (gl_rsurf.c:961-967): the vertex's z moved
    by the two-sine wave, or z unchanged when waveHeight is 0. `time` is
    gp_cl->time, kept a double as the reference's expression is. */
 float nv2a_warp_wave_z( const float v[3], double time, float waveHeight );
 
-/* EmitWaterPolys' texture coordinate (gl_rsurf.c:967-984): (os, ot) are
+/* EmitWaterPolys' texture coordinate (gl_rsurf.c:969-984): (os, ot) are
    the polygon's raw texture-space coordinates (R_TextureCoord for a
    SURF_DRAWTURB face: DotProduct( v, vecs ), no offset, no division,
    gl_rsurf.c:147-160), warped by the sin table unless `ripples`, then
@@ -86,6 +86,72 @@ int nv2a_warp_trunc_sum( int base, float a );
 
 float nv2a_warp_wave_z_frame( const nv2a_warp_frame_t *frame, const float v[3], float waveHeight );
 void nv2a_warp_texcoord_frame( const nv2a_warp_frame_t *frame, float os, float ot, float out_st[2] );
+
+/* R5 (docs/r3d/divergences.md #147): the same per-vertex body on the
+   NV2A's vertex unit (vs_warp.vp), for static vertices built once a map.
+
+   Mod_LooksLikeWaterTexture (engine/common/mod_bmodel.c:2579 in the root
+   clone): the texture names whose faces the engine marks SURF_DRAWTURB and
+   hands to GL_SubdivideSurface. Not called by the renderer (the engine
+   sets the flag); it is the baker's rule for counting a map's water
+   vertices (tools/asset-studio), kept here beside the subdivision it
+   feeds so both sides use one copy. The engine tests the name after
+   lowercasing it (Q_strnlwr in Mod_LoadTexture, mod_bmodel.c:2953): pass
+   the lowercased name. */
+int nv2a_warp_looks_like_water( const char *name );
+
+/* The static vertex vs_warp reads: position (attribute 0) and the two
+   texinfo dot products R_TextureCoord gives a SURF_DRAWTURB face
+   (attribute 9). Pieces are stored in the order the reference draws them
+   (the glpoly2_t chain, last-emitted piece first), each piece's points
+   forward. */
+typedef struct
+{
+	float xyz[3];
+	float os, ot;
+} nv2a_warp_gpu_vertex_t;
+
+#define NV2A_WARP_GPU_VERTEX_BYTES 20u
+
+/* The buffer holds at most this many vertices: the inline index lists
+   (reversed faces, triangle fans) are 16-bit. The largest retail map
+   needs 49,836 (disposal). */
+#define NV2A_WARP_GPU_MAX_VERTS 65535u
+
+/* The bytes the buffer takes for a map whose water faces subdivide into
+   `verts` points - one ledger term, shared by ref/nv2a's per-map ledger
+   (r_context.c nv2a_load_map_geometry) and the baker's
+   (tools/asset-studio Nv2aMapBudget.h). An upper bound: a face that would
+   pass the cap is left to the CPU path. */
+uint32_t nv2a_warp_gpu_bytes( uint32_t verts );
+
+/* vs_warp's constants (c[n] is hardware constant n + 96). c[0..3] is the
+   model-view-projection, c[5..12] the parameters below; the quarter table
+   r_turbsin[0..64] is in hardware constants NV2A_WARP_GPU_TABLE_HW..+64,
+   which the program reaches only through A0. */
+#define NV2A_WARP_GPU_C_MVP        0u
+#define NV2A_WARP_GPU_C_PARAMS     5u
+#define NV2A_WARP_GPU_PARAM_REGS   8u
+#define NV2A_WARP_GPU_WAVE_REG     10u /* c[10] = ( 8, 0.8, waveHeight, 1/64 ) */
+#define NV2A_WARP_GPU_TABLE_HW     0u
+#define NV2A_WARP_GPU_TABLE_REGS   65u
+
+/* The table: register k holds ( r_turbsin[k], 0, 0, 0 ). */
+void nv2a_warp_gpu_table( float out[NV2A_WARP_GPU_TABLE_REGS][4] );
+
+/* c[5..12] for this frame's time terms, a face's wave height (the
+   entity's scale, signed as EmitWaterPolys signs it) and the colour
+   (Color4ub's bytes). */
+void nv2a_warp_gpu_params( const nv2a_warp_frame_t *frame, float waveHeight, const uint8_t rgba[4],
+	float out[NV2A_WARP_GPU_PARAM_REGS][4] );
+
+/* vs_warp.vp instruction for instruction, in float, for the host test:
+   the vertex's displaced z and its texture coordinates. EXP's .y is
+   x - floor( x ), ARL is floor (its operands are integers + 0.25), and
+   every MUL, ADD and exact MAD rounds as one IEEE single operation. */
+void nv2a_warp_gpu_emulate( const float params[NV2A_WARP_GPU_PARAM_REGS][4],
+	const float table[NV2A_WARP_GPU_TABLE_REGS][4], const nv2a_warp_gpu_vertex_t *v,
+	float *out_z, float out_st[2] );
 
 /* NV097_SET_FOG_PARAMS words 0 and 1 for GL_EXP fog, f = e^(-density * d):
    the hardware computes x + 2^(d * y * 16) - 1.5, so x = 1.5 and

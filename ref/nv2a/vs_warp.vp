@@ -1,0 +1,145 @@
+!!VP1.1
+# vs_warp.vp - the water warp on the NV2A's vertex unit (R5,
+# docs/r3d/divergences.md #147): EmitWaterPolys' per-vertex body
+# (ref/gl/gl_rsurf.c:961-984 in the root clone) for the static water
+# vertices r_warp.c builds at R_NewMap. Compiled with
+# deps/nxdk/tools/vp20compiler; vs_warp.inl is its unedited output.
+#
+# The wave and the texture warp are the reference's quantised ones, not a
+# smooth sine: each of the four table indices is (int)( ... ) & 255 with
+# C's truncation toward zero, and each table value is warpsin.h's own
+# float, read from constants. The arithmetic is the CPU path's
+# (nv2a_warp_util.c nv2a_warp_wave_z_frame / nv2a_warp_texcoord_frame),
+# operation for operation: this frame's time terms are split on the CPU
+# into an integer base and a float fraction (nv2a_warp_frame_init), each
+# index is the fraction plus the vertex's terms in float, in the same
+# order, floored with EXP's .y (= x - floor(x)), plus one where the whole
+# sum base + x is negative and has a fraction (truncation), plus
+# base & 255, wrapped into 0..255 with EXP's .y again. Products that
+# could round differently fused (MAD) are written as MUL then ADD; every
+# MAD left is exact (products by 1 and -1, of 0 and 1, and -128 and -2
+# times 0 or 1).
+# tools/host-tests/nv2a_warp_util_host_test.c emulates this program and
+# checks it against both the CPU path and the reference's double formula.
+# Not bit-exact with the reference: its index sums are doubles (cl.time is
+# a double), these are floats, as the CPU path's are, and the s/t index is
+# reassociated to o * ( 0.125 * TURBSCALE ) + time * TURBSCALE; at an index
+# boundary that is one table step (at most 0.1 unit of wave). Nor is
+# "identical to the CPU path" established on the console: the emulation
+# assumes IEEE single rounding for ADD/MUL and an exact EXP .y, which the
+# NV2A does not document (xemu runs host floats, so its pixel-identical
+# screenshots do not settle it). Unverified on hardware, with vs_studio's
+# (divergences.md #143): negative-A0 reads below c[0], EXP .y as an exact
+# frac, and loading program memory between draws with no drain.
+#
+# 59 instructions. Not resident: all 136 slots hold vs_lit, vs_2d, vs_tri
+# and vs_studio (r_context.c nv2a_vp_table), so this program is loaded over
+# vs_studio's last 59 slots when the water draws, and vs_studio's tail is
+# put back when a studio model draws next (nv2a_select_vertex_program).
+#
+# Lanes, throughout: x = the first wave index (time * 160 + y + x),
+#                    y = the second (x * 5 + time * 171 - y),
+#                    z = s's index (( ot * 0.125 + time ) * TURBSCALE),
+#                    w = t's index (( os * 0.125 + time ) * TURBSCALE).
+#
+# Inputs:   v[0] OPOS ( x, y, z ), the face's model-space vertex,
+#           v[8] TEX0 (hardware attribute 9) ( os, ot ), its texinfo dot
+#                products (R_TextureCoord for SURF_DRAWTURB, gl_rsurf.c:147).
+# Constants (c[n] is hardware constant n + 96, vp20compiler main.c:516):
+#   c[0..3]  the entity's model-view-projection rows (vs_tri's slot, the
+#            same layout vs_studio.vp's c[5..8] uses)
+#   c[5]     ( frac160, frac171, fracts, 0.125 * TURBSCALE )
+#   c[6]     ( 1, 5, 1, -1 )
+#   c[7]     ( -base160, -base171, -basets, -basets )
+#   c[8]     ( base160 & 255, base171 & 255, basets & 255, basets & 255 ) / 256
+#   c[9]     ( 1/256, 256, 128, -128 )
+#   c[10]    ( 8, 0.8, waveHeight, 1/64 )
+#   c[11]    ( -2, 1, table address bias, 0 )
+#   c[12]    the colour ( r, g, b, a ) / 255
+#   table    hardware 0..64: .x = r_turbsin[k], k = 0..64, reached as
+#            c[A0.x + 0] with A0 = k + bias (nv2a_warp_util.h). The table
+#            is exactly symmetric (r_turbsin[128 - k] = r_turbsin[k],
+#            r_turbsin[k + 128] = -r_turbsin[k], checked by the host test),
+#            so index j reads entry min( j', 128 - j' ), j' = j mod 128,
+#            negated when j >= 128.
+# Every ARL operand is an exact integer plus 0.25, so floor and round
+# agree. Each ARL is followed by an instruction that does not read A0, as
+# in vs_studio.vp.
+
+# --- the four indices' float terms, in the CPU path's order ---
+MUL R2.xy, v[0].yxzw, c[6];
+MUL R2.zw, v[8].xxyx, c[5].w;
+ADD R1.xy, R2, c[5];
+ADD R1.zw, R2, c[5].z;
+MAD R1.xy, v[0], c[6].zwzw, R1;
+
+# --- floor of each ---
+EXP R3.y, R1.x;
+ADD R4.x, R1.x, -R3.y;
+EXP R3.y, R1.y;
+ADD R4.y, R1.y, -R3.y;
+EXP R3.y, R1.z;
+ADD R4.z, R1.z, -R3.y;
+EXP R3.y, R1.w;
+ADD R4.w, R1.w, -R3.y;
+
+# --- truncation toward zero: + 1 where base + x < 0 with a fraction ---
+SLT R5, R4, R1;
+SLT R6, R4, c[7];
+MAD R4, R5, R6, R4;
+MUL R4, R4, c[9].x;
+ADD R4, R4, c[8];
+
+# --- & 255: 256 * frac( n / 256 ) ---
+EXP R3.y, R4.x;
+MUL R7.x, R3.y, c[9].y;
+EXP R3.y, R4.y;
+MUL R7.y, R3.y, c[9].y;
+EXP R3.y, R4.z;
+MUL R7.z, R3.y, c[9].y;
+EXP R3.y, R4.w;
+MUL R7.w, R3.y, c[9].y;
+
+# --- the quarter-wave fold: entry, sign and constant address ---
+SGE R8, R7, c[9].z;
+MAD R7, R8, c[9].w, R7;
+ADD R9, c[9].z, -R7;
+MIN R7, R7, R9;
+MAD R8, R8, c[11].x, c[11].y;
+ADD R7, R7, c[11].z;
+
+# --- the four table reads ---
+ARL A0.x, R7.x;
+MOV o[COL0], c[12];
+MOV R10.x, c[A0.x + 0].x;
+ARL A0.x, R7.y;
+MOV o[TEX0].zw, c[11].wwwy;
+MOV R10.y, c[A0.x + 0].x;
+ARL A0.x, R7.z;
+MUL R10.xy, R10, R8;
+MOV R10.z, c[A0.x + 0].x;
+ARL A0.x, R7.w;
+ADD R11.xy, R10, c[10].x;
+MOV R10.w, c[A0.x + 0].x;
+MUL R10.zw, R10, R8;
+
+# --- the wave: ( r_turbsin[i2] + 8 ) * 0.8 + ( r_turbsin[i1] + 8 ), * waveHeight + z ---
+MUL R11.y, R11.y, c[10].y;
+ADD R11.x, R11.y, R11.x;
+MUL R11.x, R11.x, c[10].z;
+ADD R0.z, R11.x, v[0].z;
+
+# --- position: the entity's model-view-projection, then vs_tri's divide and fog ---
+MUL R1, v[0].y, c[1];
+MAD R1, v[0].x, c[0], R1;
+MAD R1, R0.z, c[2], R1;
+ADD R1, R1, c[3];
+RCP R2.x, R1.w;
+MUL o[HPOS].xyz, R1, R2.x;
+MOV o[HPOS].w, R1;
+MOV o[FOGC].x, R1.w;
+
+# --- texture coordinates: ( os + r_turbsin[i3], ot + r_turbsin[i4] ) / 64, q = 1 ---
+ADD R10.zw, R10, v[8].xxxy;
+MUL o[TEX0].xy, R10.zwzw, c[10].w;
+END

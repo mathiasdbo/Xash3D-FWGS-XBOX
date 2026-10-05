@@ -44,6 +44,13 @@ Where it departs from ref/gl (docs/r3d/divergences.md #138):
   field; only the renderer that filled it). A map whose water would need
   more than NV2A_WARP_MAX_MAP_BYTES keeps the rest of its water unwarped
   (the baked faces), with a warning.
+- R5 (divergences.md #147): the per-vertex work - the wave, the texture
+  warp, the entity transform - runs on the vertex unit (vs_warp.vp) over
+  a static copy of every face's pieces built at R_NewMap (20 bytes a
+  vertex, in the map's ledger and the baker's), where ref/gl and the CPU
+  path below compute it per vertex per frame. Same faces, pieces, order,
+  primitives and arithmetic; R_WarpEmitSurface stays for a draw the GPU
+  path cannot take whole, and for r_warp_gpu 0.
 - The fog colour. The reference takes it from the palette of wherever the
   texture's pixels came from (entry 3 the colour, entry 4's red the
   density, img_wad.c:584-592): the BSP's own embedded miptex with the
@@ -63,6 +70,8 @@ Where it departs from ref/gl (docs/r3d/divergences.md #138):
   Quake global fog (ENGINE_QUAKE_COMPATIBLE), no Spirit direct-GL fog
   (R_CheckGLFog, HACKS_RELATED_HLMODS).
 */
+#include <windows.h>
+#include <xboxkrnl/xboxkrnl.h> /* MmAllocateContiguousMemoryEx: R5's static water buffer */
 #include "ref_common.h"
 #include "xash3d_mathlib.h"
 #include "const.h"
@@ -80,8 +89,9 @@ Where it departs from ref/gl (docs/r3d/divergences.md #138):
 #include "r_warp.h"
 #include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
 
-/* A cap on one map's water pieces: the largest retail map needs 0.64 MiB
-   in this layout, 652348 bytes (disposal: 928 faces, 12410 pieces,
+/* A cap on one map's water pieces: the largest retail map needs 0.63 MiB
+   in this layout, 656060 bytes (652348 before R5's gpu_first; disposal:
+   928 faces, 12410 pieces,
    49836 vertices). */
 #define NV2A_WARP_MAX_MAP_BYTES ( 1024u * 1024u )
 
@@ -96,7 +106,10 @@ typedef struct
 	uint16_t numverts;
 	uint8_t  *counts;
 	float    *xyz;
+	uint32_t gpu_first; /* R5: the face's first vertex in the map's static water buffer, or NV2A_WARP_NO_GPU */
 } nv2a_warp_polys_t;
+
+#define NV2A_WARP_NO_GPU 0xFFFFFFFFu
 
 nv2a_warp_stats_t nv2a_warp_stats;
 
@@ -245,6 +258,7 @@ void R_WarpSubdivideSurface( model_t *mod, msurface_t *fa )
 	warp->numverts = (uint16_t)build.verts;
 	warp->counts = block + sizeof( nv2a_warp_polys_t );
 	warp->xyz = (float *)( block + sizeof( nv2a_warp_polys_t ) + counts_bytes );
+	warp->gpu_first = NV2A_WARP_NO_GPU; /* R5: placed by R_WarpGpuNewMap */
 
 	/* The fill pass: the same input, so the same pieces in the same order. */
 	memset( &build, 0, sizeof( build ));
@@ -307,10 +321,21 @@ static void nv2a_warp_transform( const nv2a_warp_xform_t *x, float px, float py,
 /* EmitWaterPolys( warp, reverse, ripples ), gl_rsurf.c:926, for the
    current entity's scale and transform. r_ripple is not ported (#138), so
    ripples is always false. Each piece goes to the TriAPI's batch whole:
-   a quad as a quad (GL_QUADS when every piece is one, gl_rsurf.c:940), any
+   a quad as a quad (GL_QUADS when every piece is one, gl_rsurf.c:943), any
    other piece as the triangle fan GL_POLYGON is. The wave and texture
    coordinate use this frame's hoisted time terms (nv2a_warp_frame_t). */
 static nv2a_warp_frame_t nv2a_warp_frame;
+
+/* set the current waveheight (gl_rsurf.c:934-937) - from the first point
+   of the chain's head, the last piece emitted (header). */
+static float R_WarpWaveHeight( const nv2a_warp_polys_t *polys, float scale )
+{
+	const int end = polys->numverts - polys->counts[polys->numpolys - 1];
+
+	if( polys->xyz[end * 3 + 2] >= nv2a_warp_vieworigin[2] )
+		return -scale;
+	return scale;
+}
 
 static void R_WarpEmitSurface( const msurface_t *warp, qboolean reverse, float scale, const nv2a_warp_xform_t *xform )
 {
@@ -324,12 +349,7 @@ static void R_WarpEmitSurface( const msurface_t *warp, qboolean reverse, float s
 
 	if( !polys || !info ) return;
 
-	/* set the current waveheight - from the first point of the chain's
-	   head, the last piece emitted (header). */
-	end = polys->numverts - polys->counts[polys->numpolys - 1];
-	if( polys->xyz[end * 3 + 2] >= nv2a_warp_vieworigin[2] )
-		waveHeight = -scale;
-	else waveHeight = scale;
+	waveHeight = R_WarpWaveHeight( polys, scale );
 
 	nv2a_warp_stats.faces++;
 	end = polys->numverts;
@@ -376,6 +396,262 @@ static void R_WarpEmitSurface( const msurface_t *warp, qboolean reverse, float s
 		NV2A_FT_ADD( XBOX_FT_W_WATER_VERTS, n );
 		end = first;
 	}
+}
+
+/*
+========================================================================
+R5: EmitWaterPolys on the vertex unit (divergences.md #147)
+========================================================================
+
+The same faces, pieces, order, primitives and per-vertex arithmetic as
+R_WarpEmitSurface, with the per-vertex work - the wave, the texture warp,
+the entity transform and the vertex itself - moved to vs_warp.vp, which
+reads the pieces from one static buffer built at R_NewMap. Per face the
+CPU now only picks the wave height's sign (EmitWaterPolys does it per
+face too, gl_rsurf.c:934-937) and pushes the draws: a face of quads
+forward is one DRAW_ARRAYS run (GL_QUADS, :943); any other face, and every
+face seen from below (drawn reversed, :949-950), is an inline index list
+that repeats R_WarpEmitSurface's own quads or triangle fans vertex for
+vertex. A draw whose faces are not all in the buffer (a map past
+NV2A_WARP_GPU_MAX_VERTS, a buffer that could not be allocated, a brush
+model from another .bsp) takes the CPU path whole, so the order of the
+faces never changes. r_warp_gpu 0 forces the CPU path. */
+
+static CVAR_DEFINE_AUTO( r_warp_gpu, "1", 0, "ref_nv2a: warp water on the GPU's vertex unit (0 = CPU path)" );
+
+static nv2a_warp_gpu_vertex_t *nv2a_warp_gpu_vb;    /* contiguous, write-combined */
+static uint32_t               nv2a_warp_gpu_count;
+static const model_t          *nv2a_warp_gpu_world;  /* whose faces it holds */
+
+/* Every water face of `world` that fits under NV2A_WARP_GPU_MAX_VERTS
+   gets its place in the buffer, in surface order (assign), or is only
+   counted. Returns the vertices placed. */
+static uint32_t R_WarpGpuPlace( const model_t *world, qboolean assign )
+{
+	uint32_t total = 0;
+	int i;
+
+	if( !world || !world->surfaces )
+		return 0;
+
+	for( i = 0; i < world->numsurfaces; i++ )
+	{
+		const msurface_t *s = &world->surfaces[i];
+		nv2a_warp_polys_t *polys;
+
+		if( !FBitSet( s->flags, SURF_DRAWTURB ) || !s->polys )
+			continue;
+		polys = (nv2a_warp_polys_t *)s->polys;
+		if( total + polys->numverts > NV2A_WARP_GPU_MAX_VERTS )
+		{
+			if( assign )
+				polys->gpu_first = NV2A_WARP_NO_GPU;
+			continue;
+		}
+		if( assign )
+			polys->gpu_first = total;
+		total += polys->numverts;
+	}
+	return total;
+}
+
+uint32_t R_WarpGpuMapBytes( const model_t *world )
+{
+	return nv2a_warp_gpu_bytes( R_WarpGpuPlace( world, false ));
+}
+
+static void R_WarpGpuFree( void )
+{
+	/* Called between frames (nv2a_free_map_resources, R_WarpGpuNewMap),
+	   after R_EndFrame's wait for the GPU, as the map's other buffers are. */
+	if( nv2a_warp_gpu_vb )
+		MmFreeContiguousMemory( nv2a_warp_gpu_vb );
+	nv2a_warp_gpu_vb = NULL;
+	nv2a_warp_gpu_count = 0;
+	nv2a_warp_gpu_world = NULL;
+}
+
+/* The world's water pieces into the buffer: per face, the pieces in the
+   order R_WarpEmitSurface draws them (last emitted first), each piece's
+   points forward, with R_TextureCoord's two dot products for a
+   SURF_DRAWTURB face (gl_rsurf.c:147-160) - the expressions
+   R_WarpEmitSurface evaluates per frame, evaluated once. Written in order
+   through the write-combining mapping, as the map's vertex buffer is
+   (r_context.c nv2a_upload_map_gpu_data). Called by r_context.c once the
+   map's own GPU buffers are in place (nv2a_try_pending_upload), so they
+   get the contiguous memory first and a map whose world did not fit
+   takes none for its water; the bytes are in the same ledger. */
+void R_WarpGpuNewMap( const model_t *world )
+{
+	nv2a_warp_gpu_vertex_t *out;
+	uint32_t count;
+	int i;
+
+	R_WarpGpuFree();
+
+	count = R_WarpGpuPlace( world, true );
+	if( count == 0 )
+		return;
+
+	nv2a_warp_gpu_vb = MmAllocateContiguousMemoryEx( count * NV2A_WARP_GPU_VERTEX_BYTES, 0, NV2A_TEXTURE_MAXRAM, 0,
+		PAGE_READWRITE | PAGE_WRITECOMBINE );
+	if( !nv2a_warp_gpu_vb )
+	{
+		gEngfuncs.Con_Printf( S_WARN "ref_nv2a: no memory for the water's %u-byte vertex buffer, water warps on the CPU\n",
+			count * NV2A_WARP_GPU_VERTEX_BYTES );
+		return;
+	}
+
+	out = nv2a_warp_gpu_vb;
+	for( i = 0; i < world->numsurfaces; i++ )
+	{
+		const msurface_t *s = &world->surfaces[i];
+		const nv2a_warp_polys_t *polys;
+		const mtexinfo_t *info = s->texinfo;
+		int p, end;
+
+		if( !FBitSet( s->flags, SURF_DRAWTURB ) || !s->polys )
+			continue;
+		polys = (const nv2a_warp_polys_t *)s->polys;
+		if( polys->gpu_first == NV2A_WARP_NO_GPU )
+			continue;
+
+		end = polys->numverts;
+		for( p = polys->numpolys - 1; p >= 0; p-- )
+		{
+			const int first = end - polys->counts[p];
+			int k;
+
+			for( k = first; k < end; k++, out++ )
+			{
+				const float *v = polys->xyz + (size_t)k * 3;
+
+				VectorCopy( v, out->xyz );
+				out->os = info ? DotProduct( v, info->vecs[0] ) : 0.0f;
+				out->ot = info ? DotProduct( v, info->vecs[1] ) : 0.0f;
+			}
+			end = first;
+		}
+	}
+	nv2a_warp_gpu_count = count;
+	nv2a_warp_gpu_world = world;
+}
+
+/* Is `surf` in the buffer? Only the current world's faces were placed
+   (R_WarpGpuEnabled checks the buffer is that world's); a brush model
+   loaded from another .bsp keeps NV2A_WARP_NO_GPU. */
+static qboolean R_WarpGpuHas( const msurface_t *surf )
+{
+	const nv2a_warp_polys_t *polys = (const nv2a_warp_polys_t *)surf->polys;
+
+	return polys && surf->texinfo && polys->gpu_first != NV2A_WARP_NO_GPU
+		&& polys->gpu_first + polys->numverts <= nv2a_warp_gpu_count;
+}
+
+static qboolean R_WarpGpuEnabled( void )
+{
+	return r_warp_gpu.value != 0.0f && nv2a_warp_gpu_vb != NULL && nv2a_warp_gpu_world == gp_cl->models[1];
+}
+
+/* One begin/end's parameters: this frame's time terms and the current
+   colour, which are the same for every face it draws; the wave height,
+   the one that is not, starts as +scale and is set per face. */
+static qboolean R_WarpGpuBegin( const float (*mvp)[4], float scale )
+{
+	float params[NV2A_WARP_GPU_PARAM_REGS][4];
+	uint8_t rgba[4];
+
+	if( !nv2a_wgpu_begin( nv2a_warp_gpu_vb, mvp ))
+		return false;
+	nv2a_tri_current_color( rgba );
+	nv2a_warp_gpu_params( &nv2a_warp_frame, scale, rgba, params );
+	nv2a_wgpu_set_params( (const float (*)[4])params );
+	return true;
+}
+
+/* nv2a_wgpu_bind only when the face's texture differs from the last one
+   bound in this begin/end (`bound`, the directory entry R_WarpBindSurface
+   selected, or NV2A_TRI_NO_MAP_TEXTURE for GL_Bind's), so a run of faces
+   with one texture resolves it once. False: no texture, skip the face. */
+#define NV2A_WARP_GPU_UNBOUND 0xFFFFFFFEu
+static qboolean R_WarpGpuBind( uint32_t bound, uint32_t *gpu_bound )
+{
+	if( *gpu_bound == bound )
+		return true;
+	if( !nv2a_wgpu_bind())
+		return false;
+	*gpu_bound = bound;
+	return true;
+}
+
+/* An index list for the reversed and fan faces, flushed in whole
+   primitives. */
+#define NV2A_WARP_GPU_INDICES 1024
+static uint16_t nv2a_warp_gpu_idx[NV2A_WARP_GPU_INDICES];
+
+/* R_WarpEmitSurface for a face in the buffer: the same pieces in the same
+   order as the same primitives - quads for a face of quads, else each
+   piece as GL_POLYGON's triangle fan (0, i, i + 1) - each piece's points
+   reversed when `reverse`. The face's wave height goes to vs_warp's
+   parameters; the vertices are already there. */
+static void R_WarpGpuEmitSurface( const msurface_t *warp, qboolean reverse, float scale )
+{
+	const nv2a_warp_polys_t *polys = (const nv2a_warp_polys_t *)warp->polys;
+	const qboolean useQuads = FBitSet( warp->flags, SURF_DRAWTURB_QUADS );
+	uint32_t start = polys->gpu_first;
+	uint32_t n_idx = 0;
+	int p;
+
+	nv2a_wgpu_set_wave_height( R_WarpWaveHeight( polys, scale ));
+
+	nv2a_warp_stats.faces++;
+	nv2a_warp_stats.polys += polys->numpolys;
+	nv2a_warp_stats.verts += polys->numverts;
+	NV2A_FT_ADD( XBOX_FT_W_WATER_VERTS, polys->numverts );
+	NV2A_FT_ADD( XBOX_FT_W_WATER_GPU, polys->numverts );
+
+	if( useQuads && !reverse )
+	{
+		nv2a_wgpu_draw_quads( start, polys->numverts );
+		return;
+	}
+
+	/* Pieces in draw order: the buffer holds them that way already. */
+	for( p = polys->numpolys - 1; p >= 0; p-- )
+	{
+		const uint32_t n = polys->counts[p];
+		const uint32_t need = ( useQuads && n == 4 ) ? 4 : 3 * ( n - 2 );
+		uint32_t i;
+
+		if( n_idx + need > NV2A_WARP_GPU_INDICES )
+		{
+			nv2a_wgpu_draw_indices( useQuads, nv2a_warp_gpu_idx, n_idx );
+			n_idx = 0;
+		}
+
+		if( useQuads && n == 4 )
+		{
+			/* reversed (a forward quad face is the DRAW_ARRAYS above) */
+			for( i = 0; i < 4; i++ )
+				nv2a_warp_gpu_idx[n_idx++] = (uint16_t)( start + 3 - i );
+		}
+		else
+		{
+			/* the fan over the piece's points in draw order */
+			const uint32_t v0 = reverse ? start + n - 1 : start;
+
+			for( i = 1; i + 1 < n; i++ )
+			{
+				nv2a_warp_gpu_idx[n_idx++] = (uint16_t)v0;
+				nv2a_warp_gpu_idx[n_idx++] = (uint16_t)( reverse ? start + n - 1 - i : start + i );
+				nv2a_warp_gpu_idx[n_idx++] = (uint16_t)( reverse ? start + n - 2 - i : start + i + 1 );
+			}
+		}
+		start += n;
+	}
+
+	if( n_idx > 0 )
+		nv2a_wgpu_draw_indices( useQuads, nv2a_warp_gpu_idx, n_idx );
 }
 
 /* TriRenderMode sets the blend state these paths need, but also calls
@@ -432,19 +708,31 @@ static qboolean R_WarpBindSurface( const msurface_t *surf, uint32_t *bound )
 static void R_WarpDrawChain( msurface_t *chain, float scale )
 {
 	nv2a_warp_xform_t identity;
-	uint32_t bound = NV2A_TRI_NO_MAP_TEXTURE;
+	uint32_t bound = NV2A_TRI_NO_MAP_TEXTURE, gpu_bound = NV2A_WARP_GPU_UNBOUND;
+	qboolean gpu = R_WarpGpuEnabled();
 	msurface_t *s;
 
 	memset( &identity, 0, sizeof( identity ));
 	identity.identity = true;
 
+	/* R5: on the vertex unit when every face is in the buffer. */
+	for( s = chain; s != NULL && gpu; s = s->texturechain )
+		gpu = R_WarpGpuHas( s );
+	if( gpu )
+		gpu = R_WarpGpuBegin( NULL, scale );
+
 	for( s = chain; s != NULL; s = s->texturechain )
 	{
 		if( !R_WarpBindSurface( s, &bound ))
 			continue;
-		R_WarpEmitSurface( s, false, scale, &identity );
+		if( !gpu )
+			R_WarpEmitSurface( s, false, scale, &identity );
+		else if( R_WarpGpuBind( bound, &gpu_bound ))
+			R_WarpGpuEmitSurface( s, false, scale );
 	}
 
+	if( gpu )
+		nv2a_wgpu_end();
 	nv2a_tri_bind_map_texture( NV2A_TRI_NO_MAP_TEXTURE );
 }
 
@@ -552,12 +840,12 @@ void R_WarpAddBrushSurface( msurface_t *surf, qboolean reverse )
 	nv2a_warp_entity_count++;
 }
 
-void R_WarpDrawBrushEntity( cl_entity_t *e, float blend, qboolean rotated )
+void R_WarpDrawBrushEntity( cl_entity_t *e, float blend, qboolean rotated, const float mvp[4][4] )
 {
 	nv2a_2d_shadow_t saved;
 	nv2a_warp_xform_t xform;
-	uint32_t bound = NV2A_TRI_NO_MAP_TEXTURE;
-	qboolean flat_color;
+	uint32_t bound = NV2A_TRI_NO_MAP_TEXTURE, gpu_bound = NV2A_WARP_GPU_UNBOUND;
+	qboolean flat_color, gpu;
 	int i;
 
 	if( nv2a_warp_entity_count == 0 )
@@ -620,15 +908,28 @@ void R_WarpDrawBrushEntity( cl_entity_t *e, float blend, qboolean rotated )
 	if( flat_color )
 		GL_Bind( 0, nv2a_tex_white());
 
+	/* R5: on the vertex unit, with the entity's model-view-projection (the
+	   one its other faces drew with), when every face is in the buffer. */
+	gpu = R_WarpGpuEnabled() && mvp != NULL;
+	for( i = 0; i < nv2a_warp_entity_count && gpu; i++ )
+		gpu = R_WarpGpuHas( nv2a_warp_entity_faces[i].surf );
+	if( gpu )
+		gpu = R_WarpGpuBegin( mvp, e->curstate.scale );
+
 	for( i = 0; i < nv2a_warp_entity_count; i++ )
 	{
 		msurface_t *s = nv2a_warp_entity_faces[i].surf;
 
 		if( !flat_color && !R_WarpBindSurface( s, &bound ))
 			continue;
-		R_WarpEmitSurface( s, nv2a_warp_entity_faces[i].reverse, e->curstate.scale, &xform );
+		if( !gpu )
+			R_WarpEmitSurface( s, nv2a_warp_entity_faces[i].reverse, e->curstate.scale, &xform );
+		else if( R_WarpGpuBind( bound, &gpu_bound ))
+			R_WarpGpuEmitSurface( s, nv2a_warp_entity_faces[i].reverse, e->curstate.scale );
 	}
 	nv2a_warp_entity_count = 0;
+	if( gpu )
+		nv2a_wgpu_end();
 
 	nv2a_tri_bind_map_texture( NV2A_TRI_NO_MAP_TEXTURE );
 	/* Submitted under this entity's state before the caller's own brush
@@ -704,6 +1005,7 @@ static void R_WarpRegisterCvars( void )
 	if( nv2a_warp_cvars_registered )
 		return;
 	gEngfuncs.Cvar_RegisterVariable( &gl_fog );
+	gEngfuncs.Cvar_RegisterVariable( &r_warp_gpu );
 	nv2a_warp_cvars_registered = true;
 }
 
@@ -781,6 +1083,7 @@ void R_WarpFreeMap( void )
 	nv2a_warp_world_chain = NULL;
 	nv2a_warp_entity_count = 0;
 	nv2a_warp_fog_world = NULL;
+	R_WarpGpuFree();
 	nv2a_gl_is_fog_enabled = false;
 	nv2a_gl_fog_enable( false );
 }

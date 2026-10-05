@@ -461,13 +461,14 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 72)
+        self.assertEqual(len(r["counters"]), 74)
         self.assertEqual(r["counters"][20], "span_calls")
         self.assertEqual(len(r["spans"]), 50)
-        # A count after the spans (2026-10-02) is a plain counter.
-        self.assertEqual(r["counters"][-1], "world_walked")
+        # Counts after the spans (2026-10-02, R5) are plain counters.
+        self.assertEqual(r["counters"][-3:], ["world_walked", "water_gpu", "vp_loads"])
         self.assertNotIn("world_walked", fr.span_names(r))
-        self.assertEqual(r["frames"][0][8][-1], 500)
+        self.assertNotIn("vp_loads", fr.span_names(r))
+        self.assertEqual(r["frames"][0][8][r["counters"].index("world_walked")], 500)
         self.assertEqual(r["spans"][0], ("k_input", ""))
         parent = dict(r["spans"])
         self.assertEqual(parent["k_sv_game"], "k_sv")

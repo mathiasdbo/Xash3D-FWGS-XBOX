@@ -2,6 +2,7 @@
 #include "BspParser.h" // BspLumpType - the dheader_t lump indices
 #include "Nv2aMapBudget.h"
 #include "Nv2aMapFit.h"
+#include "Nv2aWater.h"  // R5: the water vertex buffer's bytes
 #include <fstream>
 #include <iostream>
 #include <iomanip>
@@ -802,7 +803,19 @@ namespace formats {
             const uint64_t texBytes = static_cast<uint64_t>(header.lenTextureData);
             const uint64_t lmBytes = static_cast<uint64_t>(header.lenLightmapAtlas);
             const uint64_t engineBytes = mpakClassicPrefixBytes(header); // MPAK v12: what the engine holds (reported only)
-            const uint64_t total = nv2aMapLedgerBytes(header);
+            // R5 (divergences.md #147): the water's static vertex buffer,
+            // counted from the archive's own classic lumps with the
+            // renderer's own subdivision (Nv2aWater.h).
+            Nv2aWaterLumps waterLumps;
+            waterLumps.faces = mFacesData.data(); waterLumps.facesLen = mFacesData.size();
+            waterLumps.surfedges = mSurfedgesData.data(); waterLumps.surfedgesLen = mSurfedgesData.size();
+            waterLumps.edges = mEdgesData.data(); waterLumps.edgesLen = mEdgesData.size();
+            waterLumps.vertexes = mVertexesData.data(); waterLumps.vertexesLen = mVertexesData.size();
+            waterLumps.texinfo = mTexinfoData.data(); waterLumps.texinfoLen = mTexinfoData.size();
+            waterLumps.miptex = mMiptexData.data(); waterLumps.miptexLen = mMiptexData.size();
+            const Nv2aWaterCount water = nv2aWaterCount(waterLumps);
+            const uint64_t waterBytes = nv2aWaterGpuBytes(water.vertices);
+            const uint64_t total = nv2aMapLedgerBytes(header, waterBytes);
             const double pct = 100.0 * static_cast<double>(total) / static_cast<double>(kNv2aMapBudgetBytes);
 
             if (!nv2aMapWithinBudget(total)) {
@@ -812,7 +825,7 @@ namespace formats {
                           << ") - this archive would not draw on the Xbox target. Failing the bake.\n"
                           << "  [vb=" << vbBytes << " idx=" << idxBytes << " faces=" << facesBytes
                           << " vis=" << visBytes << " remap=" << remapBytes << " lmtab=" << lmTableBytes << " pvslist=" << pvsListBytes << " tex=" << texBytes
-                          << " lm=" << lmBytes << " bsp=" << engineBytes << " file=" << fileSize << "]\n";
+                          << " lm=" << lmBytes << " water=" << waterBytes << " bsp=" << engineBytes << " file=" << fileSize << "]\n";
                 // The 512 caps above fail before any section is written, so
                 // they only ever leave a 2048-byte stub behind. This check
                 // runs after the full archive is written and verified, so
@@ -855,12 +868,14 @@ namespace formats {
                 if (mMiptexData.size() >= sizeof(textures))
                     std::memcpy(&textures, mMiptexData.data(), sizeof(textures));
                 lumps.textures = textures > 0 ? static_cast<uint32_t>(textures) : 0u;
+                lumps.waterPolyBytes = water.polyBytes; // R5: in the engine's world structures
                 // The same resident tables the ledger counts, including the
                 // lightmap tables and the visible-face list.
                 const uint64_t tables = nv2aMapTableBytes(header);
                 const uint64_t temporaries = static_cast<uint64_t>(header.vCount) * kNv2aPositionBytes
                     + header.lenFaceDrawCmds + header.lenFaceVertexBase + header.lenFaceRemap + header.lenTextureDir + header.lenBatches;
-                const Nv2aFit fit = nv2aCheckArchive(lumps, engineBytes, tables, temporaries, vbBytes + texBytes + lmBytes);
+                const uint64_t gpuBytes = vbBytes + texBytes + lmBytes + waterBytes; // the ledger's GPU side (R5: + water)
+                const Nv2aFit fit = nv2aCheckArchive(lumps, engineBytes, tables, temporaries, gpuBytes);
                 if (!fit.ok) {
                     std::cerr << "ERROR: this map does not fit the Original Xbox (tools/asset-studio/src/formats/Nv2aMapFit.h). Failing the bake.\n"
                               << fit.reason;
@@ -873,11 +888,11 @@ namespace formats {
                     return false;
                 }
                 std::cout << "Xbox fit: world structures " << nv2aMiB(nv2aEngineWorldBytes(lumps))
-                          << ", renderer " << nv2aMiB(tables + (vbBytes + texBytes + lmBytes > temporaries ? vbBytes + texBytes + lmBytes : temporaries))
+                          << ", renderer " << nv2aMiB(tables + (gpuBytes > temporaries ? gpuBytes : temporaries))
                           << " - fits\n";
                 // X9-W: advisory only - single-player never builds a PHS.
                 std::string hostLimit;
-                const uint32_t hostPlayers = nv2aMaxHostPlayers(lumps, engineBytes, tables, temporaries, vbBytes + texBytes + lmBytes,
+                const uint32_t hostPlayers = nv2aMaxHostPlayers(lumps, engineBytes, tables, temporaries, gpuBytes,
                                                                 phs.offsets.size(), phs.data.size(), mPeakEdicts, mMaxEdicts, hostLimit);
                 if (hostPlayers)
                     std::cout << "Xbox hosting (multiplayer, advisory): up to " << hostPlayers << " players";
@@ -890,7 +905,7 @@ namespace formats {
                       << "nv2a map budget: " << total << " / " << kNv2aMapBudgetBytes
                       << " bytes (" << pct << "%) [vb=" << vbBytes << " idx=" << idxBytes
                       << " faces=" << facesBytes << " vis=" << visBytes << " remap=" << remapBytes
-                      << " tex=" << texBytes << " lm=" << lmBytes << " bsp=" << engineBytes << " file=" << fileSize << "]\n"
+                      << " tex=" << texBytes << " lm=" << lmBytes << " water=" << waterBytes << " bsp=" << engineBytes << " file=" << fileSize << "]\n"
                       << std::defaultfloat;
         }
 

@@ -115,6 +115,9 @@ namespace formats {
         uint64_t visibility = 0, nodes = 0, leaves = 0, marksurfaces = 0, planes = 0, clipnodes = 0, models = 0;
         uint64_t entities = 0, texinfo = 0, vertexes = 0, edges = 0, surfedges = 0, faces = 0, lighting = 0, miptex = 0;
         uint32_t textures = 0;
+        // R5: the water's CPU-side pieces in the model pool (Nv2aWater.h
+        // Nv2aWaterCount::polyBytes), built while the world loads.
+        uint64_t waterPolyBytes = 0;
     };
 
     // What one Mem_Malloc/Mem_Calloc of `size` takes: zone.c's 24-byte
@@ -141,6 +144,7 @@ namespace formats {
         b += nv2aZoneChunk(52 * nodes) + nv2aZoneChunk(60 * (l.leaves / 28));
         b += nv2aZoneChunk(8 * (l.clipnodes / 8)) + nv2aZoneChunk(8 * nodes);
         b += nv2aZoneChunk(l.visibility) + nv2aZoneChunk(l.lighting) + nv2aZoneChunk(l.entities + 1) + nv2aZoneChunk(64 * (l.models / 64));
+        b += l.waterPolyBytes; // R5: GL_SubdivideSurface's pieces (r_warp.c), already zone chunks
         return b;
     }
 

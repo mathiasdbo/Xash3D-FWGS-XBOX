@@ -1294,7 +1294,8 @@ typedef enum
 	NV2A_RESIDENT_NONE,
 	NV2A_RESIDENT_2D,
 	NV2A_RESIDENT_TRI,
-	NV2A_RESIDENT_STUDIO /* divergences.md #143, vs_studio */
+	NV2A_RESIDENT_STUDIO, /* divergences.md #143, vs_studio */
+	NV2A_RESIDENT_WARP    /* R5, divergences.md #147: vs_warp */
 } nv2a_resident_program_t;
 
 static nv2a_resident_program_t nv2a_resident_program;
@@ -1348,11 +1349,14 @@ static uint32_t           nv2a_decal_vb_used;
    pushbuffer grew from 34 to 59 KiB a frame with the GPU studio path
    (PR #175).
 
-   Nothing else writes program memory: SET_TRANSFORM_PROGRAM is pushed
-   only by nv2a_upload_vertex_programs, pbkit never pushes it (pb_init
-   included), and ref/nv2a never selects the fixed-function transform. A
-   future path that loads a program of its own must call
-   nv2a_upload_vertex_programs again afterwards. */
+   Program memory is written only here: by nv2a_upload_vertex_programs,
+   and for the one program that is not resident, vs_warp (R5,
+   divergences.md #147), by nv2a_vp_load_slots, which puts it over
+   vs_studio's last slots and puts them back before vs_studio runs again.
+   pbkit never pushes SET_TRANSFORM_PROGRAM (pb_init included), and
+   ref/nv2a never selects the fixed-function transform. A future path that
+   loads a program of its own must leave the resident ones as it found
+   them, as vs_warp does. */
 static const uint32_t nv2a_vp_lit_words[] =
 {
 	#include "vs_lit.inl"
@@ -1369,6 +1373,22 @@ static const uint32_t nv2a_vp_studio_words[] =
 {
 	#include "vs_studio.inl"
 };
+
+/* R5 (divergences.md #147): the water warp's program (vs_warp.vp). With
+   every slot taken by the four resident programs it is loaded on demand
+   over vs_studio's tail - vs_studio is the only program long enough - and
+   that tail is loaded back the next time vs_studio is selected. Both
+   directions are lazy: water after water, or a frame that draws no GPU
+   studio model after its water, loads nothing. One load is
+   NV2A_VP_WARP_INSTRUCTIONS instructions of five dwords. */
+static const uint32_t nv2a_vp_warp_words[] =
+{
+	#include "vs_warp.inl"
+};
+#define NV2A_VP_WARP_INSTRUCTIONS (( uint32_t )( sizeof( nv2a_vp_warp_words ) / 16 ))
+STATIC_ASSERT( sizeof( nv2a_vp_warp_words ) % 16 == 0, "a vertex program instruction is four dwords" );
+STATIC_ASSERT( sizeof( nv2a_vp_warp_words ) <= sizeof( nv2a_vp_studio_words ),
+	"vs_warp is loaded over vs_studio's last slots and must fit inside them" );
 
 typedef enum
 {
@@ -1401,6 +1421,11 @@ static const struct
 
 static uint32_t  nv2a_vp_start[NV2A_VP_COUNT]; /* each program's first slot */
 static nv2a_vp_t nv2a_vp_selected = NV2A_VP_COUNT;
+
+/* R5: vs_warp is in vs_studio's last NV2A_VP_WARP_INSTRUCTIONS slots
+   (loaded), and PROGRAM_START points at it (selected). */
+static qboolean nv2a_vp_warp_loaded;
+static qboolean nv2a_vp_warp_selected;
 
 /* The register-combiner "pixel programs" (ps_*.inl) are state, not
    memory: a switch re-pushes the whole set. Tracked so that a vertex
@@ -1465,11 +1490,96 @@ static void nv2a_upload_vertex_programs( void )
 	}
 
 	nv2a_vp_selected = NV2A_VP_COUNT; /* the next select sets the execution mode too */
+	nv2a_vp_warp_loaded = false;      /* R5: vs_studio is whole again */
+	nv2a_vp_warp_selected = false;
+}
+
+/* R5 (divergences.md #147): `count` instructions of `words` into program
+   memory from `slot` on, with the same preamble as
+   nv2a_upload_vertex_programs (program mode, context writes off, the load
+   pointer), in blocks of up to 25 instructions. Pushed between draws, in
+   pushbuffer order: the tree reloaded programs over the slots the
+   previous draw had just run on every switch before divergences.md #143's
+   resident programs, on the console, with no wait or fence
+   (nv2a-xbox-specialist, R5 review). PROGRAM_START is pushed again by the
+   next select. */
+static void nv2a_vp_load_slots( uint32_t slot, const uint32_t *words, uint32_t count )
+{
+	uint32_t *p;
+	uint32_t i = 0;
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
+		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
+		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, slot );
+	pb_end( p );
+
+	while( i < count )
+	{
+		uint32_t n = count - i, k;
+
+		if( n > 25 )
+			n = 25;
+		p = pb_begin();
+		for( k = 0; k < n; k++ )
+		{
+			pb_push( p++, NV097_SET_TRANSFORM_PROGRAM, 4 );
+			memcpy( p, &words[( i + k ) * 4], 4 * 4 );
+			p += 4;
+		}
+		pb_end( p );
+		i += n;
+	}
+
+	nv2a_vp_selected = NV2A_VP_COUNT; /* the next select pushes the preamble and its PROGRAM_START */
+	nv2a_vp_warp_selected = false;
+	NV2A_FT_ADD( XBOX_FT_W_VP_LOADS, 1 );
+}
+
+/* The slot vs_warp starts at: vs_studio's last NV2A_VP_WARP_INSTRUCTIONS. */
+static uint32_t nv2a_vp_warp_slot( void )
+{
+	return nv2a_vp_start[NV2A_VP_STUDIO] + nv2a_vp_table[NV2A_VP_STUDIO].instructions - NV2A_VP_WARP_INSTRUCTIONS;
+}
+
+/* R5: selects vs_warp, loading it first if vs_studio's tail is there. */
+static void nv2a_select_warp_program( void )
+{
+	uint32_t *p;
+
+	if( !nv2a_vp_warp_loaded )
+	{
+		nv2a_vp_load_slots( nv2a_vp_warp_slot(), nv2a_vp_warp_words, NV2A_VP_WARP_INSTRUCTIONS );
+		nv2a_vp_warp_loaded = true;
+	}
+	if( nv2a_vp_warp_selected )
+		return;
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
+		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
+		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, nv2a_vp_warp_slot());
+	pb_end( p );
+	nv2a_vp_selected = NV2A_VP_COUNT; /* none of the resident ones */
+	nv2a_vp_warp_selected = true;
 }
 
 static void nv2a_select_vertex_program( nv2a_vp_t vp )
 {
 	uint32_t *p;
+
+	/* R5: vs_warp sits over vs_studio's tail; put the tail back first. */
+	if( vp == NV2A_VP_STUDIO && nv2a_vp_warp_loaded )
+	{
+		const uint32_t keep = nv2a_vp_table[NV2A_VP_STUDIO].instructions - NV2A_VP_WARP_INSTRUCTIONS;
+
+		nv2a_vp_load_slots( nv2a_vp_warp_slot(), &nv2a_vp_studio_words[keep * 4], NV2A_VP_WARP_INSTRUCTIONS );
+		nv2a_vp_warp_loaded = false;
+	}
 
 	if( nv2a_vp_selected == vp )
 		return;
@@ -1485,6 +1595,7 @@ static void nv2a_select_vertex_program( nv2a_vp_t vp )
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, nv2a_vp_start[vp] );
 	pb_end( p );
 	nv2a_vp_selected = vp;
+	nv2a_vp_warp_selected = false;
 }
 
 /* ps_lit or ps_2d. Each upload resets the final combiner to its unfogged
@@ -3090,7 +3201,7 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 	   function's direct pushes (lessons.md: a draw that depends on state
 	   it never sets). */
 	nv2a_2d_dirty = true;
-	XBOX_FT_SPAN( XBOX_FT_S_WARP_BRUSH, R_WarpDrawBrushEntity( e, blend, rotated ));
+	XBOX_FT_SPAN( XBOX_FT_S_WARP_BRUSH, R_WarpDrawBrushEntity( e, blend, rotated, (const float (*)[4])mvp ));
 }
 
 /* Brush's own direct constant-96 push (nv2a_draw_brush_entity) leaves the
@@ -4905,7 +5016,11 @@ static qboolean nv2a_load_map_geometry( const mpak_header_t *header, const byte 
 			+ (uint64_t)geo.faceRemap.length * 2
 			+ (uint64_t)( geo.faceDrawCmds.length / 8 ) * NV2A_LM_FACE_BYTES
 			+ (uint64_t)( geo.faceDrawCmds.length / 8 ) * NV2A_PVS_LIST_FACE_BYTES;
-		const uint64_t gpu = vb_bytes + (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length;
+		/* R5 (#147): + the water's static vertex buffer, built at R_NewMap
+		   after the others, mirrored by Nv2aMapBudget.h's
+		   nv2aMapLedgerBytes( header, waterGpuBytes ). */
+		const uint64_t gpu = vb_bytes + (uint64_t)geo.textureData.length + (uint64_t)geo.lightmapAtlas.length
+			+ (uint64_t)R_WarpGpuMapBytes( nv2a_map_owner );
 		const uint64_t load = (uint64_t)vert_count * 3 * sizeof( float )
 			+ (uint64_t)geo.faceDrawCmds.length + (uint64_t)geo.faceVertexBase.length + (uint64_t)geo.faceRemap.length
 			+ (uint64_t)geo.textureDir.length + (uint64_t)geo.batches.length;
@@ -7615,6 +7730,16 @@ static qboolean nv2a_sgpu_lut_valid;
    (R_BeginFrame), as the gamma table already was, so no frame depends on
    a value written by the one before. */
 static qboolean nv2a_sgpu_fixed_valid;
+
+/* R5 (divergences.md #147): the water program's constants share hardware
+   0..64 (its sine table, inside the palette's first 22 bones' rows) and
+   c[5..12] (its parameters, over this path's c[5..9] and c[10..12]) with
+   this path. Each side forgets the other's shadow when it writes there:
+   these two are cleared by the palette and constant pushes below, and the
+   water's pushes clear nv2a_sgpu_pal_valid_count and the submodel and mesh
+   shadows. */
+static qboolean nv2a_wgpu_table_valid;
+static qboolean nv2a_wgpu_params_valid;
 static float    nv2a_sgpu_submodel_shadow[5][4];
 static qboolean nv2a_sgpu_submodel_valid;
 static float    nv2a_sgpu_elight_shadow[NV2A_SGPU_ELIGHT_REGS][4];
@@ -7748,6 +7873,8 @@ static void nv2a_sgpu_invalidate_consts( void )
 	nv2a_sgpu_elight_valid = false;
 	nv2a_sgpu_mesh_valid = false;
 	nv2a_sgpu_pal_valid_count = 0;
+	nv2a_wgpu_table_valid = false; /* R5: the water's, by the same rule */
+	nv2a_wgpu_params_valid = false;
 }
 
 qboolean nv2a_sgpu_begin_submodel( const nv2a_sgpu_geometry_t *geo, const float light[4],
@@ -7789,6 +7916,7 @@ qboolean nv2a_sgpu_begin_submodel( const nv2a_sgpu_geometry_t *geo, const float 
 		nv2a_sgpu_push_consts( NV2A_SGPU_HW_C0 + NV2A_SGPU_C_MVP, (const float (*)[4])block, 5 );
 		memcpy( nv2a_sgpu_submodel_shadow, block, sizeof( block ));
 		nv2a_sgpu_submodel_valid = true;
+		nv2a_wgpu_params_valid = false; /* R5: c[5..9] are the water's c[5..9] too */
 	}
 
 	/* c[88..93]: the entity's local lights, all-zero signs when it has
@@ -7815,6 +7943,9 @@ static void nv2a_sgpu_palette_range( nv2a_pb_block_t *b, const float (*rows)[4],
 	{
 		nv2a_blk_consts( b, nv2a_sgpu_matrix_slot( first ), &rows[first * 3], n * 3 );
 		memcpy( nv2a_sgpu_pal_rows_shadow[first * 3], rows[first * 3], n * 3 * sizeof( float[4] ));
+		/* R5: the low bank's rows hold the water's sine table too. */
+		if( nv2a_sgpu_matrix_slot( first ) < NV2A_WARP_GPU_TABLE_HW + NV2A_WARP_GPU_TABLE_REGS )
+			nv2a_wgpu_table_valid = false;
 	}
 	if( !held || memcmp( nv2a_sgpu_pal_lights_shadow[first], lights[first], n * sizeof( float[4] )))
 	{
@@ -7906,6 +8037,7 @@ void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_
 		nv2a_blk_consts( &b, NV2A_SGPU_HW_C0 + NV2A_SGPU_C_MESH, (const float (*)[4])mesh_consts, NV2A_SGPU_MESH_REGS );
 		memcpy( nv2a_sgpu_mesh_shadow, mesh_consts, sizeof( nv2a_sgpu_mesh_shadow ));
 		nv2a_sgpu_mesh_valid = true;
+		nv2a_wgpu_params_valid = false; /* R5: c[10..12] are the water's too */
 	}
 	nv2a_blk_room( &b, 22 + NV2A_STAGE0_DWORDS );
 	p = b.p;
@@ -7966,6 +8098,280 @@ void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_
    Same gate as Begin (renderer, frame and camera ready); the colour is
    the current Color4ub/Color4f, as Vertex3f takes it. */
 static void nv2a_2d_append( nv2a_imm_space_t space, uint32_t op, const void *verts, uint32_t n );
+
+/*
+========================================================================
+R5 (divergences.md #147): the water warp on the vertex unit
+========================================================================
+
+r_warp.c keeps each map's water pieces in one static vertex buffer
+(nv2a_warp_gpu_vertex_t: model-space position and the two texinfo dot
+products) and draws them through these, with vs_warp doing
+EmitWaterPolys' per-vertex wave and texture warp in place of
+R_WarpEmitSurface's CPU loop and nv2a_tri_append_3d. One begin/end pair
+draws one entity's water faces, or the world chain's, under the state the
+TriAPI flush would have drawn the same faces under (the same render state
+from nv2a_2d_desired, the same stage 0 from nv2a_2d_resolve_batch_key, the
+same fog, ps_2d), in the same order: anything the TriAPI holds is flushed
+first, and the faces are drawn as they come. */
+
+static float              nv2a_wgpu_params_shadow[NV2A_WARP_GPU_PARAM_REGS][4];
+static nv2a_2d_batch_key_t nv2a_wgpu_key;
+static qboolean           nv2a_wgpu_key_valid;
+static qboolean           nv2a_wgpu_active;
+
+/* One pbkit block shared by everything a begin/end pair pushes after its
+   state - the parameters, the texture stages and every face's draws - so
+   a face costs dwords, not a pb_end of its own (a write-combining flush
+   and an MMIO spin, pbkit.c pb_start; console-performance-specialist, R5
+   review). Closed and reopened before it would pass 128 dwords
+   (nv2a_blk_room). Nothing else pushes between begin and end: r_warp.c
+   only selects the next texture (nv2a_tri_bind_map_texture, a variable). */
+static nv2a_pb_block_t    nv2a_wgpu_blk;
+
+qboolean nv2a_wgpu_begin( const void *vb, const float (*mvp)[4] )
+{
+	nv2a_pb_block_t *b = &nv2a_wgpu_blk;
+	const uint32_t base = (uint32_t)vb & 0x03ffffff;
+	uint32_t *p;
+	int i;
+
+	/* Begin()'s own gate, and no view-model depth range (water is never
+	   the view model's). */
+	if( !nv2a_ready || !nv2a_frame_open || nv2a_in2d || !nv2a_view_valid || !vb || nv2a_2d_desired.viewmodel_depthrange )
+		return false;
+
+	/* Whatever the TriAPI holds draws first, under its own state. */
+	nv2a_2d_flush();
+
+	nv2a_select_warp_program();
+	nv2a_select_pixel_program( NV2A_PS_2D );
+	nv2a_resident_program = NV2A_RESIDENT_WARP; /* the TriAPI and the studio path re-enter after this */
+	nv2a_sgpu_entered = false;
+	nv2a_lit_state_current = false;
+	nv2a_2d_dirty = true;
+	nv2a_2d_pushed_valid = false;
+	nv2a_2d_pushed_base_valid = false;
+
+	nv2a_push_fog( &nv2a_fog_current );
+
+	/* The TriAPI re-entry's common state (stage 1 off, alpha function and
+	   reference, every array format reset - so the studio path's
+	   attributes 1 and 2 are off), the render state nv2a_2d_flush pushes
+	   for a 3D batch, from the desired state the faces were "appended"
+	   under, and the water buffer on attributes 0 and 9
+	   (nv2a_set_attrib_pointer's words). */
+	nv2a_blk_open( b );
+	nv2a_blk_room( b, 6 + 17 + 18 + 8 + 2 );
+	p = b->p;
+	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0 + 0x40, 0 );
+	p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER );
+	p = pb_push1( p, NV097_SET_ALPHA_REF, nv2a_2d_desired.alpha_ref );
+	pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
+	for( i = 0; i < 16; i++ )
+		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
+	p = pb_push1( p, NV097_SET_BLEND_ENABLE, nv2a_2d_desired.blend_enable ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, nv2a_2d_desired.sfactor );
+	p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, nv2a_2d_desired.dfactor );
+	p = pb_push1( p, NV097_SET_BLEND_EQUATION, NV097_SET_BLEND_EQUATION_V_FUNC_ADD );
+	p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, nv2a_2d_desired.alpha_test_enable ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_DEPTH_MASK, nv2a_2d_desired.depth_mask ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, nv2a_2d_desired.cull_enable ? 1 : 0 );
+	p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, nv2a_2d_desired.depth_test_disable ? 0 : 1 );
+	p = pb_push1( p, NV097_SET_DEPTH_FUNC, nv2a_2d_desired.depth_func_equal ? NV097_SET_DEPTH_FUNC_V_EQUAL : NV097_SET_DEPTH_FUNC_V_LEQUAL );
+	p = pb_push1( p, NV097_SET_VERTEX_DATA_ARRAY_FORMAT + 0 * 4,
+		MASK( NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F )
+		| MASK( NV097_SET_VERTEX_DATA_ARRAY_FORMAT_SIZE, 3 )
+		| MASK( NV097_SET_VERTEX_DATA_ARRAY_FORMAT_STRIDE, NV2A_WARP_GPU_VERTEX_BYTES ));
+	p = pb_push1( p, NV097_SET_VERTEX_DATA_ARRAY_OFFSET + 0 * 4, base );
+	p = pb_push1( p, NV097_SET_VERTEX_DATA_ARRAY_FORMAT + 9 * 4,
+		MASK( NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F )
+		| MASK( NV097_SET_VERTEX_DATA_ARRAY_FORMAT_SIZE, 2 )
+		| MASK( NV097_SET_VERTEX_DATA_ARRAY_FORMAT_STRIDE, NV2A_WARP_GPU_VERTEX_BYTES ));
+	p = pb_push1( p, NV097_SET_VERTEX_DATA_ARRAY_OFFSET + 9 * 4, base + 12 );
+	p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
+	b->p = p;
+
+	/* c[0..3]: the entity's model-view-projection, or the world's. */
+	nv2a_blk_consts( b, NV2A_SGPU_HW_C0 + NV2A_WARP_GPU_C_MVP, mvp ? mvp : (const float (*)[4])nv2a_map_viewproj, 4 );
+
+	/* The sine table, when the studio path wrote over it (or a new frame
+	   started); its palette's rows there are gone after this. */
+	if( !nv2a_wgpu_table_valid )
+	{
+		static float table[NV2A_WARP_GPU_TABLE_REGS][4];
+		static qboolean table_built;
+
+		if( !table_built )
+		{
+			nv2a_warp_gpu_table( table );
+			table_built = true;
+		}
+		nv2a_blk_consts( b, NV2A_WARP_GPU_TABLE_HW, (const float (*)[4])table, NV2A_WARP_GPU_TABLE_REGS );
+		nv2a_wgpu_table_valid = true;
+		nv2a_sgpu_pal_valid_count = 0;
+	}
+
+	nv2a_wgpu_key_valid = false;
+	nv2a_wgpu_active = true;
+	NV2A_FT_ADD( XBOX_FT_W_DRAWS, 1 );
+	return true;
+}
+
+/* c[5..12] (nv2a_warp_gpu_params) when they differ from what is there. */
+void nv2a_wgpu_set_params( const float params[NV2A_WARP_GPU_PARAM_REGS][4] )
+{
+	if( !nv2a_wgpu_active )
+		return;
+	if( nv2a_wgpu_params_valid && !memcmp( params, nv2a_wgpu_params_shadow, sizeof( nv2a_wgpu_params_shadow )))
+		return;
+
+	nv2a_blk_consts( &nv2a_wgpu_blk, NV2A_SGPU_HW_C0 + NV2A_WARP_GPU_C_PARAMS, params, NV2A_WARP_GPU_PARAM_REGS );
+	memcpy( nv2a_wgpu_params_shadow, params, sizeof( nv2a_wgpu_params_shadow ));
+	nv2a_wgpu_params_valid = true;
+	nv2a_sgpu_submodel_valid = false; /* c[5..9] */
+	nv2a_sgpu_mesh_valid = false;     /* c[10..12] */
+}
+
+/* A face's wave height: the one parameter that changes within a begin/end
+   (EmitWaterPolys picks its sign per face, gl_rsurf.c:934-937). Only its
+   register, c[10], is pushed, and only when it changes. Call after
+   nv2a_wgpu_set_params. */
+void nv2a_wgpu_set_wave_height( float waveHeight )
+{
+	const uint32_t r = NV2A_WARP_GPU_WAVE_REG - NV2A_WARP_GPU_C_PARAMS;
+
+	if( !nv2a_wgpu_active || !nv2a_wgpu_params_valid )
+		return;
+	if( nv2a_wgpu_params_shadow[r][2] == waveHeight )
+		return;
+
+	nv2a_wgpu_params_shadow[r][2] = waveHeight;
+	nv2a_blk_consts( &nv2a_wgpu_blk, NV2A_SGPU_HW_C0 + NV2A_WARP_GPU_WAVE_REG, (const float (*)[4])nv2a_wgpu_params_shadow[r], 1 );
+}
+
+/* Stage 0 for the texture the next faces draw with - the map directory
+   texture nv2a_tri_bind_map_texture selected, or GL_Bind's - when it
+   differs from the last one this draw pushed. False when there is none
+   (the face is skipped, as nv2a_2d_append skips it). vs_warp writes the
+   coordinates EmitWaterPolys gives, normalized: right for a directory
+   texture (DXT1, sized by BASE_SIZE, divergences.md #100); the only
+   GL_Bind texture the water uses is the white one of a kRenderTransColor
+   entity (R_WarpDrawBrushEntity), which is one colour wherever it is
+   sampled, so no texel scale is applied (the TriAPI's linear-texture
+   scale, nv2a_tex_coord_scale, is not). */
+qboolean nv2a_wgpu_bind( void )
+{
+	nv2a_2d_batch_key_t key;
+	nv2a_pb_block_t *b = &nv2a_wgpu_blk;
+
+	if( !nv2a_wgpu_active || !nv2a_2d_resolve_batch_key( &key ))
+		return false;
+	if( nv2a_wgpu_key_valid && !memcmp( &key, &nv2a_wgpu_key, sizeof( key )))
+		return true;
+
+	nv2a_blk_room( b, NV2A_STAGE0_DWORDS );
+	b->p = nv2a_emit_stage0( b->p, &key );
+	b->load_next = 0xFFFFFFFFu;
+	nv2a_wgpu_key = key;
+	nv2a_wgpu_key_valid = true;
+	return true;
+}
+
+/* `count` vertices from `first` as quads (a face whose pieces are all
+   quads, drawn forward: GL_QUADS, gl_rsurf.c:943): DRAW_ARRAYS of up to
+   256 (the COUNT field's 8 bits, nv_regs.h:520 - whole quads), up to 40
+   in one BEGIN/END. */
+void nv2a_wgpu_draw_quads( uint32_t first, uint32_t count )
+{
+	nv2a_pb_block_t *b = &nv2a_wgpu_blk;
+
+	if( !nv2a_wgpu_active )
+		return;
+
+	while( count >= 4 )
+	{
+		uint32_t *p;
+		uint32_t calls = 0;
+
+		nv2a_blk_room( b, 4 + 2 * 40 );
+		p = pb_push1( b->p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_QUADS );
+		while( count >= 4 && calls < 40 )
+		{
+			uint32_t n = count > 256 ? 256 : count & ~3u;
+
+			p = pb_push1( p, 0x40000000 | NV097_DRAW_ARRAYS,
+				MASK( NV097_DRAW_ARRAYS_COUNT, n - 1 ) | MASK( NV097_DRAW_ARRAYS_START_INDEX, first ));
+			first += n;
+			count -= n;
+			calls++;
+		}
+		b->p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
+		NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
+	}
+}
+
+/* `n` indices into the buffer as quads or triangles (reversed faces, and
+   the triangle fans GL_POLYGON draws as), whole primitives per BEGIN/END:
+   two 16-bit indices a dword through ARRAY_ELEMENT16 (low half first), an
+   odd last one alone through ARRAY_ELEMENT32 - the shape of
+   nv2a_draw_exact_indices. At most 228 indices a BEGIN/END (76 triangles,
+   57 quads): 2 + 1 + 114 + 2 + 2 dwords, under pbkit's 128. */
+void nv2a_wgpu_draw_indices( qboolean quads, const uint16_t *idx, uint32_t n )
+{
+	nv2a_pb_block_t *b = &nv2a_wgpu_blk;
+
+	if( !nv2a_wgpu_active )
+		return;
+
+	while( n > 0 )
+	{
+		uint32_t m = n > 228 ? 228 : n, k;
+		uint32_t *p;
+
+		nv2a_blk_room( b, 2 + 1 + m / 2 + 2 + 2 );
+		p = pb_push1( b->p, NV097_SET_BEGIN_END, quads ? NV097_SET_BEGIN_END_OP_QUADS : NV097_SET_BEGIN_END_OP_TRIANGLES );
+		if( m >= 2 )
+		{
+			pb_push( p++, 0x40000000 | NV097_ARRAY_ELEMENT16, m / 2 );
+			for( k = 0; k + 1 < m; k += 2 )
+				*( p++ ) = (uint32_t)idx[k] | ((uint32_t)idx[k + 1] << 16 );
+		}
+		if( m & 1 )
+			p = pb_push1( p, NV097_ARRAY_ELEMENT32, idx[m - 1] );
+		b->p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
+		NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
+
+		idx += m;
+		n -= m;
+	}
+}
+
+/* Closes the shared block, then nv2a_2d_flush's own tail: the world and
+   brush-entity path assume the depth test on with LEQUAL and never write
+   either. */
+void nv2a_wgpu_end( void )
+{
+	nv2a_pb_block_t *b = &nv2a_wgpu_blk;
+
+	if( !nv2a_wgpu_active )
+		return;
+	nv2a_wgpu_active = false;
+
+	if( nv2a_2d_desired.depth_test_disable || nv2a_2d_desired.depth_func_equal )
+	{
+		nv2a_blk_room( b, 4 );
+		b->p = pb_push1( b->p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
+		b->p = pb_push1( b->p, NV097_SET_DEPTH_FUNC, NV097_SET_DEPTH_FUNC_V_LEQUAL );
+	}
+	nv2a_blk_close( b );
+}
+
+/* The current Color4ub/Color4f colour, as Vertex3f takes it. */
+void nv2a_tri_current_color( uint8_t rgba[4] )
+{
+	memcpy( rgba, nv2a_2d_color, 4 );
+}
 
 void nv2a_tri_append_3d( qboolean quads, nv2a_tri_vert_t *v, uint32_t n )
 {
@@ -8799,6 +9205,9 @@ static void nv2a_try_pending_upload( void )
 	{
 		nv2a_pending_upload.pending = false;
 		nv2a_map_ready = true;
+		/* R5 (#147): the water's static vertex buffer, after the map's own
+		   (its bytes are in the ledger above, R_WarpGpuMapBytes). */
+		R_WarpGpuNewMap( nv2a_map_owner );
 	}
 	else if( nv2a_pending_upload.retried )
 	{

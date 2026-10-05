@@ -8,6 +8,7 @@
 #include "formats/VfsIndexer.h"
 #include "formats/UiPacker.h"
 #include "formats/Nv2aMapFit.h"
+#include "formats/Nv2aWater.h" // R5: the water pieces in the engine's world bytes
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -561,6 +562,23 @@ int main(int argc, char *argv[]) {
                 std::memcpy(&textures, miptex.data(), sizeof(textures));
             lumps.textures = textures > 0 ? static_cast<uint32_t>(textures) : 0u;
             lumps.miptex = formats::nv2aHeaderOnlyMiptexBytes(lumps.textures);
+            {
+                // R5: the water's CPU-side pieces, counted from the source
+                // lumps the engine will load (Nv2aWater.h).
+                formats::Nv2aWaterLumps w;
+                const auto& faces = bsp.getLumpData(formats::LUMP_FACES);
+                const auto& surfedges = bsp.getLumpData(formats::LUMP_SURFEDGES);
+                const auto& edges = bsp.getLumpData(formats::LUMP_EDGES);
+                const auto& vertexes = bsp.getLumpData(formats::LUMP_VERTICES);
+                const auto& texinfo = bsp.getLumpData(formats::LUMP_TEXINFO);
+                w.faces = faces.data(); w.facesLen = faces.size();
+                w.surfedges = surfedges.data(); w.surfedgesLen = surfedges.size();
+                w.edges = edges.data(); w.edgesLen = edges.size();
+                w.vertexes = vertexes.data(); w.vertexesLen = vertexes.size();
+                w.texinfo = texinfo.data(); w.texinfoLen = texinfo.size();
+                w.miptex = miptex.data(); w.miptexLen = miptex.size();
+                lumps.waterPolyBytes = formats::nv2aWaterCount(w).polyBytes;
+            }
             const auto& ents = bsp.getLumpData(formats::LUMP_ENTITIES);
             const uint32_t peak = formats::nv2aPeakEdicts(reinterpret_cast<const char*>(ents.data()), ents.size());
             const uint32_t maxEdicts = readGameMaxEdicts(gameDir);

@@ -89,6 +89,7 @@ VERTS = "verts"             # derived counter: the sum of every v_* counter
 WORK_TABLE = [("draws", "Draws"), ("prims", "Prims"), ("pb_dwords", "PB KiB"), ("tex_binds", "Tex binds"),
               (VERTS, "Verts"), ("v_studio", "Studio verts"), ("world_faces", "World faces"), ("world_walked", "Faces walked"),
               ("studio_models", "Models"), ("lm_texels", "LM texels"), ("water_verts", "Water verts"),
+              ("water_gpu", "Water GPU"), ("vp_loads", "VP loads"),
               ("decals", "Decals"), ("particles", "Particles")]
 PAGE_BYTES = 4096
 

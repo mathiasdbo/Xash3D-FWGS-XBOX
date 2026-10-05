@@ -2005,3 +2005,16 @@ to do: every mixer span read about zero in xemu while the console spent
 1.5 ms there. **When a span is an order of magnitude smaller in the
 emulator than on hardware, first prove the workload runs there (count its
 calls or its samples), and only then compare times.**
+
+### NEVER trust a scripted A/B switch without a per-frame counter that proves which side ran
+
+R5 (x9-perf-water): the "CPU path" recording set `r_warp_gpu 0` at the top
+of the config, before the first `map`. ref/nv2a registers that cvar on
+its first map load, so the line was an unknown command, the cvar came up
+at its default 1, and the "before" run measured the GPU path: the two
+recordings agreed to the hundredth of a millisecond, which read like "no
+gain" until `water_gpu` equalled `water_verts` in both. **Give every
+switch a counter that only one side increments, and read it on both
+recordings before comparing their times; set a cvar after the code that
+registers it has run.** The screenshot A/B of the same change was valid
+only because it was checked the same way, frame by frame.

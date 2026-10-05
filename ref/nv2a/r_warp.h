@@ -52,7 +52,17 @@ void R_WarpDrawWaterSurfaces( int rvp_flags );
    gl_rsurf.c:1717). `blend` is tr.blend. The object transform is the
    entity's origin and angles. */
 void R_WarpAddBrushSurface( struct msurface_s *surf, qboolean reverse );
-void R_WarpDrawBrushEntity( struct cl_entity_s *e, float blend, qboolean rotated );
+void R_WarpDrawBrushEntity( struct cl_entity_s *e, float blend, qboolean rotated, const float mvp[4][4] );
+
+/* R5 (divergences.md #147): the bytes R_WarpNewMap's static water vertex
+   buffer takes for this world - the term ref/nv2a's per-map ledger and
+   the baker's (Nv2aMapBudget.h) both add. */
+uint32_t R_WarpGpuMapBytes( const struct model_s *world );
+
+/* R5: builds that buffer for `world`, replacing any previous one - once the
+   map's own GPU buffers are in place (r_context.c nv2a_try_pending_upload);
+   R_WarpFreeMap frees it. */
+void R_WarpGpuNewMap( const struct model_s *world );
 
 /* The frame's fog, in the reference's order within R_RenderScene
    (gl_rmain.c:945-980): R_WarpSetupFrame is R_SetupFrame's

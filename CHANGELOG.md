@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: water warps on the GPU's vertex unit
+
+The water warp (the waves and the swirling texture of every water, slime
+and laser surface) was computed on the CPU for every water vertex every
+frame: on the console it cost 2.73 ms a frame on c1a1b, the slowest map.
+Each map's water is now copied once, at load, into a vertex buffer, and a
+new vertex program on the GPU does the per-vertex work; the CPU only sends
+the draws. It is the reference's own stepped wave, not a smoothed one -
+the same sine table, the same truncation of negative values - and in
+xemu, screenshots at eight fixed spots (still and moving water, seen from
+above and below, opaque and translucent) are pixel-identical to the CPU
+path. In xemu the water's own time went from 1.31 to 0.04 ms on c1a1b,
+0.51 to 0.05 on c2a2a and 0.95 to 0.07 on c1a4g; the console's figure
+needs a hardware run. The buffer costs 20 bytes per water vertex (0.95
+MiB on disposal, the largest), counted in the map budget, and the bake
+now also counts the CPU-side water data that was never budgeted. The CPU
+path stays behind `r_warp_gpu 0`, and two new frame-time counters show
+how much water the GPU drew and how often the water program was loaded.
+
 ### Changed - Xbox: the world pass visits only the faces in view of the player's area, and the 3D scene in the frame-time spans
 
 On the console the world pass cost 1.7-2.3 ms a frame on every map. Eight

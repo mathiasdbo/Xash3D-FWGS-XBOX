@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(AssetStudio LANGUAGES CXX)
+project(AssetStudio LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,7 +17,17 @@ add_library(AssetStudioFormats STATIC
     src/formats/BmpParser.cpp
     src/utils/TextureOpt.cpp
     src/utils/rgbcx.cpp
+    src/formats/Nv2aWater.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../ref/nv2a/nv2a_warp_util.c
 )
+# R5 (docs/r3d/divergences.md #147): the baker counts a map's water vertices
+# with the renderer's own subdivision and water-texture rule
+# (src/formats/Nv2aWater.h), so the C file is compiled here as it is in
+# ref/nv2a. Its include paths are scoped to the two files that need them:
+# ref/nv2a for nv2a_warp_util.h, engine/ for the sine table it includes
+# (warpsin.h).
+set_source_files_properties(src/formats/Nv2aWater.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../../ref/nv2a/nv2a_warp_util.c
+    PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../ref/nv2a;${CMAKE_CURRENT_SOURCE_DIR}/../../engine")
 # ../../filesystem: shares filesystem/mpak_texture_dir.h's v10 texture-
 # directory rule (chain length, 128-byte padding) with the C reader
 # (ref/nv2a) and the PC tests, rather than PakManager.cpp keeping its own

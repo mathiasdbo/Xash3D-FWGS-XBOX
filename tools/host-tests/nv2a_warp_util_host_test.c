@@ -164,7 +164,7 @@ static void test_subdivide_limit( void )
 	CHECK( p.count == 0 );
 }
 
-/* EmitWaterPolys' wave (gl_rsurf.c:959-964) at (0, 0, 10), time 0: both
+/* EmitWaterPolys' wave (gl_rsurf.c:961-967) at (0, 0, 10), time 0: both
    sine indices are 0, so nv = ( 0 + 8 ) * 0.8 + ( 0 + 8 ) = 14.4 and
    z = 14.4 * waveHeight + 10. waveHeight 0 leaves z alone. At time 0.1
    and (1, 2): index 1 = (int)( 16 + 3 ) = 19 -> 1.798445; index 2 =
@@ -181,7 +181,7 @@ static void test_wave( void )
 	CHECK( NEAR( nv2a_warp_wave_z( w, 0.1, 1.0f ), 5.0 + 17.706913 ));
 }
 
-/* EmitWaterPolys' coordinates (gl_rsurf.c:966-984), time 0: (64, 0) ->
+/* EmitWaterPolys' coordinates (gl_rsurf.c:969-984), time 0: (64, 0) ->
    s = 64 + r_turbsin[(int)( 0 * TURBSCALE )] = 64, t = 0 +
    r_turbsin[(int)( 8 * 40.74366 ) & 255] = r_turbsin[325 & 255 = 69] =
    3.969920; both / 64. With ripples the coordinates are only divided. */
@@ -252,6 +252,177 @@ static void test_frame_agreement( void )
 	CHECK( differ * 1000 < total ); /* under 0.1 % */
 }
 
+/* R5: vs_warp's quarter table folds back to engine/warpsin.h exactly -
+   r_turbsin[j] == sign * r_turbsin[min( j', 128 - j' )], j' = j mod 128,
+   sign -1 from 128 on - for all 256 entries, with no rounding. */
+static void test_gpu_table_fold( void )
+{
+	float table[NV2A_WARP_GPU_TABLE_REGS][4];
+	int j, bad = 0;
+
+	nv2a_warp_gpu_table( table );
+	for( j = 0; j < 256; j++ )
+	{
+		const int h = j >= 128;
+		const int j2 = j - 128 * h;
+		const int k = j2 < 128 - j2 ? j2 : 128 - j2;
+		const float v = ( h ? -1.0f : 1.0f ) * table[k][0];
+
+		if( v != nv2a_warp_turbsin( j ))
+			bad++;
+	}
+	CHECK( bad == 0 );
+	CHECK( table[64][0] == 4.0f && table[0][1] == 0.0f );
+}
+
+/* Mod_LooksLikeWaterTexture, mod_bmodel.c:2579-2591. */
+static void test_looks_like_water( void )
+{
+	CHECK( nv2a_warp_looks_like_water( "!waterblue" ));
+	CHECK( nv2a_warp_looks_like_water( "*lava1" ));
+	CHECK( !nv2a_warp_looks_like_water( "*default" ));
+	CHECK( nv2a_warp_looks_like_water( "water4b" ));
+	CHECK( !nv2a_warp_looks_like_water( "WATER4b" )); /* Q_strncmp: case-sensitive */
+	CHECK( nv2a_warp_looks_like_water( "LASER1" ));   /* Q_strnicmp: not */
+	CHECK( nv2a_warp_looks_like_water( "laserbeam" ));
+	CHECK( !nv2a_warp_looks_like_water( "lase" ));
+	CHECK( !nv2a_warp_looks_like_water( "{water" ));
+	CHECK( !nv2a_warp_looks_like_water( "sky" ));
+}
+
+static void test_gpu_bytes( void )
+{
+	CHECK( nv2a_warp_gpu_bytes( 0 ) == 0 );
+	CHECK( nv2a_warp_gpu_bytes( 49836 ) == 49836u * 20u );
+	CHECK( nv2a_warp_gpu_bytes( 1000000 ) == NV2A_WARP_GPU_MAX_VERTS * 20u );
+	CHECK( sizeof( nv2a_warp_gpu_vertex_t ) == NV2A_WARP_GPU_VERTEX_BYTES );
+}
+
+/* A vertex coordinate: integers, halves and quarters (brush vertices and
+   the 64-grid cuts), and arbitrary floats (a cut's interpolated points). */
+static float rand_coord( unsigned *s, int range )
+{
+	const int kind = (int)( lcg( s ) % 4 );
+	const int i = (int)( lcg( s ) % ( 2 * range )) - range;
+
+	if( kind == 0 )
+		return (float)i;
+	if( kind == 1 )
+		return (float)i * 0.5f;
+	if( kind == 2 )
+		return (float)i * 0.25f;
+	return (float)i + (float)( lcg( s ) % 1000000 ) / 1000000.0f;
+}
+
+/* A client time: the first seconds of a map (the sums go below zero, so
+   C's truncation toward zero matters), a play session, and a very long
+   one (the bases pass 2^20). */
+static double rand_time( unsigned *s )
+{
+	switch( lcg( s ) % 4 )
+	{
+	case 0:  return ( lcg( s ) % 3000 ) / 1000.0;
+	case 1:  return 1.0 + ( lcg( s ) % 600000 ) / 1000.0;
+	case 2:  return ( lcg( s ) % 7200000 ) / 1000.0;
+	default: return 30000.0 + ( lcg( s ) % 70000000 ) / 1000.0;
+	}
+}
+
+/* R5: vs_warp, emulated instruction for instruction, against the CPU
+   path (nv2a_warp_wave_z_frame, nv2a_warp_texcoord_frame) - the same
+   float operations in the same order, so every result must be identical -
+   and against the reference's own double expressions
+   (nv2a_warp_wave_z/nv2a_warp_texcoord, gl_rsurf.c:961-984), which the
+   float sums can only miss by one table step at an index boundary. */
+static void test_gpu_emulation( void )
+{
+	static const float heights[] = { 0.0f, 1.0f, -1.0f, 8.0f, -8.0f, 16.0f, -3.5f };
+	float table[NV2A_WARP_GPU_TABLE_REGS][4];
+	const uint8_t white[4] = { 255, 255, 255, 255 };
+	unsigned seed = 4242u;
+	long total = 0, cpu_differ = 0, ref_differ = 0, ref_far = 0, negative = 0;
+	int k;
+
+	nv2a_warp_gpu_table( table );
+	for( k = 0; k < 400000; k++ )
+	{
+		const double time = rand_time( &seed );
+		const float wh = heights[lcg( &seed ) % ( sizeof( heights ) / sizeof( heights[0] ))];
+		float params[NV2A_WARP_GPU_PARAM_REGS][4];
+		nv2a_warp_gpu_vertex_t v;
+		nv2a_warp_frame_t fr;
+		float gz, gst[2], cz, cst[2], rz, rst[2];
+
+		v.xyz[0] = rand_coord( &seed, 4096 );
+		v.xyz[1] = rand_coord( &seed, 4096 );
+		v.xyz[2] = rand_coord( &seed, 4096 );
+		v.os = rand_coord( &seed, 32768 );
+		v.ot = rand_coord( &seed, 32768 );
+		if( time * 160.0 + v.xyz[1] + v.xyz[0] < 0.0 || ( v.ot * 0.125 + time ) < 0.0 )
+			negative++;
+
+		nv2a_warp_frame_init( &fr, time );
+		nv2a_warp_gpu_params( &fr, wh, white, params );
+		nv2a_warp_gpu_emulate( (const float (*)[4])params, (const float (*)[4])table, &v, &gz, gst );
+
+		cz = nv2a_warp_wave_z_frame( &fr, v.xyz, wh );
+		nv2a_warp_texcoord_frame( &fr, v.os, v.ot, cst );
+		rz = nv2a_warp_wave_z( v.xyz, time, wh );
+		nv2a_warp_texcoord( v.os, v.ot, time, 0, rst );
+
+		total += 3;
+		cpu_differ += ( gz != cz ) + ( gst[0] != cst[0] ) + ( gst[1] != cst[1] );
+		if( gz != rz ) { ref_differ++; if( fabs( gz - rz ) > fabs( wh ) * 0.25 + 1e-3 ) ref_far++; }
+		if( gst[0] != rst[0] ) { ref_differ++; if( fabs( gst[0] - rst[0] ) * 64.0 > 0.25 ) ref_far++; }
+		if( gst[1] != rst[1] ) { ref_differ++; if( fabs( gst[1] - rst[1] ) * 64.0 > 0.25 ) ref_far++; }
+	}
+	printf( "nv2a_warp_util: vs_warp emulation: %ld of %ld results differ from the CPU path; "
+		"%ld from the reference's double sums (%ld more than one step); %ld vertices with a negative sum\n",
+		cpu_differ, total, ref_differ, ref_far, negative );
+	CHECK( cpu_differ == 0 );
+	CHECK( ref_far == 0 );
+	/* Under 0.5 %: the float sums' rounding grows with the operands, and
+	   this sweep reaches texture coordinates of 32768 (an index sum near
+	   170,000, whose float spacing is 1/64); the CPU path shares every
+	   one of these, by the first check. */
+	CHECK( ref_differ * 200 < total );
+	CHECK( negative > 10000 );
+}
+
+/* Worked by hand against gl_rsurf.c:961-984 at time 1.0, where the sums
+   are negative: v = ( -300.5, -200.25, 7 ), waveHeight 2:
+   i1 = (int)( 160 - 200.25 - 300.5 ) = (int)( -340.75 ) = -340 -> & 255 = 172
+   i2 = (int)( -1502.5 + 171 + 200.25 ) = (int)( -1131.25 ) = -1131 -> 149
+   r_turbsin[172] = -r_turbsin[44] = -3.527685, r_turbsin[149] =
+   -r_turbsin[21] = -1.971595; nv = ( 6.028405 * 0.8 ) + 4.472315 =
+   9.295039; z = 7 + 18.590078. A floor instead of the truncation would
+   read entries 171 and 148 instead. */
+static void test_gpu_negative( void )
+{
+	float table[NV2A_WARP_GPU_TABLE_REGS][4];
+	float params[NV2A_WARP_GPU_PARAM_REGS][4];
+	const uint8_t c[4] = { 255, 128, 0, 51 };
+	nv2a_warp_gpu_vertex_t v = { { -300.5f, -200.25f, 7.0f }, 0.0f, 0.0f };
+	nv2a_warp_frame_t fr;
+	float z, st[2];
+
+	nv2a_warp_gpu_table( table );
+	nv2a_warp_frame_init( &fr, 1.0 );
+	nv2a_warp_gpu_params( &fr, 2.0f, c, params );
+	nv2a_warp_gpu_emulate( (const float (*)[4])params, (const float (*)[4])table, &v, &z, st );
+	CHECK( NEAR( z, 7.0 + 18.590078 ));
+	CHECK( params[7][1] == 128.0f / 255.0f && params[7][3] == 51.0f / 255.0f );
+
+	/* An exactly integral negative sum truncates to itself: time 0,
+	   x + y = -256 -> index -256 & 255 = 0 -> r_turbsin[0] = 0; the
+	   second index (int)( -640 - 128 ) = -768 & 255 = 0 too. */
+	v.xyz[0] = -128.0f; v.xyz[1] = -128.0f; v.xyz[2] = 0.0f;
+	nv2a_warp_frame_init( &fr, 0.0 );
+	nv2a_warp_gpu_params( &fr, 1.0f, c, params );
+	nv2a_warp_gpu_emulate( (const float (*)[4])params, (const float (*)[4])table, &v, &z, st );
+	CHECK( z == 8.0f * 0.8f + 8.0f );
+}
+
 /* The hardware's own fog formulas (header): EXP x + 2^( d * y * 16 ) - 1.5
    must give e^( -density * d ), EXP2 x + 2^( -d^2 * y^2 * 32 ) - 1.5
    e^( -( density * d )^2 ); LINEAR x + d * y - 1 must give
@@ -297,6 +468,11 @@ int main( void )
 	test_texcoord();
 	test_trunc_sum();
 	test_frame_agreement();
+	test_gpu_table_fold();
+	test_looks_like_water();
+	test_gpu_bytes();
+	test_gpu_emulation();
+	test_gpu_negative();
 	test_fog_params();
 	test_fog_color();
 

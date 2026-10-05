@@ -17,6 +17,7 @@ r_context.c-owned globals it needs to read/write.
 #include "xash3d_types.h"
 #include "triangleapi.h" /* TRICULLSTYLE */
 #include "nv2a_tri_util.h" /* nv2a_tri_vert_t, X9-X step 11 */
+#include "nv2a_warp_util.h" /* NV2A_WARP_GPU_PARAM_REGS, R5 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -184,6 +185,26 @@ void nv2a_tri_flush( void );
    coordinates are in the bound texture's units (normalized for a map
    directory texture). */
 void nv2a_tri_append_3d( qboolean quads, nv2a_tri_vert_t *v, uint32_t n );
+
+/* R5 (divergences.md #147): r_warp.c's water through vs_warp instead of
+   nv2a_tri_append_3d - r_context.c's half (the program, the constants and
+   the GPU state). One nv2a_wgpu_begin/nv2a_wgpu_end pair draws one
+   entity's, or the world chain's, water faces from the map's static water
+   buffer `vb`, transformed by `mvp` (NULL: the world's view-projection),
+   under the current desired state, fog and colour; per face the
+   parameters (nv2a_warp_gpu_params), the texture (the map directory entry
+   or GL_Bind's, as the TriAPI resolves it; false: none, skip the face) and
+   the draws. nv2a_wgpu_begin is false when the frame cannot take a draw. */
+qboolean nv2a_wgpu_begin( const void *vb, const float (*mvp)[4] );
+void nv2a_wgpu_set_params( const float params[NV2A_WARP_GPU_PARAM_REGS][4] );
+void nv2a_wgpu_set_wave_height( float waveHeight );
+qboolean nv2a_wgpu_bind( void );
+void nv2a_wgpu_draw_quads( uint32_t first, uint32_t count );
+void nv2a_wgpu_draw_indices( qboolean quads, const uint16_t *idx, uint32_t n );
+void nv2a_wgpu_end( void );
+
+/* The current Color4ub/Color4f colour, as Vertex3f takes it. */
+void nv2a_tri_current_color( uint8_t rgba[4] );
 
 #ifdef __cplusplus
 }

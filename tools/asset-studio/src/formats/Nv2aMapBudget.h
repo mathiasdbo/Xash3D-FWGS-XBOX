@@ -110,7 +110,12 @@ namespace formats {
             + faces * kNv2aPvsListFaceBytes;
     }
 
-    inline uint64_t nv2aMapLedgerBytes(const MpakHeader6& h) {
+    // R5 (divergences.md #147): `waterGpuBytes` is the water's static vertex
+    // buffer (Nv2aWater.h nv2aWaterGpuBytes of the map's water vertices),
+    // which ref/nv2a builds at R_NewMap after the other GPU buffers and keeps
+    // for the whole map - a GPU-side term, as r_context.c adds it. Not in
+    // the header, so the caller computes it from the map's lumps.
+    inline uint64_t nv2aMapLedgerBytes(const MpakHeader6& h, uint64_t waterGpuBytes = 0) {
         const uint64_t vbBytes = static_cast<uint64_t>(h.vCount) * kNv2aLitVertexBytes;
         // X9-T: the peak, as ref/nv2a now computes it - the tables live on,
         // the engine's buffer and the load's temporaries live only while
@@ -124,7 +129,8 @@ namespace formats {
         const uint64_t tables = nv2aMapTableBytes(h);
         const uint64_t gpu = vbBytes
             + static_cast<uint64_t>(h.lenTextureData)
-            + static_cast<uint64_t>(h.lenLightmapAtlas);
+            + static_cast<uint64_t>(h.lenLightmapAtlas)
+            + waterGpuBytes;
         const uint64_t load = static_cast<uint64_t>(h.vCount) * kNv2aPositionBytes
             + static_cast<uint64_t>(h.lenFaceDrawCmds) + static_cast<uint64_t>(h.lenFaceVertexBase)
             + static_cast<uint64_t>(h.lenFaceRemap) + static_cast<uint64_t>(h.lenTextureDir)

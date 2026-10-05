@@ -133,7 +133,7 @@ enum
 	XBOX_FT_W_STUDIO_TRIS,   /* studio mesh triangles drawn */
 	XBOX_FT_W_LM_FACES,      /* lightmap faces rebuilt (divergences.md #162) */
 	XBOX_FT_W_LM_TEXELS,     /* lightmap texels (luxels) rebuilt */
-	XBOX_FT_W_WATER_VERTS,   /* water vertices warped on the CPU (#166) */
+	XBOX_FT_W_WATER_VERTS,   /* water vertices drawn, warped on the CPU (#166) or the GPU (R5: water_gpu) */
 	XBOX_FT_W_DECALS,        /* decals drawn (#167) */
 	XBOX_FT_W_PARTICLES,     /* particles drawn (#161) */
 	XBOX_FT_W_BEAMS,         /* beams drawn (#161) */
@@ -223,6 +223,8 @@ enum
 enum
 {
 	XBOX_FT_W_WORLD_WALKED = XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_COUNT, /* faces the world pass's face loop visited (world_faces: what it drew) */
+	XBOX_FT_W_WATER_GPU,     /* R5: the water_verts the vertex unit warped (vs_warp) */
+	XBOX_FT_W_VP_LOADS,      /* R5: vertex-program loads into slots another program had (vs_warp over vs_studio's tail, and back) */
 	XBOX_FT_W_END
 };
 

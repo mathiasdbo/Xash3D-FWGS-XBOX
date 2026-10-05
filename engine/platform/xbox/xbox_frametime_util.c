@@ -45,7 +45,7 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"k_pvs", "k_sky", "k_world_walk", "k_warp_world", "k_world_decals",
 	"k_brush", "k_warp_brush", "k_warp_trans",
 	/* the counts after the spans */
-	"world_walked",
+	"world_walked", "water_gpu", "vp_loads",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,
