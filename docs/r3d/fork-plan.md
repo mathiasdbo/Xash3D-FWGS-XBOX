@@ -9785,6 +9785,87 @@ buffers, with the xemu measurement in brackets where there is one. Checks:
 | undertow | 9.6 | 2.37 | 1.02 | 0.44 | 2.08 (1.09) | 29.0 | 19.6 | - |
 | xen_dm | 5.6 | 1.62 | 0.70 | 0.28 | 1.19 (0.67) | 30.2 | 21.4 | - |
 
+### X9-Y — Multisample anti-aliasing (proposed 2026-10-05, not started)
+
+**Status: proposed.** Scoped from a read-only specialist pass over `ref/nv2a`;
+`deps/nxdk` was not checked out for it, so **every register value and every
+claim about what pbkit does is UNVERIFIED** until step Y0 closes. Nothing here
+is observed behaviour.
+
+**What the hardware offers (recollection, to be verified in Y0).**
+`NV097_SET_SURFACE_FORMAT` carries an anti-aliasing field (none / 2x
+`CENTER_CORNER_2` / 4x `SQUARE_OFFSET_4`); `NV097_SET_ANTI_ALIASING_CONTROL`
+carries enable, alpha-to-coverage, alpha-to-one and a sample mask. The colour
+and Z surfaces are stored enlarged (2x: width x2; 4x: width x2 and height x2)
+and nothing resolves them at scan-out, so the backend must run its own resolve
+pass at present time. Quincunx is a 2x surface plus a different resolve filter.
+
+**Where it lands in this repo.**
+- Today `ref/nv2a` never writes `SURFACE_FORMAT/PITCH/CLIP/COLOR_OFFSET/
+  ZETA_OFFSET`; pbkit owns the surface (`pb_init`, `r_context.c:3975`;
+  `pb_target_back_buffer`, `:9094`). The mode is fixed at 640x480
+  (`vid_sdl2.c:1002`). No AA token exists in `ref/nv2a`; `gl_msaa_samples`
+  (`ref_common.c:39`) is the PC knob and is reused as the setting.
+- The viewport is baked into CPU matrices (`nv2a_matrix_viewport` at
+  `r_context.c:6809`, `:7532`, `:7905`; the 2D matrix at `:7482`), so enlarging
+  the target is a change to those calls plus the clears at `:9096-9097`.
+- Present is pbkit's `pb_finished()` flip (`R_EndFrame`, `:8400-8445`), after
+  `nv2a_wait_gpu_idle()`.
+
+**Decision: re-push the surface registers from `ref/nv2a` after
+`pb_target_back_buffer()`, over separately allocated AA colour and Z surfaces;
+do not edit nxdk** (`tools/xbox-build-nxdk.sh:14` pins it, and this repo
+already re-pushes state per frame, e.g. `nv2a_set_3d_state`, `:1727`). Keep
+logical `nv2a_width/height` for the engine and screenshots; add
+`nv2a_rt_w/h` for the enlarged target. Derive aspect from the display, never
+from either pixel size (see the aspect bullet in this section).
+
+**Steps** (one at a time; each ends in a measurement, not a feeling):
+- **Y0 - verify, no code.** Initialise `deps/nxdk`. Confirm against
+  `lib/pbkit/nv_regs.h` and `pbkit.c` (~`:1680-1707`) the register offsets,
+  field values and AA sizing rules; whether `pb_target_back_buffer` re-pushes
+  the surface format each frame (it would override ours); and what
+  `pb_back_buffer_width()` returns. **Exit:** a table of verified values
+  replaces every UNVERIFIED mark above.
+- **Y1 - 2x surface, resolve stubbed.** Allocate AA colour + Z with
+  `MmAllocateContiguousMemoryEx` (pattern at `:3999`), push the surface
+  registers after `:9094`, scale viewport/clip/clears, add the cvar. Gate it
+  off by default. **Exit (xemu):** no crash, geometry correct and unscaled
+  when the AA surface is blitted 1:1; xemu proves only register acceptance.
+- **Y2 - resolve pass.** In `R_EndFrame`, between `R_Set2DMode(false)` and
+  `nv2a_wait_gpu_idle()`: retarget to pbkit's 1x back buffer, bind the AA
+  colour as a linear texture (recipe at `:2026-2038`), draw one full-screen
+  quad through the existing 2D ring and `ps_2d` program. One bilinear tap at
+  the sample boundary averages the samples, so 2x and 4x need no combiner
+  math. Move the resolve ahead of the screenshot read (`:4470`). **Exit:** the
+  resolved image matches a no-AA frame on flat regions and smooths edges.
+- **Y3 - 4x.** Same path, `SQUARE_OFFSET_4`, 2x2 average. **Exit:** only if Y4
+  says the memory fits.
+- **Y4 - budget and cost, real hardware.** Measure with
+  `xbox_frametime.c` / `frametime-recorder.md` on `c1a3` and `crossfire`, and
+  the steady-free ledger. Estimates, not measurements: 480p 2x about +3.5 MiB,
+  4x about +8.2 MiB, against 11.9 MiB steady free on `boot_camp` (tightest) and
+  11.9-19.8 MiB across the corpus; 4x multiplies ROP/Z bandwidth on the shared
+  6.4 GB/s bus. 720p is not in the repo, and 4x there (~+24.6 MiB) is out.
+  If tight: two pbkit back buffers instead of three, reusing the AA surface.
+- **Y5 - Quincunx, optional.** Prefer the hardware convolution filter on the
+  sampler if it exists and works; failing that, a two-pass 5-tap (centre 1/2,
+  four corners 1/8 each) because NV2A has four texture stages and no loops.
+  Needs real hardware: xemu may not model the kernel.
+- **Y6 - alpha-tested edges.** Decals and sprites alias under MSAA; try
+  alpha-to-coverage on the X9-I alpha-test path, and check the view-model
+  depth hack (`:7515-7535`) still has a consistent Z scale on the enlarged Z.
+
+**Risks.** A half-texel error in the resolve blurs the whole frame; memory,
+not fill rate, is probably the first wall on the tight maps; anything that
+reads the framebuffer (screenshots, `nv2a_lm_stats`-style captures) must read
+the resolved buffer.
+
+**Exit:** a documented decision per mode (2x / 4x / Quincunx: ship, ship
+behind a cvar, or drop) with a hardware frame time and peak memory figure on
+`c1a3`, `crossfire` and `boot_camp`. **xemu is not validation** for the cost
+or Quincunx rows.
+
 X9-M onward (skinning, dynamic lighting, the frame-time exit criterion
 itself) sketched in this section's own bullets below, not started.
 
