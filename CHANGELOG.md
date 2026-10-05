@@ -5,6 +5,17 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - Xbox: each controller press counted once
+
+On the Xbox the engine and the Half-Life client both opened the controller.
+The client turned every button into an extra key, so B (use) also fired
+whatever the right-trigger key was bound to. It also added a second look
+and move driven by its own cvars, which the menu never sets. The client
+(deps/hlsdk) no longer opens the controller on the Xbox, so the engine's
+gamepad bindings and the menu's controller settings are the only ones in
+effect. Owner-verified on the console. The menu submodule also moves to
+its merged `resonance3d` branch, with no change in content.
+
 ### Changed - Xbox: water warps on the GPU's vertex unit
 
 The water warp (the waves and the swirling texture of every water, slime
