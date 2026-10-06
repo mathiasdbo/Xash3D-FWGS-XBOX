@@ -34,6 +34,11 @@ What the numbers mean (the recorder's header comment has the detail):
           top-level spans plus "unattributed" add up to cpu. Spans nest
           (the SPANS chunk names each one's parent); "own" is a span's
           time minus its children's.
+  sv_game (recorders from 2026-10-05) the server game frame broken down:
+          per-movetype spans under k_sv_game, g_* counters (thinks,
+          touches, SV_Move calls, the DLL's traces...; g_*_kc are times),
+          the slowest entity of each frame, and the CLASSES chunk's
+          per-classname totals for each map.
 Recordings made in xemu time the emulator on the PC, not a Pentium III;
 the work counters are counts, the same in xemu as on the console. The
 spans are times: in xemu they only show that they are recorded and add
@@ -71,6 +76,21 @@ FRAME_BYTES = 32            # the fixed part of a frame record
 COUNTER_NAME_BYTES = 16
 CHUNK_FRAMES, CHUNK_MAP, CHUNK_CALIB, CHUNK_END, CHUNK_COUNTERS = 1, 2, 3, 4, 5
 CHUNK_SPANS = 6             # span name -> parent span name (recorders from 2026-10-01)
+CHUNK_CLASSES = 7           # per-classname server game frame totals (recorders from 2026-10-05)
+CLASS_NAME_BYTES = 32
+CLASS_BYTES = CLASS_NAME_BYTES + 7 * 4
+# g_* counters that are not counts: times in kilocycles, and the slowest
+# entity's class row and edict number. Kept out of the count correlation.
+G_TIMES = ("g_think_kc", "g_touch_kc", "g_move_kc", "g_worst_kc")
+G_LABELS = ("g_worst_cls", "g_worst_ent")
+# The sv_game counts the summary shows, with their headings.
+G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
+           ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
+           ("g_push_tests", "push tests"), ("g_push_replays", "replays"), ("g_walkmoves", "walkmoves"),
+           ("g_find_visits", "find visits")]
+MOVETYPES = {0: "none", 3: "walk", 4: "step", 5: "fly", 6: "toss", 7: "push", 8: "noclip", 9: "flymissile",
+             10: "bounce", 11: "bouncemissile", 12: "follow", 13: "pushstep", 14: "compound"}
+CLASS_TOP = 12              # classname rows the summary shows per map
 SPAN_CALLS = "span_calls"   # the counter of span closures in a frame (the spans' own cost)
 
 F_ACTIVE, F_MENU, F_FLUSH, F_SATURATED, F_OVERLAY = 0x1, 0x2, 0x4, 0x8, 0x10
@@ -130,7 +150,7 @@ def parse(data):
         "qpc_hz": qpc_hz, "tsc_open": tsc_open, "qpc_open": qpc_open, "mode": mode,
         "build": build, "frames": [], "maps": [], "calibs": [], "end": None,
         "truncated": False, "gaps": 0, "lost_frames": 0, "unknown_chunks": 0,
-        "counters": [], "spans": [],
+        "counters": [], "spans": [], "classes": [],
     }
     frames = rec["frames"]
     off = header_bytes
@@ -195,6 +215,18 @@ def parse(data):
                 return data[at:at + COUNTER_NAME_BYTES].split(b"\0", 1)[0].decode("latin-1")
             rec["spans"] = [(_name(q + i * 2 * COUNTER_NAME_BYTES), _name(q + (i * 2 + 1) * COUNTER_NAME_BYTES))
                             for i in range(n)]
+        elif ctype == CHUNK_CLASSES:
+            n, = struct.unpack_from("<I", data, body)
+            if clen < 4 + n * CLASS_BYTES:
+                raise FormatError("CLASSES chunk at %d: length %d for %d classes" % (off, clen, n))
+            rows = []
+            for i in range(n):
+                q = body + 4 + i * CLASS_BYTES
+                name = data[q:q + CLASS_NAME_BYTES].split(b"\0", 1)[0].decode("latin-1")
+                mt, runs, thinks, moves, phys, think, worst = struct.unpack_from("<7I", data, q + CLASS_NAME_BYTES)
+                rows.append({"name": name, "movetype": mt, "runs": runs, "thinks": thinks, "moves": moves,
+                             "phys_kc": phys, "think_kc": think, "worst_kc": worst})
+            rec["classes"].append({"frame": len(frames), "rows": rows})
         else:
             rec["unknown_chunks"] += 1
         off = body + clen
@@ -346,6 +378,32 @@ def frame_span_ms(rec, fr):
     idx = {n: i for i, n in enumerate(rec["counters"])}
     w = fr[8] if len(fr) > 8 else ()
     return {s: (w[idx[s]] * k if idx[s] < len(w) else 0.0) for s in span_names(rec)}
+
+
+def class_names(rec):
+    """Every classname the recording's CLASSES chunks name, by row index
+    (each chunk lists every name seen so far, so the last is a superset)."""
+    return [c["name"] for c in rec["classes"][-1]["rows"]] if rec["classes"] else []
+
+
+def segment_classes(rec, seg):
+    """The CLASSES rows for a segment, summed over the chunks written in
+    it (the recorder writes one at its end: before the next MAP chunk or
+    at the END), as a list sorted by time in SV_Physics_Entity, most
+    first; [] for a file without them."""
+    acc = {}
+    for ch in rec["classes"]:
+        if not (seg["start"] < ch["frame"] <= seg["end"]):
+            continue
+        for row in ch["rows"]:
+            if not row["runs"]:
+                continue
+            a = acc.setdefault(row["name"], dict(row, runs=0, thinks=0, moves=0, phys_kc=0, think_kc=0, worst_kc=0))
+            a["movetype"] = row["movetype"]
+            for k in ("runs", "thinks", "moves", "phys_kc", "think_kc"):
+                a[k] += row[k]
+            a["worst_kc"] = max(a["worst_kc"], row["worst_kc"])
+    return sorted(acc.values(), key=lambda a: (-a["phys_kc"], a["name"]))
 
 
 def play_frames(rec, seg):
@@ -546,6 +604,19 @@ def segment_stats(rec, seg, include_flush=False, include_level_change=False):
         st["unattributed_ms"] = st["cpu_ms"] - top
         if SPAN_CALLS in rec["counters"]:
             st["span_calls"] = st["work_avg"][SPAN_CALLS]
+    classes = segment_classes(rec, seg)
+    if classes:
+        # The rows count every frame that started in play, warm-up and
+        # flush frames included: per frame is over those.
+        played = sum(1 for fr in frames if _in_play(fr[7]))
+        k = 1e6 / rec["tsc_hz"]  # kilocycles -> ms
+        st["class_frames"] = played
+        st["classes"] = [dict(c, phys_ms=c["phys_kc"] * k / played if played else 0.0,
+                              think_ms=c["think_kc"] * k / played if played else 0.0,
+                              worst_ms=c["worst_kc"] * k,
+                              runs_pf=c["runs"] / float(played) if played else 0.0,
+                              thinks_pf=c["thinks"] / float(played) if played else 0.0,
+                              moves_pf=c["moves"] / float(played) if played else 0.0) for c in classes]
     return st
 
 
@@ -570,7 +641,9 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
     names = work_names(rec)
     if not names:
         return []
-    timed = set(span_names(rec))  # the spans are times, not counts: their own table
+    # The spans are times, not counts: their own table; so are the g_*_kc
+    # counters, and the g_worst_cls/ent are labels.
+    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -786,6 +859,7 @@ def summary_text(rec, rows, sess):
     elif sess.get("version") == 1:
         lines.append("version-1 recording: no work counters")
     lines.extend(spans_text(rec, rows))
+    lines.extend(svgame_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -840,9 +914,63 @@ def spans_text(rec, rows):
         if not top or not top[0]["spans"].get(key):
             continue
         lines.append("")
-        lines.append("top frames by %s (ms): t s, map, total, cpu, %s" % (key, key))
+        worst = key == "k_sv_game" and "g_worst_cls" in rec["counters"]
+        lines.append("top frames by %s (ms): t s, map, total, cpu, %s%s" % (
+            key, key, ", slowest entity (ms)" if worst else ""))
         for r in top:
-            lines.append("%8.1f  %-12s %7.1f %7.1f %7.2f" % (r["t"], r["map"][:12], r["total"], r["cpu"], r["spans"][key]))
+            lines.append("%8.1f  %-12s %7.1f %7.1f %7.2f%s" % (r["t"], r["map"][:12], r["total"], r["cpu"],
+                                                             r["spans"][key], "  " + worst_entity(rec, r) if worst else ""))
+    return lines
+
+
+def worst_entity(rec, r):
+    """A top frame's slowest entity, from its g_worst_* counters: "name #edict ms"."""
+    w = r["work"]
+    row = int(w.get("g_worst_cls", 0))
+    names = class_names(rec)
+    name = names[row - 1] if 0 < row <= len(names) else ("(row %d)" % row if row else "-")
+    return "%s #%d %.2f" % (name, int(w.get("g_worst_ent", 0)), w.get("g_worst_kc", 0) * 1e6 / rec["tsc_hz"])
+
+
+def svgame_text(rec, rows):
+    """The server game frame: the g_* counts per in-play frame, the three
+    cross-cutting timers, and each map's top classnames."""
+    have = [k for k, _ in G_TABLE if k in rec["counters"]]
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r]
+    if not have or not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    cols = [(n, h) for n, h in G_TABLE if n in have]
+    lines = ["", "sv_game work per in-play frame, avg/peak (inside SV_Physics only; counts, exact in xemu)"]
+    lines.append("%-18s " % "map" + " ".join("%12s" % h[:12] for _, h in cols))
+    for r in maps:
+        lines.append("%-18s " % r["map"][:18] + " ".join(
+            "%12s" % ("%s/%s" % (short(r["work_avg"][n]), short(r["work_peak"][n]))) for n, _ in cols))
+    if all(t in rec["counters"] for t in G_TIMES):
+        lines.append("sv_game timers, ms per in-play frame (overlapping: a think's traces are in think and SV_Move): "
+                     "think / touch / SV_Move / slowest entity")
+        for r in maps:
+            a = r["work_avg"]
+            lines.append("%-18s %6.2f %6.2f %6.2f %6.2f" % (r["map"][:18], a["g_think_kc"] * k, a["g_touch_kc"] * k,
+                                                           a["g_move_kc"] * k, a["g_worst_kc"] * k))
+    for r in rows:
+        if not r.get("classes"):
+            continue
+        sg = r.get("span_ms", {}).get("k_sv_game")
+        lines.append("")
+        lines.append("%s: top classnames by time in SV_Physics_Entity, over %d frames in play%s" % (
+            r["map"], r["class_frames"], (" (sv_game %.2f ms/frame)" % sg) if sg else ""))
+        lines.append("%-28s %-9s %7s %7s %8s %8s %8s %8s" % (
+            "classname", "movetype", "ents/f", "think/f", "moves/f", "ms/f", "think ms", "worst"))
+        for c in r["classes"][:CLASS_TOP]:
+            lines.append("%-28s %-9s %7.1f %7.2f %8.1f %8.3f %8.3f %8.2f" % (
+                c["name"][:28], MOVETYPES.get(c["movetype"], str(c["movetype"]))[:9], c["runs_pf"], c["thinks_pf"],
+                c["moves_pf"], c["phys_ms"], c["think_ms"], c["worst_ms"]))
+        rest = r["classes"][CLASS_TOP:]
+        if rest:
+            lines.append("%-28s %-9s %7.1f %7.2f %8.1f %8.3f %8.3f" % (
+                "(%d more)" % len(rest), "", sum(c["runs_pf"] for c in rest), sum(c["thinks_pf"] for c in rest),
+                sum(c["moves_pf"] for c in rest), sum(c["phys_ms"] for c in rest), sum(c["think_ms"] for c in rest)))
     return lines
 
 
@@ -1162,8 +1290,35 @@ def spans_section_html(rec, rows, source="xbox", include_flush=False, include_le
                                                fmt(sp.get("k_sv"), 2), fmt(sp.get("k_scr"), 2),
                                                fmt(r["work"].get("studio_models"), 0)))
         parts.append("</tbody></table></div>")
+    parts.extend(svgame_section_html(rec, rows))
     parts.append("</section>")
     return "\n".join(parts)
+
+
+def svgame_section_html(rec, rows):
+    """The server game frame's classname tables (part of the spans
+    section); [] for a file without CLASSES chunks."""
+    esc = html.escape
+    parts = []
+    for r in rows:
+        if not r.get("classes"):
+            continue
+        sg = r.get("span_ms", {}).get("k_sv_game")
+        parts.append('<h3 class="sub">sv_game by classname: %s</h3>' % esc(r["map"]))
+        parts.append('<p class="lede" style="font-size:13.5px;margin-bottom:10px">Per frame in play (%d frames, '
+                     'warm-up included)%s: each entity\'s whole <code>SV_Physics_Entity</code> (its movement, its '
+                     'Think, the touches and traces it causes), its Think alone, and its slowest single run.</p>'
+                     % (r["class_frames"], (", sv_game %.2f ms" % sg) if sg else ""))
+        parts.append('<div class="table-box"><table class="small"><thead><tr><th>Classname</th><th>Movetype</th>'
+                     '<th>Ents</th><th>Thinks</th><th>SV_Move</th><th>ms</th><th>Think ms</th><th>Worst ms</th>'
+                     '</tr></thead><tbody>')
+        for c in r["classes"][:CLASS_TOP]:
+            parts.append('<tr><td style="text-align:left">%s</td><td>%s</td><td>%.1f</td><td>%.2f</td><td>%.1f</td>'
+                         '<td>%.3f</td><td>%.3f</td><td>%.2f</td></tr>'
+                         % (esc(c["name"]), MOVETYPES.get(c["movetype"], str(c["movetype"])), c["runs_pf"],
+                            c["thinks_pf"], c["moves_pf"], c["phys_ms"], c["think_ms"], c["worst_ms"]))
+        parts.append("</tbody></table></div>")
+    return parts
 
 
 def lc_section_html(sess):

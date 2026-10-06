@@ -28,6 +28,25 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER size a scratch buffer from one of the things written into it - size it from the largest, or give each its own
+
+`FT_Flush` (`engine/platform/xbox/xbox_frametime.c`, since #169 on
+2026-10-01) wrote both a FRAMES chunk head (16 bytes) and a whole CALIB
+chunk (24 bytes) through one `uint8_t head[16]`, so every flush wrote 8
+bytes past it. For four days nothing showed: the overflow landed in
+alignment padding or in saved registers no caller happened to rely on.
+The sv_game breakdown (2026-10-05) added a call after `FT_Flush` that kept
+a pointer in ESI across it, and the first in-game flush became an access
+violation in an unrelated function (`Xbox_FT_SvGame_EncodeClasses`
+writing through ESI = 1) - found only by reading the bugcheck's
+exception record off the stack with `tools/xemu-debug.py`. A stack
+overflow into callee-saved registers is invisible until some caller's
+register allocation changes, so "it has always worked" says nothing.
+**Declare a shared buffer as the largest thing that goes into it, by its
+size constants (`XBOX_FT_CHUNK_BYTES + XBOX_FT_CALIB_BYTES`), not by the
+first use; when a new crash points into code that cannot fail, look for
+a write past a buffer in the functions it returned from.**
+
 ### ALWAYS copy a reference file:line from the authoritative clone while writing the comment, not from the in-repo tree or from memory
 
 R3 (x9-perf-world, #146) committed new ref/nv2a comments whose

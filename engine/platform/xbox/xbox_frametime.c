@@ -65,6 +65,7 @@ seconds. tools/frametime-report.py fetches and reads it.
 #include "client.h"
 #include "xbox_frametime.h"
 #include "xbox_frametime_util.h"
+#include "xbox_frametime_svgame.h"
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
 
@@ -86,10 +87,11 @@ xbox_ft_work_t xbox_ft_work;
 xbox_ft_spans_t xbox_ft_spans;
 int xbox_ft_snd_extra;
 
-/* 1024 frames x 212 bytes (32 + 45 work counters: 20 counts, span_calls
-   and 24 spans) = 212 KiB ring, plus the per-map histogram (4 KiB) and a
-   26.5 KiB encode buffer: ~243 KiB, allocated when recording starts and
-   freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush
+/* 1024 frames x 420 bytes (32 + 97 work counters: 20 counts, span_calls,
+   56 spans and 20 later counts) = 420 KiB ring, plus the per-map
+   histogram (4 KiB), a 52.5 KiB encode buffer and the server classname
+   table (~30 KiB, xbox_frametime_svgame.c): ~507 KiB, allocated when
+   recording starts and freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush
    every 5 s or at half full keeps it from overrunning unless a single
    flush stalls for 7 s. */
 #define XBOX_FT_RING_FRAMES     1024u
@@ -211,7 +213,16 @@ static void FT_Flush( void )
 	const xbox_ft_frame_t *span[2];
 	uint32_t count[2], n, s, i, done;
 	uint64_t tsc, qpc;
-	uint8_t head[16];
+	/* The larger of the two chunk heads written from it: a FRAMES head
+	   (16 bytes) and a whole CALIB chunk (24). It was 16 until
+	   2026-10-05, so every flush wrote 8 bytes past it - over this
+	   function's saved registers when the stack alignment put them there
+	   (an access violation in the caller once it kept a pointer in ESI
+	   across the call, docs/r3d/lessons.md). */
+	uint8_t head[XBOX_FT_CHUNK_BYTES + XBOX_FT_CALIB_BYTES];
+
+	STATIC_ASSERT( sizeof( head ) >= XBOX_FT_CHUNK_BYTES + 8u, "FT_Flush: head holds a FRAMES chunk head" );
+	STATIC_ASSERT( sizeof( head ) >= XBOX_FT_CHUNK_BYTES + XBOX_FT_CALIB_BYTES, "FT_Flush: head holds a CALIB chunk" );
 
 	if( !ft.file )
 		return;
@@ -260,6 +271,17 @@ static void FT_Flush( void )
 	}
 }
 
+/* The server game frame's per-classname rows since the last ones
+   (xbox_frametime_svgame.c), closing the map they belong to. */
+static void FT_WriteClasses( void )
+{
+	const uint8_t *classes;
+	size_t bytes = Xbox_FT_SvGame_EncodeClasses( &classes );
+
+	if( bytes )
+		FT_Write( classes, bytes );
+}
+
 static void FT_Stop( void )
 {
 	uint8_t end[XBOX_FT_CHUNK_BYTES + XBOX_FT_END_BYTES];
@@ -268,6 +290,7 @@ static void FT_Stop( void )
 	{
 		/* The frame in progress is not pushed: it has no end yet. */
 		FT_Flush();
+		FT_WriteClasses();
 		if( FT_Write( end, xbox_ft_encode_end( end, xbox_ft_rdtsc(), ft.ring.lost )))
 			FS_Flush( ft.file );
 		if( ft.file )
@@ -277,6 +300,7 @@ static void FT_Stop( void )
 
 	xbox_ft_waits.active = 0;
 	xbox_ft_spans.on = 0;
+	Xbox_FT_SvGame_Stop();
 	Z_Free( ft.block );
 	memset( &ft, 0, sizeof( ft ));
 }
@@ -318,6 +342,12 @@ static qboolean FT_Start( int mode )
 	xbox_ft_ring_init( &ft.ring, (xbox_ft_frame_t *)ft.block, XBOX_FT_RING_FRAMES );
 	ft.map_stats = (xbox_ft_stats_t *)( (byte *)ft.block + ring_bytes );
 	ft.encode = (uint8_t *)ft.block + ring_bytes + sizeof( xbox_ft_stats_t );
+	if( !Xbox_FT_SvGame_Start( ))
+	{
+		Con_Printf( S_ERROR "frametime: no memory for the classname table\n" );
+		FT_Stop();
+		return false;
+	}
 
 	ft.qpc_hz = KeQueryPerformanceFrequency();
 	ft.tsc_open = xbox_ft_rdtsc();
@@ -377,8 +407,10 @@ static void FT_TrackMap( uint64_t now, qboolean active )
 		FT_MemoryPages( &free_pages, &total_pages );
 		Q_strncpy( ft.map_name, clgame.mapname, sizeof( ft.map_name ));
 
-		/* Frames before the map chunk, so the file stays in order. */
+		/* Frames before the map chunk, so the file stays in order; the
+		   per-classname rows close the map before it. */
 		FT_Flush();
+		FT_WriteClasses();
 		FT_Write( chunk, xbox_ft_encode_map( chunk, now, ft.load_seen ? now - ft.load_begin : 0,
 			ft.load_seen ? ft.free_before : 0, free_pages, total_pages, flags, ft.map_name ));
 		ft.last_free_pages = free_pages;
@@ -401,6 +433,7 @@ static void FT_CloseFrame( uint64_t now )
 	f->gpu = xbox_ft_saturate( xbox_ft_waits.gpu, &f->flags );
 	f->vblank = xbox_ft_saturate( xbox_ft_waits.vblank, &f->flags );
 	f->swap = xbox_ft_saturate( xbox_ft_waits.swap, &f->flags );
+	Xbox_FT_SvGame_CloseFrame();
 	memcpy( f->work, xbox_ft_work.c, sizeof( xbox_ft_work.c ));
 	f->work[XBOX_FT_W_SPAN_CALLS] = xbox_ft_spans.calls;
 	{
@@ -447,9 +480,14 @@ void Xbox_FrameTime_BeginFrame( void )
 	   k_sndx_* spans. Frames start outside the mixer. */
 	xbox_ft_snd_extra = 0;
 
-	/* The whole cost when off. */
+	/* The whole cost when off (and the server game frame's state reset
+	   for the same reason as xbox_ft_snd_extra: a longjmp out of
+	   SV_Physics would leave in_game set). */
 	if( want == 0 && ft.mode == 0 )
+	{
+		Xbox_FT_SvGame_BeginFrame( 0 );
 		return;
+	}
 
 	now = xbox_ft_rdtsc();
 
@@ -460,11 +498,13 @@ void Xbox_FrameTime_BeginFrame( void )
 		if( want == 0 )
 		{
 			FT_Stop();
+			Xbox_FT_SvGame_BeginFrame( 0 );
 			return;
 		}
 		if( ft.mode == 0 && !FT_Start( want ))
 		{
 			Cvar_DirectSet( &host_frametime_analysis, "0" );
+			Xbox_FT_SvGame_BeginFrame( 0 );
 			return;
 		}
 		ft.mode = want;
@@ -482,6 +522,10 @@ void Xbox_FrameTime_BeginFrame( void )
 		ft.cur.flags |= XBOX_FT_F_ACTIVE;
 	if( cls.key_dest != key_game || cl.paused )
 		ft.cur.flags |= XBOX_FT_F_MENU;
+	/* After FT_CloseFrame stored the last frame's server game totals:
+	   they restart here, and this frame counts towards the CLASSES rows
+	   when it starts in play. */
+	Xbox_FT_SvGame_BeginFrame( active && !FBitSet( ft.cur.flags, XBOX_FT_F_MENU ));
 
 	FT_TrackMap( now, active );
 
@@ -567,6 +611,7 @@ static void FT_FormatSpans( const uint64_t *work, uint64_t cpu_ticks, uint32_t n
 		"cdelta", "ccdat", "cmd", "pmove", "wpkt",
 		"sspat", "smix", "sdsp", "sout", "xmix", "xdsp", "xout",
 		"pvs", "sky", "walk", "wwarp", "wdec", "brush", "bwarp", "twarp",
+		"start", "pstep", "ppush", "ptoss", "pnone", "pother",
 	};
 	/* A span added without a label is a compile error, not a NULL. */
 	STATIC_ASSERT( ARRAYSIZE( label ) == XBOX_FT_S_COUNT, "one overlay label per span" );

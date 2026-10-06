@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #include "server.h"
 #include "const.h"
 #include "pm_local.h"
+#include "platform/xbox/xbox_frametime_svgame.h" // the recorder's sv_game breakdown, docs/r3d/divergences.md #141
 #include "studio.h"
 
 typedef struct moveclip_s
@@ -559,7 +560,7 @@ static void SV_TouchLinks( edict_t *ent, areanode_t *node )
 		if( !sv.playersonly )
 		{
 			svgame.globals->time = sv.time;
-			svgame.dllFuncs.pfnTouch( touch, ent );
+			XBOX_FT_SV_TIMED( XBOX_FT_SV_TOUCH, XBOX_FT_W_G_TOUCHES, svgame.dllFuncs.pfnTouch( touch, ent ));
 		}
 	}
 
@@ -627,6 +628,8 @@ SV_LinkEdict
 void GAME_EXPORT SV_LinkEdict( edict_t *ent, qboolean touch_triggers )
 {
 	areanode_t	*node;
+
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_LINKS );
 
 	if( ent->area.prev ) SV_UnlinkEdict( ent );	// unlink from old position
 	if( ent == svgame.edicts ) return;		// don't add the world
@@ -1198,6 +1201,7 @@ static void SV_ClipToLinks( areanode_t *node, moveclip_t *clip )
 
 		touch = EDICT_FROM_AREA( l );
 
+		XBOX_FT_SV_COUNT( XBOX_FT_W_G_CLIP_ENTS );
 		if( !SV_ClipToEntity( touch, clip ))
 			return; // trace.allsoild
 	}
@@ -1295,6 +1299,11 @@ SV_Move
 trace_t SV_Move( const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, int type, edict_t *e, qboolean monsterclip )
 {
 	moveclip_t clip = { 0 };
+#if XASH_XBOX && !XASH_DEDICATED
+	xbox_ft_sv_timer_t xbox_ft_sv_t_; // the recorder's sv_game breakdown (#141): SV_Move's count and time
+
+	xbox_ft_sv_timer_begin( &xbox_ft_sv_t_, XBOX_FT_SV_MOVE, XBOX_FT_W_G_MOVES );
+#endif
 
 	SV_ClipMoveToEntity( SV_EdictNum( 0 ), start, mins, maxs, end, &clip.trace );
 
@@ -1337,6 +1346,9 @@ trace_t SV_Move( const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end,
 
 	SV_CopyTraceToGlobal( &clip.trace );
 
+#if XASH_XBOX && !XASH_DEDICATED
+	xbox_ft_sv_timer_end( &xbox_ft_sv_t_, XBOX_FT_SV_MOVE );
+#endif
 	return clip.trace;
 }
 

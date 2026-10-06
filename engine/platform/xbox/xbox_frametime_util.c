@@ -44,8 +44,13 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"k_sndx_mix", "k_sndx_dsp", "k_sndx_out",
 	"k_pvs", "k_sky", "k_world_walk", "k_warp_world", "k_world_decals",
 	"k_brush", "k_warp_brush", "k_warp_trans",
+	"k_sv_start", "k_sv_pstep", "k_sv_ppush", "k_sv_ptoss", "k_sv_pnone", "k_sv_pother",
 	/* the counts after the spans */
 	"world_walked", "water_gpu", "vp_loads",
+	"g_ents", "g_thinks", "g_touches", "g_moves", "g_dll_traces", "g_clip_ents",
+	"g_links", "g_push_tests", "g_walkmoves", "g_find_visits",
+	"g_think_kc", "g_touch_kc", "g_move_kc", "g_worst_kc", "g_worst_cls", "g_worst_ent",
+	"g_push_replays",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,
@@ -104,6 +109,12 @@ const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT] =
 	[XBOX_FT_S_BRUSH]         = XBOX_FT_S_R_SCENE,
 	[XBOX_FT_S_WARP_BRUSH]    = XBOX_FT_S_BRUSH,
 	[XBOX_FT_S_WARP_TRANS]    = XBOX_FT_S_R_SCENE,
+	[XBOX_FT_S_SV_START]      = XBOX_FT_S_SV_GAME,
+	[XBOX_FT_S_SV_PSTEP]      = XBOX_FT_S_SV_GAME,
+	[XBOX_FT_S_SV_PPUSH]      = XBOX_FT_S_SV_GAME,
+	[XBOX_FT_S_SV_PTOSS]      = XBOX_FT_S_SV_GAME,
+	[XBOX_FT_S_SV_PNONE]      = XBOX_FT_S_SV_GAME,
+	[XBOX_FT_S_SV_POTHER]     = XBOX_FT_S_SV_GAME,
 };
 
 uint32_t xbox_ft_span_kcyc( uint64_t ticks )
@@ -470,5 +481,29 @@ size_t xbox_ft_encode_end( uint8_t *out, uint64_t tsc, uint32_t lost )
 	p = put_u64( p, tsc );
 	p = put_u32( p, lost );
 	p = put_u32( p, 0 );
+	return (size_t)( p - out );
+}
+
+size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uint32_t count )
+{
+	uint8_t *p = out;
+	uint32_t i;
+
+	p = put_u32( p, XBOX_FT_CHUNK_CLASSES );
+	p = put_u32( p, 4u + count * XBOX_FT_CLASS_BYTES );
+	p = put_u32( p, count );
+	for( i = 0; i < count; i++ )
+	{
+		const xbox_ft_class_t *c = &classes[i];
+
+		p = put_name( p, c->name, XBOX_FT_CLASS_NAME_BYTES );
+		p = put_u32( p, c->movetype );
+		p = put_u32( p, c->runs );
+		p = put_u32( p, c->thinks );
+		p = put_u32( p, c->moves );
+		p = put_u32( p, xbox_ft_span_kcyc( c->phys ));
+		p = put_u32( p, xbox_ft_span_kcyc( c->think ));
+		p = put_u32( p, xbox_ft_span_kcyc( c->worst ));
+	}
 	return (size_t)( p - out );
 }

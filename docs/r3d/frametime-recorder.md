@@ -295,6 +295,12 @@ boundary. The report shows it per map, and the overlay shows it as `none`.
 | `k_brush` | `k_r_scene` | every `nv2a_draw_brush_entity` call of the solid and translucent passes: doors, trains, `func_wall`, `func_water` | `r_context.c`, `nv2a_draw_solid_entities` / `nv2a_draw_trans_entities` |
 | `k_warp_brush` | `k_brush` | `R_WarpDrawBrushEntity`: a brush entity's water | `r_context.c`, `nv2a_draw_brush_entity` |
 | `k_warp_trans` | `k_r_scene` | `R_WarpDrawWaterSurfaces`: the world's translucent water (`sv_wateralpha` below 1) | `r_context.c`, `GL_RenderFrame` |
+| `k_sv_start` | `k_sv_game` | the game DLL's `StartFrame` | `engine/server/sv_phys.c`, `SV_Physics` (`:1895` in this tree) |
+| `k_sv_pstep` | `k_sv_game` | every `SV_Physics_Entity` of an entity that starts it as `MOVETYPE_STEP`/`PUSHSTEP`: monsters (their AI think included), `func_pushable` | `sv_phys.c`, `SV_Physics` (`:1908`), `XBOX_FT_SV_ENTITY` |
+| `k_sv_ppush` | `k_sv_game` | the same for `MOVETYPE_PUSH`: brush movers - doors, trains, lifts, `func_rotating`, `func_pendulum` (`SV_PushMove`/`SV_PushRotate`, their Blocked and Think) | same |
+| `k_sv_ptoss` | `k_sv_game` | the same for `TOSS`, `BOUNCE`, `FLY`, `FLYMISSILE`, `BOUNCEMISSILE`: gibs, grenades, items falling | same |
+| `k_sv_pnone` | `k_sv_game` | the same for `MOVETYPE_NONE`: think-only entities - triggers, logic, sprites, beams | same |
+| `k_sv_pother` | `k_sv_game` | the same for `NOCLIP`, `FOLLOW`, `COMPOUND` and anything else | same |
 
 The eleven from `k_sv_reliable` to `k_cl_wpacket` (2026-10-02) break
 the local server/client round trip down; they come after `k_snd` in the
@@ -334,6 +340,16 @@ about once a frame; `k_brush` and `k_warp_brush` once per brush entity
 drawn. The face walk's count, `world_walked`, comes after the spans in
 the record for the same reason.
 
+The last six (2026-10-05, appended the same way) break `k_sv_game` down
+by movetype; the next section has the rest of the server game frame's
+breakdown. Each entity's whole `SV_Physics_Entity` - its movement, its
+think, and the touches and traces both cause - goes to the span of the
+movetype it had when it started, so `k_sv_pstep` is the monsters' AI as
+well as their physics. `k_sv_game`'s own time is the loop over the
+edicts itself, the lightstyles and `SV_CheckAllEnts`. These close once
+per entity SV_Physics runs (300-370 a frame on the maps measured), which
+is most of the span closures of a frame now.
+
 Spans not listed under a parent stay in that parent's **own** time.
 Examples: the overlay's drawing (inside `k_scr`; it also has its own field)
 and the view setup and entity sorting of `GL_RenderFrame` (inside
@@ -357,6 +373,63 @@ counters, so the ref API does not change.
 that they are recorded and add up, not what the Pentium III spends. The
 numbers for the decision come from the owner's hardware route.
 
+## The server game frame (2026-10-05)
+
+`k_sv_game` (`SV_Physics`) had become the largest single CPU cost on the
+console (6-7 ms a frame on c1a1b) with nothing under it. Besides the
+movetype spans above, `engine/platform/xbox/xbox_frametime_svgame.{c,h}`
+add three things. The engine/server sites are macros from that header,
+the plain upstream statement outside an Xbox build (divergence #141).
+
+**Counts** (`g_*`, after `vp_loads` in the record), counted only while
+`SV_Physics` runs and the recorder is recording (with it off each site
+is one load and branch) - player movement (`k_sv_runcmd`) and the send
+path are not in them. Exact in xemu.
+
+| counter | counted at (this tree) |
+|---|---|
+| `g_ents` | each entity `SV_Physics` runs (`sv_phys.c:1908`) |
+| `g_thinks` | each game DLL `Think`: `SV_TryThink` (`:228`), `SV_Physics_Pusher` (`:1291`) |
+| `g_touches` | each game DLL `Touch`: `SV_Impact`, both ways (`:304`, `:310`), `SV_TouchLinks` (`sv_world.c:563`) |
+| `g_moves` | each `SV_Move` (`sv_world.c:1305`): every hull trace, the engine's physics and the DLL's |
+| `g_dll_traces` | the DLL's `TraceLine`, `TraceToss`, `TraceHull`, `TraceMonsterHull`, `TraceModel` (`sv_game.c:2125-2208`) |
+| `g_clip_ents` | each entity `SV_ClipToLinks` takes from an area node's solid list for a trace, before `SV_ClipToEntity`'s filters: the list walk, not the clip tests (`sv_world.c:1204`) |
+| `g_links` | each `SV_LinkEdict` (`sv_world.c:632`) |
+| `g_push_tests` | each `SV_TestEntityPosition` (`sv_phys.c:192`): `SV_PushMove`/`SV_PushRotate`'s per-entity stuck test, inside-the-pusher test and after-push test, and #149's replays |
+| `g_push_replays` | of those, the traces #149 replays at the end of a push loop (`SV_PushReplaySkipped`), at most one per moving pusher |
+| `g_walkmoves` | the DLL's `WalkMove`, `MoveToOrigin`, `DropToFloor` (`sv_game.c:1443`, `:1872`, `:1905`) |
+| `g_find_visits` | each edict `FindEntityByString`/`FindEntityInSphere` look at (`sv_game.c:1515`, `:1584`) |
+
+**Times**, in kilocycles like the spans but cross-cutting, so not spans:
+`g_think_kc` (inside the DLL's Think), `g_touch_kc` (its Touch) and
+`g_move_kc` (inside `SV_Move`). Each times only the outermost call of
+its kind, but they overlap one another and the movetype spans: a think
+that traces counts in `g_think_kc` and `g_move_kc`. `g_worst_kc` is the
+slowest single `SV_Physics_Entity` of the frame, `g_worst_cls` its
+classname (1 + its row in the CLASSES chunk, 0 none) and `g_worst_ent`
+its edict number; the report names it next to each of the top
+`k_sv_game` frames.
+
+**The CLASSES chunk** (type 7): per classname, the entity-frames
+`SV_Physics` ran it, its thinks, its `SV_Move` calls, its time in
+`SV_Physics_Entity` and in Think, and its slowest single run, over the
+frames that start in play (warm-up frames included, menu and pause
+frames not). The recorder writes one when a map closes - before the next
+MAP chunk, and at the END - so each covers the map before it; every
+chunk lists every classname seen in the recording, in first-seen order
+(192 at most; later ones share an `(other classes)` row), so the
+`g_worst_cls` rows mean the same in all of them. A classname is looked
+up by its string pointer, one hash probe per entity, in a table
+allocated when recording starts. The report prints each map's top
+classnames by time.
+
+First use (xemu, 2026-10-05, PR #181's main plus this breakdown): on
+every map measured, `k_sv_ppush` was most of `k_sv_game` and `g_push_tests`
+most of `g_moves` - the movers' per-entity position tests
+(divergence #149). With #149, `k_sv_game` went from 3.60 to 0.98 ms on
+c1a1b in xemu, and its largest parts are now the movers' own walk over
+the edicts (`k_sv_ppush` 0.61) and the monsters (`k_sv_pstep` 0.23).
+
 ## Cost
 
 - **Off:** one float compare per `Host_Frame`; in ref/nv2a one load and
@@ -364,11 +437,13 @@ numbers for the decision come from the owner's hardware route.
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~364 KiB (ring 1024 x 320 B = 320 KiB, the overlay's histogram
-  4 KiB, a 40 KiB encode buffer); a few `rdtsc` per frame plus two per
-  span closed (below); a ~94 KiB write and `fsync` every 5 s (those
-  frames are flagged); about 18.8 KiB per second of play on disk at 60 fps
-  (66 MiB an hour; the file stops at 64 MiB, ~58 minutes). Before the
+- **On:** ~507 KiB (ring 1024 x 420 B = 420 KiB, the overlay's histogram
+  4 KiB, a 52.5 KiB encode buffer, the server's classname table ~30 KiB);
+  a few `rdtsc` per frame plus two per span closed (below); a ~123 KiB
+  write and `fsync` every 5 s (those frames are flagged); about 24.6 KiB
+  per second of play on disk at 60 fps (87 MiB an hour; the file stops at
+  64 MiB, ~44 minutes). Before the server game frame's breakdown
+  (2026-10-05) it was ~364 KiB and 18.8 KiB/s. Before the
   scene spans (2026-10-02) it was ~324 KiB and 16.6 KiB/s; before the
   mixer spans, ~292 KiB and 15 KiB/s; before the
   round-trip spans, ~243 KiB and 12.4 KiB/s; before any spans, ~130 KiB
@@ -417,13 +492,15 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 320 bytes with today's
-72: the 20 counts, `span_calls`, the 50 spans and `world_walked`; 284
+frame records of 32 bytes plus one u32 per counter - 420 bytes with today's
+97: the 20 counts, `span_calls`, the 56 spans, `world_walked`, `water_gpu`,
+`vp_loads` and the 17 `g_*`; 328 with 50 spans and three counts after them, 284
 with 42 spans, 256 with 35, 212 with the first 24, 112 before the spans),
 SPANS (from 2026-10-01, right after COUNTERS: each span's name and its
 parent's, 16 bytes each, "" for the top level), MAP, CALIB (TSC,
-performance counter) and END (written on a clean stop; a file without it
-was cut short). The reader finds counters by name, so a later version can
+performance counter), CLASSES (from 2026-10-05: per-classname server
+game frame totals, one per map, see above) and END (written on a clean
+stop; a file without it was cut short). The reader finds counters by name, so a later version can
 add some without breaking it. The spans used that: they are counters plus
 an optional chunk, which a reader that does not know it skips by its
 length, so the version stayed 2. Version 1 is the same

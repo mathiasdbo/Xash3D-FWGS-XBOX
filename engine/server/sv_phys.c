@@ -19,6 +19,12 @@ GNU General Public License for more details.
 #include "library.h"
 #include "triangleapi.h"
 #include "ref_common.h"
+#include "platform/xbox/xbox_frametime_svgame.h" // the recorder's sv_game breakdown, docs/r3d/divergences.md #141
+#if XASH_XBOX && !XASH_DEDICATED
+#include "platform/xbox/xbox_frametime.h"
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt
+#endif
 
 typedef int (*PHYSICAPI)( int, server_physics_api_t*, physics_interface_t* );
 #if !XASH_DEDICATED
@@ -183,6 +189,8 @@ returns true if the entity is in solid currently
 */
 static qboolean SV_TestEntityPosition( edict_t *ent, edict_t *blocker )
 {
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_PUSH_TESTS );
+
 	if( FBitSet( ent->v.flags, FL_CLIENT|FL_FAKECLIENT ))
 	{
 		// to avoid falling through tracktrain update client mins\maxs here
@@ -217,7 +225,7 @@ static qboolean SV_TryThink( edict_t *ent, double frametime, double time )
 
 	ent->v.nextthink = 0.0f;
 	svgame.globals->time = thinktime;
-	svgame.dllFuncs.pfnThink( ent );
+	XBOX_FT_SV_TIMED( XBOX_FT_SV_THINK, XBOX_FT_W_G_THINKS, svgame.dllFuncs.pfnThink( ent ));
 
 	return true;
 }
@@ -293,13 +301,13 @@ void SV_Impact( edict_t *e1, edict_t *e2, trace_t *trace )
 	if( e1->v.solid != SOLID_NOT )
 	{
 		SV_CopyTraceToGlobal( trace );
-		svgame.dllFuncs.pfnTouch( e1, e2 );
+		XBOX_FT_SV_TIMED( XBOX_FT_SV_TOUCH, XBOX_FT_W_G_TOUCHES, svgame.dllFuncs.pfnTouch( e1, e2 ));
 	}
 
 	if( e2->v.solid != SOLID_NOT )
 	{
 		SV_CopyTraceToGlobal( trace );
-		svgame.dllFuncs.pfnTouch( e2, e1 );
+		XBOX_FT_SV_TIMED( XBOX_FT_SV_TOUCH, XBOX_FT_W_G_TOUCHES, svgame.dllFuncs.pfnTouch( e2, e1 ));
 	}
 }
 
@@ -863,6 +871,81 @@ static qboolean SV_CanBlock( edict_t *ent )
 	return true;
 }
 
+#if XASH_XBOX
+/*
+============
+SV_PushSkipsCheck
+
+Resonance3D (docs/r3d/divergences.md #149). SV_PushMove and
+SV_PushRotate test every pushable entity of the map against every moving
+pusher, every frame, and the first test is a full hull trace
+(SV_TestEntityPosition with the pusher made non-solid: "is it stuck in
+something else already?", upstream sv_phys.c:921 and :1040). Only then
+comes the bounding-box reject that throws away almost all of them
+(:928-934, :1047-1053). The trace changes nothing but the gpGlobals
+trace_* fields (SV_CopyTraceToGlobal, sv_game.c:193-209; trace_ent,
+sv_world.c:1335), so for an entity the box reject would discard anyway
+the trace can be skipped, as long as what it leaves in those fields is
+reproduced: the caller clears trace_flags at once (the only one a later
+trace reads, SV_HullForStudioModel, sv_world.c:296), and SV_PushReplaySkipped
+reruns the trace when the skipped entity was the loop's last, so the
+fields read after the push are upstream's. Returns true for such an
+entity: not a client (SV_TestEntityPosition resizes a client's box
+before tracing, which can move it into the pusher's box, :186-191) and
+not riding the pusher (upstream tests a rider whatever its box, :926,
+:1045). `mins`/`maxs` are the box the caller's own reject uses.
+
+Never while the game DLL has a hook a trace would call: pfnShouldCollide
+(SV_ClipToEntity, sv_world.c:1105, for every linked entity the trace
+visits) or the physics interface's SV_HullForBsp / ClipMoveToEntity
+(:180, :1071). Skipping the trace would skip those calls. Half-Life's
+DLLs have none of them (deps/hlsdk/dlls/cbase.cpp, gNewDLLFunctions).
+============
+*/
+static qboolean SV_PushSkipsCheck( const edict_t *check, const edict_t *pusher, const vec3_t mins, const vec3_t maxs )
+{
+	if( svgame.dllFuncs2.pfnShouldCollide || svgame.physFuncs.SV_HullForBsp || svgame.physFuncs.ClipMoveToEntity )
+		return false;
+
+	if( FBitSet( check->v.flags, FL_CLIENT|FL_FAKECLIENT ))
+		return false;
+
+	if( FBitSet( check->v.flags, FL_ONGROUND ) && check->v.groundentity == pusher )
+		return false;
+
+	return check->v.absmin[0] >= maxs[0]
+		|| check->v.absmin[1] >= maxs[1]
+		|| check->v.absmin[2] >= maxs[2]
+		|| check->v.absmax[0] <= mins[0]
+		|| check->v.absmax[1] <= mins[1]
+		|| check->v.absmax[2] <= mins[2];
+}
+
+/*
+============
+SV_PushReplaySkipped
+
+Resonance3D (#149): when the push loop's last pushable entity was
+skipped by SV_PushSkipsCheck, its trace was upstream's last: run it now,
+on the same world (nothing moved after it), so the gpGlobals trace_*
+fields the pusher's Blocked/Think and later code can read are upstream's.
+`flags` is the trace_flags that trace would have started with, which the
+skip cleared.
+============
+*/
+static void SV_PushReplaySkipped( edict_t *pusher, edict_t *skipped, int flags, int oldsolid )
+{
+	if( !skipped )
+		return;
+
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_PUSH_REPLAYS );
+	svgame.globals->trace_flags = flags;
+	pusher->v.solid = SOLID_NOT;
+	SV_TestEntityPosition( skipped, pusher );
+	pusher->v.solid = oldsolid;
+}
+#endif // XASH_XBOX
+
 /*
 ============
 SV_PushMove
@@ -906,6 +989,11 @@ static edict_t *SV_PushMove( edict_t *pusher, float movetime )
 	if( pusher->v.solid == SOLID_NOT )
 		return NULL;
 
+#if XASH_XBOX
+	edict_t *skipped = NULL; // #149: the last entity SV_PushSkipsCheck skipped, until a later one is tested
+	int skipped_flags = 0;   // the trace_flags its trace would have started with
+#endif
+
 	// see if any solid entities are inside the final position
 	for( int e = 1; e < svgame.numEntities; e++ )
 	{
@@ -916,6 +1004,19 @@ static edict_t *SV_PushMove( edict_t *pusher, float movetime )
 		// filter movetypes to collide with
 		if( !SV_CanPushed( check ))
 			continue;
+
+#if XASH_XBOX
+		// #149: upstream's box reject below, before its stuck test, for
+		// the entities it is sure to reject
+		if( SV_PushSkipsCheck( check, pusher, mins, maxs ))
+		{
+			skipped_flags = svgame.globals->trace_flags;
+			svgame.globals->trace_flags = 0; // what the skipped trace's SV_CopyTraceToGlobal leaves
+			skipped = check;
+			continue;
+		}
+		skipped = NULL;
+#endif
 
 		pusher->v.solid = SOLID_NOT;
 		block = SV_TestEntityPosition( check, pusher );
@@ -974,6 +1075,9 @@ static edict_t *SV_PushMove( edict_t *pusher, float movetime )
 		}
 	}
 
+#if XASH_XBOX
+	SV_PushReplaySkipped( pusher, skipped, skipped_flags, oldsolid ); // #149
+#endif
 	return NULL;
 }
 
@@ -1024,6 +1128,11 @@ static edict_t *SV_PushRotate( edict_t *pusher, float movetime )
 	// create pusher final position
 	Matrix4x4_CreateFromEntity( end_l, pusher->v.angles, pusher->v.origin, 1.0f );
 
+#if XASH_XBOX
+	edict_t *skipped = NULL; // #149, as in SV_PushMove
+	int skipped_flags = 0;
+#endif
+
 	// see if any solid entities are inside the final position
 	for( int e = 1; e < svgame.numEntities; e++ )
 	{
@@ -1035,6 +1144,19 @@ static edict_t *SV_PushRotate( edict_t *pusher, float movetime )
 		// filter movetypes to collide with
 		if( !SV_CanPushed( check ))
 			continue;
+
+#if XASH_XBOX
+		// #149: upstream's box reject below (against the pusher's moved
+		// box), before its stuck test, for the entities it is sure to reject
+		if( SV_PushSkipsCheck( check, pusher, pusher->v.absmin, pusher->v.absmax ))
+		{
+			skipped_flags = svgame.globals->trace_flags;
+			svgame.globals->trace_flags = 0; // what the skipped trace's SV_CopyTraceToGlobal leaves
+			skipped = check;
+			continue;
+		}
+		skipped = NULL;
+#endif
 
 		pusher->v.solid = SOLID_NOT;
 		block = SV_TestEntityPosition( check, pusher );
@@ -1112,6 +1234,9 @@ static edict_t *SV_PushRotate( edict_t *pusher, float movetime )
 		}
 	}
 
+#if XASH_XBOX
+	SV_PushReplaySkipped( pusher, skipped, skipped_flags, oldsolid ); // #149
+#endif
 	return NULL;
 }
 
@@ -1182,7 +1307,7 @@ static void SV_Physics_Pusher( edict_t *ent )
 	{
 		ent->v.nextthink = 0.0f;
 		svgame.globals->time = sv.time;
-		svgame.dllFuncs.pfnThink( ent );
+		XBOX_FT_SV_TIMED( XBOX_FT_SV_THINK, XBOX_FT_W_G_THINKS, svgame.dllFuncs.pfnThink( ent ));
 	}
 }
 
@@ -1779,12 +1904,14 @@ SV_Physics
 */
 void SV_Physics( void )
 {
+	XBOX_FT_SV_GAME_BEGIN();
+
 	SV_CheckAllEnts ();
 
 	svgame.globals->time = sv.time;
 
 	// let the progs know that a new frame has started
-	svgame.dllFuncs.pfnStartFrame();
+	XBOX_FT_SPAN( XBOX_FT_S_SV_START, svgame.dllFuncs.pfnStartFrame());
 
 	// treat each object in turn
 	for( int i = 0; i < svgame.numEntities; i++ )
@@ -1797,7 +1924,7 @@ void SV_Physics( void )
 		if( i > 0 && i <= svs.maxclients )
 			continue;
 
-		SV_Physics_Entity( ent );
+		XBOX_FT_SV_ENTITY( ent, i, SV_Physics_Entity( ent ));
 	}
 
 	if( svgame.globals->force_retouch != 0.0f )
@@ -1811,6 +1938,8 @@ void SV_Physics( void )
 
 	// increase framecount
 	sv.framecount++;
+
+	XBOX_FT_SV_GAME_END();
 
 #if 0 // figure out why this causes memory corruption
 	// decrement svgame.numEntities if the highest number entities died

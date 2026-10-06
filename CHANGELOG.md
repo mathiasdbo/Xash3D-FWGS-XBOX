@@ -5,6 +5,43 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: moving doors, trains, pendulums and fans no longer test every object in the map
+
+Every frame, each moving brush entity (a door, a lift, a train, a
+swinging pendulum, a fan) checked every movable object in the map with a
+full collision trace before throwing almost all of them away with a cheap
+box test. On c1a1b, with 17 pendulums swinging, that was 734 traces a
+frame, and it was most of the server's game logic, which the console
+spends 6-7 ms a frame on there. The cheap test now comes first for the
+objects it would discard anyway; the trace results the game can read are
+kept exactly as before (the last skipped trace is redone when its result
+is the one left behind). Traces per frame went from 734 to 38 on c1a1b,
+316 to 24 on c1a1c, 78 to 11 on c1a0c and 84 to 7 on c1a1f. A scripted
+session over those four maps, run with a fixed random seed, gives the
+same state for every entity on every server frame as before, and a save
+that differs only where two runs of the old build already differ (stack
+addresses the save picks up). In xemu the server's game logic went from 3.60 to 0.98 ms
+a frame on c1a1b, 1.78 to 0.54 on c1a1c, 1.12 to 0.69 on c1a0c and 0.93
+to 0.43 on c1a1f; the console's figure needs a hardware run.
+
+### Added - frame-time recorder: the server's game logic broken down
+
+`k_sv_game`, the server's game logic, is now split by the kind of entity
+(monsters, moving brush entities, falling objects, think-only entities)
+and the game DLL's `StartFrame`, with counts of thinks, touches,
+collision traces and the like, the slowest single entity of each frame,
+and a per-map table of the entity classes that cost the most. The report
+tool shows all of it, and names the slowest entity of each of the worst
+frames. A recording grows to 420 bytes a frame (24.6 KiB a second) and
+~507 KiB of memory while it runs; nothing changes with the recorder off.
+
+### Fixed - frame-time recorder: an 8-byte stack overflow on every flush
+
+Each time the recorder wrote its file it put a 24-byte record into a
+16-byte buffer, over the registers it keeps for its caller. It went
+unnoticed until a change around it crashed the game in xemu on the first
+flush in a map; the data in recordings made so far is not affected.
+
 ### Fixed - Xbox: each controller press counted once
 
 On the Xbox the engine and the Half-Life client both opened the controller.

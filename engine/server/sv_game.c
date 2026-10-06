@@ -23,6 +23,7 @@ GNU General Public License for more details.
 #include "const.h"
 #include "render_api.h"	// modelstate_t
 #include "ref_common.h" // decals
+#include "platform/xbox/xbox_frametime_svgame.h" // the recorder's sv_game breakdown, docs/r3d/divergences.md #141
 
 // GameAPI functions declarations
 static int GAME_EXPORT pfnModelIndex( const char *m );
@@ -1439,6 +1440,8 @@ pfnMoveToOrigin
 */
 static void GAME_EXPORT pfnMoveToOrigin( edict_t *ent, const float *pflGoal, float dist, int iMoveType )
 {
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_WALKMOVES );
+
 	if( !pflGoal || !SV_IsValidEdict( ent ))
 		return;
 
@@ -1509,6 +1512,7 @@ static edict_t *GAME_EXPORT SV_FindEntityByString( edict_t *pStartEdict, const c
 		edict_t *ed = SV_EdictNum( e );
 		const char *t;
 
+		XBOX_FT_SV_COUNT( XBOX_FT_W_G_FIND_VISITS );
 		if( !SV_IsValidEdict( ed )) continue;
 
 		if( e <= svs.maxclients && !SV_ClientFromEdict( ed, ( svs.maxclients != 1 )))
@@ -1577,6 +1581,7 @@ static edict_t *GAME_EXPORT pfnFindEntityInSphere( edict_t *pStartEdict, const f
 		edict_t *ent = SV_EdictNum( e );
 		float distSquared = 0.0f;
 
+		XBOX_FT_SV_COUNT( XBOX_FT_W_G_FIND_VISITS );
 		if( !SV_IsValidEdict( ent ))
 			continue;
 
@@ -1864,6 +1869,8 @@ int GAME_EXPORT pfnDropToFloor( edict_t *e )
 	qboolean	monsterClip;
 	trace_t	trace;
 
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_WALKMOVES );
+
 	if( !SV_IsValidEdict( e ))
 		return 0;
 
@@ -1895,6 +1902,8 @@ pfnWalkMove
 */
 static int GAME_EXPORT pfnWalkMove( edict_t *ent, float yaw, float dist, int iMode )
 {
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_WALKMOVES );
+
 	if( !SV_IsValidEdict( ent ))
 		return 0;
 
@@ -2113,6 +2122,8 @@ static void GAME_EXPORT pfnTraceLine( const float *v1, const float *v2, int fNoM
 {
 	trace_t	trace;
 
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_DLL_TRACES );
+
 	trace = SV_Move( v1, vec3_origin, vec3_origin, v2, fNoMonsters, pentToSkip, false );
 	if( !SV_IsValidEdict( trace.ent ))
 		trace.ent = svgame.edicts;
@@ -2128,6 +2139,8 @@ pfnTraceToss
 static void GAME_EXPORT pfnTraceToss( edict_t *pent, edict_t *pentToIgnore, TraceResult *ptr )
 {
 	trace_t	trace;
+
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_DLL_TRACES );
 
 	if( !SV_IsValidEdict( pent ))
 		return;
@@ -2146,6 +2159,8 @@ static void GAME_EXPORT pfnTraceHull( const float *v1, const float *v2, int fNoM
 {
 	trace_t	trace;
 
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_DLL_TRACES );
+
 	if( hullNumber < 0 || hullNumber > 3 )
 		hullNumber = 0;
 
@@ -2163,6 +2178,8 @@ static int GAME_EXPORT pfnTraceMonsterHull( edict_t *pEdict, const float *v1, co
 {
 	qboolean	monsterClip;
 	trace_t	trace;
+
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_DLL_TRACES );
 
 	if( !SV_IsValidEdict( pEdict ))
 		return 0;
@@ -2187,6 +2204,8 @@ static void GAME_EXPORT pfnTraceModel( const float *v1, const float *v2, int hul
 	float	*mins, *maxs;
 	model_t	*model;
 	trace_t	trace;
+
+	XBOX_FT_SV_COUNT( XBOX_FT_W_G_DLL_TRACES );
 
 	if( !SV_IsValidEdict( pent ))
 		return;

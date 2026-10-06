@@ -448,7 +448,10 @@ class Spans(unittest.TestCase):
     4 (world 1, client_studio 2 (studio_points 1)), r_end 1), snd 1): top
     level 15, 1 ms unattributed. seq 40: sv_game 10, sv 12, CPU 22. seq 41:
     client_studio 5, studio_points 3, r_scene 7, scr 8, cl 10, CPU 19. The
-    statistics use seq 30..49 (the first 30 in play are the warm-up)."""
+    statistics use seq 30..49 (the first 30 in play are the warm-up).
+    sv_game (2026-10-05): sv_start 1 + sv_pstep 2 (seq 40: 8) + 1 own;
+    g_thinks 30, g_moves 200, g_worst_kc 1 (seq 40: 6), g_worst_cls 2,
+    g_worst_ent 57; a CLASSES chunk closing the map."""
 
     @classmethod
     def setUpClass(cls):
@@ -461,11 +464,13 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 74)
+        self.assertEqual(len(r["counters"]), 97)
         self.assertEqual(r["counters"][20], "span_calls")
-        self.assertEqual(len(r["spans"]), 50)
+        self.assertEqual(len(r["spans"]), 56)
         # Counts after the spans (2026-10-02, R5) are plain counters.
-        self.assertEqual(r["counters"][-3:], ["world_walked", "water_gpu", "vp_loads"])
+        self.assertEqual(r["counters"][77:80], ["world_walked", "water_gpu", "vp_loads"])
+        self.assertEqual(r["counters"][80], "g_ents")
+        self.assertEqual(r["counters"][-1], "g_push_replays")
         self.assertNotIn("world_walked", fr.span_names(r))
         self.assertNotIn("vp_loads", fr.span_names(r))
         self.assertEqual(r["frames"][0][8][r["counters"].index("world_walked")], 500)
@@ -499,6 +504,12 @@ class Spans(unittest.TestCase):
         self.assertLess(order.index("k_world_walk"), order.index("k_client_studio"))
         self.assertEqual(r["unknown_chunks"], 0)
         self.assertEqual(fr.span_depth(r)["k_skin_read"], 5)
+        # The server game frame's breakdown (2026-10-05).
+        self.assertEqual(parent["k_sv_pstep"], "k_sv_game")
+        self.assertEqual(parent["k_sv_pother"], "k_sv_game")
+        self.assertEqual(fr.span_depth(r)["k_sv_start"], 2)
+        self.assertLess(order.index("k_sv_game"), order.index("k_sv_start"))
+        self.assertLess(order.index("k_sv_pother"), order.index("k_sv_send"))
 
     def test_span_averages(self):
         a = self.row
@@ -515,6 +526,8 @@ class Spans(unittest.TestCase):
         self.assertAlmostEqual(own["k_r_scene"], 1.0)     # 4 = world 1 + client_studio 2 + 1 (7 = 1 + 5 + 1)
         self.assertAlmostEqual(own["k_client_studio"], 1.05)
         self.assertAlmostEqual(own["k_scr"], 0.0)
+        self.assertAlmostEqual(ms["k_sv_pstep"], (19 * 2 + 8) / 20.0)
+        self.assertAlmostEqual(own["k_sv_game"], 1.0)
         # The invariant the recorder is built on: top level + unattributed = CPU.
         self.assertAlmostEqual(a["span_top_ms"] + a["unattributed_ms"], a["cpu_ms"])
         self.assertAlmostEqual(a["unattributed_ms"], 1.0)
@@ -539,7 +552,41 @@ class Spans(unittest.TestCase):
         names = [c["name"] for c in fr.work_correlation(self.rec)]
         self.assertIn("studio_models", names)
         self.assertIn("span_calls", names)
+        self.assertIn("g_moves", names)
         self.assertFalse([n for n in names if n.startswith("k_")])
+        # The g_* times and labels are not counts either.
+        self.assertFalse([n for n in names if n.endswith("_kc") or n.startswith("g_worst")])
+
+    def test_classes_chunk(self):
+        r = self.rec
+        self.assertEqual(len(r["classes"]), 1)
+        self.assertEqual(r["classes"][0]["frame"], 50)
+        self.assertEqual(fr.class_names(r), ["func_tracktrain", "monster_scientist", "info_target"])
+        row = r["classes"][0]["rows"][1]
+        self.assertEqual((row["movetype"], row["runs"], row["thinks"], row["moves"]), (4, 100, 20, 400))
+        self.assertEqual((row["phys_kc"], row["think_kc"], row["worst_kc"]), (106, 90, 8))
+        # Per frame over the 50 frames that started in play, warm-up included;
+        # the class nothing ran is left out; most time first.
+        a = self.row
+        self.assertEqual(a["class_frames"], 50)
+        self.assertEqual([c["name"] for c in a["classes"]], ["monster_scientist", "func_tracktrain"])
+        sci = a["classes"][0]
+        self.assertAlmostEqual(sci["phys_ms"], 106 / 50.0)
+        self.assertAlmostEqual(sci["think_ms"], 90 / 50.0)
+        self.assertAlmostEqual(sci["worst_ms"], 8.0)
+        self.assertAlmostEqual(sci["runs_pf"], 2.0)
+        self.assertAlmostEqual(sci["moves_pf"], 8.0)
+
+    def test_classes_need_their_segment(self):
+        # A chunk at a segment's start belongs to the segment before it.
+        seg = {"start": 50, "end": 60}
+        self.assertEqual(fr.segment_classes(self.rec, seg), [])
+        self.assertEqual(len(fr.segment_classes(self.rec, {"start": 0, "end": 50})), 2)
+
+    def test_worst_entity(self):
+        top = fr.top_frames(self.rec, "k_sv_game", 1)
+        self.assertEqual(top[0]["seq"], 40)
+        self.assertEqual(fr.worst_entity(self.rec, top[0]), "monster_scientist #57 6.00")
 
     def test_summary_and_page(self):
         s = fr.session_stats(self.rec, self.rows)
@@ -547,13 +594,19 @@ class Spans(unittest.TestCase):
         self.assertIn("CPU spans", text)
         self.assertIn("unattributed", text)
         self.assertIn("top frames by k_sv_game", text)
-        self.assertRegex(text, r"\n  sv_game +4\.30/4\.30 +26%")       # depth 1: two spaces
+        self.assertRegex(text, r"\n  sv_game +4\.30/1\.00 +26%")       # depth 1: two spaces
+        self.assertRegex(text, r"\n    sv_pstep +2\.30/2\.30 +14%")     # depth 2
+        self.assertIn("monster_scientist #57 6.00", text)
+        self.assertIn("sv_game work per in-play frame", text)
+        self.assertRegex(text, r"c1a0c: top classnames by time in SV_Physics_Entity, over 50 frames in play")
+        self.assertRegex(text, r"\nmonster_scientist +step +2\.0 +0\.40 +8\.0 +2\.120 +1\.800 +8\.00")
         page = fr.render_html(self.rec, self.rows, s, ["spans.bin"], source="xemu")
         self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
         self.assertIn('id="spans"', page)
         self.assertIn("CPU by subsystem", page)
         self.assertIn("Recorded in xemu:</b> these are the emulator", page)
         self.assertIn("The ten frames with the most sv_game", page)
+        self.assertIn("sv_game by classname: c1a0c", page)
         run_page_script(page)
 
     def test_without_spans_chunk(self):

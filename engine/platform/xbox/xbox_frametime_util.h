@@ -65,6 +65,20 @@ still write it when given zero counters (the tests' v1 fixture).
               directly inside Host_Frame). A reader without it skips the
               chunk by its length and sees the spans as plain counters,
               so the version stays 2.
+    7 CLASSES (2026-10-05) the server game frame per entity classname,
+              for the frames since the previous CLASSES chunk: written
+              before each MAP chunk (closing the map before it) and when
+              recording stops. u32 count, then count x
+              XBOX_FT_CLASS_BYTES (60): char[32] classname, NUL-padded,
+              u32 movetype (the last one seen), u32 runs (entity-frames
+              SV_Physics ran it), u32 thinks, u32 SV_Move calls, u32
+              kilocycles in its SV_Physics_Entity (think included), u32
+              kilocycles in its Think, u32 kilocycles of its slowest
+              single SV_Physics_Entity. Every chunk lists every classname
+              seen so far in the recording, in first-seen order, so an
+              index (the g_worst_cls counter) means the same name in
+              every chunk. Only frames that start in play are counted
+              (not menu or pause frames; the warm-up frames are).
   frame record, XBOX_FT_FRAME_BYTES (32) + 4 x counters:
     0  u32 sequence number (consecutive; a gap is frames lost)
     4  u32 total ticks, Host_Frame start to the next Host_Frame start
@@ -108,6 +122,7 @@ still write it when given zero counters (the tests' v1 fixture).
 #define XBOX_FT_CHUNK_END      4u
 #define XBOX_FT_CHUNK_COUNTERS 5u
 #define XBOX_FT_CHUNK_SPANS    6u
+#define XBOX_FT_CHUNK_CLASSES  7u
 
 /* Per-frame work counters (v2). ref/nv2a adds to them where the work is
    submitted (xbox_frametime.h's xbox_ft_work); the recorder zeroes them
@@ -213,6 +228,18 @@ enum
 	XBOX_FT_S_BRUSH,         /*   in k_r_scene: nv2a_draw_brush_entity, every solid and translucent brush entity */
 	XBOX_FT_S_WARP_BRUSH,    /*     in k_brush: R_WarpDrawBrushEntity - a brush entity's water (func_water) */
 	XBOX_FT_S_WARP_TRANS,    /*   in k_r_scene: R_WarpDrawWaterSurfaces - the world's translucent water */
+	/* The server's game frame, broken down (2026-10-05, appended for the
+	   same reason): SV_Physics' parts. Each entity's whole
+	   SV_Physics_Entity - its movement, its think, the touches and traces
+	   it causes - is charged to the span of the movetype it had when it
+	   started; k_sv_game's own time is the loop itself, lightstyles and
+	   the SV_CheckAllEnts sweep. xbox_frametime_svgame.c. */
+	XBOX_FT_S_SV_START,      /*   in k_sv_game: the game DLL's StartFrame */
+	XBOX_FT_S_SV_PSTEP,      /*   in k_sv_game: MOVETYPE_STEP/PUSHSTEP - monsters: their AI think, SV_Physics_Step */
+	XBOX_FT_S_SV_PPUSH,      /*   in k_sv_game: MOVETYPE_PUSH - brush movers (trains, doors, lifts): SV_PushMove/Rotate, think */
+	XBOX_FT_S_SV_PTOSS,      /*   in k_sv_game: TOSS/BOUNCE/FLY/FLYMISSILE/BOUNCEMISSILE - gibs, grenades, falling items */
+	XBOX_FT_S_SV_PNONE,      /*   in k_sv_game: MOVETYPE_NONE - think-only entities: triggers, logic, sprites */
+	XBOX_FT_S_SV_POTHER,     /*   in k_sv_game: NOCLIP, FOLLOW, COMPOUND and any other movetype */
 	XBOX_FT_S_COUNT
 };
 
@@ -225,6 +252,27 @@ enum
 	XBOX_FT_W_WORLD_WALKED = XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_COUNT, /* faces the world pass's face loop visited (world_faces: what it drew) */
 	XBOX_FT_W_WATER_GPU,     /* R5: the water_verts the vertex unit warped (vs_warp) */
 	XBOX_FT_W_VP_LOADS,      /* R5: vertex-program loads into slots another program had (vs_warp over vs_studio's tail, and back) */
+	/* The server game frame's work (2026-10-05, xbox_frametime_svgame.c):
+	   counted only inside SV_Physics (k_sv_game), so player movement in
+	   k_sv_runcmd and the send path are not in them. Counts, exact in
+	   xemu - except the four marked as times. */
+	XBOX_FT_W_G_ENTS,        /* entities SV_Physics ran */
+	XBOX_FT_W_G_THINKS,      /* game DLL Think calls (SV_RunThink, SV_Physics_Pusher) */
+	XBOX_FT_W_G_TOUCHES,     /* game DLL Touch calls (SV_Impact, both ways; SV_TouchLinks) */
+	XBOX_FT_W_G_MOVES,       /* SV_Move calls: every hull trace, the engine's physics and the DLL's alike */
+	XBOX_FT_W_G_DLL_TRACES,  /* the DLL's TraceLine/TraceHull/TraceMonsterHull/TraceModel/TraceToss calls */
+	XBOX_FT_W_G_CLIP_ENTS,   /* entities SV_ClipToLinks looked at for a trace (the area-node candidates) */
+	XBOX_FT_W_G_LINKS,       /* SV_LinkEdict calls */
+	XBOX_FT_W_G_PUSH_TESTS,  /* SV_TestEntityPosition calls (SV_PushMove/SV_PushRotate's per-entity tests) */
+	XBOX_FT_W_G_WALKMOVES,   /* the DLL's WalkMove/MoveToOrigin/DropToFloor calls */
+	XBOX_FT_W_G_FIND_VISITS, /* edicts the DLL's FindEntityByString/FindEntityInSphere scans looked at */
+	XBOX_FT_W_G_THINK_KC,    /* time: kilocycles inside the DLL's Think (outermost), with what it calls */
+	XBOX_FT_W_G_TOUCH_KC,    /* time: kilocycles inside the DLL's Touch (outermost) */
+	XBOX_FT_W_G_MOVE_KC,     /* time: kilocycles inside SV_Move (outermost) */
+	XBOX_FT_W_G_WORST_KC,    /* time: the slowest single entity's SV_Physics_Entity, kilocycles */
+	XBOX_FT_W_G_WORST_CLS,   /* that entity's classname: 1 + its index in the CLASSES chunk (0: none) */
+	XBOX_FT_W_G_WORST_ENT,   /* that entity's edict number */
+	XBOX_FT_W_G_PUSH_REPLAYS,/* of g_push_tests, the traces #149 replays at the end of a push loop */
 	XBOX_FT_W_END
 };
 
@@ -371,5 +419,27 @@ size_t xbox_ft_encode_frame( uint8_t *out, const xbox_ft_frame_t *frame, uint32_
 size_t xbox_ft_encode_map( uint8_t *out, uint64_t tsc, uint64_t load_ticks, uint32_t free_before, uint32_t free_after, uint32_t total_pages, uint32_t flags, const char *name );
 size_t xbox_ft_encode_calib( uint8_t *out, uint64_t tsc, uint64_t qpc );
 size_t xbox_ft_encode_end( uint8_t *out, uint64_t tsc, uint32_t lost );
+
+/* The CLASSES chunk (2026-10-05): one per-classname row of the server
+   game frame, in ticks; the encoder rounds them to kilocycles. */
+#define XBOX_FT_CLASS_NAME_BYTES 32u
+#define XBOX_FT_CLASS_BYTES      ( XBOX_FT_CLASS_NAME_BYTES + 7u * 4u )
+#define XBOX_FT_CLASSES_MAX      192u /* distinct classnames per recording; later ones share the last row */
+
+typedef struct xbox_ft_class_s
+{
+	char name[XBOX_FT_CLASS_NAME_BYTES]; /* NUL-terminated, truncated */
+	uint32_t movetype;
+	uint32_t runs;
+	uint32_t thinks;
+	uint32_t moves;
+	uint64_t phys;      /* ticks in SV_Physics_Entity */
+	uint64_t think;     /* ticks in the DLL's Think */
+	uint64_t worst;     /* the slowest single SV_Physics_Entity, ticks */
+} xbox_ft_class_t;
+
+/* Writes the chunk for classes[0..count) - XBOX_FT_CHUNK_BYTES + 4 +
+   count x XBOX_FT_CLASS_BYTES bytes - and returns that count. */
+size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uint32_t count );
 
 #endif /* XBOX_FRAMETIME_UTIL_H */
