@@ -77,12 +77,21 @@ COUNTER_NAME_BYTES = 16
 CHUNK_FRAMES, CHUNK_MAP, CHUNK_CALIB, CHUNK_END, CHUNK_COUNTERS = 1, 2, 3, 4, 5
 CHUNK_SPANS = 6             # span name -> parent span name (recorders from 2026-10-01)
 CHUNK_CLASSES = 7           # per-classname server game frame totals (recorders from 2026-10-05)
+CHUNK_NOTES = 8             # named one-off events: sounds loaded in play, slow server messages (2026-10-06)
+NOTE_BYTES = 64
+NOTE_KINDS = {1: "sound", 2: "message"}
+NOTES_TOP = 12              # notes the summary lists, slowest first
 CLASS_NAME_BYTES = 32
 CLASS_BYTES = CLASS_NAME_BYTES + 7 * 4
 # g_* counters that are not counts: times in kilocycles, and the slowest
 # entity's class row and edict number. Kept out of the count correlation.
 G_TIMES = ("g_think_kc", "g_touch_kc", "g_move_kc", "g_worst_kc")
 G_LABELS = ("g_worst_cls", "g_worst_ent")
+# First-use loads (recorders from 2026-10-06): sounds S_LoadSound read and
+# textures ref/nv2a created in the frame. snd_load_kc is a time
+# (kilocycles), so it stays out of the count correlation; a stall lists
+# whichever of them it has.
+LOAD_TIMES = ("snd_load_kc", "cl_parse_kc")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -152,7 +161,7 @@ def parse(data):
         "qpc_hz": qpc_hz, "tsc_open": tsc_open, "qpc_open": qpc_open, "mode": mode,
         "build": build, "frames": [], "maps": [], "calibs": [], "end": None,
         "truncated": False, "gaps": 0, "lost_frames": 0, "unknown_chunks": 0,
-        "counters": [], "spans": [], "classes": [],
+        "counters": [], "spans": [], "classes": [], "notes": [], "notes_dropped": 0,
     }
     frames = rec["frames"]
     off = header_bytes
@@ -229,6 +238,16 @@ def parse(data):
                 rows.append({"name": name, "movetype": mt, "runs": runs, "thinks": thinks, "moves": moves,
                              "phys_kc": phys, "think_kc": think, "worst_kc": worst})
             rec["classes"].append({"frame": len(frames), "rows": rows})
+        elif ctype == CHUNK_NOTES:
+            n, dropped = struct.unpack_from("<II", data, body)
+            if clen < 8 + n * NOTE_BYTES:
+                raise FormatError("NOTES chunk at %d: length %d for %d notes" % (off, clen, n))
+            for i in range(n):
+                q = body + 8 + i * NOTE_BYTES
+                seq, kind, kc, nbytes = struct.unpack_from("<IIII", data, q)
+                name = data[q + 16:q + NOTE_BYTES].split(b"\0", 1)[0].decode("latin-1")
+                rec["notes"].append({"seq": seq, "kind": kind, "kc": kc, "bytes": nbytes, "name": name})
+            rec["notes_dropped"] += dropped
         else:
             rec["unknown_chunks"] += 1
         off = body + clen
@@ -498,24 +517,93 @@ def _top_spans_label(top):
     return ", ".join("%s %.0f" % (s.replace("k_", "", 1), v) for s, v in top)
 
 
+def stall_loads(rec, fr):
+    """The frame's first-use loads (recorders from 2026-10-06): {"snd":
+    (count, KiB, ms), "tex": (count, KiB)} for each kind it has, and
+    "parse": the ms the client spent parsing server messages (inside
+    k_cl_read; the rest of k_cl_read is around the parser); {} for a
+    frame without them or a file without the counters."""
+    idx = {n: i for i, n in enumerate(rec["counters"])}
+    w = fr[8] if len(fr) > 8 else ()
+
+    def get(name):
+        i = idx.get(name)
+        return w[i] if i is not None and i < len(w) else 0
+    out = {}
+    if get("snd_loads"):
+        out["snd"] = (get("snd_loads"), get("snd_load_kb"), get("snd_load_kc") * 1e6 / rec["tsc_hz"])
+    if get("tex_loads"):
+        out["tex"] = (get("tex_loads"), get("tex_load_kb"))
+    if get("cl_parse_kc"):
+        out["parse"] = get("cl_parse_kc") * 1e6 / rec["tsc_hz"]
+    return out
+
+
+def frame_notes(rec, seq):
+    """The NOTES of one frame (recorders from 2026-10-06), slowest first:
+    [(kind name, name, ms, bytes)]."""
+    k = 1e6 / rec["tsc_hz"]
+    out = [(NOTE_KINDS.get(n["kind"], "kind %d" % n["kind"]), n["name"], n["kc"] * k, n["bytes"])
+           for n in rec["notes"] if n["seq"] == seq]
+    return sorted(out, key=lambda x: (-x[2], x[1]))
+
+
+def _notes_label(notes, top=3):
+    return ", ".join("%s %s %.0f ms" % (kind, name, ms) for kind, name, ms, _ in notes[:top])
+
+
+def notes_list(rec):
+    """Every note with the seconds into the session and the map it was in,
+    slowest first."""
+    start_s = _start_seconds(rec)
+    seg_of = {}
+    for seg in segments(rec):
+        for i in range(seg["start"], seg["end"]):
+            seg_of[rec["frames"][i][0]] = seg["name"]
+    k = 1e6 / rec["tsc_hz"]
+    out = [{"t": start_s.get(n["seq"]), "map": seg_of.get(n["seq"], "?"), "kind": NOTE_KINDS.get(n["kind"], str(n["kind"])),
+            "name": n["name"], "ms": n["kc"] * k, "bytes": n["bytes"], "seq": n["seq"]} for n in rec["notes"]]
+    return sorted(out, key=lambda r: (-r["ms"], r["seq"]))
+
+
+def _loads_label(loads):
+    parts = []
+    if "snd" in loads:
+        parts.append("sounds loaded %d (%d KiB, %.0f ms)" % loads["snd"])
+    if "tex" in loads:
+        parts.append("textures loaded %d (%d KiB)" % loads["tex"])
+    if loads.get("parse", 0) >= STALL_SPAN_MS:
+        parts.append("messages parsed in %.0f ms" % loads["parse"])
+    return "; ".join(parts)
+
+
 def stall_list(rec, include_level_change=False):
     """In-play frames past the warm-up longer than STALL_MS, level-change
     frames left out (unless include_level_change), flush frames kept and
     marked: seconds into the session, map, the times and the CPU share
     of the frame, and its largest spans (stall_top_spans). A stall that
     is mostly CPU happened inside Host_Frame (an autosave, a synchronous
-    read)."""
+    read). A frame's flags are the state it starts in, so the frame in
+    which the player opens the menu or the console still starts in play:
+    such a stall is marked "opens_menu" (the next frame starts with
+    F_MENU) - the menu's own work, not the game's (2026-10-06: three of
+    the route's four ~320 ms non-autosave stalls)."""
     start_s = _start_seconds(rec)
     lc = level_change_frames(rec)
+    frames = rec["frames"]
+    index = {f[0]: i for i, f in enumerate(frames)}
     out = []
     for seg in segments(rec):
         for fr, (t, c, g, w, o, ov) in play_frames(rec, seg):
             if t <= STALL_MS or (fr[0] in lc and not include_level_change):
                 continue
+            i = index[fr[0]]
+            opens_menu = i + 1 < len(frames) and bool(frames[i + 1][7] & F_MENU)
             out.append({"seq": fr[0], "t": start_s[fr[0]], "map": seg["name"], "total": t, "cpu": c,
                         "cpu_pct": 100.0 * c / t if t else 0.0, "gpu": g, "other": o,
-                        "flush": bool(fr[7] & F_FLUSH), "level_change": fr[0] in lc,
-                        "top_spans": stall_top_spans(rec, fr)})
+                        "flush": bool(fr[7] & F_FLUSH), "level_change": fr[0] in lc, "opens_menu": opens_menu,
+                        "top_spans": stall_top_spans(rec, fr), "loads": stall_loads(rec, fr),
+                        "notes": frame_notes(rec, fr[0])})
     return out
 
 
@@ -665,7 +753,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
         return []
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
-    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS)
+    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -861,10 +949,22 @@ def summary_text(rec, rows, sess):
         lines.append("%8s  %-12s %8s %7s %5s %7s %8s  %s" % ("t s", "map", "total", "cpu", "cpu%", "gpu", "between",
                                                              "largest spans, own ms"))
         for r in stalls:
-            note = " ".join(x for x, on in (("flush", r["flush"]), ("level-change", r["level_change"])) if on)
+            note = " ".join(x for x, on in (("flush", r["flush"]), ("level-change", r["level_change"]),
+                                             ("opens-menu", r.get("opens_menu"))) if on)
             lines.append("%8.1f  %-12s %8.1f %7.1f %4.0f%% %7.1f %8.1f  %s" % (
                 r["t"], r["map"][:12], r["total"], r["cpu"], r["cpu_pct"], r["gpu"], r["other"],
-                "  ".join(x for x in (_top_spans_label(r.get("top_spans", [])), note) if x)))
+                "  ".join(x for x in (_top_spans_label(r.get("top_spans", [])),
+                                      _loads_label(r.get("loads", {})), _notes_label(r.get("notes", [])), note) if x)))
+    if rec.get("notes") or rec.get("notes_dropped"):
+        notes = notes_list(rec)
+        lines.append("")
+        lines.append("notes: %d named events (sounds loaded in play, server messages over 5 ms)%s; the slowest %d:"
+                     % (len(notes), (", %d dropped" % rec["notes_dropped"]) if rec.get("notes_dropped") else "",
+                        min(NOTES_TOP, len(notes))))
+        lines.append("%8s  %-12s %-8s %-34s %8s %8s" % ("t s", "map", "kind", "name", "ms", "KiB"))
+        for r in notes[:NOTES_TOP]:
+            lines.append("%8s  %-12s %-8s %-34s %8.1f %8.1f" % (
+                fmt(r["t"]), r["map"][:12], r["kind"], r["name"][:34], r["ms"], r["bytes"] / 1024.0))
     if sess.get("counters"):
         lines.append("")
         lines.append("work per frame in play, avg/peak (counts: the same in xemu and on the console)")
@@ -1372,13 +1472,15 @@ def lc_section_html(sess):
     if stalls:
         parts.append('<div class="table-box"><table class="small"><thead><tr><th>s</th><th>Map</th><th>Total ms</th>'
                      '<th>CPU ms</th><th>CPU share</th><th>GPU ms</th><th>Between ms</th>'
-                     '<th>Largest spans, own ms</th><th></th></tr></thead><tbody>')
+                     '<th>Largest spans, own ms</th><th>First-use loads</th><th>Notes</th><th></th></tr></thead><tbody>')
         for r in stalls:
-            note = " ".join(x for x, on in (("flush", r["flush"]), ("level change", r["level_change"])) if on)
+            note = " ".join(x for x, on in (("flush", r["flush"]), ("level change", r["level_change"]),
+                                             ("opens the menu", r.get("opens_menu"))) if on)
             parts.append("<tr><td>%.1f</td><td>%s</td><td>%.1f</td><td>%.1f</td><td>%.0f%%</td><td>%.1f</td>"
-                         "<td>%.1f</td><td>%s</td><td>%s</td></tr>"
+                         "<td>%.1f</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
                          % (r["t"], esc(r["map"]), r["total"], r["cpu"], r["cpu_pct"], r["gpu"], r["other"],
-                            esc(_top_spans_label(r.get("top_spans", []))), note))
+                            esc(_top_spans_label(r.get("top_spans", []))), esc(_loads_label(r.get("loads", {}))),
+                            esc(_notes_label(r.get("notes", []))), note))
         parts.append("</tbody></table></div>")
     else:
         parts.append("<p>None.</p>")

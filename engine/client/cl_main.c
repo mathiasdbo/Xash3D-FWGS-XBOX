@@ -2971,7 +2971,14 @@ static void CL_ParseNetMessage( sizebuf_t *msg, void (*parsefn)( sizebuf_t * ))
 	cls.starting_count = MSG_GetNumBytesRead( msg ); // updates each frame
 	CL_Parse_Debug( true ); // begin parsing
 
+#if XASH_XBOX
+	xbox_ft_span_t ft_parse; // cl_parse_kc (#141 (11))
+	xbox_ft_span_begin( &ft_parse );
+#endif
 	parsefn( msg );
+#if XASH_XBOX
+	xbox_ft_time_add( &ft_parse, XBOX_FT_W_CL_PARSE_KC );
+#endif
 
 	cl.frames[cl.parsecountmod].graphdata.msgbytes += MSG_GetNumBytesRead( msg ) - cls.starting_count;
 	CL_Parse_Debug( false ); // done

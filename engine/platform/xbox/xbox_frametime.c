@@ -87,18 +87,18 @@ xbox_ft_work_t xbox_ft_work;
 xbox_ft_spans_t xbox_ft_spans;
 int xbox_ft_snd_extra;
 
-/* 1024 frames x 420 bytes (32 + 97 work counters: 20 counts, span_calls,
-   56 spans and 20 later counts) = 420 KiB ring, plus the per-map
-   histogram (4 KiB), a 52.5 KiB encode buffer and the server classname
-   table (~30 KiB, xbox_frametime_svgame.c): ~507 KiB, allocated when
-   recording starts and freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush
+/* 1024 frames x 508 bytes (32 + 119 work counters: 20 counts, span_calls,
+   72 spans and 26 later counts) = 508 KiB ring, plus the per-map
+   histogram (4 KiB), a 63.5 KiB encode buffer, 4 KiB of notes and the
+   server classname table (~30 KiB, xbox_frametime_svgame.c): ~610 KiB,
+   allocated when recording starts and freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush
    every 5 s or at half full keeps it from overrunning unless a single
    flush stalls for 7 s. */
 #define XBOX_FT_RING_FRAMES     1024u
 #define XBOX_FT_FLUSH_SECONDS   5u
 #define XBOX_FT_ENCODE_FRAMES   128u
 #define XBOX_FT_WARMUP_FRAMES   30u     /* left out of a map's statistics, as item 12's report did */
-#define XBOX_FT_MAX_FILE_BYTES  ( 64u * 1024u * 1024u )  /* ~1.4 hours at 60 fps (12.4 KiB/s) */
+#define XBOX_FT_MAX_FILE_BYTES  ( 64u * 1024u * 1024u )  /* ~37 min at 60 fps (29.8 KiB/s) */
 #define XBOX_FT_NOMINAL_TSC_HZ  733333333u /* until calibrated: the retail Pentium III clock */
 
 /* The overlay. The graph shows the last XBOX_FT_GRAPH_FRAMES frames as
@@ -129,10 +129,12 @@ typedef struct xbox_ft_state_s
 	char filename[64];
 	uint64_t file_bytes;
 
-	void *block;                /* the one allocation: ring + stats + encode buffer */
+	void *block;                /* the one allocation: ring + stats + encode buffer + notes */
 	xbox_ft_ring_t ring;
 	xbox_ft_stats_t *map_stats;
 	uint8_t *encode;
+	xbox_ft_note_t *notes;      /* the NOTES since the last flush (XBOX_FT_NOTES_MAX) */
+	uint32_t num_notes, notes_dropped;
 
 	uint64_t qpc_hz, tsc_open, qpc_open;
 	uint64_t tsc_hz;            /* live calibration */
@@ -226,6 +228,17 @@ static void FT_Flush( void )
 
 	if( !ft.file )
 		return;
+
+	/* The named notes (2026-10-06) first: each carries its frame's
+	   sequence number, so the order of the chunks does not matter. */
+	if( ft.num_notes || ft.notes_dropped )
+	{
+		STATIC_ASSERT( XBOX_FT_NOTES_CHUNK_BYTES( XBOX_FT_NOTES_MAX ) <= XBOX_FT_ENCODE_FRAMES * ( XBOX_FT_FRAME_BYTES + 4u * XBOX_FT_W_COUNT ),
+			"FT_Flush: the encode buffer holds a full NOTES chunk" );
+		if( !FT_Write( ft.encode, xbox_ft_encode_notes( ft.encode, ft.notes, ft.num_notes, ft.notes_dropped )))
+			return;
+		ft.num_notes = ft.notes_dropped = 0;
+	}
 
 	n = xbox_ft_ring_unflushed( &ft.ring );
 	if( n )
@@ -338,10 +351,12 @@ static qboolean FT_Start( int mode )
 		return false;
 	}
 
-	ft.block = Z_Calloc( ring_bytes + sizeof( xbox_ft_stats_t ) + XBOX_FT_ENCODE_FRAMES * xbox_ft_frame_bytes( XBOX_FT_W_COUNT ));
+	ft.block = Z_Calloc( ring_bytes + sizeof( xbox_ft_stats_t ) + XBOX_FT_ENCODE_FRAMES * xbox_ft_frame_bytes( XBOX_FT_W_COUNT )
+		+ XBOX_FT_NOTES_MAX * sizeof( xbox_ft_note_t ));
 	xbox_ft_ring_init( &ft.ring, (xbox_ft_frame_t *)ft.block, XBOX_FT_RING_FRAMES );
 	ft.map_stats = (xbox_ft_stats_t *)( (byte *)ft.block + ring_bytes );
 	ft.encode = (uint8_t *)ft.block + ring_bytes + sizeof( xbox_ft_stats_t );
+	ft.notes = (xbox_ft_note_t *)( ft.encode + XBOX_FT_ENCODE_FRAMES * xbox_ft_frame_bytes( XBOX_FT_W_COUNT ));
 	if( !Xbox_FT_SvGame_Start( ))
 	{
 		Con_Printf( S_ERROR "frametime: no memory for the classname table\n" );
@@ -458,6 +473,41 @@ static void FT_CloseFrame( uint64_t now )
 				xbox_ft_ticks_to_us( f->gpu, ft.tsc_hz ));
 		}
 	}
+}
+
+/* A named one-off event (the NOTES chunk, xbox_frametime_util.h) in the
+   frame in progress: the one the ring will number next. Nothing while
+   not recording; past XBOX_FT_NOTES_MAX before a flush it is counted as
+   dropped and replaces the fastest note kept, if it is slower. */
+void Xbox_FT_Note( uint32_t kind, const char *name, uint32_t kcyc, uint32_t bytes )
+{
+	xbox_ft_note_t *n;
+
+	if( !ft.mode || !ft.file || !ft.notes )
+		return;
+	if( ft.num_notes >= XBOX_FT_NOTES_MAX )
+	{
+		/* Full: keep the slowest. A burst of small sentence-word loads
+		   must not crowd out the one slow message the notes are for. */
+		uint32_t i, fastest = 0;
+
+		ft.notes_dropped++;
+		for( i = 1; i < XBOX_FT_NOTES_MAX; i++ )
+		{
+			if( ft.notes[i].kcyc < ft.notes[fastest].kcyc )
+				fastest = i;
+		}
+		if( kcyc <= ft.notes[fastest].kcyc )
+			return;
+		n = &ft.notes[fastest];
+	}
+	else
+		n = &ft.notes[ft.num_notes++];
+	n->seq = ft.ring.next_seq;
+	n->kind = kind;
+	n->kcyc = kcyc;
+	n->bytes = bytes;
+	Q_strncpy( n->name, name ? name : "", sizeof( n->name ));
 }
 
 void Xbox_FrameTime_Init( void )
@@ -620,6 +670,7 @@ static void FT_FormatSpans( const uint64_t *work, uint64_t cpu_ticks, uint32_t n
 		"start", "pstep", "ppush", "ptoss", "pnone", "pother",
 		"save", "sinit", "sents", "shl1", "scli", "sglob", "sage", "ssav",
 		"shot", "shrd", "shrs", "shwr",
+		"ui", "uifile", "uipic", "music",
 	};
 	/* A span added without a label is a compile error, not a NULL. */
 	STATIC_ASSERT( ARRAYSIZE( label ) == XBOX_FT_S_COUNT, "one overlay label per span" );

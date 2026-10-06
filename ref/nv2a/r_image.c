@@ -1102,6 +1102,11 @@ int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
 	   one place a fresh slot's first successful upload completes. */
 	SetBits( tex->flags, TF_IMG_UPLOADED );
 
+	/* tex_loads/tex_load_kb (#141): a texture loaded in a frame is a
+	   first-use load when it happens in play (a menu restore, a decal) */
+	NV2A_FT_ADD( XBOX_FT_W_TEX_LOADS, 1 );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_LOAD_KB, ( tex->gpu_size + 1023u ) / 1024u );
+
 	gEngfuncs.FS_FreeImage( pic );
 
 	return (int)( tex - nv2a_textures );
@@ -1180,6 +1185,8 @@ int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags
 	   "only on first upload" rule (gl_image.c:1144-1145) exactly, rather
 	   than freeing and re-copying it. */
 	SetBits( tex->flags, TF_IMG_UPLOADED );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_LOADS, 1 ); /* tex_loads/tex_load_kb (#141), updates included */
+	NV2A_FT_ADD( XBOX_FT_W_TEX_LOAD_KB, ( tex->gpu_size + 1023u ) / 1024u );
 
 	if( nv2a_frame_is_open())
 		nv2a_tex_queue_free( old_has_arena, old_offset, old_fallback );

@@ -20,6 +20,11 @@ GNU General Public License for more details.
 #include "input.h"
 #include "server.h" // !!svgame.hInstance
 #include "vid_common.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_frametime_client.h" // k_ui, k_ui_file, k_ui_pic: docs/r3d/divergences.md #141 (11)
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt // the recorder's CPU spans: Xbox only (#141)
+#endif
 
 static void 	UI_UpdateUserinfo( void );
 
@@ -60,7 +65,7 @@ void UI_UpdateMenu( float realtime )
 	gameui.globals->demorecording = cls.demorecording;
 	gameui.globals->developer = host.allow_console;
 
-	gameui.dllFuncs.pfnRedraw( realtime );
+	XBOX_FT_SPAN( XBOX_FT_S_UI, gameui.dllFuncs.pfnRedraw( realtime ));
 	UI_UpdateUserinfo();
 }
 
@@ -524,7 +529,7 @@ static HIMAGE GAME_EXPORT pfnPIC_Load( const char *szPicName, const byte *image_
 	SetBits( flags, TF_IMAGE );
 
 	Image_SetForceFlags( IL_LOAD_DECAL ); // allow decal images for menu
-	tx = ref.dllFuncs.GL_LoadTexture( szPicName, image_buf, image_size, flags );
+	XBOX_FT_SPAN( XBOX_FT_S_UI_PIC, tx = ref.dllFuncs.GL_LoadTexture( szPicName, image_buf, image_size, flags ));
 	Image_ClearForceFlags();
 
 	return tx;
@@ -1216,7 +1221,11 @@ static const ui_enginefuncs_t gEngfuncs =
 	Cmd_CheckMapsList,
 	CL_Active,
 	pfnClientJoin,
+#if XASH_XBOX
+	Xbox_FT_UI_LoadFile, // COM_LoadFileForMe timed as k_ui_file (#141 (11))
+#else
 	COM_LoadFileForMe,
+#endif
 	pfnParseFile,
 	COM_FreeFile,
 	Key_ClearStates,

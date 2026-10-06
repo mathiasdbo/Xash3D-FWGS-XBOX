@@ -1689,7 +1689,11 @@ void SND_UpdateSound( void )
 		Con_NXPrintf( &info, "room_type: %i (%s) ----(%i)---- painted: %i\n", idsp_room, Cvar_VariableString( "dsp_coeff_table" ), total, snd.paintedtime );
 	}
 
+#if XASH_XBOX
+	XBOX_FT_SPAN( XBOX_FT_S_SND_MUSIC, S_StreamBackgroundTrack ()); // k_snd_music (#141)
+#else
 	S_StreamBackgroundTrack ();
+#endif
 
 	// mix some sound
 	S_UpdateChannels ();

@@ -16,6 +16,9 @@ GNU General Public License for more details.
 #include "common.h"
 #include "client.h"
 #include "sound.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_frametime.h" // first-use load counters, docs/r3d/divergences.md #141
+#endif
 
 // during registration it is possible to have more sounds
 // than could actually be referenced during gameplay,
@@ -112,6 +115,12 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 	if( COM_StringEmptyOrNULL( sfx->name ))
 		return NULL;
 
+#if XASH_XBOX
+	// the frame-time recorder's snd_loads/snd_load_kb/snd_load_kc (#141)
+	xbox_ft_span_t ft_load;
+	xbox_ft_span_begin( &ft_load );
+#endif
+
 	// load it from disk
 	if( Q_stricmp( sfx->name, "*default" ))
 	{
@@ -135,6 +144,18 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		Sound_Process( &sc, SOUND_44k, sc->width, sc->channels, SOUND_RESAMPLE );
 
 	sfx->cache = sc;
+
+#if XASH_XBOX
+	{
+		const uint32_t kc = xbox_ft_load_end( &ft_load, XBOX_FT_W_SND_LOADS, XBOX_FT_W_SND_LOAD_KB, XBOX_FT_W_SND_LOAD_KC, sc->size );
+
+		// named in the recording when it happens in play: the
+		// cls.state test of the s_warn_late_precache warning above (without
+		// its cvar or its "*default" exclusion)
+		if( cls.state == ca_active )
+			Xbox_FT_Note( XBOX_FT_NOTE_SOUND, sfx->name, kc, (uint32_t)sc->size );
+	}
+#endif
 
 	return sfx->cache;
 }

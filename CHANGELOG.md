@@ -5,6 +5,21 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - Frame-time recorder: the menu, the music, and named one-off events
+
+The owner's 29-minute route recording had four single frames of about
+320 ms that were not autosaves. Three of them were the first time the
+pause menu opened after a map load: the menu rebuilds its fonts and
+background then, because it gives that memory back to each map
+(divergence #127). New spans now show the menu's drawing and the files
+and pictures it loads, and the music stream's own time. The fourth, in
+c1a1b's first fight, was 300 ms spent reading one server packet, and
+nothing in the recording could say what was in it. Every frame now also
+counts the sounds and textures loaded on first use, and the recording
+names, with their times, each sound loaded during play and each server
+message that took 5 ms or more to read, so the next console run says
+which one it was. Divergence #141 (11).
+
 ### Changed - Xbox: autosaves hitch for about a third as long
 
 Every autosave froze the game for one frame of 320-425 ms on the

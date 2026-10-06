@@ -414,12 +414,35 @@ class LevelChange(unittest.TestCase):
             # The largest own-time spans of each stall (only a file with spans has them).
             if source == "flag":
                 self.assertEqual(st[0]["top_spans"], [("k_save_sav", 400.0), ("k_save_ents", 100.0), ("k_save", 30.0)])
+                # First-use loads (2026-10-06): 250 kilocycles at 1 MHz is 250 ms.
+                self.assertEqual(st[0]["loads"], {"snd": (2, 300, 250.0), "tex": (6, 4096), "parse": 50.0})
+                # NOTES (2026-10-06): the frame's named events, slowest first.
+                self.assertEqual(st[0]["notes"], [("message", "svc_sound", 200.0, 40),
+                                                  ("sound", "fvox/flatline.wav", 120.0, 131072)])
+                self.assertEqual(rec["notes_dropped"], 1)
             else:
                 self.assertEqual(st[0]["top_spans"], [])
+                self.assertEqual(st[0]["loads"], {})
+                self.assertEqual(st[0]["notes"], [])
+            self.assertEqual(st[1]["notes"], [])
+            self.assertEqual(st[1]["loads"], {})
             self.assertEqual(st[1]["top_spans"], [])
             st = fr.stall_list(rec, include_level_change=True)
             self.assertEqual([s["seq"] for s in st], [35, 38, 83])
             self.assertTrue(st[1]["level_change"])
+            self.assertFalse(any(s["opens_menu"] for s in st))
+
+    def test_stall_that_opens_the_menu(self):
+        # A frame's flags are the state it starts in: with the frame after
+        # seq 83 starting in a menu, seq 83 is the frame that opened it.
+        for source, rec in self._recs():
+            f = rec["frames"][84]
+            rec["frames"][84] = f[:7] + (f[7] | fr.F_MENU,) + f[8:]
+            st = fr.stall_list(rec)
+            self.assertEqual([(s["seq"], s["opens_menu"]) for s in st], [(35, False), (83, True)], source)
+            rows = [fr.segment_stats(rec, s) for s in fr.segments(rec)]
+            text = fr.summary_text(rec, rows, fr.session_stats(rec, rows))
+            self.assertRegex(text, r"\n +[0-9.]+ +c1a0e .*opens-menu")
 
     def test_summary_and_page(self):
         for source, rec in self._recs():
@@ -432,6 +455,13 @@ class LevelChange(unittest.TestCase):
             self.assertIn("stalls: 2 in-play frame(s) over 250 ms", text)
             if source == "flag":
                 self.assertIn("save_sav 400, save_ents 100, save 30", text)
+                self.assertIn("sounds loaded 2 (300 KiB, 250 ms); textures loaded 6 (4096 KiB); messages parsed in 50 ms", text)
+                self.assertIn("message svc_sound 200 ms, sound fvox/flatline.wav 120 ms", text)
+                self.assertIn("notes: 2 named events (sounds loaded in play, server messages over 5 ms), 1 dropped", text)
+                self.assertRegex(text, r"c1a0 +message +svc_sound +200\.0 +0\.0")
+                self.assertRegex(text, r"c1a0 +sound +fvox/flatline\.wav +120\.0 +128\.0")
+            else:
+                self.assertNotIn("notes:", text)
             self.assertIn("c1a0 -> c1a0e", text)
             self.assertIn("LOAD flag" if source == "flag" else "shape (unflagged file)", text)
             page = fr.render_html(rec, rows, s, ["lc.bin"])
@@ -440,6 +470,8 @@ class LevelChange(unittest.TestCase):
             self.assertIn("c1a0 &rarr; c1a0e", page)
             if source == "flag":
                 self.assertIn("save_sav 400, save_ents 100, save 30", page)
+                self.assertIn("sounds loaded 2 (300 KiB, 250 ms)", page)
+                self.assertIn("message svc_sound 200 ms", page)
             run_page_script(page)
 
     def test_cli(self):
@@ -474,13 +506,16 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 109)
+        self.assertEqual(len(r["counters"]), 119)
         self.assertEqual(r["counters"][20], "span_calls")
-        self.assertEqual(len(r["spans"]), 68)
+        self.assertEqual(len(r["spans"]), 72)
         # Counts after the spans (2026-10-02, R5) are plain counters.
-        self.assertEqual(r["counters"][89:92], ["world_walked", "water_gpu", "vp_loads"])
-        self.assertEqual(r["counters"][92], "g_ents")
-        self.assertEqual(r["counters"][-1], "g_push_replays")
+        self.assertEqual(r["counters"][93:96], ["world_walked", "water_gpu", "vp_loads"])
+        self.assertEqual(r["counters"][96], "g_ents")
+        self.assertEqual(r["counters"][112], "g_push_replays")
+        self.assertEqual(r["counters"][113:], ["snd_loads", "snd_load_kb", "snd_load_kc", "tex_loads", "tex_load_kb",
+                                               "cl_parse_kc"])
+        self.assertNotIn("snd_loads", fr.span_names(r))
         self.assertNotIn("world_walked", fr.span_names(r))
         self.assertNotIn("vp_loads", fr.span_names(r))
         self.assertEqual(r["frames"][0][8][r["counters"].index("world_walked")], 500)
@@ -530,6 +565,18 @@ class Spans(unittest.TestCase):
         self.assertLess(order.index("k_cl_wpacket"), order.index("k_save"))
         self.assertLess(order.index("k_save_sav"), order.index("k_sv"))
         self.assertLess(order.index("k_r_end"), order.index("k_scrshot"))
+        # The menu and the music (2026-10-06): k_ui under k_scr, its two
+        # services under it; k_snd_music under k_snd.
+        self.assertEqual(parent["k_ui"], "k_scr")
+        self.assertEqual(parent["k_ui_file"], "k_ui")
+        self.assertEqual(parent["k_ui_pic"], "k_ui")
+        self.assertEqual(parent["k_snd_music"], "k_snd")
+        self.assertEqual(fr.span_depth(r)["k_ui_pic"], 3)
+        self.assertLess(order.index("k_shot_write"), order.index("k_ui"))
+        self.assertLess(order.index("k_ui_pic"), order.index("k_snd"))
+        self.assertLess(order.index("k_snd"), order.index("k_snd_music"))
+        # cl_parse_kc (2026-10-06) is a time counter, not a span.
+        self.assertNotIn("cl_parse_kc", fr.span_names(r))
 
     def test_span_averages(self):
         a = self.row
@@ -574,8 +621,9 @@ class Spans(unittest.TestCase):
         self.assertIn("span_calls", names)
         self.assertIn("g_moves", names)
         self.assertFalse([n for n in names if n.startswith("k_")])
-        # The g_* times and labels are not counts either.
+        # The g_* times and labels are not counts either, nor is snd_load_kc.
         self.assertFalse([n for n in names if n.endswith("_kc") or n.startswith("g_worst")])
+        self.assertIn("snd_loads", names)
 
     def test_classes_chunk(self):
         r = self.rec

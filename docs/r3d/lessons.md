@@ -28,6 +28,21 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### ALWAYS read the frame after a stall before calling the stall gameplay
+
+A recorded frame's flags are the state it started in, so the frame in
+which the player opened the pause menu is an in-play frame. The
+x9-perf-stalls route recording (2026-10-06) listed four ~320 ms
+non-autosave stalls as play; three were the first pause after a map
+load (the next frame starts with `MENU`), the menu rebuilding what
+divergence #127 releases for each map, and earlier recordings' 320-430
+ms stalls had all been filed as autosaves without that check. **Before
+attributing a stall, list what the frames on both sides of it say - the
+next frame's flags, the save spans, the map markers - and match it
+against what the player did (a pause, a manual save, a load, a death)
+before looking for an engine cause.** `tools/frametime-report.py` now
+marks such a stall `opens-menu`.
+
 ### ALWAYS count the kernel I/O calls and check the buffer's alignment before blaming the bytes of a slow Xbox file write
 
 The autosave stall looked like a big-file problem (a 939 KB .sav). The

@@ -69,7 +69,14 @@ code). `cl_showfps` is unchanged.
    table lists every in-play frame still over 250 ms with its CPU share
    and its three largest spans by own time: a stall that is nearly all
    CPU happened inside `Host_Frame` (an autosave - `save_sav`,
-   `save_ents`... - or a synchronous read).
+   `save_ents`... - or a synchronous read). A frame's flags are the state
+   it starts in, so the frame in which the player opens the pause menu
+   (or the console) still counts as play: the table marks it
+   `opens-menu` when the next frame starts in the menu. On the
+   2026-10-06 route recording three of the four ~320 ms stalls that were
+   not autosaves were that frame - the first pause after each map load,
+   when the menu rebuilds the fonts and background it released for the
+   map (divergence #127).
 
 ## The overlay (mode 2)
 
@@ -216,8 +223,13 @@ site is one add; nothing tests whether the recorder is on.
 | `particles`, `beams` | particles and beams drawn (#161) |
 | `sprites` | sprite models drawn |
 | `world_walked` | world faces `nv2a_draw_map_geometry`'s face loop visited (2026-10-02, after the spans in the record): every face of every batch before R3, the PVS's world faces after it. `world_faces` is how many of them it drew |
+| `snd_loads`, `snd_load_kb`, `snd_load_kc` | (2026-10-06, at the end of the record) sounds `S_LoadSound` loaded because they were not in its cache - a sentence's word, a name nobody precached - with their decoded size and the time spent loading them, in kilocycles (a time, the console's only on the console). A load runs under whichever span asked for the sound - the first word of a sentence in `k_cl_read` (`S_StartSound` from `svc_sound`), the next words in `k_snd_mix` - so its time is a counter, not a span with one parent. `engine/client/sound/s_load.c`, `S_LoadSound` |
+| `tex_loads`, `tex_load_kb` | (2026-10-06) textures ref/nv2a created from an image (`GL_LoadTexture`, `GL_LoadTextureFromBuffer`, updates included) and their storage. In play, a non-zero value is a first-use load: a menu restore, a decal, a sprite. `ref/nv2a/r_image.c` |
+| `cl_parse_kc` | (2026-10-06) time, kilocycles: `CL_ParseNetMessage`'s parse call, every server message of the frame's packets (`engine/client/cl_main.c`). Inside `k_cl_read`; a counter rather than a span because `k_cl_pkt_ents` and `k_cl_clientdata`, which it contains, are older spans and a span's parent must come before it in the file |
 
-The report adds `verts`, the sum of the five `v_*` counters.
+The report adds `verts`, the sum of the five `v_*` counters. Its stalls
+table lists each stall's first-use loads (`snd_*`, `tex_*`) next to its
+largest spans.
 
 A counter covers the same span as the frame's `total`: from its
 `Host_Frame` start to the next one. So the frame that runs a `changelevel`
@@ -314,6 +326,10 @@ boundary. The report shows it per map, and the overlay shows it as `none`.
 | `k_shot_read` | `k_scrshot` | ref/nv2a's back-buffer readback in `VID_ScreenShot` (the GPU wait before it is not charged) | `ref/nv2a/r_context.c`, `VID_ScreenShot` |
 | `k_shot_resample` | `k_scrshot` | `Image_Process`: the resample to the thumbnail's 267x200 | same |
 | `k_shot_write` | `k_scrshot` | `FS_SaveImage`: the BMP's encode and write | same |
+| `k_ui` | `k_scr` | the menu DLL's `pfnRedraw` in `UI_UpdateMenu`: the menu's drawing, and what it restores on demand after a map load released it (#127) | `engine/client/dll_int/cl_gameui.c`, `UI_UpdateMenu` |
+| `k_ui_file` | `k_ui` | the menu's `COM_LoadFile` calls (`Xbox_FT_UI_LoadFile`, a timed `COM_LoadFileForMe`, in the menu's engine-function table): font cache files, font files, layouts. The menu also loads files and pictures outside its redraw (init, key events); those are counted with no `k_ui` open, which the report clamps like a skin read | `engine/platform/xbox/xbox_frametime_client.c` |
+| `k_ui_pic` | `k_ui` | the menu's `PIC_Load` calls: the image decode and ref/nv2a's texture upload | `cl_gameui.c`, `pfnPIC_Load` |
+| `k_snd_music` | `k_snd` | `S_StreamBackgroundTrack`: the music stream - opening a track, reading and decoding it | `engine/client/sound/s_main.c`, `SND_UpdateSound` |
 
 The eleven from `k_sv_reliable` to `k_cl_wpacket` (2026-10-02) break
 the local server/client round trip down; they come after `k_snd` in the
@@ -327,8 +343,9 @@ and a span has one parent, so its three spans come in two sets: `k_snd_*`
 under `k_snd` and `k_sndx_*` under `k_snd_extra`. `S_ExtraUpdate` sets
 `xbox_ft_snd_extra` while it mixes, and that picks the set. The time
 `S_UpdateChannels` spends in `SNDDMA_BeginPainting` (the SDL audio
-device lock, held by the audio thread while it copies a buffer out) and
-`S_StreamBackgroundTrack` stay in the parents' own time. A renderer
+device lock, held by the audio thread while it copies a buffer out)
+stays in the parents' own time; `S_StreamBackgroundTrack` has had its
+own span, `k_snd_music`, since 2026-10-06. A renderer
 calling `S_ExtraUpdate` through `CL_ExtraUpdate` would charge `k_sndx_*`
 outside `k_snd_extra`; ref/nv2a does not call it. The mixer paints only
 when the audio thread has consumed a block (1024 samples, 23 ms at
@@ -378,6 +395,18 @@ time is inside these spans - on the console the IDE drive, in xemu the
 host's file cache. The report's stalls table names each stall's three
 largest spans by own time.
 
+The last four (2026-10-06, x9-perf-stalls, appended the same way) name
+two kinds of stall that showed up as a parent's own time. The first
+pause after every map load cost about 310 ms on the console, all of it in
+`k_scr`'s own time: the menu DLL's redraw had no span, and it is where
+the menu rebuilds what divergence #127 releases for a map. `k_ui` is
+that redraw, and `k_ui_file` and `k_ui_pic` are the two engine services
+the rebuild reads and uploads through, so a menu stall splits into disc,
+upload and the menu's own work. `k_snd_music` is the music stream, the
+part of `k_snd`'s own time that reads the disc: 120-165 ms `k_snd`
+frames on the console's route recording (2026-10-06) had nothing else
+in `k_snd` to explain them.
+
 Spans not listed under a parent stay in that parent's **own** time.
 Examples: the overlay's drawing (inside `k_scr`; it also has its own field)
 and the view setup and entity sorting of `GL_RenderFrame` (inside
@@ -400,6 +429,30 @@ counters, so the ref API does not change.
 **In xemu** the spans are the emulator's times on a PC. A run there shows
 that they are recorded and add up, not what the Pentium III spends. The
 numbers for the decision come from the owner's hardware route.
+
+## Notes: named one-off events (2026-10-06)
+
+A span says where a stall's time went; it cannot say which sound or which
+server message it was. The NOTES chunk does, for two kinds of event,
+each with the sequence number of the frame it happened in:
+
+| kind | written when | name | bytes |
+|---|---|---|---|
+| `sound` | `S_LoadSound` loads a sound while `cls.state == ca_active` (the client-state test of upstream's `s_warn_late_precache` warning, `s_load.c:119` in the reference, without its cvar or its `*default` exclusion): a sentence's word, a name nobody precached. Map-load registrations happen before the client is active and are left out | the sound's name | decoded size |
+| `message` | one server message took the client 5 ms or more to parse (`CL_ParseServerMessage`, `engine/client/parse/cl_parse.c`, through `Xbox_FT_CL_CloseMessage` in `engine/platform/xbox/xbox_frametime_client.c`: the time from one message's start to the next, minus the renderer's waits; the current protocol only - the GoldSrc and legacy parsers are not timed) | its `svc_*` name, or the user message's name (`clgame.msg`) | its size in the packet |
+
+The time is in kilocycles and needs `host_frametime_spans` on (the
+default); a note taken with it off has time 0. The recorder keeps up to
+64 notes between flushes; past that it counts each new note as dropped
+and keeps it in place of the fastest kept one if it is slower, so a
+burst of small sentence-word loads cannot crowd out the slow message
+the notes are for. It writes the chunk at a flush that has any.
+`cl_parse_kc` (a per-frame time counter, below) says how much of
+`k_cl_read` was the message parser at all: a `k_cl_read` stall with no
+message note is many small messages when it is high, and work around the
+parser - netchan, fragment reassembly, resource requests - when it is
+low. The report lists each stall's notes next
+to its spans and loads, and the slowest twelve of the session.
 
 ## The server game frame (2026-10-05)
 
@@ -465,12 +518,18 @@ the edicts (`k_sv_ppush` 0.61) and the monsters (`k_sv_pstep` 0.23).
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~561 KiB (ring 1024 x 468 B = 468 KiB, the overlay's histogram
-  4 KiB, a 58.5 KiB encode buffer, the server's classname table ~30 KiB);
-  a few `rdtsc` per frame plus two per span closed (below); a ~137 KiB
-  write and `fsync` every 5 s (those frames are flagged); about 27.4 KiB
-  per second of play on disk at 60 fps (96 MiB an hour; the file stops at
-  64 MiB, ~40 minutes). Before the savegame spans (2026-10-05) it was
+- **On:** ~610 KiB (ring 1024 x 508 B = 508 KiB, the overlay's histogram
+  4 KiB, a 63.5 KiB encode buffer, 4 KiB of notes, the server's classname
+  table ~30 KiB);
+  a few `rdtsc` per frame plus two per span closed and two per server
+  message (below); a ~149 KiB write and `fsync` every 5 s (those frames
+  are flagged); about 29.8 KiB per second of play on disk at 60 fps, plus
+  at most 4 KiB of notes per flush (105 MiB an hour; the file stops at 64
+  MiB, ~36 minutes at 60 fps, ~30 at the 72 fps cap - the owner's 29-minute
+  route of 2026-10-06 was 47 MB at 468-byte records, ~51 MB at 508).
+  Before the menu, music and first-use load
+  counters (2026-10-06) it was ~561 KiB and 27.4 KiB/s. Before the
+  savegame spans (2026-10-05) it was
   ~507 KiB and 24.6 KiB/s. Before the server game frame's breakdown
   (2026-10-05) it was ~364 KiB and 18.8 KiB/s. Before the
   scene spans (2026-10-02) it was ~324 KiB and 16.6 KiB/s; before the
@@ -521,14 +580,17 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 468 bytes with today's
-109: the 20 counts, `span_calls`, the 68 spans, `world_walked`, `water_gpu`,
-`vp_loads` and the 17 `g_*`; 420 with 56 spans, 328 with 50 spans and three counts after them, 284
+frame records of 32 bytes plus one u32 per counter - 508 bytes with today's
+119: the 20 counts, `span_calls`, the 72 spans, `world_walked`, `water_gpu`,
+`vp_loads`, the 17 `g_*`, the five first-use load counters and
+`cl_parse_kc`; 468 with
+68 spans and no load counters, 420 with 56 spans, 328 with 50 spans and three counts after them, 284
 with 42 spans, 256 with 35, 212 with the first 24, 112 before the spans),
 SPANS (from 2026-10-01, right after COUNTERS: each span's name and its
 parent's, 16 bytes each, "" for the top level), MAP, CALIB (TSC,
 performance counter), CLASSES (from 2026-10-05: per-classname server
-game frame totals, one per map, see above) and END (written on a clean
+game frame totals, one per map, see above), NOTES (from 2026-10-06: named
+one-off events, see "Notes" above) and END (written on a clean
 stop; a file without it was cut short). The reader finds counters by name, so a later version can
 add some without breaking it. The spans used that: they are counters plus
 an optional chunk, which a reader that does not know it skips by its

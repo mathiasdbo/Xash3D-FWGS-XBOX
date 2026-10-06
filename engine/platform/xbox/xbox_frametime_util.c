@@ -48,12 +48,15 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"k_save", "k_save_init", "k_save_ents", "k_save_hl1", "k_save_client", "k_save_globals",
 	"k_save_age", "k_save_sav",
 	"k_scrshot", "k_shot_read", "k_shot_resample", "k_shot_write",
+	"k_ui", "k_ui_file", "k_ui_pic", "k_snd_music",
 	/* the counts after the spans */
 	"world_walked", "water_gpu", "vp_loads",
 	"g_ents", "g_thinks", "g_touches", "g_moves", "g_dll_traces", "g_clip_ents",
 	"g_links", "g_push_tests", "g_walkmoves", "g_find_visits",
 	"g_think_kc", "g_touch_kc", "g_move_kc", "g_worst_kc", "g_worst_cls", "g_worst_ent",
 	"g_push_replays",
+	"snd_loads", "snd_load_kb", "snd_load_kc", "tex_loads", "tex_load_kb",
+	"cl_parse_kc",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,
@@ -130,6 +133,10 @@ const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT] =
 	[XBOX_FT_S_SHOT_READ]     = XBOX_FT_S_SCRSHOT,
 	[XBOX_FT_S_SHOT_RESAMPLE] = XBOX_FT_S_SCRSHOT,
 	[XBOX_FT_S_SHOT_WRITE]    = XBOX_FT_S_SCRSHOT,
+	[XBOX_FT_S_UI]            = XBOX_FT_S_SCR,
+	[XBOX_FT_S_UI_FILE]       = XBOX_FT_S_UI,
+	[XBOX_FT_S_UI_PIC]        = XBOX_FT_S_UI,
+	[XBOX_FT_S_SND_MUSIC]     = XBOX_FT_S_SND,
 };
 
 uint32_t xbox_ft_span_kcyc( uint64_t ticks )
@@ -519,6 +526,28 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
 		p = put_u32( p, xbox_ft_span_kcyc( c->phys ));
 		p = put_u32( p, xbox_ft_span_kcyc( c->think ));
 		p = put_u32( p, xbox_ft_span_kcyc( c->worst ));
+	}
+	return (size_t)( p - out );
+}
+
+size_t xbox_ft_encode_notes( uint8_t *out, const xbox_ft_note_t *notes, uint32_t count, uint32_t dropped )
+{
+	uint8_t *p = out;
+	uint32_t i;
+
+	p = put_u32( p, XBOX_FT_CHUNK_NOTES );
+	p = put_u32( p, 8u + count * XBOX_FT_NOTE_BYTES );
+	p = put_u32( p, count );
+	p = put_u32( p, dropped );
+	for( i = 0; i < count; i++ )
+	{
+		const xbox_ft_note_t *n = &notes[i];
+
+		p = put_u32( p, n->seq );
+		p = put_u32( p, n->kind );
+		p = put_u32( p, n->kcyc );
+		p = put_u32( p, n->bytes );
+		p = put_name( p, n->name, XBOX_FT_NOTE_NAME_BYTES );
 	}
 	return (size_t)( p - out );
 }

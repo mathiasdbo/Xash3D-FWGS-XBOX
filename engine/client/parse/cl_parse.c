@@ -23,6 +23,7 @@ GNU General Public License for more details.
 #include "eiface.h"
 #if XASH_XBOX
 #include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
+#include "platform/xbox/xbox_frametime_client.h" // per-message timing, #141 (11)
 #else
 #define XBOX_FT_SPAN( id, stmt ) stmt
 #endif
@@ -2548,6 +2549,9 @@ void CL_ParseServerMessage( sizebuf_t *msg )
 	size_t bufStart, playerbytes;
 	int cmd;
 	int old_background;
+#if XASH_XBOX
+	xbox_ft_cl_msg_t ft_msg = { .cmd = -1 }; // per-message timing (#141 (11))
+#endif
 
 	// parse the message
 	while( 1 )
@@ -2561,11 +2565,19 @@ void CL_ParseServerMessage( sizebuf_t *msg )
 		// mark start position
 		bufStart = MSG_GetNumBytesRead( msg );
 
+#if XASH_XBOX
+		// the previous message ends where this one starts (#141 (11))
+		Xbox_FT_CL_CloseMessage( &ft_msg, msg );
+#endif
+
 		// end of message (align bits)
 		if( MSG_GetNumBitsLeft( msg ) < 8 )
 			break;
 
 		cmd = MSG_ReadServerCmd( msg );
+#if XASH_XBOX
+		Xbox_FT_CL_OpenMessage( &ft_msg, bufStart, cmd );
+#endif
 
 		// record command for debugging spew on parse problem
 		CL_Parse_RecordCommand( cmd, bufStart );

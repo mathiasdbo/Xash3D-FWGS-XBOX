@@ -142,6 +142,56 @@ static inline void xbox_ft_span_end( const xbox_ft_span_t *s, int id )
 	}
 }
 
+/* Closes a first-use load opened with xbox_ft_span_begin (2026-10-06,
+   XBOX_FT_W_SND_LOADS / XBOX_FT_W_TEX_LOADS): counts it and its size in
+   KiB, rounded up, unconditionally like the renderer's counts, and adds
+   its time minus the renderer's waits, in kilocycles, to `kc_id` when
+   the span was timed (-1: no time counter). A load can run under any
+   span (a sound's first word in k_cl_read, the next one in k_snd_mix),
+   so its time is a plain counter, not a span with one parent. */
+/* An open span's ticks so far minus the renderer's waits in them (0 when
+   it is not timing), and the same in kilocycles. */
+static inline uint64_t xbox_ft_span_ticks_since( const xbox_ft_span_t *s )
+{
+	uint64_t d, w;
+
+	if( !s->t0 )
+		return 0;
+	d = xbox_ft_rdtsc() - s->t0;
+	w = xbox_ft_wait_ticks() - s->w0;
+	return d > w ? d - w : 0;
+}
+
+static inline uint32_t xbox_ft_span_kc_since( const xbox_ft_span_t *s )
+{
+	return (uint32_t)(( xbox_ft_span_ticks_since( s ) + 500u ) / 1000u );
+}
+
+/* Adds an open span's time so far, in kilocycles, to time counter `id`
+   (XBOX_FT_W_*_KC): a time measured like a span that is not one. */
+static inline void xbox_ft_time_add( const xbox_ft_span_t *s, int id )
+{
+	if( s->t0 )
+		xbox_ft_work.c[id] += xbox_ft_span_kc_since( s );
+}
+
+/* Returns the load's kilocycles (0 when it was not timed), for a note. */
+static inline uint32_t xbox_ft_load_end( const xbox_ft_span_t *s, int count_id, int kb_id, int kc_id, size_t bytes )
+{
+	const uint32_t kc = xbox_ft_span_kc_since( s );
+
+	xbox_ft_work.c[count_id]++;
+	xbox_ft_work.c[kb_id] += (uint32_t)(( bytes + 1023u ) / 1024u );
+	if( kc_id >= 0 )
+		xbox_ft_work.c[kc_id] += kc;
+	return kc;
+}
+
+/* A named one-off event for the NOTES chunk (XBOX_FT_NOTE_*,
+   xbox_frametime_util.h), credited to the frame in progress: a sound
+   loaded in play, a slow server message. Nothing while not recording. */
+void Xbox_FT_Note( uint32_t kind, const char *name, uint32_t kcyc, uint32_t bytes );
+
 /* Times one statement as span `id` (XBOX_FT_S_*). Engine files that use
    it include this header under #if XASH_XBOX && !XASH_DEDICATED and
    define XBOX_FT_SPAN( id, stmt ) as plain `stmt` otherwise

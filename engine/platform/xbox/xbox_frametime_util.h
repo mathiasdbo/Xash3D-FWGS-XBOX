@@ -79,6 +79,12 @@ still write it when given zero counters (the tests' v1 fixture).
               index (the g_worst_cls counter) means the same name in
               every chunk. Only frames that start in play are counted
               (not menu or pause frames; the warm-up frames are).
+    8 NOTES   (2026-10-06) named one-off events since the previous
+              flush: u32 count, u32 dropped, then count x
+              XBOX_FT_NOTE_BYTES (64): u32 frame sequence number, u32
+              kind, u32 kilocycles, u32 bytes, char[48] name (see
+              xbox_ft_encode_notes below). Written at a flush that has
+              any.
   frame record, XBOX_FT_FRAME_BYTES (32) + 4 x counters:
     0  u32 sequence number (consecutive; a gap is frames lost)
     4  u32 total ticks, Host_Frame start to the next Host_Frame start
@@ -260,6 +266,20 @@ enum
 	XBOX_FT_S_SHOT_READ,     /*     in k_scrshot: ref/nv2a's back-buffer readback (after the GPU wait) */
 	XBOX_FT_S_SHOT_RESAMPLE, /*     in k_scrshot: Image_Process - the resample to the thumbnail's size */
 	XBOX_FT_S_SHOT_WRITE,    /*     in k_scrshot: FS_SaveImage - the image's encode and write */
+	/* The menu and the music, broken down (2026-10-06, x9-perf-stalls,
+	   appended for the same reason). The first pause after a map load
+	   cost ~310 ms on the console, all of it in k_scr's own time: the
+	   menu DLL's redraw had no span. k_ui is that redraw (UI_UpdateMenu's
+	   pfnRedraw, engine/client/dll_int/cl_gameui.c), including what the
+	   menu restores on demand after a map load released it
+	   (docs/r3d/divergences.md #127: font atlases, font files, background
+	   tiles); k_ui_file and k_ui_pic are the two engine services that
+	   restore goes through. k_snd_music is S_StreamBackgroundTrack, the
+	   part of k_snd's own time that opens, reads and decodes the music. */
+	XBOX_FT_S_UI,            /*     in k_scr: UI_UpdateMenu - the menu DLL's redraw, its lazy restores included */
+	XBOX_FT_S_UI_FILE,       /*       in k_ui: the menu's COM_LoadFile calls - font cache, font files, layouts */
+	XBOX_FT_S_UI_PIC,        /*       in k_ui: the menu's PIC_Load calls - image decode and texture upload */
+	XBOX_FT_S_SND_MUSIC,     /*   in k_snd: S_StreamBackgroundTrack - the music stream: open, read, decode */
 	XBOX_FT_S_COUNT
 };
 
@@ -293,6 +313,24 @@ enum
 	XBOX_FT_W_G_WORST_CLS,   /* that entity's classname: 1 + its index in the CLASSES chunk (0: none) */
 	XBOX_FT_W_G_WORST_ENT,   /* that entity's edict number */
 	XBOX_FT_W_G_PUSH_REPLAYS,/* of g_push_tests, the traces #149 replays at the end of a push loop */
+	/* First-use loads (2026-10-06, x9-perf-stalls): what a frame read
+	   off the disc on the main thread because something used it for the
+	   first time. Counts and sizes are exact in xemu; the time is the
+	   console's only on the console. */
+	XBOX_FT_W_SND_LOADS,     /* sounds S_LoadSound loaded (not cached: a sentence's word, an unprecached name) */
+	XBOX_FT_W_SND_LOAD_KB,   /* their decoded size, KiB (each load rounded up) */
+	XBOX_FT_W_SND_LOAD_KC,   /* time: kilocycles in those loads, wherever they ran (k_cl_read, k_snd_mix, k_cl_dll...) */
+	XBOX_FT_W_TEX_LOADS,     /* textures ref/nv2a created from an image (GL_LoadTexture, GL_LoadTextureFromBuffer) */
+	XBOX_FT_W_TEX_LOAD_KB,   /* their texture storage, KiB (each rounded up) */
+	/* time: kilocycles in CL_ParseNetMessage's parse function - every
+	   server message of the frame's packets - so k_cl_read minus it is
+	   what CL_ReadPackets did around the parser (netchan, fragment
+	   reassembly, resource requests). A counter, not a span: the parse
+	   spans k_cl_pkt_ents and k_cl_clientdata are older and a span's
+	   parent must come before it. A k_cl_read stall with no slow-message
+	   note is then many small messages (this is high) or work outside
+	   the parser (this is low). */
+	XBOX_FT_W_CL_PARSE_KC,
 	XBOX_FT_W_END
 };
 
@@ -461,5 +499,44 @@ typedef struct xbox_ft_class_s
 /* Writes the chunk for classes[0..count) - XBOX_FT_CHUNK_BYTES + 4 +
    count x XBOX_FT_CLASS_BYTES bytes - and returns that count. */
 size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uint32_t count );
+
+/* The NOTES chunk (2026-10-06, x9-perf-stalls): named one-off events, so a
+   stall that the spans put in k_cl_read or a first-use load says what it
+   was. A note carries the sequence number of the frame it happened in
+   (the frame in progress: the ring's next_seq), its kind, its time in
+   kilocycles (0 when the spans were off), a size in bytes and a name.
+   Kinds:
+     XBOX_FT_NOTE_SOUND  a sound S_LoadSound loaded in play (cls.state ==
+                         ca_active, the client-state test of upstream's
+                         s_warn_late_precache warning, s_load.c:119 in
+                         the reference): name = the sound, bytes = its
+                         decoded size
+     XBOX_FT_NOTE_MSG    one server message that took the client at least
+                         XBOX_FT_NOTE_MSG_KC to parse: name = its svc_* or
+                         user-message name, bytes = its size in the packet
+   The recorder keeps up to XBOX_FT_NOTES_MAX between flushes and counts
+   the rest as dropped. */
+#define XBOX_FT_CHUNK_NOTES      8u
+#define XBOX_FT_NOTE_SOUND       1u
+#define XBOX_FT_NOTE_MSG         2u
+#define XBOX_FT_NOTE_NAME_BYTES  48u
+#define XBOX_FT_NOTE_BYTES       ( 16u + XBOX_FT_NOTE_NAME_BYTES )
+#define XBOX_FT_NOTES_MAX        64u
+#define XBOX_FT_NOTE_MSG_KC      3667u /* 5 ms at 733 MHz */
+#define XBOX_FT_NOTES_CHUNK_BYTES( n ) ( XBOX_FT_CHUNK_BYTES + 8u + ( n ) * XBOX_FT_NOTE_BYTES )
+
+typedef struct xbox_ft_note_s
+{
+	uint32_t seq;
+	uint32_t kind;
+	uint32_t kcyc;
+	uint32_t bytes;
+	char name[XBOX_FT_NOTE_NAME_BYTES]; /* NUL-terminated, truncated */
+} xbox_ft_note_t;
+
+/* Writes the chunk for notes[0..count) - u32 count, u32 dropped, then
+   count x { u32 seq, u32 kind, u32 kilocycles, u32 bytes, char[48]
+   name } - XBOX_FT_NOTES_CHUNK_BYTES( count ) bytes, and returns that. */
+size_t xbox_ft_encode_notes( uint8_t *out, const xbox_ft_note_t *notes, uint32_t count, uint32_t dropped );
 
 #endif /* XBOX_FRAMETIME_UTIL_H */
