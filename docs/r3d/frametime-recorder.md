@@ -433,13 +433,14 @@ numbers for the decision come from the owner's hardware route.
 ## Notes: named one-off events (2026-10-06)
 
 A span says where a stall's time went; it cannot say which sound or which
-server message it was. The NOTES chunk does, for two kinds of event,
+server message it was. The NOTES chunk does, for three kinds of event,
 each with the sequence number of the frame it happened in:
 
 | kind | written when | name | bytes |
 |---|---|---|---|
 | `sound` | `S_LoadSound` loads a sound while `cls.state == ca_active` (the client-state test of upstream's `s_warn_late_precache` warning, `s_load.c:119` in the reference, without its cvar or its `*default` exclusion): a sentence's word, a name nobody precached. Map-load registrations happen before the client is active and are left out | the sound's name | decoded size |
 | `message` | one server message took the client 5 ms or more to parse (`CL_ParseServerMessage`, `engine/client/parse/cl_parse.c`, through `Xbox_FT_CL_CloseMessage` in `engine/platform/xbox/xbox_frametime_client.c`: the time from one message's start to the next, minus the renderer's waits; the current protocol only - the GoldSrc and legacy parsers are not timed) | its `svc_*` name, or the user message's name (`clgame.msg`) | its size in the packet |
+| `menu` | the end of a map load ran the menu's font restore, or left the fonts released because less than 8 MiB was free (`Xbox_MenuFonts_MapLoaded`, `engine/platform/xbox/xbox_menu_fonts.c`, divergence #127; from 2026-10-06, x9-perf-menufonts) | `menu_restorefonts ran, <KiB> KiB free before` or `fonts left released, <KiB> KiB free` | what the restore took from free memory (`MmQueryStatistics`; atlases placed in ref/nv2a's preallocated arena do not show) |
 
 The time is in kilocycles and needs `host_frametime_spans` on (the
 default); a note taken with it off has time 0. The recorder keeps up to

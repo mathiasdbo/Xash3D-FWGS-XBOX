@@ -514,11 +514,17 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
      XBOX_FT_NOTE_MSG    one server message that took the client at least
                          XBOX_FT_NOTE_MSG_KC to parse: name = its svc_* or
                          user-message name, bytes = its size in the packet
+     XBOX_FT_NOTE_MENU   the end of a map load ran the menu's font restore,
+                         or left the fonts released for lack of memory
+                         (xbox_menu_fonts.c, divergences.md #127): name
+                         says which and the free memory before, bytes =
+                         what the restore took from free memory
    The recorder keeps up to XBOX_FT_NOTES_MAX between flushes and counts
    the rest as dropped. */
 #define XBOX_FT_CHUNK_NOTES      8u
 #define XBOX_FT_NOTE_SOUND       1u
 #define XBOX_FT_NOTE_MSG         2u
+#define XBOX_FT_NOTE_MENU        3u
 #define XBOX_FT_NOTE_NAME_BYTES  48u
 #define XBOX_FT_NOTE_BYTES       ( 16u + XBOX_FT_NOTE_NAME_BYTES )
 #define XBOX_FT_NOTES_MAX        64u

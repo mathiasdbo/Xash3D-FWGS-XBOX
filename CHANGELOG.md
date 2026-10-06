@@ -5,6 +5,26 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: the first pause after a map load no longer freezes
+
+To leave more memory for each map, the menu gives back its fonts while a
+map loads (divergence #127). It used to rebuild them the first time the
+pause menu opened, which froze that frame for about a third of a second
+on the console. The fonts are now rebuilt at the end of the map load,
+while the loading screen is still up, as long as at least 8 MiB of
+memory is free; with less they are rebuilt when the menu opens, as
+before. Opening the pause menu is now as fast the first time as later.
+Each map load takes about 300 ms longer on the console, inside the
+loading screen. The fonts are now given back as each load begins, so a
+level change no longer carries them through its memory peak.
+
+The font cache on the hard disk is about a quarter of its old size
+(1.2 MB instead of 4 MB). It stores glyphs at 8 bits per pixel instead
+of 32, so a font rebuild reads less and uses less temporary memory. The
+menu text is pixel-identical. Old cache files are never read; they are
+deleted the first time the new cache is written. Divergences #127 and
+#152.
+
 ### Added - Frame-time recorder: the menu, the music, and named one-off events
 
 The owner's 29-minute route recording had four single frames of about

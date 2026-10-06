@@ -79,7 +79,7 @@ CHUNK_SPANS = 6             # span name -> parent span name (recorders from 2026
 CHUNK_CLASSES = 7           # per-classname server game frame totals (recorders from 2026-10-05)
 CHUNK_NOTES = 8             # named one-off events: sounds loaded in play, slow server messages (2026-10-06)
 NOTE_BYTES = 64
-NOTE_KINDS = {1: "sound", 2: "message"}
+NOTE_KINDS = {1: "sound", 2: "message", 3: "menu"}
 NOTES_TOP = 12              # notes the summary lists, slowest first
 CLASS_NAME_BYTES = 32
 CLASS_BYTES = CLASS_NAME_BYTES + 7 * 4
@@ -958,7 +958,7 @@ def summary_text(rec, rows, sess):
     if rec.get("notes") or rec.get("notes_dropped"):
         notes = notes_list(rec)
         lines.append("")
-        lines.append("notes: %d named events (sounds loaded in play, server messages over 5 ms)%s; the slowest %d:"
+        lines.append("notes: %d named events (sounds loaded in play, server messages over 5 ms, the menu font restore at a map load)%s; the slowest %d:"
                      % (len(notes), (", %d dropped" % rec["notes_dropped"]) if rec.get("notes_dropped") else "",
                         min(NOTES_TOP, len(notes))))
         lines.append("%8s  %-12s %-8s %-34s %8s %8s" % ("t s", "map", "kind", "name", "ms", "KiB"))

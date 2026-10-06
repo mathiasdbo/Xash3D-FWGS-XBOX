@@ -19,6 +19,9 @@ GNU General Public License for more details.
 #include "qfont.h"
 #include "input.h"
 #include "library.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_menu_fonts.h" // the menu's fonts released as a load starts, #127
+#endif
 
 CVAR_DEFINE_AUTO( scr_centertime, "2.5", 0, "centerprint hold time" );
 CVAR_DEFINE_AUTO( scr_loading, "0", 0, "loading bar progress" );
@@ -516,9 +519,9 @@ static void SCR_UpdateLoadingScreen( void )
 
 	// Nothing else is drawn: the menu is already inactive
 	// (UI_SetActiveMenu( false ) in SCR_BeginLoadingPlaque, or the Load
-	// Game screen's own UI_CloseMenu), and its deferred low-memory release
-	// (divergence #127) still runs on the first connecting frame's
-	// UI_UpdateMenu, as before.
+	// Game screen's own UI_CloseMenu), and its fonts and background were
+	// released just before this (Xbox_MenuFonts_LoadStarting in
+	// SCR_BeginLoadingPlaque, divergence #127).
 	SCR_DrawLoadingScreen();
 
 	ref.dllFuncs.R_EndFrame();
@@ -577,6 +580,13 @@ void SCR_BeginLoadingPlaque( qboolean is_background )
 	}
 
 #if XASH_XBOX
+	// Resonance3D (docs/r3d/divergences.md #127): the menu's fonts and
+	// background go before the server loads the map, on every load -
+	// a changelevel or a load started in game included, where the
+	// menu's own release would only run after the load.
+	if( !is_background )
+		Xbox_MenuFonts_LoadStarting();
+
 	// Resonance3D (docs/r3d/divergences.md #130): a load started while
 	// disconnected (New Game, Load Game, `map` from the main menu) gets
 	// its loading screen now, before the server loads the map. Upstream's

@@ -207,6 +207,15 @@ string_fast() {
 run_test string_fast_gcc string_fast gcc
 run_test string_fast_clang string_fast clang
 
+# tools/host-tests/mainui_atlas_tga_host_test.cpp, header (divergence #152):
+# the font cache's TGA atlas decodes to the texels and flags the BMP did.
+mainui_atlas_tga() {
+	g++ $HOST_CFLAGS -Wall -std=c++11 -I3rdparty/mainui/font \
+		tools/host-tests/mainui_atlas_tga_host_test.cpp \
+		-o "$OUT/mainui_atlas_tga_test" && "$OUT/mainui_atlas_tga_test"
+}
+run_test mainui_atlas_tga mainui_atlas_tga
+
 if [ "$ran" -eq 0 ]; then
 	echo "host-tests: ran zero tests - that is a broken script, not a pass" >&2
 	exit 1

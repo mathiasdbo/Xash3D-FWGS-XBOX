@@ -24,6 +24,7 @@ GNU General Public License for more details.
 #if XASH_XBOX
 #include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
 #include "platform/xbox/xbox_frametime_client.h" // per-message timing, #141 (11)
+#include "platform/xbox/xbox_menu_fonts.h" // the menu's fonts rebuilt after the load, #127
 #else
 #define XBOX_FT_SPAN( id, stmt ) stmt
 #endif
@@ -1726,6 +1727,13 @@ void CL_RegisterResources( sizebuf_t *msg, connprotocol_t proto )
 			}
 
 			Mod_FreeUnused ();
+
+#if XASH_XBOX
+			// Resonance3D (docs/r3d/divergences.md #127): the map is
+			// loaded and the plaque still up - rebuild the menu fonts the
+			// load released now, not on the first pause-menu open
+			Xbox_MenuFonts_MapLoaded();
+#endif
 
 			if( host_developer.value <= DEV_NONE )
 				Con_ClearNotify(); // clear any lines of console text
