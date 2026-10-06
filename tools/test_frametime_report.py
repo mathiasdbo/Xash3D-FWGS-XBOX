@@ -411,6 +411,12 @@ class LevelChange(unittest.TestCase):
             self.assertAlmostEqual(st[1]["other"], 290.0)  # between frames, no load after it
             self.assertEqual(st[1]["map"], "c1a0e")
             self.assertFalse(st[1]["level_change"])
+            # The largest own-time spans of each stall (only a file with spans has them).
+            if source == "flag":
+                self.assertEqual(st[0]["top_spans"], [("k_save_sav", 400.0), ("k_save_ents", 100.0), ("k_save", 30.0)])
+            else:
+                self.assertEqual(st[0]["top_spans"], [])
+            self.assertEqual(st[1]["top_spans"], [])
             st = fr.stall_list(rec, include_level_change=True)
             self.assertEqual([s["seq"] for s in st], [35, 38, 83])
             self.assertTrue(st[1]["level_change"])
@@ -424,12 +430,16 @@ class LevelChange(unittest.TestCase):
             text = fr.summary_text(rec, rows, s)
             self.assertIn("level-change frames: 1", text)
             self.assertIn("stalls: 2 in-play frame(s) over 250 ms", text)
+            if source == "flag":
+                self.assertIn("save_sav 400, save_ents 100, save 30", text)
             self.assertIn("c1a0 -> c1a0e", text)
             self.assertIn("LOAD flag" if source == "flag" else "shape (unflagged file)", text)
             page = fr.render_html(rec, rows, s, ["lc.bin"])
             self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
             self.assertIn("Level changes and stalls", page)
             self.assertIn("c1a0 &rarr; c1a0e", page)
+            if source == "flag":
+                self.assertIn("save_sav 400, save_ents 100, save 30", page)
             run_page_script(page)
 
     def test_cli(self):
@@ -464,12 +474,12 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 97)
+        self.assertEqual(len(r["counters"]), 109)
         self.assertEqual(r["counters"][20], "span_calls")
-        self.assertEqual(len(r["spans"]), 56)
+        self.assertEqual(len(r["spans"]), 68)
         # Counts after the spans (2026-10-02, R5) are plain counters.
-        self.assertEqual(r["counters"][77:80], ["world_walked", "water_gpu", "vp_loads"])
-        self.assertEqual(r["counters"][80], "g_ents")
+        self.assertEqual(r["counters"][89:92], ["world_walked", "water_gpu", "vp_loads"])
+        self.assertEqual(r["counters"][92], "g_ents")
         self.assertEqual(r["counters"][-1], "g_push_replays")
         self.assertNotIn("world_walked", fr.span_names(r))
         self.assertNotIn("vp_loads", fr.span_names(r))
@@ -510,6 +520,16 @@ class Spans(unittest.TestCase):
         self.assertEqual(fr.span_depth(r)["k_sv_start"], 2)
         self.assertLess(order.index("k_sv_game"), order.index("k_sv_start"))
         self.assertLess(order.index("k_sv_pother"), order.index("k_sv_send"))
+        # The savegame's breakdown (2026-10-05): under k_cl_begin and k_scr.
+        self.assertEqual(parent["k_save"], "k_cl_begin")
+        self.assertEqual(parent["k_save_sav"], "k_save")
+        self.assertEqual(parent["k_scrshot"], "k_scr")
+        self.assertEqual(parent["k_shot_write"], "k_scrshot")
+        self.assertEqual(fr.span_depth(r)["k_save_ents"], 2)
+        self.assertEqual(fr.span_depth(r)["k_shot_read"], 3)
+        self.assertLess(order.index("k_cl_wpacket"), order.index("k_save"))
+        self.assertLess(order.index("k_save_sav"), order.index("k_sv"))
+        self.assertLess(order.index("k_r_end"), order.index("k_scrshot"))
 
     def test_span_averages(self):
         a = self.row

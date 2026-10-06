@@ -45,6 +45,9 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"k_pvs", "k_sky", "k_world_walk", "k_warp_world", "k_world_decals",
 	"k_brush", "k_warp_brush", "k_warp_trans",
 	"k_sv_start", "k_sv_pstep", "k_sv_ppush", "k_sv_ptoss", "k_sv_pnone", "k_sv_pother",
+	"k_save", "k_save_init", "k_save_ents", "k_save_hl1", "k_save_client", "k_save_globals",
+	"k_save_age", "k_save_sav",
+	"k_scrshot", "k_shot_read", "k_shot_resample", "k_shot_write",
 	/* the counts after the spans */
 	"world_walked", "water_gpu", "vp_loads",
 	"g_ents", "g_thinks", "g_touches", "g_moves", "g_dll_traces", "g_clip_ents",
@@ -115,6 +118,18 @@ const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT] =
 	[XBOX_FT_S_SV_PTOSS]      = XBOX_FT_S_SV_GAME,
 	[XBOX_FT_S_SV_PNONE]      = XBOX_FT_S_SV_GAME,
 	[XBOX_FT_S_SV_POTHER]     = XBOX_FT_S_SV_GAME,
+	[XBOX_FT_S_SAVE]          = XBOX_FT_S_CL_BEGIN,
+	[XBOX_FT_S_SAVE_INIT]     = XBOX_FT_S_SAVE,
+	[XBOX_FT_S_SAVE_ENTS]     = XBOX_FT_S_SAVE,
+	[XBOX_FT_S_SAVE_HL1]      = XBOX_FT_S_SAVE,
+	[XBOX_FT_S_SAVE_CLIENT]   = XBOX_FT_S_SAVE,
+	[XBOX_FT_S_SAVE_GLOBALS]  = XBOX_FT_S_SAVE,
+	[XBOX_FT_S_SAVE_AGE]      = XBOX_FT_S_SAVE,
+	[XBOX_FT_S_SAVE_SAV]      = XBOX_FT_S_SAVE,
+	[XBOX_FT_S_SCRSHOT]       = XBOX_FT_S_SCR,
+	[XBOX_FT_S_SHOT_READ]     = XBOX_FT_S_SCRSHOT,
+	[XBOX_FT_S_SHOT_RESAMPLE] = XBOX_FT_S_SCRSHOT,
+	[XBOX_FT_S_SHOT_WRITE]    = XBOX_FT_S_SCRSHOT,
 };
 
 uint32_t xbox_ft_span_kcyc( uint64_t ticks )

@@ -17,6 +17,13 @@
 
 static int failures;
 
+/* Every encoder output goes through one stack buffer per test: sized
+   from the largest chunk (docs/r3d/lessons.md, "NEVER size a scratch
+   buffer from one of the things written into it"), with room to grow. */
+#define TEST_BUF_BYTES 8192
+typedef char test_buf_fits_spans[( XBOX_FT_SPANS_CHUNK_BYTES <= TEST_BUF_BYTES ) ? 1 : -1];
+typedef char test_buf_fits_counters[( XBOX_FT_CHUNK_BYTES + 4 + XBOX_FT_W_COUNT * XBOX_FT_COUNTER_NAME_BYTES <= TEST_BUF_BYTES ) ? 1 : -1];
+
 #define CHECK( cond ) do { if( !( cond )) { fprintf( stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond ); failures++; } } while( 0 )
 
 static uint32_t rd32( const uint8_t *p ) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -141,7 +148,7 @@ static void test_stats( void )
 
 static void test_encoders( void )
 {
-	uint8_t buf[2048];
+	uint8_t buf[TEST_BUF_BYTES];
 	xbox_ft_frame_t f;
 	uint32_t i;
 
@@ -149,13 +156,13 @@ static void test_encoders( void )
 	   spans - 24 from 2026-10-01, 11 round-trip, 7 mixer and 8 scene
 	   ones from 2026-10-02 - and world_walked, water_gpu and vp_loads
 	   after them); 112 bytes for a file from before the spans (20). */
-	CHECK( XBOX_FT_W_SPAN_CALLS == 20 && XBOX_FT_W_SPAN_FIRST == 21 && XBOX_FT_S_COUNT == 56 );
-	CHECK( XBOX_FT_W_WORLD_WALKED == 77 && XBOX_FT_W_WATER_GPU == 78 && XBOX_FT_W_VP_LOADS == 79 );
-	CHECK( XBOX_FT_W_G_ENTS == 80 && XBOX_FT_W_G_WORST_ENT == 95 && XBOX_FT_W_G_PUSH_REPLAYS == 96 && XBOX_FT_W_COUNT == 97 );
-	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 420 && xbox_ft_frame_bytes( 0 ) == 32 );
+	CHECK( XBOX_FT_W_SPAN_CALLS == 20 && XBOX_FT_W_SPAN_FIRST == 21 && XBOX_FT_S_COUNT == 68 );
+	CHECK( XBOX_FT_W_WORLD_WALKED == 89 && XBOX_FT_W_WATER_GPU == 90 && XBOX_FT_W_VP_LOADS == 91 );
+	CHECK( XBOX_FT_W_G_ENTS == 92 && XBOX_FT_W_G_WORST_ENT == 107 && XBOX_FT_W_G_PUSH_REPLAYS == 108 && XBOX_FT_W_COUNT == 109 );
+	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 468 && xbox_ft_frame_bytes( 0 ) == 32 );
 	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_SPAN_CALLS ) == 112 );
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", XBOX_FT_W_COUNT ) == XBOX_FT_HEADER_BYTES );
-	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 420 );
+	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 468 );
 	/* Version 1 is the same header without counters. */
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", 0 ) == XBOX_FT_HEADER_BYTES );
 	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 );
@@ -181,15 +188,15 @@ static void test_encoders( void )
 	CHECK( xbox_ft_encode_frame( buf, &f, 0 ) == XBOX_FT_FRAME_BYTES );
 	CHECK( rd32( buf ) == 7 && buf[4] == 0xDD && buf[7] == 0xAA && rd32( buf + 24 ) == 6 );
 	CHECK( buf[28] == 0x01 && buf[29] == 0x80 && buf[30] == 0 && buf[31] == 0 );
-	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 420 );
+	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 468 );
 	CHECK( rd32( buf ) == 7 && buf[28] == 0x01 && buf[29] == 0x80 );
 	CHECK( rd32( buf + 32 ) == 0x01000000u && rd32( buf + 32 + 4 * XBOX_FT_W_LM_TEXELS ) == 0x01000000u + XBOX_FT_W_LM_TEXELS );
-	CHECK( rd32( buf + 416 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
+	CHECK( rd32( buf + 464 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
 
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, 0 ) == 16 );
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_FRAMES && rd32( buf + 4 ) == 8 + 3 * 32 && rd32( buf + 8 ) == 10 && rd32( buf + 12 ) == 3 );
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, XBOX_FT_W_COUNT ) == 16 );
-	CHECK( rd32( buf + 4 ) == 8 + 3 * 420 );
+	CHECK( rd32( buf + 4 ) == 8 + 3 * 468 );
 
 	/* The COUNTERS chunk: every name, NUL-padded to 16 bytes. */
 	CHECK( xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ) == 8 + 4 + XBOX_FT_W_COUNT * 16 );
@@ -208,7 +215,11 @@ static void test_encoders( void )
 	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_WORLD_WALK ), "k_world_walk" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_WARP_TRANS ), "k_warp_trans" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SV_START ), "k_sv_start" ) == 0 );
-	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_COUNT - 1 ), "k_sv_pother" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SV_POTHER ), "k_sv_pother" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SAVE ), "k_save" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SAVE_SAV ), "k_save_sav" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SCRSHOT ), "k_scrshot" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * ( XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_COUNT - 1 ), "k_shot_write" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_WORLD_WALKED, "world_walked" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_WATER_GPU, "water_gpu" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_VP_LOADS, "vp_loads" ) == 0 );
@@ -236,7 +247,7 @@ static void test_encoders( void )
    own-time split and the SPANS chunk. */
 static void test_spans( void )
 {
-	uint8_t buf[2048];
+	uint8_t buf[TEST_BUF_BYTES];
 	uint64_t span[XBOX_FT_S_COUNT], self[XBOX_FT_S_COUNT];
 	uint32_t i;
 
@@ -277,6 +288,15 @@ static void test_spans( void )
 	CHECK( xbox_ft_span_parent[XBOX_FT_S_SV_START] == XBOX_FT_S_SV_GAME && xbox_ft_span_parent[XBOX_FT_S_SV_PSTEP] == XBOX_FT_S_SV_GAME );
 	CHECK( xbox_ft_span_parent[XBOX_FT_S_SV_PPUSH] == XBOX_FT_S_SV_GAME && xbox_ft_span_parent[XBOX_FT_S_SV_PTOSS] == XBOX_FT_S_SV_GAME );
 	CHECK( xbox_ft_span_parent[XBOX_FT_S_SV_PNONE] == XBOX_FT_S_SV_GAME && xbox_ft_span_parent[XBOX_FT_S_SV_POTHER] == XBOX_FT_S_SV_GAME );
+	/* The savegame's breakdown (2026-10-05). */
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SAVE] == XBOX_FT_S_CL_BEGIN && xbox_ft_span_parent[XBOX_FT_S_SAVE_INIT] == XBOX_FT_S_SAVE );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SAVE_ENTS] == XBOX_FT_S_SAVE && xbox_ft_span_parent[XBOX_FT_S_SAVE_HL1] == XBOX_FT_S_SAVE );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SAVE_CLIENT] == XBOX_FT_S_SAVE && xbox_ft_span_parent[XBOX_FT_S_SAVE_GLOBALS] == XBOX_FT_S_SAVE );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SAVE_AGE] == XBOX_FT_S_SAVE && xbox_ft_span_parent[XBOX_FT_S_SAVE_SAV] == XBOX_FT_S_SAVE );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SCRSHOT] == XBOX_FT_S_SCR && xbox_ft_span_parent[XBOX_FT_S_SHOT_READ] == XBOX_FT_S_SCRSHOT );
+	CHECK( xbox_ft_span_parent[XBOX_FT_S_SHOT_RESAMPLE] == XBOX_FT_S_SCRSHOT && xbox_ft_span_parent[XBOX_FT_S_SHOT_WRITE] == XBOX_FT_S_SCRSHOT );
+	for( i = 0; i < XBOX_FT_S_COUNT; i++ )
+		CHECK( xbox_ft_span_parent[i] < (int)i ); /* every parent before its children */
 
 	/* Kilocycles, rounded half up, saturating. */
 	CHECK( xbox_ft_span_kcyc( 0 ) == 0 && xbox_ft_span_kcyc( 499 ) == 0 && xbox_ft_span_kcyc( 500 ) == 1 );
@@ -304,11 +324,13 @@ static void test_spans( void )
 
 	/* The SPANS chunk: { span, parent } name pairs, "" at the top. */
 	CHECK( xbox_ft_encode_spans( buf, XBOX_FT_W_COUNT ) == XBOX_FT_SPANS_CHUNK_BYTES );
-	CHECK( XBOX_FT_SPANS_CHUNK_BYTES == 8 + 4 + 56 * 32 );
-	CHECK( rd32( buf ) == XBOX_FT_CHUNK_SPANS && rd32( buf + 4 ) == 4 + 56 * 32 && rd32( buf + 8 ) == 56 );
+	CHECK( XBOX_FT_SPANS_CHUNK_BYTES == 8 + 4 + 68 * 32 );
+	CHECK( rd32( buf ) == XBOX_FT_CHUNK_SPANS && rd32( buf + 4 ) == 4 + 68 * 32 && rd32( buf + 8 ) == 68 );
 	/* The last pair is the last span, not world_walked after it. */
 	CHECK( strcmp( (const char *)buf + 12 + 32 * 49, "k_warp_trans" ) == 0 && strcmp( (const char *)buf + 12 + 32 * 49 + 16, "k_r_scene" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 32 * 55, "k_sv_pother" ) == 0 && strcmp( (const char *)buf + 12 + 32 * 55 + 16, "k_sv_game" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 32 * 56, "k_save" ) == 0 && strcmp( (const char *)buf + 12 + 32 * 56 + 16, "k_cl_begin" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 32 * 67, "k_shot_write" ) == 0 && strcmp( (const char *)buf + 12 + 32 * 67 + 16, "k_scrshot" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12, "k_input" ) == 0 && buf[12 + 16] == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 32 * XBOX_FT_S_STUDIO_POINTS, "k_studio_points" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 32 * XBOX_FT_S_STUDIO_POINTS + 16, "k_client_studio" ) == 0 );
@@ -358,7 +380,7 @@ static void test_classes( void )
    mode-1 file write), with the same times. */
 static int write_fixture( const char *path, uint32_t counters )
 {
-	uint8_t buf[2048];
+	uint8_t buf[TEST_BUF_BYTES];
 	xbox_ft_frame_t f;
 	uint32_t i, j;
 	FILE *fp = fopen( path, "wb" );
@@ -423,6 +445,10 @@ static int write_fixture( const char *path, uint32_t counters )
    LevelChange): 1 MHz TSC. Map "c1a0", seq 0..39 in play at 20 ms (host
    19 ms, GPU 3 ms), except
      seq 35  a 600 ms stall inside Host_Frame (host 599 ms): an autosave;
+             when `flagged`, its spans (ms) are k_cl_begin 560 > k_save
+             550 > k_save_sav 400, k_save_ents 100, k_save_init 20 - own
+             times save_sav 400, save_ents 100, save 30, save_init 20,
+             cl_begin 10;
      seq 38  the changelevel frame: 500 ms, host 10 ms - 490 ms between
              host frames, the load; flagged XBOX_FT_F_LOAD when `flagged`;
      seq 39  the last frame still starting in play: 100 ms, host 10 ms -
@@ -434,7 +460,7 @@ static int write_fixture( const char *path, uint32_t counters )
    counters; otherwise version 1. */
 static int write_fixture_level_change( const char *path, int flagged )
 {
-	uint8_t buf[2048];
+	uint8_t buf[TEST_BUF_BYTES];
 	xbox_ft_frame_t f;
 	uint32_t i, counters = flagged ? XBOX_FT_W_COUNT : 0;
 	FILE *fp = fopen( path, "wb" );
@@ -462,6 +488,14 @@ static int write_fixture_level_change( const char *path, int flagged )
 		{
 			f.total = 600000;
 			f.host = 599000;
+			if( flagged )
+			{
+				f.work[XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_CL_BEGIN] = 560;
+				f.work[XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SAVE] = 550;
+				f.work[XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SAVE_SAV] = 400;
+				f.work[XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SAVE_ENTS] = 100;
+				f.work[XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SAVE_INIT] = 20;
+			}
 		}
 		else if( i == 38 )
 		{
@@ -525,7 +559,7 @@ static int write_fixture_level_change( const char *path, int flagged )
    Clean END. */
 static int write_fixture_spans( const char *path )
 {
-	uint8_t buf[2048];
+	uint8_t buf[TEST_BUF_BYTES];
 	xbox_ft_frame_t f;
 	uint32_t i;
 	FILE *fp = fopen( path, "wb" );

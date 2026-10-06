@@ -28,6 +28,19 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### ALWAYS count the kernel I/O calls and check the buffer's alignment before blaming the bytes of a slow Xbox file write
+
+The autosave stall looked like a big-file problem (a 939 KB .sav). The
+x9-perf-autosave spans showed otherwise: in xemu, 72 writes of 260 or 4
+bytes cost 64 ms and 36 file-sized writes 123 ms - about 1 ms per
+`FS_Write` whatever it carried (each is `write` + `lseek`, synchronous
+kernel calls) - and the same 36 reads took 81.5 ms into a buffer not on
+a page boundary against 28.9 ms into one that was. One page-aligned write
+per file took the save from ~370 to ~100 ms with the same bytes on disk.
+**Before optimising how much a console path reads or writes, count its
+`NtReadFile`/`NtWriteFile` calls and check where its buffers start;
+reduce calls and align buffers first.**
+
 ### NEVER size a scratch buffer from one of the things written into it - size it from the largest, or give each its own
 
 `FT_Flush` (`engine/platform/xbox/xbox_frametime.c`, since #169 on

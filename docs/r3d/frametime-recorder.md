@@ -66,9 +66,10 @@ code). `cl_showfps` is unchanged.
    2026-10-01 flag it (`LOAD`); for older files the report recognises it
    by its shape: one of the last two in-play frames of a map that a load
    follows, with at least 100 ms between host frames. Then a **stalls**
-   table lists every in-play frame still over 250 ms with its CPU share:
-   a stall that is nearly all CPU happened inside `Host_Frame` (an
-   autosave, a synchronous read).
+   table lists every in-play frame still over 250 ms with its CPU share
+   and its three largest spans by own time: a stall that is nearly all
+   CPU happened inside `Host_Frame` (an autosave - `save_sav`,
+   `save_ents`... - or a synchronous read).
 
 ## The overlay (mode 2)
 
@@ -301,6 +302,18 @@ boundary. The report shows it per map, and the overlay shows it as `none`.
 | `k_sv_ptoss` | `k_sv_game` | the same for `TOSS`, `BOUNCE`, `FLY`, `FLYMISSILE`, `BOUNCEMISSILE`: gibs, grenades, items falling | same |
 | `k_sv_pnone` | `k_sv_game` | the same for `MOVETYPE_NONE`: think-only entities - triggers, logic, sprites, beams | same |
 | `k_sv_pother` | `k_sv_game` | the same for `NOCLIP`, `FOLLOW`, `COMPOUND` and anything else | same |
+| `k_save` | `k_cl_begin` | `SaveGameSlot`: a whole `save`/`autosave` | `engine/server/sv_save.c`, `SV_SaveGame` |
+| `k_save_init` | `k_save` | `SaveInit`/`SaveFinish`: the save buffer's allocation, clearing and release (the one in `SaveGameState` and the swap between the two buffers in `SaveGameSlot`) | `sv_save.c`, `SaveGameState`, `SaveGameSlot` |
+| `k_save_ents` | `k_save` | `SaveGameState`'s serialisation: entity table, `ParmsChangeLevel`, header, adjacency, lightstyles, every entity's `pfnSave` (the game DLL), the ETABLE, the token table | `sv_save.c`, `SaveGameState` |
+| `k_save_hl1` | `k_save` | writing `<map>.HL1` and `EntityPatchWrite`'s `<map>.HL3` | `sv_save.c`, `SaveGameState` |
+| `k_save_client` | `k_save` | `SaveClientState`: the renderer's decal list, static entities, sounds, `<map>.HL2` | `sv_save.c`, `SaveGameState` |
+| `k_save_globals` | `k_save` | the `.sav`'s game header (with `DirectoryCount`) and the DLL's `SaveGlobalState` | `sv_save.c`, `SaveGameSlot` |
+| `k_save_age` | `k_save` | `AgeSaveList`: the aged `autosave`/`quick` files' deletes and renames | `sv_save.c`, `SaveGameSlot` |
+| `k_save_sav` | `k_save` | the `.sav` itself: open, header, tokens, globals, `DirectoryCopy` of every `.HL?` file in `save/`, close | `sv_save.c`, `SaveGameSlot` |
+| `k_scrshot` | `k_scr` | `SCR_MakeScreenShot` in `V_PostRender`: the `saveshot` thumbnail (or any screenshot) | `engine/client/cl_view.c`, `V_PostRender` |
+| `k_shot_read` | `k_scrshot` | ref/nv2a's back-buffer readback in `VID_ScreenShot` (the GPU wait before it is not charged) | `ref/nv2a/r_context.c`, `VID_ScreenShot` |
+| `k_shot_resample` | `k_scrshot` | `Image_Process`: the resample to the thumbnail's 267x200 | same |
+| `k_shot_write` | `k_scrshot` | `FS_SaveImage`: the BMP's encode and write | same |
 
 The eleven from `k_sv_reliable` to `k_cl_wpacket` (2026-10-02) break
 the local server/client round trip down; they come after `k_snd` in the
@@ -349,6 +362,21 @@ well as their physics. `k_sv_game`'s own time is the loop over the
 edicts itself, the lightstyles and `SV_CheckAllEnts`. These close once
 per entity SV_Physics runs (300-370 a frame on the maps measured), which
 is most of the span closures of a frame now.
+
+The last twelve (2026-10-05, appended the same way) break a savegame
+down. A `save` or `autosave` (the game's `trigger_autosave` queues one
+with `SERVER_COMMAND`) runs from `Cbuf_Execute` in `Host_ClientBegin`,
+and `SaveGameSlot` queues `saveshot` into the same command buffer
+(upstream `sv_save.c:1740`), so with nothing else queued the thumbnail
+is taken in the same frame's `V_PostRender`: an autosave is one long
+frame, `k_save` plus `k_scrshot`. A save typed at the console runs from
+`Host_InputFrame` instead, outside `k_cl_begin`. The `k_save_*` children
+are the sequential parts of `SaveGameSlot`; `SaveGameState` is also
+called by a `changelevel`, between frames, where nothing records it.
+Every file write is a synchronous kernel call on the Xbox, so the disk's
+time is inside these spans - on the console the IDE drive, in xemu the
+host's file cache. The report's stalls table names each stall's three
+largest spans by own time.
 
 Spans not listed under a parent stay in that parent's **own** time.
 Examples: the overlay's drawing (inside `k_scr`; it also has its own field)
@@ -437,12 +465,13 @@ the edicts (`k_sv_ppush` 0.61) and the monsters (`k_sv_pstep` 0.23).
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~507 KiB (ring 1024 x 420 B = 420 KiB, the overlay's histogram
-  4 KiB, a 52.5 KiB encode buffer, the server's classname table ~30 KiB);
-  a few `rdtsc` per frame plus two per span closed (below); a ~123 KiB
-  write and `fsync` every 5 s (those frames are flagged); about 24.6 KiB
-  per second of play on disk at 60 fps (87 MiB an hour; the file stops at
-  64 MiB, ~44 minutes). Before the server game frame's breakdown
+- **On:** ~561 KiB (ring 1024 x 468 B = 468 KiB, the overlay's histogram
+  4 KiB, a 58.5 KiB encode buffer, the server's classname table ~30 KiB);
+  a few `rdtsc` per frame plus two per span closed (below); a ~137 KiB
+  write and `fsync` every 5 s (those frames are flagged); about 27.4 KiB
+  per second of play on disk at 60 fps (96 MiB an hour; the file stops at
+  64 MiB, ~40 minutes). Before the savegame spans (2026-10-05) it was
+  ~507 KiB and 24.6 KiB/s. Before the server game frame's breakdown
   (2026-10-05) it was ~364 KiB and 18.8 KiB/s. Before the
   scene spans (2026-10-02) it was ~324 KiB and 16.6 KiB/s; before the
   mixer spans, ~292 KiB and 15 KiB/s; before the
@@ -492,9 +521,9 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 420 bytes with today's
-97: the 20 counts, `span_calls`, the 56 spans, `world_walked`, `water_gpu`,
-`vp_loads` and the 17 `g_*`; 328 with 50 spans and three counts after them, 284
+frame records of 32 bytes plus one u32 per counter - 468 bytes with today's
+109: the 20 counts, `span_calls`, the 68 spans, `world_walked`, `water_gpu`,
+`vp_loads` and the 17 `g_*`; 420 with 56 spans, 328 with 50 spans and three counts after them, 284
 with 42 spans, 256 with 35, 212 with the first 24, 112 before the spans),
 SPANS (from 2026-10-01, right after COUNTERS: each span's name and its
 parent's, 16 bytes each, "" for the top level), MAP, CALIB (TSC,

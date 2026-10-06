@@ -5,6 +5,34 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: autosaves hitch for about a third as long
+
+Every autosave froze the game for one frame of 320-425 ms on the
+console, the most visible hitch left in the campaign. Almost none of
+that was the game working out what to save: it was the save files being
+written. The engine wrote each file a few bytes at a time, about 130
+separate write calls per save, and on the Xbox every call is a slow trip
+into the system's file code however little it carries. It also set
+aside and cleared 1 MiB of memory for every map's state it copied into
+the save, and cleared two 4 MiB buffers it never needed cleared. The
+system turned out to read and write much faster when the memory involved
+starts on a page boundary.
+
+Each save file is now assembled in memory the save already has and
+written in one go, page-aligned, with nothing extra allocated and
+nothing cleared that is not needed. The files are byte for byte what
+they were: saves made the old way and the new way in the same frame
+are identical. In xemu, with a save carrying twelve maps, the autosave
+frame went from 407-424 ms to 140-179 ms. Divergence #151.
+
+### Added - Frame-time recorder: where a save spends its time
+
+Twelve new spans break a save down: the save buffer's setup, the game's
+own serialisation, each file written, the aging of old autosaves, the
+.sav itself, and the thumbnail (read back, resized, written). The
+report's stall table now names the three parts of each stall that took
+the longest. Divergence #141 (10).
+
 ### Fixed - Xbox: no sound for a whole session on some builds
 
 Some builds had no sound at all on the console, every boot, while builds

@@ -104,6 +104,8 @@ GPU_BOUND_MS = 1.0          # a frame whose GPU wait exceeds this was held up by
 LC_OTHER_MS = 100.0         # unflagged files: a level-change frame has at least this between host frames
 LC_TAIL_FRAMES = 2          # ... and is one of the last this-many in-play frames before the load
 STALL_MS = 250.0            # an in-play frame longer than this is listed as a stall
+STALL_TOP_SPANS = 3         # a stall lists its this-many largest spans by own time ...
+STALL_SPAN_MS = 1.0         # ... of at least this many ms
 VERTS = "verts"             # derived counter: the sum of every v_* counter
 # The counters the per-map table shows, in order, with their headings.
 WORK_TABLE = [("draws", "Draws"), ("prims", "Prims"), ("pb_dwords", "PB KiB"), ("tex_binds", "Tex binds"),
@@ -478,12 +480,31 @@ def level_change_list(rec):
     return out
 
 
+def stall_top_spans(rec, fr):
+    """The frame's STALL_TOP_SPANS largest spans by own time (a span minus
+    its children), at least STALL_SPAN_MS each: [(span, ms)], largest
+    first; empty for a file without spans. Own times, so an autosave
+    names the part of the save that took the time (k_save_sav), not
+    every span above it."""
+    incl = frame_span_ms(rec, fr)
+    if not incl:
+        return []
+    own = span_own(rec, incl)
+    top = sorted(((v, s) for s, v in own.items() if v >= STALL_SPAN_MS), key=lambda x: (-x[0], x[1]))
+    return [(s, v) for v, s in top[:STALL_TOP_SPANS]]
+
+
+def _top_spans_label(top):
+    return ", ".join("%s %.0f" % (s.replace("k_", "", 1), v) for s, v in top)
+
+
 def stall_list(rec, include_level_change=False):
     """In-play frames past the warm-up longer than STALL_MS, level-change
     frames left out (unless include_level_change), flush frames kept and
     marked: seconds into the session, map, the times and the CPU share
-    of the frame. A stall that is mostly CPU happened inside Host_Frame
-    (an autosave, a synchronous read)."""
+    of the frame, and its largest spans (stall_top_spans). A stall that
+    is mostly CPU happened inside Host_Frame (an autosave, a synchronous
+    read)."""
     start_s = _start_seconds(rec)
     lc = level_change_frames(rec)
     out = []
@@ -493,7 +514,8 @@ def stall_list(rec, include_level_change=False):
                 continue
             out.append({"seq": fr[0], "t": start_s[fr[0]], "map": seg["name"], "total": t, "cpu": c,
                         "cpu_pct": 100.0 * c / t if t else 0.0, "gpu": g, "other": o,
-                        "flush": bool(fr[7] & F_FLUSH), "level_change": fr[0] in lc})
+                        "flush": bool(fr[7] & F_FLUSH), "level_change": fr[0] in lc,
+                        "top_spans": stall_top_spans(rec, fr)})
     return out
 
 
@@ -836,11 +858,13 @@ def summary_text(rec, rows, sess):
     lines.append("stalls: %d in-play frame(s) over %.0f ms (level-change frames %s; flush frames marked)"
                  % (len(stalls), STALL_MS, "included" if sess.get("lc_included") else "excluded"))
     if stalls:
-        lines.append("%8s  %-12s %8s %7s %5s %7s %8s  %s" % ("t s", "map", "total", "cpu", "cpu%", "gpu", "between", ""))
+        lines.append("%8s  %-12s %8s %7s %5s %7s %8s  %s" % ("t s", "map", "total", "cpu", "cpu%", "gpu", "between",
+                                                             "largest spans, own ms"))
         for r in stalls:
+            note = " ".join(x for x, on in (("flush", r["flush"]), ("level-change", r["level_change"])) if on)
             lines.append("%8.1f  %-12s %8.1f %7.1f %4.0f%% %7.1f %8.1f  %s" % (
                 r["t"], r["map"][:12], r["total"], r["cpu"], r["cpu_pct"], r["gpu"], r["other"],
-                " ".join(x for x, on in (("flush", r["flush"]), ("level-change", r["level_change"])) if on)))
+                "  ".join(x for x in (_top_spans_label(r.get("top_spans", [])), note) if x)))
     if sess.get("counters"):
         lines.append("")
         lines.append("work per frame in play, avg/peak (counts: the same in xemu and on the console)")
@@ -1347,12 +1371,14 @@ def lc_section_html(sess):
                  'marked.</p>' % (STALL_MS, "included" if sess.get("lc_included") else "left out"))
     if stalls:
         parts.append('<div class="table-box"><table class="small"><thead><tr><th>s</th><th>Map</th><th>Total ms</th>'
-                     '<th>CPU ms</th><th>CPU share</th><th>GPU ms</th><th>Between ms</th><th></th></tr></thead><tbody>')
+                     '<th>CPU ms</th><th>CPU share</th><th>GPU ms</th><th>Between ms</th>'
+                     '<th>Largest spans, own ms</th><th></th></tr></thead><tbody>')
         for r in stalls:
             note = " ".join(x for x, on in (("flush", r["flush"]), ("level change", r["level_change"])) if on)
             parts.append("<tr><td>%.1f</td><td>%s</td><td>%.1f</td><td>%.1f</td><td>%.0f%%</td><td>%.1f</td>"
-                         "<td>%.1f</td><td>%s</td></tr>" % (r["t"], esc(r["map"]), r["total"], r["cpu"],
-                                                           r["cpu_pct"], r["gpu"], r["other"], note))
+                         "<td>%.1f</td><td>%s</td><td>%s</td></tr>"
+                         % (r["t"], esc(r["map"]), r["total"], r["cpu"], r["cpu_pct"], r["gpu"], r["other"],
+                            esc(_top_spans_label(r.get("top_spans", []))), note))
         parts.append("</tbody></table></div>")
     else:
         parts.append("<p>None.</p>")

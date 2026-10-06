@@ -580,7 +580,7 @@ void V_PostRender( void )
 		XBOX_FT_SPAN( XBOX_FT_S_SND_EXTRA, S_ExtraUpdate());
 	}
 
-	SCR_MakeScreenShot();
+	XBOX_FT_SPAN( XBOX_FT_S_SCRSHOT, SCR_MakeScreenShot());
 	ref.dllFuncs.R_AllowFog( true );
 	Platform_SetTimer( 0.0f );
 	XBOX_FT_SPAN( XBOX_FT_S_R_END, ref.dllFuncs.R_EndFrame());

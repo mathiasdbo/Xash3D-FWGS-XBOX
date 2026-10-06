@@ -155,6 +155,15 @@ static inline void xbox_ft_span_end( const xbox_ft_span_t *s, int id )
 		xbox_ft_span_end( &xbox_ft_span_, ( id )); \
 	} while( 0 )
 
+/* The same for a run of statements: XBOX_FT_SPAN_BEGIN( var ) declares
+   and opens span variable `var`, XBOX_FT_SPAN_END( var, id ) closes it
+   as span `id`: two inserted lines time a region of upstream code
+   without re-indenting it (sv_save.c). A path that returns between the
+   two records nothing for that span. Files that use them define both as
+   nothing outside an Xbox build (#141). */
+#define XBOX_FT_SPAN_BEGIN( var ) xbox_ft_span_t var; xbox_ft_span_begin( &var )
+#define XBOX_FT_SPAN_END( var, id ) xbox_ft_span_end( &var, ( id ))
+
 /* Engine side (xbox_frametime.c). */
 void Xbox_FrameTime_Init( void );          /* registers the cvar */
 void Xbox_FrameTime_BeginFrame( void );    /* Host_Frame, after Host_FilterTime */

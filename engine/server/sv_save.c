@@ -20,6 +20,223 @@ GNU General Public License for more details.
 #include "render_api.h"	// decallist_t
 #include "sound.h"		// S_GetDynamicSounds
 #include "ref_common.h" // decals
+#if XASH_XBOX && !XASH_DEDICATED
+#include "platform/xbox/xbox_frametime.h" // the frame-time recorder's save spans, docs/r3d/divergences.md #141
+#else
+#define XBOX_FT_SPAN( id, stmt ) stmt
+#define XBOX_FT_SPAN_BEGIN( var )
+#define XBOX_FT_SPAN_END( var, id )
+#endif
+
+#if XASH_XBOX
+/*
+Resonance3D (docs/r3d/divergences.md #151): the save path's file writes,
+staged. Upstream writes each file of a save with one FS_Write per field
+(`sv_save.c:1582-1592`, `:1746-1754`, `:1260-1268`, `:1023-1028` in the
+reference) and copies every <map>.HL? into the .sav through FS_FileCopy
+(`:654-656`), which allocates a 1 MiB buffer per file (`io.c:1100`).
+FS_Write is unbuffered (`io.c:181`): on the Xbox each call is a
+synchronous NtWriteFile into the FATX driver, and in xemu each one cost
+about a millisecond of CPU however few bytes it carried - an autosave
+late in a chapter made ~130 of them. The kernel was also about three
+times slower reading into, and twice as slow writing from, a buffer
+that does not start on a page. Here the bytes of each file are gathered,
+in the order upstream writes them, in the free tail of the active save
+buffer (svgame.globals->pSaveData, 4 MiB, of which a save uses a few
+hundred KiB), from its first page boundary, and handed to FS_Write in as
+few calls as fit - one per file in practice - so every file gets the
+same bytes. Nothing is allocated. SaveFinish and SaveClear flush first,
+so staged bytes never outlive their buffer; a file is complete once
+SaveClose returns, as upstream's FS_Close.
+*/
+#define SAVE_STAGE_MIN ( 64 * 1024 ) // a smaller free tail is not worth staging into: write through
+#define SAVE_STAGE_ALIGN 4096        // the stage and every file read into it start on a page
+
+typedef struct save_stage_s
+{
+	file_t *file; // the file the staged bytes belong to; NULL when nothing is staged
+	byte   *buf;  // the free tail of the save buffer, past pCurrentData
+	size_t  len;
+	size_t  cap;
+} save_stage_t;
+
+static save_stage_t save_stage;
+
+// Set when a save file write or a read into the stage fell short since
+// SaveGameSlot started; SaveGameSlot then removes the incomplete .sav
+// and fails instead of reporting a save it did not finish. Upstream
+// ignored FS_Write's count per field; a staged flush carries a whole file,
+// so a short write must not be dropped silently.
+static qboolean save_io_failed;
+
+static void SaveIO_Fail( const char *func, size_t lost )
+{
+	if( !save_io_failed )
+		Con_Printf( S_ERROR "%s: a save file write fell short (%u bytes not written)\n", func, (uint)lost );
+	save_io_failed = true;
+}
+
+// Writes the whole stage, continuing after a short write; a write that
+// makes no progress fails the save.
+static void SaveStage_Flush( void )
+{
+	const byte *p = save_stage.buf;
+	size_t left = save_stage.len;
+
+	while( save_stage.file && left > 0 )
+	{
+		fs_offset_t written = FS_Write( save_stage.file, p, left );
+
+		if( written <= 0 )
+		{
+			SaveIO_Fail( __func__, left );
+			break;
+		}
+		p += written;
+		left -= (size_t)written;
+	}
+	save_stage.len = 0;
+}
+
+static void SaveStage_End( void )
+{
+	SaveStage_Flush();
+	save_stage.file = NULL;
+}
+
+// Stages `file`'s writes from here on, ending any other file's; false
+// when there is no save buffer or too little of it left (write through).
+static qboolean SaveStage_Begin( file_t *file )
+{
+	SAVERESTOREDATA *pSaveData = svgame.globals->pSaveData;
+	byte *tail, *end;
+
+	if( save_stage.file == file )
+		return true;
+
+	SaveStage_End();
+
+	if( !file || !pSaveData )
+		return false;
+
+	// The game DLL's overflow ("Save/Restore overflow!", CSave::BufferData)
+	// sets size to bufferSize without writing: the files then take the
+	// whole buffer, the stage included. Write through, as upstream; the
+	// unwritten bytes are stale rather than zero (SaveInitUncleared), in a
+	// save that is broken either way.
+	if( pSaveData->size >= pSaveData->bufferSize )
+		return false;
+
+	// everything written so far lies before pCurrentData (the data, the
+	// ETABLE, then the token table StoreHashTable appended)
+	tail = (byte *)pSaveData->pCurrentData;
+	end = (byte *)( pSaveData + 1 ) + pSaveData->bufferSize;
+	if( tail < (byte *)( pSaveData + 1 ) || tail > end )
+		return false;
+	tail += ( SAVE_STAGE_ALIGN - (uintptr_t)tail % SAVE_STAGE_ALIGN ) % SAVE_STAGE_ALIGN;
+	if( tail > end || (size_t)( end - tail ) < SAVE_STAGE_MIN )
+		return false;
+
+	save_stage.file = file;
+	save_stage.buf = tail;
+	save_stage.len = 0;
+	// whole pages, so a file bigger than the stage is flushed at page
+	// offsets of the file too
+	save_stage.cap = (size_t)( end - tail ) / SAVE_STAGE_ALIGN * SAVE_STAGE_ALIGN;
+	return true;
+}
+
+static fs_offset_t SaveWrite( file_t *file, const void *data, size_t datasize )
+{
+	const byte *src = data;
+	size_t left = datasize;
+
+	if( !SaveStage_Begin( file ))
+	{
+		fs_offset_t written = FS_Write( file, data, datasize );
+
+		if( written != (fs_offset_t)datasize )
+			SaveIO_Fail( __func__, datasize - ( written > 0 ? (size_t)written : 0 ));
+		return written;
+	}
+
+	while( left > 0 )
+	{
+		size_t n;
+
+		if( save_stage.len == save_stage.cap )
+			SaveStage_Flush();
+
+		n = Q_min( left, save_stage.cap - save_stage.len );
+		memcpy( save_stage.buf + save_stage.len, src, n );
+		save_stage.len += n;
+		src += n;
+		left -= n;
+	}
+
+	return datasize;
+}
+
+// FS_FileCopy's copy loop (io.c:1102-1118) reading into the stage: the
+// same bytes, without the 1 MiB buffer. On a short read it stops as
+// FS_FileCopy does, dropping the chunk it was reading; the chunks are the
+// stage's, not 1 MiB, so a truncated input file leaves a different (and
+// equally corrupt) tail in the .sav.
+static qboolean SaveCopy( file_t *pOutput, file_t *pInput, int fileSize )
+{
+	if( !SaveStage_Begin( pOutput ))
+	{
+		if( FS_FileCopy( pOutput, pInput, fileSize ))
+			return true;
+		SaveIO_Fail( __func__, (size_t)fileSize );
+		return false;
+	}
+
+	while( fileSize > 0 )
+	{
+		byte *dst = save_stage.buf + save_stage.len;
+		byte *end = save_stage.buf + save_stage.cap;
+		// read on the next page boundary (a third of the time of an
+		// unaligned read, in xemu), then move the bytes down into place
+		byte *rd = dst + ( SAVE_STAGE_ALIGN - (uintptr_t)dst % SAVE_STAGE_ALIGN ) % SAVE_STAGE_ALIGN;
+		int size, readSize;
+
+		if( rd >= end )
+		{
+			SaveStage_Flush(); // the stage starts on a page: the next read lands in place
+			continue;
+		}
+
+		size = (int)Q_min( (size_t)fileSize, (size_t)( end - rd ));
+		readSize = FS_Read( pInput, rd, size );
+		if( readSize < size )
+		{
+			Con_Reportf( S_ERROR "%s: unexpected end of input file (%d < %d)\n", __func__, readSize, size );
+			SaveIO_Fail( __func__, (size_t)fileSize );
+			return false;
+		}
+
+		if( rd != dst )
+			memmove( dst, rd, size );
+		save_stage.len += size;
+		fileSize -= size;
+	}
+
+	return true;
+}
+
+static int SaveClose( file_t *file )
+{
+	if( file && save_stage.file == file )
+		SaveStage_End();
+
+	return FS_Close( file );
+}
+#else // !XASH_XBOX
+#define SaveWrite FS_Write
+#define SaveCopy  FS_FileCopy
+#define SaveClose FS_Close
+#endif // !XASH_XBOX
 
 /*
 ==============================================================================
@@ -702,9 +919,9 @@ static void DirectoryCopy( const char *pPath, file_t *pFile )
 
 		memset( szName, 0, sizeof( szName )); // clearing the string to prevent garbage in output file
 		Q_strncpy( szName, COM_FileWithoutPath( t->filenames[i] ), sizeof( szName ));
-		FS_Write( pFile, szName, MAX_OSPATH );
-		FS_Write( pFile, &fileSize, sizeof( int ));
-		FS_FileCopy( pFile, pCopy, fileSize );
+		SaveWrite( pFile, szName, MAX_OSPATH );
+		SaveWrite( pFile, &fileSize, sizeof( int ));
+		SaveCopy( pFile, pCopy, fileSize );
 		FS_Close( pCopy );
 	}
 	Mem_Free( t );
@@ -773,6 +990,47 @@ static SAVERESTOREDATA *SaveInit( int size, int tokenCount )
 	return pSaveData;
 }
 
+#if XASH_XBOX
+/*
+=============
+SaveInitUncleared
+
+Resonance3D (docs/r3d/divergences.md #151): SaveInit for the two buffers
+a save writes into (SaveGameState, SaveGameSlot). Upstream clears the
+whole 4 MiB (Mem_Calloc, `sv_save.c:709` in the reference); a save
+writes a few hundred KiB from the start and the files take only the
+bytes written (`size`, then the token table StoreHashTable appends), so
+the clearing of the rest - two 4 MiB passes per autosave, every page
+touched - changes nothing a file receives. Upstream already relies on
+that: SaveClientState reuses the HL1 buffer through SaveClear without
+clearing it. The structure and the token table are cleared as before.
+The load path keeps SaveInit: it parses the token table it reads in.
+=============
+*/
+static SAVERESTOREDATA *SaveInitUncleared( int size, int tokenCount )
+{
+	SAVERESTOREDATA	*pSaveData;
+
+	pSaveData = Mem_Malloc( host.mempool, sizeof( SAVERESTOREDATA ) + size );
+	memset( pSaveData, 0, sizeof( SAVERESTOREDATA ));
+	pSaveData->pTokens = (char **)Mem_Calloc( host.mempool, tokenCount * sizeof( char* ));
+	pSaveData->tokenCount = tokenCount;
+
+	pSaveData->pBaseData = (char *)(pSaveData + 1); // skip the save structure);
+	pSaveData->pCurrentData = pSaveData->pBaseData; // reset the pointer
+	pSaveData->bufferSize = size;
+
+	pSaveData->time = svgame.globals->time;	// Use DLL time
+
+	// shared with dlls
+	svgame.globals->pSaveData = pSaveData;
+
+	return pSaveData;
+}
+#else
+#define SaveInitUncleared SaveInit
+#endif
+
 /*
 =============
 SaveClear
@@ -782,6 +1040,10 @@ clearing buffer for reuse
 */
 static void SaveClear( SAVERESTOREDATA *pSaveData )
 {
+#if XASH_XBOX
+	SaveStage_End(); // #151: staged bytes may live in this buffer
+#endif
+
 	memset( pSaveData->pTokens, 0, pSaveData->tokenCount * sizeof( char* ));
 
 	pSaveData->pBaseData = (char *)(pSaveData + 1); // skip the save structure);
@@ -804,6 +1066,10 @@ release global save-restore buffer
 static void SaveFinish( SAVERESTOREDATA *pSaveData )
 {
 	if( !pSaveData ) return;
+
+#if XASH_XBOX
+	SaveStage_End(); // #151: write out what is staged in this buffer before it is freed
+#endif
 
 	if( pSaveData->pTokens )
 	{
@@ -1071,15 +1337,15 @@ static qboolean EntityPatchWrite( SAVERESTOREDATA *pSaveData, const char *level 
 	}
 
 	// patch count
-	FS_Write( pFile, &size, sizeof( int ));
+	SaveWrite( pFile, &size, sizeof( int ));
 
 	for( i = 0; i < pSaveData->tableCount; i++ )
 	{
 		if( FBitSet( pSaveData->pTable[i].flags, FENTTABLE_REMOVED ))
-			FS_Write( pFile, &i, sizeof( int ));
+			SaveWrite( pFile, &i, sizeof( int ));
 	}
 
-	FS_Close( pFile );
+	SaveClose( pFile );
 
 	return true;
 }
@@ -1308,16 +1574,16 @@ static qboolean SaveClientState( SAVERESTOREDATA *pSaveData, const char *level, 
 	int version = CLIENT_SAVEGAME_VERSION;
 	int id = SAVEGAME_HEADER;
 
-	FS_Write( pFile, &id, sizeof( id ));
-	FS_Write( pFile, &version, sizeof( version ));
-	FS_Write( pFile, &pSaveData->size, sizeof( int )); // does not include token table
+	SaveWrite( pFile, &id, sizeof( id ));
+	SaveWrite( pFile, &version, sizeof( version ));
+	SaveWrite( pFile, &pSaveData->size, sizeof( int )); // does not include token table
 
 	// write out the tokens first so we can load them before we load the entities
-	FS_Write( pFile, &pSaveData->tokenCount, sizeof( int ));
-	FS_Write( pFile, &pSaveData->tokenSize, sizeof( int ));
-	FS_Write( pFile, pTokenData, pSaveData->tokenSize );
-	FS_Write( pFile, pSaveData->pBaseData, pSaveData->size ); // header and globals
-	FS_Close( pFile );
+	SaveWrite( pFile, &pSaveData->tokenCount, sizeof( int ));
+	SaveWrite( pFile, &pSaveData->tokenSize, sizeof( int ));
+	SaveWrite( pFile, pTokenData, pSaveData->tokenSize );
+	SaveWrite( pFile, pSaveData->pBaseData, pSaveData->size ); // header and globals
+	SaveClose( pFile );
 
 	return true;
 }
@@ -1523,7 +1789,8 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
 	if( !svgame.dllFuncs.pfnParmsChangeLevel )
 		return NULL;
 
-	pSaveData = SaveInit( SAVE_HEAPSIZE, SAVE_HASHSTRINGS );
+	XBOX_FT_SPAN( XBOX_FT_S_SAVE_INIT, pSaveData = SaveInitUncleared( SAVE_HEAPSIZE, SAVE_HASHSTRINGS ));
+	XBOX_FT_SPAN_BEGIN( ft_ents );
 
 	Q_snprintf( name, sizeof( name ), DEFAULT_SAVE_DIRECTORY "%s.HL1", sv.name );
 	COM_FixSlashes( name );
@@ -1615,6 +1882,8 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
 
 	// Write entity string token table
 	pTokenData = StoreHashTable( pSaveData );
+	XBOX_FT_SPAN_END( ft_ents, XBOX_FT_S_SAVE_ENTS );
+	XBOX_FT_SPAN_BEGIN( ft_hl1 );
 
 	// output to disk
 	if(( pFile = FS_Open( name, "wb", true )) == NULL )
@@ -1630,26 +1899,29 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
 	id = SAVEFILE_HEADER;
 
 	// write the header
-	FS_Write( pFile, &id, sizeof( id ));
-	FS_Write( pFile, &version, sizeof( version ));
+	SaveWrite( pFile, &id, sizeof( id ));
+	SaveWrite( pFile, &version, sizeof( version ));
 
 	// Write out the tokens and table FIRST so they are loaded in the right order, then write out the rest of the data in the file.
-	FS_Write( pFile, &pSaveData->size, sizeof( int ));	// total size of all data to initialize read buffer
-	FS_Write( pFile, &pSaveData->tableCount, sizeof( int ));	// entities count to right initialize entity table
-	FS_Write( pFile, &pSaveData->tokenCount, sizeof( int ));	// num hash tokens to prepare token table
-	FS_Write( pFile, &pSaveData->tokenSize, sizeof( int ));	// total size of hash tokens
-	FS_Write( pFile, pTokenData, pSaveData->tokenSize );	// write tokens into the file
-	FS_Write( pFile, pTableData, tableSize );		// dump ETABLE structures
-	FS_Write( pFile, pSaveData->pBaseData, dataSize );	// and finally store all the other data
-	FS_Close( pFile );
+	SaveWrite( pFile, &pSaveData->size, sizeof( int ));	// total size of all data to initialize read buffer
+	SaveWrite( pFile, &pSaveData->tableCount, sizeof( int ));	// entities count to right initialize entity table
+	SaveWrite( pFile, &pSaveData->tokenCount, sizeof( int ));	// num hash tokens to prepare token table
+	SaveWrite( pFile, &pSaveData->tokenSize, sizeof( int ));	// total size of hash tokens
+	SaveWrite( pFile, pTokenData, pSaveData->tokenSize );	// write tokens into the file
+	SaveWrite( pFile, pTableData, tableSize );		// dump ETABLE structures
+	SaveWrite( pFile, pSaveData->pBaseData, dataSize );	// and finally store all the other data
+	SaveClose( pFile );
 
 	if( !EntityPatchWrite( pSaveData, sv.name ))
 	{
 		SaveFinish( pSaveData );
 		return NULL;
 	}
+	XBOX_FT_SPAN_END( ft_hl1, XBOX_FT_S_SAVE_HL1 );
 
-	if( !SaveClientState( pSaveData, sv.name, changelevel ))
+	qboolean client_saved;
+	XBOX_FT_SPAN( XBOX_FT_S_SAVE_CLIENT, client_saved = SaveClientState( pSaveData, sv.name, changelevel ));
+	if( !client_saved )
 	{
 		SaveFinish( pSaveData );
 		return NULL;
@@ -1749,12 +2021,18 @@ static qboolean SaveGameSlot( const char *pSaveName, const char *pSaveComment )
 	GAME_HEADER	gameHeader;
 	file_t		*pFile;
 
+#if XASH_XBOX
+	save_io_failed = false; // #151: every file of this save, the .HL? ones included, is checked from here
+#endif
 	pSaveData = SaveGameState( false );
 	if( !pSaveData )
 		return false;
 
+	XBOX_FT_SPAN_BEGIN( ft_init );
 	SaveFinish( pSaveData );
-	pSaveData = SaveInit( SAVE_HEAPSIZE, SAVE_HASHSTRINGS ); // re-init the buffer
+	pSaveData = SaveInitUncleared( SAVE_HEAPSIZE, SAVE_HASHSTRINGS ); // re-init the buffer
+	XBOX_FT_SPAN_END( ft_init, XBOX_FT_S_SAVE_INIT );
+	XBOX_FT_SPAN_BEGIN( ft_globals );
 
 	Q_strncpy( hlPath, DEFAULT_SAVE_DIRECTORY "*.HL?", sizeof( hlPath ) );
 	Q_strncpy( gameHeader.mapName, sv.name, sizeof( gameHeader.mapName )); // get the name of level where a player
@@ -1769,15 +2047,19 @@ static qboolean SaveGameSlot( const char *pSaveName, const char *pSaveComment )
 
 	// Write entity string token table
 	pTokenData = StoreHashTable( pSaveData );
+	XBOX_FT_SPAN_END( ft_globals, XBOX_FT_S_SAVE_GLOBALS );
 
 	Q_snprintf( name, sizeof( name ), DEFAULT_SAVE_DIRECTORY "%s.sav", pSaveName );
 	COM_FixSlashes( name );
 
+	XBOX_FT_SPAN_BEGIN( ft_age );
 	// output to disk
 	if( !Q_stricmp( pSaveName, "quick" ))
 		AgeSaveList( pSaveName, GI->quicksave_aged_count );
 	else if( !Q_stricmp( pSaveName, "autosave" ))
 		AgeSaveList( pSaveName, GI->autosave_aged_count );
+	XBOX_FT_SPAN_END( ft_age, XBOX_FT_S_SAVE_AGE );
+	XBOX_FT_SPAN_BEGIN( ft_sav );
 
 	// output to disk
 	if(( pFile = FS_Open( name, "wb", true )) == NULL )
@@ -1794,19 +2076,30 @@ static qboolean SaveGameSlot( const char *pSaveName, const char *pSaveComment )
 	int version = SAVEGAME_VERSION;
 	int id = SAVEGAME_HEADER;
 
-	FS_Write( pFile, &id, sizeof( id ));
-	FS_Write( pFile, &version, sizeof( version ));
-	FS_Write( pFile, &pSaveData->size, sizeof( int )); // does not include token table
+	SaveWrite( pFile, &id, sizeof( id ));
+	SaveWrite( pFile, &version, sizeof( version ));
+	SaveWrite( pFile, &pSaveData->size, sizeof( int )); // does not include token table
 
 	// write out the tokens first so we can load them before we load the entities
-	FS_Write( pFile, &pSaveData->tokenCount, sizeof( int ));
-	FS_Write( pFile, &pSaveData->tokenSize, sizeof( int ));
-	FS_Write( pFile, pTokenData, pSaveData->tokenSize );
-	FS_Write( pFile, pSaveData->pBaseData, pSaveData->size ); // header and globals
+	SaveWrite( pFile, &pSaveData->tokenCount, sizeof( int ));
+	SaveWrite( pFile, &pSaveData->tokenSize, sizeof( int ));
+	SaveWrite( pFile, pTokenData, pSaveData->tokenSize );
+	SaveWrite( pFile, pSaveData->pBaseData, pSaveData->size ); // header and globals
 
 	DirectoryCopy( hlPath, pFile );
 	SaveFinish( pSaveData );
-	FS_Close( pFile );
+	SaveClose( pFile );
+	XBOX_FT_SPAN_END( ft_sav, XBOX_FT_S_SAVE_SAV );
+
+#if XASH_XBOX
+	// #151: never leave a .sav whose bytes did not all reach the disk
+	if( save_io_failed )
+	{
+		Con_Printf( S_ERROR "%s: %s is incomplete, removing it\n", __func__, name );
+		FS_Delete( name );
+		return false;
+	}
+#endif
 
 	return true;
 }
@@ -2273,7 +2566,10 @@ qboolean SV_SaveGame( const char *pName )
 #endif // XASH_DEDICATED
 
 	SaveBuildComment( comment, sizeof( comment ));
-	return SaveGameSlot( savename, comment );
+
+	qboolean saved;
+	XBOX_FT_SPAN( XBOX_FT_S_SAVE, saved = SaveGameSlot( savename, comment ));
+	return saved;
 }
 
 static int SV_CompareFileTime( int ft1, int ft2 )

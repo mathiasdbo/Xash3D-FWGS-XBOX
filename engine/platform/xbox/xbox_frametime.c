@@ -618,6 +618,8 @@ static void FT_FormatSpans( const uint64_t *work, uint64_t cpu_ticks, uint32_t n
 		"sspat", "smix", "sdsp", "sout", "xmix", "xdsp", "xout",
 		"pvs", "sky", "walk", "wwarp", "wdec", "brush", "bwarp", "twarp",
 		"start", "pstep", "ppush", "ptoss", "pnone", "pother",
+		"save", "sinit", "sents", "shl1", "scli", "sglob", "sage", "ssav",
+		"shot", "shrd", "shrs", "shwr",
 	};
 	/* A span added without a label is a compile error, not a NULL. */
 	STATIC_ASSERT( ARRAYSIZE( label ) == XBOX_FT_S_COUNT, "one overlay label per span" );

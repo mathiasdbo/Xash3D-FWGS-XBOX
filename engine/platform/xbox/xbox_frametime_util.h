@@ -240,6 +240,26 @@ enum
 	XBOX_FT_S_SV_PTOSS,      /*   in k_sv_game: TOSS/BOUNCE/FLY/FLYMISSILE/BOUNCEMISSILE - gibs, grenades, falling items */
 	XBOX_FT_S_SV_PNONE,      /*   in k_sv_game: MOVETYPE_NONE - think-only entities: triggers, logic, sprites */
 	XBOX_FT_S_SV_POTHER,     /*   in k_sv_game: NOCLIP, FOLLOW, COMPOUND and any other movetype */
+	/* A savegame and its thumbnail, broken down (2026-10-05, appended for
+	   the same reason). A `save`/`autosave` runs from Cbuf_Execute in
+	   Host_ClientBegin, and the `saveshot` it queues from the same
+	   Cbuf_Execute, taken in that frame's V_PostRender, so an autosave is
+	   one long frame. The k_save_* children are sequential parts of
+	   SaveGameSlot (engine/server/sv_save.c); the k_shot_* ones are
+	   ref/nv2a's VID_ScreenShot. A file write is a synchronous kernel
+	   call, so the disk's time is in these spans. */
+	XBOX_FT_S_SAVE,          /*   in k_cl_begin: SaveGameSlot - the whole save */
+	XBOX_FT_S_SAVE_INIT,     /*     in k_save: SaveInit/SaveFinish - the save buffer's allocation, clearing and release */
+	XBOX_FT_S_SAVE_ENTS,     /*     in k_save: SaveGameState's serialisation - header, adjacency, lightstyles, every entity's DLL Save, ETABLE, tokens */
+	XBOX_FT_S_SAVE_HL1,      /*     in k_save: writing <map>.HL1 and <map>.HL3 */
+	XBOX_FT_S_SAVE_CLIENT,   /*     in k_save: SaveClientState - decals, static entities, sounds, <map>.HL2 */
+	XBOX_FT_S_SAVE_GLOBALS,  /*     in k_save: SaveGameSlot's game header and the DLL's SaveGlobalState */
+	XBOX_FT_S_SAVE_AGE,      /*     in k_save: AgeSaveList - the aged autosave/quick files' deletes and renames */
+	XBOX_FT_S_SAVE_SAV,      /*     in k_save: the .sav file - open, header, tokens, globals, every HL? file copied in (DirectoryCopy), close */
+	XBOX_FT_S_SCRSHOT,       /*   in k_scr: SCR_MakeScreenShot - the saveshot thumbnail (or any screenshot) */
+	XBOX_FT_S_SHOT_READ,     /*     in k_scrshot: ref/nv2a's back-buffer readback (after the GPU wait) */
+	XBOX_FT_S_SHOT_RESAMPLE, /*     in k_scrshot: Image_Process - the resample to the thumbnail's size */
+	XBOX_FT_S_SHOT_WRITE,    /*     in k_scrshot: FS_SaveImage - the image's encode and write */
 	XBOX_FT_S_COUNT
 };
 

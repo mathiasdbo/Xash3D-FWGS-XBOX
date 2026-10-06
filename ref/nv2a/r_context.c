@@ -4465,6 +4465,8 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 	   has already moved pb_back_buffer() on to the next target. */
 	if( !nv2a_frame_open )
 		return false;
+	xbox_ft_span_t read_span; /* k_shot_read: the GPU wait is not charged to it (xbox_ft_span_end) */
+	xbox_ft_span_begin( &read_span );
 	nv2a_2d_flush_and_wait();
 
 	fb = (const byte *)pb_back_buffer();
@@ -4526,6 +4528,7 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 			}
 		}
 	}
+	xbox_ft_span_end( &read_span, XBOX_FT_S_SHOT_READ );
 
 	switch( shot_type )
 	{
@@ -4547,10 +4550,10 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 		break;
 	}
 
-	gEngfuncs.Image_Process( &r_shot, width, height, flags, 0.0f );
+	XBOX_FT_SPAN( XBOX_FT_S_SHOT_RESAMPLE, gEngfuncs.Image_Process( &r_shot, width, height, flags, 0.0f ));
 
 	// write image
-	result = gEngfuncs.FS_SaveImage( filename, r_shot );
+	XBOX_FT_SPAN( XBOX_FT_S_SHOT_WRITE, result = gEngfuncs.FS_SaveImage( filename, r_shot ));
 	gEngfuncs.fsapi->AllowDirectPaths( false );			// always reset after store screenshot
 	gEngfuncs.FS_FreeImage( r_shot );
 
