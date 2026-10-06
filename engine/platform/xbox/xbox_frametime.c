@@ -544,8 +544,14 @@ void Xbox_FrameTime_BeginFrame( void )
 	ft.in_frame = true;
 }
 
+#include "xbox_audio_hal.h" // Xbox_AudioWatchdog, docs/r3d/divergences.md #150
+
 void Xbox_FrameTime_EndFrame( void )
 {
+	// not the recorder's: the audio stall watchdog (#150) needs a call
+	// once a frame and this is the Xbox's own per-frame hook
+	Xbox_AudioWatchdog();
+
 	if( !ft.mode )
 		return;
 

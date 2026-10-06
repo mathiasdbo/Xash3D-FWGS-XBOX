@@ -152,6 +152,16 @@ frametime_report() {
 }
 run_test frametime_report frametime_report
 
+# tools/host-tests/xbox_audio_hal_util_host_test.c, header (divergence
+# #150): the AC97 buffer accounting against nxdk's, through underruns,
+# under both controller behaviours; and the stall watchdog's decision.
+xbox_audio_hal_util() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_audio_hal_util_host_test.c engine/platform/xbox/xbox_audio_hal_util.c \
+		-o "$OUT/xbox_audio_hal_util_test" && "$OUT/xbox_audio_hal_util_test"
+}
+run_test xbox_audio_hal_util xbox_audio_hal_util
+
 # tools/host-tests/s_mix_host_test.c, header (divergence #145): the real
 # engine/client/sound/s_mix.c built with XASH_XBOX 0 and 1 against a stub
 # engine (tools/host-tests/s_mix_stub), and the two builds' pitched mixer

@@ -5,6 +5,32 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - Xbox: no sound for a whole session on some builds
+
+Some builds had no sound at all on the console, every boot, while builds
+differing only in unrelated code played normally. The cause identified
+is in the audio driver that came with nxdk (the Xbox SDK this port
+builds on). After the sound hardware runs out of queued audio even once
+(an underrun), the driver ignores the next "buffer played" signal. On
+hardware that stops at the end of its queue, that signal is the one the
+audio thread is waiting for, so it waits forever and sound never comes
+back. A single underrun at startup is enough, and whether one happens
+depends on when the system first runs the audio thread, which shifts
+with every code change.
+
+The engine now carries its own copy of that driver, so nxdk's is no
+longer linked. The copy works out which buffers have been played from
+the sound hardware's own position registers rather than by counting
+signals. It recovers from an underrun however the hardware behaves, in
+a host test of both behaviours where nxdk's version deadlocks. A
+watchdog also checks every frame: if the driver has been given no audio
+for a second while sound is on, it writes the driver's state to the
+console and restarts the buffer accounting. The diagnosis comes from
+the code and that host test. Owner-verified on the console: the
+combination that was silent on every boot before (this fix merged with
+the x9-perf-svgame branch) now plays sound, and so does this branch on
+its own. Divergence #150.
+
 ### Changed - Xbox: moving doors, trains, pendulums and fans no longer test every object in the map
 
 Every frame, each moving brush entity (a door, a lift, a train, a

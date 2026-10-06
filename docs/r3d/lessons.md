@@ -2037,3 +2037,22 @@ switch a counter that only one side increments, and read it on both
 recordings before comparing their times; set a cvar after the code that
 registers it has run.** The screenshot A/B of the same change was valid
 only because it was checked the same way, frame by frame.
+
+### STOP bisecting once both halves pass and their sum fails - look for the latch that turns one bad moment into a permanent state
+
+fix/xbox-audio-stall (#150): x9-perf-svgame's XBE had no sound for the
+whole session on the console, every boot. Bisecting by halves found
+build A (the branch minus its pusher commit) with sound, build B (main
+plus only that commit) with sound, and A+B silent; a diagnostic build
+(A+B plus 50 lines counting audio callbacks) had sound too, because any
+added code is just another layout. No diff was to blame. The mechanism
+identified (by reading the code and a host simulation; console
+confirmation pending) is in nxdk's audio ISR, the `analogDrained` guard
+at `deps/nxdk/lib/hal/audio.c:84-91`: one underrun - most likely the
+audio thread first running more than one 21 ms buffer after
+`XAudioPlay` - becomes a permanent deadlock, and when the scheduler
+first runs that thread depends on the code layout. **When a failure is
+deterministic for a given binary, total once it starts, and comes and
+goes with changes that cannot touch it, stop bisecting and look in the
+failing subsystem for the state that latches: a flag, a lost wakeup, a
+counter that never recovers.**
