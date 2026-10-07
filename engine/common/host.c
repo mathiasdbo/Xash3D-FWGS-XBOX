@@ -672,6 +672,9 @@ void Host_Frame( double time )
 	Host_GetCommands (); // dedicated in
 	XBOX_FT_SPAN( XBOX_FT_S_SV, Host_ServerFrame ()); // server frame
 	XBOX_FT_SPAN( XBOX_FT_S_CL, Host_ClientFrame ()); // client frame
+#if XASH_XBOX
+	SV_SaveAsync_Frame(); // #153: a chunk of a pending savegame's .sav
+#endif
 	HTTP_Run();			 // both server and client
 	XRcon_Frame();
 

@@ -280,6 +280,11 @@ enum
 	XBOX_FT_S_UI_FILE,       /*       in k_ui: the menu's COM_LoadFile calls - font cache, font files, layouts */
 	XBOX_FT_S_UI_PIC,        /*       in k_ui: the menu's PIC_Load calls - image decode and texture upload */
 	XBOX_FT_S_SND_MUSIC,     /*   in k_snd: S_StreamBackgroundTrack - the music stream: open, read, decode */
+	/* The deferred savegame write (2026-10-06, x9-perf-saveasync,
+	   docs/r3d/divergences.md #153): a save's .sav is copied and written
+	   over the frames after the save, a chunk a frame, from Host_Frame
+	   after the client frame (SV_SaveAsync_Frame). */
+	XBOX_FT_S_SAVE_PUMP,     /* top level: SV_SaveAsync_Frame - one chunk of a pending .sav: .HL? opens and reads, the write, the final rename */
 	XBOX_FT_S_COUNT
 };
 
@@ -331,6 +336,14 @@ enum
 	   note is then many small messages (this is high) or work outside
 	   the parser (this is low). */
 	XBOX_FT_W_CL_PARSE_KC,
+	/* The deferred savegame write (2026-10-06, #153). save_pump_kb is the
+	   .sav bytes written in the frame, KiB (each chunk rounded up), by
+	   k_save_pump or a flush. save_flush_kc is the time of a flush - a
+	   pending save completed at once because something was about to read
+	   or change the save folder (a level change, a load, another save,
+	   the menu's save list, quitting) - wherever it ran, so a counter. */
+	XBOX_FT_W_SAVE_PUMP_KB,
+	XBOX_FT_W_SAVE_FLUSH_KC,
 	XBOX_FT_W_END
 };
 

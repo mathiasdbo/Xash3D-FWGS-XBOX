@@ -87,10 +87,10 @@ xbox_ft_work_t xbox_ft_work;
 xbox_ft_spans_t xbox_ft_spans;
 int xbox_ft_snd_extra;
 
-/* 1024 frames x 508 bytes (32 + 119 work counters: 20 counts, span_calls,
-   72 spans and 26 later counts) = 508 KiB ring, plus the per-map
-   histogram (4 KiB), a 63.5 KiB encode buffer, 4 KiB of notes and the
-   server classname table (~30 KiB, xbox_frametime_svgame.c): ~610 KiB,
+/* 1024 frames x 520 bytes (32 + 122 work counters: 20 counts, span_calls,
+   73 spans and 28 later counts) = 520 KiB ring, plus the per-map
+   histogram (4 KiB), a 65 KiB encode buffer, 4 KiB of notes and the
+   server classname table (~30 KiB, xbox_frametime_svgame.c): ~622 KiB,
    allocated when recording starts and freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush
    every 5 s or at half full keeps it from overrunning unless a single
    flush stalls for 7 s. */
@@ -671,6 +671,7 @@ static void FT_FormatSpans( const uint64_t *work, uint64_t cpu_ticks, uint32_t n
 		"save", "sinit", "sents", "shl1", "scli", "sglob", "sage", "ssav",
 		"shot", "shrd", "shrs", "shwr",
 		"ui", "uifile", "uipic", "music",
+		"spump",
 	};
 	/* A span added without a label is a compile error, not a NULL. */
 	STATIC_ASSERT( ARRAYSIZE( label ) == XBOX_FT_S_COUNT, "one overlay label per span" );

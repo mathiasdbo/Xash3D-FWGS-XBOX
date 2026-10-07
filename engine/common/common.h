@@ -782,6 +782,10 @@ void CL_StopPlayback( void );
 qboolean SV_Initialized( void );
 void CL_ProcessFile( qboolean successfully_received, const char *filename );
 int SV_GetSaveComment( const char *savename, char *comment );
+#if XASH_XBOX
+void SV_SaveAsync_Flush( void ); // sv_save.c, #153: complete a pending .sav now
+void SV_SaveAsync_Frame( void ); // sv_save.c, #153: one chunk of it, Host_Frame
+#endif
 void SV_ClipPMoveToEntity( struct physent_s *pe, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, struct pmtrace_s *tr );
 void CL_ClipPMoveToEntity( struct physent_s *pe, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, struct pmtrace_s *tr );
 void SV_SysError( const char *error_string );

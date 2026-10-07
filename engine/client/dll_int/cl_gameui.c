@@ -1005,6 +1005,9 @@ char **GAME_EXPORT CL_GetFilesList( const char *pattern, int *numFiles, int game
 
 	if( t ) Mem_Free( t ); // release prev search
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: the menu lists save/*.sav through here
+#endif
 	t = FS_Search( pattern, true, gamedironly );
 	if( !t )
 	{

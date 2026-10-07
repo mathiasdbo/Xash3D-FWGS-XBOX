@@ -761,6 +761,10 @@ static void ClearSaveDir( void )
 {
 	search_t	*t;
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: the pending .sav copies these files
+#endif
+
 	// just delete all HL? files
 	t = FS_Search( DEFAULT_SAVE_DIRECTORY "*.HL?", true, true );
 	if( !t ) return; // already empty
@@ -1789,6 +1793,10 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
 	if( !svgame.dllFuncs.pfnParmsChangeLevel )
 		return NULL;
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: this rewrites <map>.HL1-3, which a pending .sav copies
+#endif
+
 	XBOX_FT_SPAN( XBOX_FT_S_SAVE_INIT, pSaveData = SaveInitUncleared( SAVE_HEAPSIZE, SAVE_HASHSTRINGS ));
 	XBOX_FT_SPAN_BEGIN( ft_ents );
 
@@ -2005,6 +2013,364 @@ static int LoadGameState( char const *level, qboolean changelevel )
 	return 1;
 }
 
+#if XASH_XBOX
+/*
+Resonance3D (docs/r3d/divergences.md #153): the .sav written after the
+save's frame. Upstream's SaveGameSlot writes the whole .sav in the frame
+the game is saved (`sv_save.c:1732-1758` in the reference): the header,
+tokens and globals, then every <map>.HL? of the chapter (DirectoryCopy,
+`:639-660`) - the largest part of an autosave stall on the console, and
+it grows with the chapter. Everything that depends on game state is
+still taken in that frame (the game DLL's serialisation, the .HL1-3 of
+the current map, the game header and globals, the aged names); only
+copying the .HL? files into the .sav, and the .sav's write, move to the
+following frames, sv_save_async KiB a frame (xbox_save_stream.c makes
+the bytes). The .sav is written as <name>.tmp, renamed <name>.new when
+complete and then over <name>.sav, so no listing or load sees a partial
+one and a power cut keeps either the old save or the complete new one
+(SaveAsync_Sweep). Everything that reads or changes the save folder
+calls SV_SaveAsync_Flush first (the list is in #153), so the .HL? files
+cannot change under the copy and nobody sees the folder without the
+save.
+*/
+#include "platform/xbox/xbox_save_stream.h"
+
+CVAR_DEFINE_AUTO( sv_save_async, "32", 0, "Xbox: KiB of a savegame written per frame after the save's frame (0: the whole save in its frame)" );
+
+#define SAVE_ASYNC_MIN_KB 4
+#define SAVE_ASYNC_MAX_KB 256
+#define SAVE_ASYNC_MAX_OPENS 4 // .HL? files a frame may open: each open, read and close costs ~0.5-2 ms in xemu
+#define SAVE_ASYNC_MAX_HEAD ( 64 * 1024 ) // larger globals and tokens (a mod's): write in the frame, as upstream
+#define SAVE_ASYNC_FLUSH_BYTES ( 1024 * 1024 ) // a flush's chunk: every write call has a fixed cost
+#define SAVE_ASYNC_SLOW_FRAME ( 1.0 / 30.0 ) // after a slower frame (a load's first frames) the pump waits...
+#define SAVE_ASYNC_MAX_WAITS 60              // ...but not more frames than this in a row
+
+STATIC_ASSERT( XBOX_SAVE_STREAM_NAME_BYTES == MAX_OSPATH, "the .sav's per-file name field is DirectoryCopy's szName[MAX_OSPATH]" );
+
+#if !XASH_DEDICATED
+// the frame-time recorder (#141): KiB written per frame, flush time
+#define SAVE_ASYNC_FT_KB( n ) ( xbox_ft_work.c[XBOX_FT_W_SAVE_PUMP_KB] += (uint32_t)((( n ) + 1023u ) / 1024u ))
+#define SAVE_ASYNC_FT_FLUSH_END( var ) xbox_ft_time_add( &( var ), XBOX_FT_W_SAVE_FLUSH_KC )
+#else
+#define SAVE_ASYNC_FT_KB( n )
+#define SAVE_ASYNC_FT_FLUSH_END( var )
+#endif
+
+typedef struct save_async_s
+{
+	xbox_save_stream_t stream;
+	file_t   *out;      // the open <name>.tmp; NULL: no save pending
+	search_t *files;    // the *.HL? list taken in the save's frame
+	byte     *head;     // the .sav's leading bytes (header, tokens, globals)
+	byte     *chunk;    // the chunk's allocation, made by the first pump step (after the 4 MiB save buffer is gone)
+	int       frame;    // host.framecount of the save: the pump starts on the next frame
+	int       waits;    // frames in a row the pump let pass after a slow frame
+	qboolean  written;  // every byte is in the .tmp: the next step renames
+	qboolean  failed;
+	qboolean  busy;     // in SV_SaveAsync_Flush
+	uint      bytes;    // written so far
+	uint      steps;    // chunks written
+	char      name[MAX_QPATH];
+	char      tmpname[MAX_QPATH];
+	char      newname[MAX_QPATH];
+} save_async_t;
+
+static save_async_t save_async;
+
+static void *SaveAsync_Open( void *ctx, uint32_t index, char *name, size_t name_size, int32_t *length )
+{
+	const char *path = save_async.files->filenames[index];
+	file_t *f = FS_Open( path, "rb", true ); // DirectoryCopy's FS_Open, FS_FileLength, Q_strncpy
+
+	*length = (int32_t)FS_FileLength( f );
+	Q_strncpy( name, COM_FileWithoutPath( path ), name_size );
+	return f;
+}
+
+static int32_t SaveAsync_Read( void *ctx, void *handle, void *dst, int32_t size )
+{
+	return (int32_t)FS_Read( handle, dst, size );
+}
+
+static void SaveAsync_Close( void *ctx, void *handle )
+{
+	FS_Close( handle );
+}
+
+// Takes what the .sav needs from the save's frame and opens <name>.tmp.
+// False (nothing pending, nothing changed) when the deferred write is off
+// or does not apply: the caller then writes the .sav in the frame, as
+// upstream.
+static qboolean SaveAsync_Begin( const char *name, const char *pSaveName, SAVERESTOREDATA *pSaveData, const char *pTokenData, const char *hlPath )
+{
+	const xbox_save_stream_io_t io = { SaveAsync_Open, SaveAsync_Read, SaveAsync_Close, NULL };
+	int version = SAVEGAME_VERSION;
+	int id = SAVEGAME_HEADER;
+	size_t head;
+	byte *p;
+
+	// with a .HL? write already short, the in-frame path reports the
+	// failure (#151); after the game DLL's buffer overflow (#151,
+	// SaveStage_Begin) the "globals" are the whole 4 MiB; a pending save
+	// was flushed by SV_SaveGame
+	if( sv_save_async.value <= 0.0f || save_async.out || save_io_failed || pSaveData->size >= pSaveData->bufferSize )
+		return false;
+
+	// SaveGameSlot's seven writes before DirectoryCopy, in their order
+	head = sizeof( int ) * 5 + pSaveData->tokenSize + pSaveData->size;
+	if( head > SAVE_ASYNC_MAX_HEAD )
+		return false;
+
+	Q_snprintf( save_async.tmpname, sizeof( save_async.tmpname ), DEFAULT_SAVE_DIRECTORY "%s.tmp", pSaveName );
+	Q_snprintf( save_async.newname, sizeof( save_async.newname ), DEFAULT_SAVE_DIRECTORY "%s.new", pSaveName );
+	COM_FixSlashes( save_async.tmpname );
+	COM_FixSlashes( save_async.newname );
+	if(( save_async.out = FS_Open( save_async.tmpname, "wb", true )) == NULL )
+		return false;
+	Q_strncpy( save_async.name, name, sizeof( save_async.name ));
+
+	save_async.head = p = Mem_Malloc( host.mempool, head );
+	memcpy( p, &id, sizeof( int )); p += sizeof( int );
+	memcpy( p, &version, sizeof( int )); p += sizeof( int );
+	memcpy( p, &pSaveData->size, sizeof( int )); p += sizeof( int ); // does not include token table
+	memcpy( p, &pSaveData->tokenCount, sizeof( int )); p += sizeof( int );
+	memcpy( p, &pSaveData->tokenSize, sizeof( int )); p += sizeof( int );
+	memcpy( p, pTokenData, pSaveData->tokenSize ); p += pSaveData->tokenSize;
+	memcpy( p, pSaveData->pBaseData, pSaveData->size ); // header and globals
+
+	// DirectoryCopy's FS_Search, now: the files cannot change before the
+	// copy ends (every writer flushes first)
+	save_async.files = FS_Search( hlPath, true, true );
+
+	// the chunk is set by the first step (SaveAsync_SetChunk)
+	xbox_save_stream_init( &save_async.stream, &io, save_async.head, (uint32_t)head,
+		save_async.files ? (uint32_t)save_async.files->numfilenames : 0u,
+		NULL, 0, SAVE_STAGE_ALIGN );
+	save_async.chunk = NULL;
+	save_async.frame = host.framecount;
+	save_async.waits = 0;
+	save_async.written = false;
+	save_async.failed = false;
+	save_async.busy = false; // an error that left a flush by longjmp
+	save_async.bytes = 0;
+	save_async.steps = 0;
+	return true;
+}
+
+// The stream's chunk: `bytes` from `alloc`, from its first page boundary.
+static void SaveAsync_SetChunk( byte *alloc, size_t bytes )
+{
+	save_async.stream.chunk = alloc + ( SAVE_STAGE_ALIGN - (uintptr_t)alloc % SAVE_STAGE_ALIGN ) % SAVE_STAGE_ALIGN;
+	save_async.stream.cap = (uint32_t)bytes;
+}
+
+// The save is complete or abandoned: close and free, then put the .sav in
+// place or delete the .tmp. Everything is detached first, so a nested
+// call (an error inside this one) finds nothing pending.
+static void SaveAsync_End( void )
+{
+	file_t *out = save_async.out;
+	search_t *files = save_async.files;
+	byte *head = save_async.head, *chunk = save_async.chunk;
+
+	save_async.out = NULL;
+	save_async.files = NULL;
+	save_async.head = save_async.chunk = NULL;
+	xbox_save_stream_close( &save_async.stream );
+	FS_Close( out );
+	if( files ) Mem_Free( files );
+	if( head ) Mem_Free( head );
+	if( chunk ) Mem_Free( chunk );
+
+	if( save_async.failed )
+	{
+		// #151: never leave a .sav whose bytes did not all reach the disk
+		Con_Printf( S_ERROR "%s: %s is incomplete, removing it\n", __func__, save_async.name );
+		FS_Delete( save_async.tmpname );
+		return;
+	}
+
+	// .tmp -> .new marks it complete; nxdk's rename (MoveFileA) does not
+	// replace an existing file (ReplaceIfExists FALSE), so the old .sav
+	// goes before .new takes its name. Until then the old one stayed whole
+	// (upstream truncated it in the save's frame). A cut in between leaves
+	// a .new that SaveAsync_Sweep puts in place.
+	FS_Delete( save_async.newname );
+	if( !FS_Rename( save_async.tmpname, save_async.newname ))
+	{
+		Con_Printf( S_ERROR "%s: can't rename %s to %s\n", __func__, save_async.tmpname, save_async.newname );
+		return;
+	}
+	FS_Delete( save_async.name );
+	if( !FS_Rename( save_async.newname, save_async.name ))
+		Con_Printf( S_ERROR "%s: can't rename %s to %s\n", __func__, save_async.newname, save_async.name );
+	else
+		Con_Reportf( "%s: %s written, %u bytes in %u step(s)\n", __func__, save_async.name, save_async.bytes, save_async.steps );
+}
+
+// Produces and writes one chunk (`max_opens` .HL? files opened at most,
+// 0: no limit). Once everything is written the next call ends the save
+// (the renames get a frame of their own), or this one if `now`.
+static void SaveAsync_Step( uint max_opens, qboolean now )
+{
+	uint32_t len;
+	const byte *p;
+
+	if( !save_async.written )
+	{
+		if( !save_async.stream.chunk )
+		{
+			const size_t kb = bound( SAVE_ASYNC_MIN_KB, (int)sv_save_async.value, SAVE_ASYNC_MAX_KB );
+			const size_t bytes = kb * 1024 / SAVE_STAGE_ALIGN * SAVE_STAGE_ALIGN;
+
+			save_async.chunk = Mem_Malloc( host.mempool, bytes + SAVE_STAGE_ALIGN );
+			SaveAsync_SetChunk( save_async.chunk, bytes );
+		}
+
+		len = xbox_save_stream_fill( &save_async.stream, max_opens );
+		p = save_async.stream.chunk;
+		if( save_async.stream.failed )
+		{
+			Con_Printf( S_ERROR "%s: unexpected end of a .HL? file\n", __func__ );
+			save_async.failed = true;
+		}
+
+		// SaveStage_Flush's loop: keep writing after a short write
+		while( !save_async.failed && len > 0 )
+		{
+			fs_offset_t written = FS_Write( save_async.out, p, len );
+
+			if( written <= 0 )
+			{
+				Con_Printf( S_ERROR "%s: a save file write fell short (%u bytes not written)\n", __func__, (uint)len );
+				save_async.failed = true;
+				break;
+			}
+			p += written;
+			len -= (uint32_t)written;
+			save_async.bytes += (uint)written;
+		}
+		SAVE_ASYNC_FT_KB( (uint32_t)( p - save_async.stream.chunk ));
+		xbox_save_stream_consumed( &save_async.stream );
+		save_async.steps++;
+		save_async.written = save_async.stream.done;
+
+		if( !save_async.failed && !( save_async.written && now ))
+			return;
+	}
+
+	SaveAsync_End();
+}
+
+/*
+=============
+SV_SaveAsync_Frame
+
+Host_Frame, every frame: one chunk of a pending save, from the frame
+after the save on. After a frame slower than 30 fps (a load's first
+frames, where autosaves sit) it waits, up to SAVE_ASYNC_MAX_WAITS frames.
+=============
+*/
+void SV_SaveAsync_Frame( void )
+{
+	if( !save_async.out || save_async.busy || host.framecount == save_async.frame )
+		return;
+
+	if( host.realframetime > SAVE_ASYNC_SLOW_FRAME && save_async.waits < SAVE_ASYNC_MAX_WAITS )
+	{
+		save_async.waits++;
+		return;
+	}
+	save_async.waits = 0;
+
+	XBOX_FT_SPAN_BEGIN( ft_pump );
+	SaveAsync_Step( SAVE_ASYNC_MAX_OPENS, false );
+	XBOX_FT_SPAN_END( ft_pump, XBOX_FT_S_SAVE_PUMP );
+}
+
+/*
+=============
+SV_SaveAsync_Flush
+
+Completes a pending save now. Called before anything that reads or
+changes the save folder (#153 lists them). Each write call has a fixed
+cost (xemu: 922 KiB in 39 ms with one 1 MiB chunk, 102-122 ms in 64 KiB
+ones), so it writes from a 1 MiB buffer when one can be had - plain
+malloc, which can fail, freed before the caller goes on (the level change
+and load after most flushes allocate the 4 MiB save buffer next) -
+and from the pump's chunk otherwise. Entered again from inside itself
+(an error while flushing reaching SV_Shutdown) it gives the save up.
+=============
+*/
+void SV_SaveAsync_Flush( void )
+{
+	byte *big;
+
+	if( !save_async.out )
+		return;
+
+	if( save_async.busy )
+	{
+		save_async.failed = true;
+		SaveAsync_End();
+		return;
+	}
+
+	save_async.busy = true;
+	XBOX_FT_SPAN_BEGIN( ft_flush );
+	big = save_async.written ? NULL : malloc( SAVE_ASYNC_FLUSH_BYTES + SAVE_STAGE_ALIGN );
+	if( big )
+		SaveAsync_SetChunk( big, SAVE_ASYNC_FLUSH_BYTES ); // the stream's chunk is empty between steps
+	while( save_async.out )
+		SaveAsync_Step( 0, true );
+	free( big );
+	SAVE_ASYNC_FT_FLUSH_END( ft_flush );
+	save_async.busy = false;
+}
+
+/*
+=============
+SaveAsync_Sweep
+
+Once a boot, with no save pending: a <name>.tmp is a deferred .sav that
+a power cut or crash stopped short (the .sav it was replacing is still
+there): deleted. A <name>.new is a complete one stopped between its two
+renames: put in place when <name>.sav is gone, deleted otherwise.
+Nothing else lists these names (every listing searches *.sav).
+=============
+*/
+static void SaveAsync_Sweep( void )
+{
+	static qboolean swept;
+	search_t *t;
+
+	if( swept || save_async.out )
+		return;
+	swept = true;
+
+	if(( t = FS_Search( DEFAULT_SAVE_DIRECTORY "*.tmp", true, true )) != NULL )
+	{
+		for( int i = 0; i < t->numfilenames; i++ )
+			FS_Delete( t->filenames[i] );
+		Mem_Free( t );
+	}
+
+	if(( t = FS_Search( DEFAULT_SAVE_DIRECTORY "*.new", true, true )) != NULL )
+	{
+		for( int i = 0; i < t->numfilenames; i++ )
+		{
+			char sav[MAX_QPATH];
+
+			Q_strncpy( sav, t->filenames[i], sizeof( sav ));
+			COM_ReplaceExtension( sav, ".sav", sizeof( sav ));
+			if( FS_FileExists( sav, true ) || !FS_Rename( t->filenames[i], sav ))
+				FS_Delete( t->filenames[i] );
+		}
+		Mem_Free( t );
+	}
+}
+#endif // XASH_XBOX
+
 /*
 =============
 SaveGameSlot
@@ -2060,6 +2426,20 @@ static qboolean SaveGameSlot( const char *pSaveName, const char *pSaveComment )
 		AgeSaveList( pSaveName, GI->autosave_aged_count );
 	XBOX_FT_SPAN_END( ft_age, XBOX_FT_S_SAVE_AGE );
 	XBOX_FT_SPAN_BEGIN( ft_sav );
+
+#if XASH_XBOX
+	// #153: copying the .HL? files into the .sav and writing it go to the
+	// following frames; what they need from this frame is taken here
+	if( SaveAsync_Begin( name, pSaveName, pSaveData, pTokenData, hlPath ))
+	{
+		// pending the preview image for savegame
+		Cbuf_AddTextf( "saveshot \"%s\"\n", pSaveName );
+		Con_Printf( "Saving game to %s...\n", name );
+		SaveFinish( pSaveData );
+		XBOX_FT_SPAN_END( ft_sav, XBOX_FT_S_SAVE_SAV );
+		return true;
+	}
+#endif
 
 	// output to disk
 	if(( pFile = FS_Open( name, "wb", true )) == NULL )
@@ -2385,6 +2765,10 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 	char		*startspot = NULL;
 	SAVERESTOREDATA	*pSaveData = NULL;
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: a map change, smooth or not, with nothing pending across it
+#endif
+
 	if( sv.state != ss_active )
 	{
 		Con_Printf( S_ERROR "server not running\n");
@@ -2462,6 +2846,10 @@ qboolean SV_LoadGame( const char *pPath )
 	if( Host_IsDedicated() )
 		return false;
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: a load reads a .sav and replaces the .HL? files
+#endif
+
 	if( UI_CreditsActive( ))
 		return false;
 
@@ -2532,6 +2920,10 @@ qboolean SV_SaveGame( const char *pName )
 	char   comment[80];
 	string savename;
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: one save at a time; "new" looks for a free name
+#endif
+
 	if( COM_StringEmptyOrNULL( pName ))
 		return false;
 
@@ -2599,6 +2991,10 @@ const char *SV_GetLatestSave( void )
 	int		found = 0;
 	search_t		*t;
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: the newest save may be the pending one
+#endif
+
 	if(( t = FS_Search( DEFAULT_SAVE_DIRECTORY "*.sav" , true, true )) == NULL )
 		return NULL;
 
@@ -2639,6 +3035,10 @@ int GAME_EXPORT SV_GetSaveComment( const char *savename, char *comment )
 	char	*pData, *pSaveData, *pFieldName, **pTokenList;
 	string	mapName, description;
 	file_t	*f;
+
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: the menu's save list reads each .sav's header
+#endif
 
 	if(( f = FS_Open( savename, "rb", true )) == NULL )
 	{
@@ -2823,4 +3223,8 @@ int GAME_EXPORT SV_GetSaveComment( const char *savename, char *comment )
 void SV_InitSaveRestore( void )
 {
 	pfnSaveGameComment = COM_GetProcAddress( svgame.hInstance, "SV_SaveGameComment" );
+
+#if XASH_XBOX
+	SaveAsync_Sweep(); // #153: a deferred .sav a power cut stopped
+#endif
 }

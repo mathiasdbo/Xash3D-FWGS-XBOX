@@ -366,6 +366,9 @@ static qboolean Cmd_GetSavesList( const char *s, char *completedname, int length
 {
 	string matchbuf;
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: list the pending save too
+#endif
 	search_t *t = FS_Search( va( DEFAULT_SAVE_DIRECTORY "%s*.sav", s ), true, true );	// lookup only in gamedir
 	if( !t ) return false;
 

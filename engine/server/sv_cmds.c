@@ -468,6 +468,9 @@ static void SV_DeleteSave_f( void )
 		return;
 	}
 
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: the save to delete may be the pending one
+#endif
 	// delete save and saveshot
 	FS_Delete( va( DEFAULT_SAVE_DIRECTORY "%s.sav", Cmd_Argv( 1 )));
 	FS_Delete( va( DEFAULT_SAVE_DIRECTORY "%s.bmp", Cmd_Argv( 1 )));

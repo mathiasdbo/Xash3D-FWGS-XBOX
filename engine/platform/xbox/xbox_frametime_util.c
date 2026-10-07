@@ -49,6 +49,7 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"k_save_age", "k_save_sav",
 	"k_scrshot", "k_shot_read", "k_shot_resample", "k_shot_write",
 	"k_ui", "k_ui_file", "k_ui_pic", "k_snd_music",
+	"k_save_pump",
 	/* the counts after the spans */
 	"world_walked", "water_gpu", "vp_loads",
 	"g_ents", "g_thinks", "g_touches", "g_moves", "g_dll_traces", "g_clip_ents",
@@ -57,6 +58,7 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"g_push_replays",
 	"snd_loads", "snd_load_kb", "snd_load_kc", "tex_loads", "tex_load_kb",
 	"cl_parse_kc",
+	"save_pump_kb", "save_flush_kc",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,
@@ -137,6 +139,7 @@ const int8_t xbox_ft_span_parent[XBOX_FT_S_COUNT] =
 	[XBOX_FT_S_UI_FILE]       = XBOX_FT_S_UI,
 	[XBOX_FT_S_UI_PIC]        = XBOX_FT_S_UI,
 	[XBOX_FT_S_SND_MUSIC]     = XBOX_FT_S_SND,
+	[XBOX_FT_S_SAVE_PUMP]     = -1,
 };
 
 uint32_t xbox_ft_span_kcyc( uint64_t ticks )

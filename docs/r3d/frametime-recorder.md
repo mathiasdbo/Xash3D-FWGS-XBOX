@@ -226,6 +226,8 @@ site is one add; nothing tests whether the recorder is on.
 | `snd_loads`, `snd_load_kb`, `snd_load_kc` | (2026-10-06, at the end of the record) sounds `S_LoadSound` loaded because they were not in its cache - a sentence's word, a name nobody precached - with their decoded size and the time spent loading them, in kilocycles (a time, the console's only on the console). A load runs under whichever span asked for the sound - the first word of a sentence in `k_cl_read` (`S_StartSound` from `svc_sound`), the next words in `k_snd_mix` - so its time is a counter, not a span with one parent. `engine/client/sound/s_load.c`, `S_LoadSound` |
 | `tex_loads`, `tex_load_kb` | (2026-10-06) textures ref/nv2a created from an image (`GL_LoadTexture`, `GL_LoadTextureFromBuffer`, updates included) and their storage. In play, a non-zero value is a first-use load: a menu restore, a decal, a sprite. `ref/nv2a/r_image.c` |
 | `cl_parse_kc` | (2026-10-06) time, kilocycles: `CL_ParseNetMessage`'s parse call, every server message of the frame's packets (`engine/client/cl_main.c`). Inside `k_cl_read`; a counter rather than a span because `k_cl_pkt_ents` and `k_cl_clientdata`, which it contains, are older spans and a span's parent must come before it in the file |
+| `save_pump_kb` | (2026-10-06, x9-perf-saveasync, divergence #153, at the end of the record) KiB of a savegame's `.sav` written in the frame, each chunk rounded up: by `k_save_pump` (the frames after the save) or by a flush. `engine/server/sv_save.c`, `SaveAsync_Step` |
+| `save_flush_kc` | (2026-10-06, #153) time, kilocycles: a pending `.sav` completed at once (`SV_SaveAsync_Flush`) because something was about to read or change the save folder - a level change, a load, another save, the menu's save list, `killsave`, quitting. It runs under whichever span made that call (`k_cl_begin` for a console command, `k_ui` for the menu), so a counter |
 
 The report adds `verts`, the sum of the five `v_*` counters. Its stalls
 table lists each stall's first-use loads (`snd_*`, `tex_*`) next to its
@@ -321,7 +323,7 @@ boundary. The report shows it per map, and the overlay shows it as `none`.
 | `k_save_client` | `k_save` | `SaveClientState`: the renderer's decal list, static entities, sounds, `<map>.HL2` | `sv_save.c`, `SaveGameState` |
 | `k_save_globals` | `k_save` | the `.sav`'s game header (with `DirectoryCount`) and the DLL's `SaveGlobalState` | `sv_save.c`, `SaveGameSlot` |
 | `k_save_age` | `k_save` | `AgeSaveList`: the aged `autosave`/`quick` files' deletes and renames | `sv_save.c`, `SaveGameSlot` |
-| `k_save_sav` | `k_save` | the `.sav` itself: open, header, tokens, globals, `DirectoryCopy` of every `.HL?` file in `save/`, close | `sv_save.c`, `SaveGameSlot` |
+| `k_save_sav` | `k_save` | the `.sav` itself: open, header, tokens, globals, `DirectoryCopy` of every `.HL?` file in `save/`, close. Since #153 (2026-10-06) only the deferred write's start: the `.tmp` open, the header bytes' copy and the `*.HL?` list; the copy and the write are `k_save_pump`'s, in the following frames (with `sv_save_async 0`, the whole `.sav` as before) | `sv_save.c`, `SaveGameSlot` |
 | `k_scrshot` | `k_scr` | `SCR_MakeScreenShot` in `V_PostRender`: the `saveshot` thumbnail (or any screenshot) | `engine/client/cl_view.c`, `V_PostRender` |
 | `k_shot_read` | `k_scrshot` | ref/nv2a's back-buffer readback in `VID_ScreenShot` (the GPU wait before it is not charged) | `ref/nv2a/r_context.c`, `VID_ScreenShot` |
 | `k_shot_resample` | `k_scrshot` | `Image_Process`: the resample to the thumbnail's 267x200 | same |
@@ -330,6 +332,7 @@ boundary. The report shows it per map, and the overlay shows it as `none`.
 | `k_ui_file` | `k_ui` | the menu's `COM_LoadFile` calls (`Xbox_FT_UI_LoadFile`, a timed `COM_LoadFileForMe`, in the menu's engine-function table): font cache files, font files, layouts. The menu also loads files and pictures outside its redraw (init, key events); those are counted with no `k_ui` open, which the report clamps like a skin read | `engine/platform/xbox/xbox_frametime_client.c` |
 | `k_ui_pic` | `k_ui` | the menu's `PIC_Load` calls: the image decode and ref/nv2a's texture upload | `cl_gameui.c`, `pfnPIC_Load` |
 | `k_snd_music` | `k_snd` | `S_StreamBackgroundTrack`: the music stream - opening a track, reading and decoding it | `engine/client/sound/s_main.c`, `SND_UpdateSound` |
+| `k_save_pump` | (top level) | `SV_SaveAsync_Frame` (2026-10-06, #153): one chunk of a pending savegame's `.sav` - the `.HL?` opens, reads and closes, the write, and at the end the rename - in `Host_Frame` after the client frame | `engine/server/sv_save.c`; called from `engine/common/host.c` |
 
 The eleven from `k_sv_reliable` to `k_cl_wpacket` (2026-10-02) break
 the local server/client round trip down; they come after `k_snd` in the
@@ -406,6 +409,14 @@ upload and the menu's own work. `k_snd_music` is the music stream, the
 part of `k_snd`'s own time that reads the disc: 120-165 ms `k_snd`
 frames on the console's route recording (2026-10-06) had nothing else
 in `k_snd` to explain them.
+
+The last one (2026-10-06, x9-perf-saveasync, divergence #153) is
+`k_save_pump`, top level: the frames after a save write its `.sav`
+`sv_save_async` KiB at a time, so an autosave's `.sav` time moves from
+`k_save_sav` in the save's frame to `k_save_pump` in the next frames.
+The report's "deferred savegame writes" table lists each run of such
+frames: the frames, the KiB, the largest and mean `k_save_pump`, a
+flush's time (`save_flush_kc`) and the slowest frame among them.
 
 Spans not listed under a parent stay in that parent's **own** time.
 Examples: the overlay's drawing (inside `k_scr`; it also has its own field)
@@ -519,7 +530,7 @@ the edicts (`k_sv_ppush` 0.61) and the monsters (`k_sv_pstep` 0.23).
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~610 KiB (ring 1024 x 508 B = 508 KiB, the overlay's histogram
+- **On:** ~622 KiB (ring 1024 x 520 B = 520 KiB, the overlay's histogram
   4 KiB, a 63.5 KiB encode buffer, 4 KiB of notes, the server's classname
   table ~30 KiB);
   a few `rdtsc` per frame plus two per span closed and two per server
@@ -527,7 +538,8 @@ the edicts (`k_sv_ppush` 0.61) and the monsters (`k_sv_pstep` 0.23).
   are flagged); about 29.8 KiB per second of play on disk at 60 fps, plus
   at most 4 KiB of notes per flush (105 MiB an hour; the file stops at 64
   MiB, ~36 minutes at 60 fps, ~30 at the 72 fps cap - the owner's 29-minute
-  route of 2026-10-06 was 47 MB at 468-byte records, ~51 MB at 508).
+  route of 2026-10-06 was 47 MB at 468-byte records, ~51 MB at 508, ~52
+  MB at 520).
   Before the menu, music and first-use load
   counters (2026-10-06) it was ~561 KiB and 27.4 KiB/s. Before the
   savegame spans (2026-10-05) it was
@@ -581,10 +593,11 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 508 bytes with today's
-119: the 20 counts, `span_calls`, the 72 spans, `world_walked`, `water_gpu`,
-`vp_loads`, the 17 `g_*`, the five first-use load counters and
-`cl_parse_kc`; 468 with
+frame records of 32 bytes plus one u32 per counter - 520 bytes with today's
+122: the 20 counts, `span_calls`, the 73 spans, `world_walked`, `water_gpu`,
+`vp_loads`, the 17 `g_*`, the five first-use load counters,
+`cl_parse_kc`, `save_pump_kb` and `save_flush_kc`; 508 with 72 spans and
+no save counters, 468 with
 68 spans and no load counters, 420 with 56 spans, 328 with 50 spans and three counts after them, 284
 with 42 spans, 256 with 35, 212 with the first 24, 112 before the spans),
 SPANS (from 2026-10-01, right after COUNTERS: each span's name and its

@@ -162,6 +162,23 @@ xbox_audio_hal_util() {
 }
 run_test xbox_audio_hal_util xbox_audio_hal_util
 
+# tools/host-tests/nv2a_shot_util_host_test.c, header (divergence #153):
+# the savegame thumbnail's packed 2x2 average against the per-channel loop.
+nv2a_shot_util() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
+		tools/host-tests/nv2a_shot_util_host_test.c \
+		-o "$OUT/nv2a_shot_util_test" && "$OUT/nv2a_shot_util_test"
+}
+run_test nv2a_shot_util nv2a_shot_util
+
+# tools/host-tests/xbox_save_stream_host_test.c, header (divergence #153):
+# the deferred save's .sav bytes, chunk by chunk, against upstream's
+# straight concatenation; aligned reads, open limits, short reads.
+xbox_save_stream() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox 		tools/host-tests/xbox_save_stream_host_test.c engine/platform/xbox/xbox_save_stream.c 		-o "$OUT/xbox_save_stream_test" && "$OUT/xbox_save_stream_test"
+}
+run_test xbox_save_stream xbox_save_stream
+
 # tools/host-tests/s_mix_host_test.c, header (divergence #145): the real
 # engine/client/sound/s_mix.c built with XASH_XBOX 0 and 1 against a stub
 # engine (tools/host-tests/s_mix_stub), and the two builds' pitched mixer

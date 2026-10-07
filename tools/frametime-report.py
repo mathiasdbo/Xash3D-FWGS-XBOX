@@ -91,7 +91,7 @@ G_LABELS = ("g_worst_cls", "g_worst_ent")
 # textures ref/nv2a created in the frame. snd_load_kc is a time
 # (kilocycles), so it stays out of the count correlation; a stall lists
 # whichever of them it has.
-LOAD_TIMES = ("snd_load_kc", "cl_parse_kc")
+LOAD_TIMES = ("snd_load_kc", "cl_parse_kc", "save_flush_kc")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -536,6 +536,11 @@ def stall_loads(rec, fr):
         out["tex"] = (get("tex_loads"), get("tex_load_kb"))
     if get("cl_parse_kc"):
         out["parse"] = get("cl_parse_kc") * 1e6 / rec["tsc_hz"]
+    # the deferred savegame write (recorders from 2026-10-06, #153): .sav
+    # KiB written in the frame, and a flush's ms (a pending save finished
+    # at once)
+    if get("save_pump_kb") or get("save_flush_kc"):
+        out["save"] = (get("save_pump_kb"), get("save_flush_kc") * 1e6 / rec["tsc_hz"])
     return out
 
 
@@ -574,7 +579,54 @@ def _loads_label(loads):
         parts.append("textures loaded %d (%d KiB)" % loads["tex"])
     if loads.get("parse", 0) >= STALL_SPAN_MS:
         parts.append("messages parsed in %.0f ms" % loads["parse"])
+    if "save" in loads:
+        kb, flush = loads["save"]
+        parts.append(".sav %d KiB written%s" % (kb, (", flushed in %.0f ms" % flush) if flush else ""))
     return "; ".join(parts)
+
+
+def save_pump_runs(rec):
+    """The deferred savegame writes (recorders from 2026-10-06, #153): one
+    row per run of consecutive frames that wrote .sav bytes (k_save_pump
+    or a flush) - seconds into the session at its first frame, the map,
+    the frames, the KiB, the largest and mean k_save_pump ms, the largest
+    flush ms and the slowest of those frames' total ms. Empty for a file
+    without the counters."""
+    idx = {n: i for i, n in enumerate(rec["counters"])}
+    if "save_pump_kb" not in idx:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    start_s = _start_seconds(rec)
+    seg_of = {}
+    for seg in segments(rec):
+        for fr in rec["frames"][seg["start"]:seg["end"]]:
+            seg_of[fr[0]] = seg["name"]
+
+    def get(fr, name):
+        w = fr[8] if len(fr) > 8 else ()
+        i = idx.get(name)
+        return w[i] if i is not None and i < len(w) else 0
+    out, run = [], None
+    for fr in rec["frames"]:
+        kb = get(fr, "save_pump_kb")
+        if not kb:
+            run = None
+            continue
+        pump = get(fr, "k_save_pump") * k
+        flush = get(fr, "save_flush_kc") * k
+        if run is None:
+            run = {"t": start_s[fr[0]], "map": seg_of.get(fr[0], "?"), "frames": 0, "kib": 0,
+                   "pump_max": 0.0, "pump_sum": 0.0, "flush_max": 0.0, "frame_max": 0.0}
+            out.append(run)
+        run["frames"] += 1
+        run["kib"] += kb
+        run["pump_max"] = max(run["pump_max"], pump)
+        run["pump_sum"] += pump
+        run["flush_max"] = max(run["flush_max"], flush)
+        run["frame_max"] = max(run["frame_max"], frame_ms(rec, fr)[0])
+    for run in out:
+        run["pump_mean"] = run.pop("pump_sum") / run["frames"]
+    return out
 
 
 def stall_list(rec, include_level_change=False):
@@ -955,6 +1007,17 @@ def summary_text(rec, rows, sess):
                 r["t"], r["map"][:12], r["total"], r["cpu"], r["cpu_pct"], r["gpu"], r["other"],
                 "  ".join(x for x in (_top_spans_label(r.get("top_spans", [])),
                                       _loads_label(r.get("loads", {})), _notes_label(r.get("notes", [])), note) if x)))
+    pumps = save_pump_runs(rec)
+    if pumps:
+        lines.append("")
+        lines.append("deferred savegame writes: %d (frames in a row that wrote .sav bytes; k_save_pump ms, "
+                     "flush = written at once before something used the save folder)" % len(pumps))
+        lines.append("%8s  %-12s %6s %6s %9s %9s %9s %9s" % ("t s", "map", "frames", "KiB", "pump max", "pump avg",
+                                                           "flush", "frame max"))
+        for r in pumps:
+            lines.append("%8.1f  %-12s %6d %6d %9.1f %9.1f %9.1f %9.1f" % (
+                r["t"], r["map"][:12], r["frames"], r["kib"], r["pump_max"], r["pump_mean"], r["flush_max"],
+                r["frame_max"]))
     if rec.get("notes") or rec.get("notes_dropped"):
         notes = notes_list(rec)
         lines.append("")

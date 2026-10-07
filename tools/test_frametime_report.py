@@ -431,6 +431,29 @@ class LevelChange(unittest.TestCase):
             self.assertEqual([s["seq"] for s in st], [35, 38, 83])
             self.assertTrue(st[1]["level_change"])
             self.assertFalse(any(s["opens_menu"] for s in st))
+            # The changelevel frame flushed the rest of a pending save (#153).
+            self.assertEqual(st[1]["loads"], {"save": (20, 30.0)} if source == "flag" else {})
+
+    def test_save_pump_runs(self):
+        # The deferred .sav write (2026-10-06, #153): seq 36-38 wrote it,
+        # the last of them in a flush.
+        for source, rec in self._recs():
+            runs = fr.save_pump_runs(rec)
+            if source != "flag":
+                self.assertEqual(runs, [])
+                continue
+            self.assertEqual(len(runs), 1)
+            r = runs[0]
+            self.assertEqual((r["map"], r["frames"], r["kib"]), ("c1a0", 3, 124))
+            self.assertAlmostEqual(r["t"], (35 * 20 + 600) / 1000.0)
+            self.assertAlmostEqual(r["pump_max"], 8.0)
+            self.assertAlmostEqual(r["pump_mean"], 14.0 / 3)
+            self.assertAlmostEqual(r["flush_max"], 30.0)
+            self.assertAlmostEqual(r["frame_max"], 500.0)
+            rows = [fr.segment_stats(rec, s) for s in fr.segments(rec)]
+            text = fr.summary_text(rec, rows, fr.session_stats(rec, rows))
+            self.assertIn("deferred savegame writes: 1", text)
+            self.assertRegex(text, r"c1a0 +3 +124 +8\.0 +4\.7 +30\.0 +500\.0")
 
     def test_stall_that_opens_the_menu(self):
         # A frame's flags are the state it starts in: with the frame after
@@ -457,7 +480,7 @@ class LevelChange(unittest.TestCase):
                 self.assertIn("save_sav 400, save_ents 100, save 30", text)
                 self.assertIn("sounds loaded 2 (300 KiB, 250 ms); textures loaded 6 (4096 KiB); messages parsed in 50 ms", text)
                 self.assertIn("message svc_sound 200 ms, sound fvox/flatline.wav 120 ms", text)
-                self.assertIn("notes: 2 named events (sounds loaded in play, server messages over 5 ms), 1 dropped", text)
+                self.assertIn("notes: 2 named events (sounds loaded in play, server messages over 5 ms, the menu font restore at a map load), 1 dropped", text)
                 self.assertRegex(text, r"c1a0 +message +svc_sound +200\.0 +0\.0")
                 self.assertRegex(text, r"c1a0 +sound +fvox/flatline\.wav +120\.0 +128\.0")
             else:
@@ -506,15 +529,15 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 119)
+        self.assertEqual(len(r["counters"]), 122)
         self.assertEqual(r["counters"][20], "span_calls")
-        self.assertEqual(len(r["spans"]), 72)
+        self.assertEqual(len(r["spans"]), 73)
         # Counts after the spans (2026-10-02, R5) are plain counters.
-        self.assertEqual(r["counters"][93:96], ["world_walked", "water_gpu", "vp_loads"])
-        self.assertEqual(r["counters"][96], "g_ents")
-        self.assertEqual(r["counters"][112], "g_push_replays")
-        self.assertEqual(r["counters"][113:], ["snd_loads", "snd_load_kb", "snd_load_kc", "tex_loads", "tex_load_kb",
-                                               "cl_parse_kc"])
+        self.assertEqual(r["counters"][94:97], ["world_walked", "water_gpu", "vp_loads"])
+        self.assertEqual(r["counters"][97], "g_ents")
+        self.assertEqual(r["counters"][113], "g_push_replays")
+        self.assertEqual(r["counters"][114:], ["snd_loads", "snd_load_kb", "snd_load_kc", "tex_loads", "tex_load_kb",
+                                               "cl_parse_kc", "save_pump_kb", "save_flush_kc"])
         self.assertNotIn("snd_loads", fr.span_names(r))
         self.assertNotIn("world_walked", fr.span_names(r))
         self.assertNotIn("vp_loads", fr.span_names(r))
@@ -577,6 +600,12 @@ class Spans(unittest.TestCase):
         self.assertLess(order.index("k_snd"), order.index("k_snd_music"))
         # cl_parse_kc (2026-10-06) is a time counter, not a span.
         self.assertNotIn("cl_parse_kc", fr.span_names(r))
+        # The deferred savegame write (2026-10-06, #153): a top-level span
+        # and two counters.
+        self.assertEqual(parent["k_save_pump"], "")
+        self.assertEqual(fr.span_depth(r)["k_save_pump"], 0)
+        self.assertNotIn("save_pump_kb", fr.span_names(r))
+        self.assertNotIn("save_flush_kc", fr.span_names(r))
 
     def test_span_averages(self):
         a = self.row

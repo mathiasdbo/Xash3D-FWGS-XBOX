@@ -74,6 +74,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "r_warp.h" /* X9-X item 14 step 11: water warp and fog (gl_rsurf.c/gl_rmain.c port) */
 #include "nv2a_warp_util.h" /* X9-X item 14 step 11: the fog register math */
 #include "r_decals.h" /* X9-X item 14 step 12: decals (gl_decals.c port) */
+#include "nv2a_shot_util.h" /* #153: the savegame thumbnail's packed 2x2 average, host-tested */
 #include "ref_params.h" /* X9-E: ref_viewpass_t's own real field layout and
                             RF_DRAW_WORLD - only forward-declared via
                             ref_api.h otherwise. ref/soft's own r_local.h
@@ -4443,8 +4444,11 @@ the zone allocator stops the game (Sys_Error) rather than fail a shot. It
 still reads every pixel. A full-size shot (screenshot, snapshot,
 levelshot) takes the whole 1.2 MiB, but only when the player asks. The
 write-combined framebuffer is uncached, 307200 separate 32-bit reads a
-shot: estimated at tens of milliseconds, once per shot, not measured on
-hardware. The aspect is the framebuffer's pixel ratio, right while the
+shot: estimated at tens of milliseconds, once per shot (37-38 ms on the
+console for the thumbnail, k_shot_read, 2026-10-06). Since #153 the
+thumbnail reads both rows of a block with 16-byte SSE loads (two 8-byte
+bus reads each, half the transactions) and averages two channels at a
+time; the bytes are the same. The aspect is the framebuffer's pixel ratio, right while the
 output is 4:3 only.
 */
 static qboolean VID_ScreenShot( const char *filename, int shot_type )
@@ -4510,21 +4514,48 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 			const byte *row0 = fb + (size_t)( y * 2 ) * pitch;
 			const byte *row1 = row0 + pitch;
 
-			for( x = 0; x < (int)r_shot->width; x++, dst += 4 )
+			x = 0;
+			/* #153: two output pixels per pass from one 16-byte read of
+			   each row - two 8-byte bus reads of the uncached buffer
+			   instead of four 32-bit ones - and the packed average
+			   (nv2a_shot_util.h, bit-exact with the per-channel loop it
+			   replaces). movaps needs both rows on 16 bytes: the buffer
+			   starts on a page and a 640/720-pixel pitch is a multiple;
+			   otherwise, and for an odd last pixel, 32-bit reads. */
+			if( !((uintptr_t)fb & 15u ) && !( pitch & 15u ))
 			{
-				uint32_t a, b, c, d;
-				int k;
+				for( ; x + 2 <= (int)r_shot->width; x += 2, dst += 8 )
+				{
+					uint32_t q[8] __attribute__(( aligned( 16 )));
+					uint32_t px[2];
+
+					/* asm, not _mm_load_ps: clang sees through an
+					   intrinsic load and store to the stack and reads
+					   the buffer 32 bits at a time again; movups for the
+					   stack copy, which needs no 16-byte stack alignment */
+					__asm__ __volatile__(
+						"movaps (%1), %%xmm0\n\t"
+						"movaps (%2), %%xmm1\n\t"
+						"movups %%xmm0, (%0)\n\t"
+						"movups %%xmm1, 16(%0)"
+						:
+						: "r"( q ), "r"( row0 + x * 8 ), "r"( row1 + x * 8 )
+						: "xmm0", "xmm1", "memory" );
+					px[0] = nv2a_shot_avg4( q[0], q[1], q[4], q[5] );
+					px[1] = nv2a_shot_avg4( q[2], q[3], q[6], q[7] );
+					memcpy( dst, px, 8 );
+				}
+			}
+			for( ; x < (int)r_shot->width; x++, dst += 4 )
+			{
+				uint32_t a, b, c, d, p;
 
 				memcpy( &a, row0 + x * 8, 4 );
 				memcpy( &b, row0 + x * 8 + 4, 4 );
 				memcpy( &c, row1 + x * 8, 4 );
 				memcpy( &d, row1 + x * 8 + 4, 4 );
-				for( k = 0; k < 3; k++ )
-				{
-					const int sh = k * 8;
-					dst[k] = (byte)(((( a >> sh ) & 0xFF ) + (( b >> sh ) & 0xFF ) + (( c >> sh ) & 0xFF ) + (( d >> sh ) & 0xFF ) + 2 ) >> 2 );
-				}
-				dst[3] = 0xFF;
+				p = nv2a_shot_avg4( a, b, c, d );
+				memcpy( dst, &p, 4 );
 			}
 		}
 	}

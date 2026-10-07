@@ -909,6 +909,7 @@ void SV_Init( void )
 	Cvar_RegisterVariable( &sv_pausable );
 #if XASH_XBOX
 	Cvar_RegisterVariable( &sv_leveltitle );
+	Cvar_RegisterVariable( &sv_save_async ); // sv_save.c, #153
 #endif
 	Cvar_RegisterVariable( &sv_validate_changelevel );
 	Cvar_RegisterVariable( &sv_clienttrace );
@@ -1101,6 +1102,10 @@ before Sys_Quit or Sys_Error
 */
 void SV_Shutdown( const char *finalmsg )
 {
+#if XASH_XBOX
+	SV_SaveAsync_Flush(); // #153: quit, disconnect, an error - finish the pending .sav first
+#endif
+
 	// already freed
 	if( !SV_Initialized( ))
 	{

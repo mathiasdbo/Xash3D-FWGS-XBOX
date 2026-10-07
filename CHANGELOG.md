@@ -5,6 +5,31 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: an autosave no longer writes its save file in the frame it happens
+
+An autosave still froze the game for one frame of 206-289 ms on the
+console. About half of that was writing the save file, which carries a
+copy of every map visited in the chapter and grows as the chapter goes
+on. The game is still saved in that frame: everything that can change
+afterwards is taken then. The save file itself is now written over the
+next half second or so, 32 KiB a frame, under a temporary name, and
+renamed when it is complete, so the menu, a load or a power cut never
+see half a save. Anything that needs the save folder first finishes the
+pending save at once: a level change, loading a game, another save, the
+load and save menus, deleting a save and quitting. The finished file is
+byte-for-byte what the old code wrote. In the emulator the autosave
+frame drops from about 140 ms to about 103 ms, and each following frame
+spends a few milliseconds writing; the console should gain more, since
+its disk writes were about twice as slow. `sv_save_async 0` restores the
+old behaviour.
+
+The savegame thumbnail is read from the screen in half as many memory
+reads (37-38 ms on the console before), with the same pixels.
+
+The frame-time recorder shows the deferred write as `k_save_pump`, with
+`save_pump_kb` and `save_flush_kc`, and its report lists each deferred
+write. Divergence #153.
+
 ### Changed - Xbox: the first pause after a map load no longer freezes
 
 To leave more memory for each map, the menu gives back its fonts while a
