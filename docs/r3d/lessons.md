@@ -28,6 +28,20 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER call a scripted equivalence run a proof before counting what it exercised
+
+x9-perf-pmove's first movement-log comparison (2026-10-06) scripted a
+ladder, water and a c1a1b walk by teleporting the player with
+`ent_fire 1 set origin` and `map c1a1b`. Two of the three spots left the
+player stuck (51-110 position tests a frame, origin never changing), so
+"identical" there meant two builds standing still, and the ladder
+segment had 0 frames on a ladder. A coverage pass over the log (frames
+with movetype FLY, water level 1 and 3, airborne, ducked, standing on an
+entity, origin changed) found it; spots chosen from the map's own hull
+data (a throwaway script walking the archive's clip nodes) and a turn toward the ladder fixed it.
+**Before reporting an A/B log as equivalence, tabulate per segment the
+states it was meant to exercise and the frames it actually moved.**
+
 ### ALWAYS read the frame after a stall before calling the stall gameplay
 
 A recorded frame's flags are the state it started in, so the frame in

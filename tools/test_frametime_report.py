@@ -529,15 +529,21 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 122)
+        self.assertEqual(len(r["counters"]), 153)
         self.assertEqual(r["counters"][20], "span_calls")
         self.assertEqual(len(r["spans"]), 73)
         # Counts after the spans (2026-10-02, R5) are plain counters.
         self.assertEqual(r["counters"][94:97], ["world_walked", "water_gpu", "vp_loads"])
         self.assertEqual(r["counters"][97], "g_ents")
         self.assertEqual(r["counters"][113], "g_push_replays")
-        self.assertEqual(r["counters"][114:], ["snd_loads", "snd_load_kb", "snd_load_kc", "tex_loads", "tex_load_kb",
-                                               "cl_parse_kc", "save_pump_kb", "save_flush_kc"])
+        self.assertEqual(r["counters"][114:122], ["snd_loads", "snd_load_kb", "snd_load_kc", "tex_loads", "tex_load_kb",
+                                                  "cl_parse_kc", "save_pump_kb", "save_flush_kc"])
+        # Player movement (2026-10-06): server/client twins, then the times.
+        self.assertEqual(r["counters"][122:126], ["pm_sv_cmds", "pm_cl_cmds", "pm_cl_redo", "pm_cl_solids"])
+        self.assertEqual(r["counters"][126:128], ["pm_sv_physents", "pm_cl_physents"])
+        self.assertEqual(r["counters"][142], "pm_sv_setup_kc")
+        self.assertEqual(r["counters"][150:], ["pm_cl_post_kc", "pm_sv_culls", "pm_cl_culls"])
+        self.assertNotIn("pm_sv_cmds", fr.span_names(r))
         self.assertNotIn("snd_loads", fr.span_names(r))
         self.assertNotIn("world_walked", fr.span_names(r))
         self.assertNotIn("vp_loads", fr.span_names(r))
@@ -697,6 +703,10 @@ class Spans(unittest.TestCase):
         self.assertIn("sv_game work per in-play frame", text)
         self.assertRegex(text, r"c1a0c: top classnames by time in SV_Physics_Entity, over 50 frames in play")
         self.assertRegex(text, r"\nmonster_scientist +step +2\.0 +0\.40 +8\.0 +2\.120 +1\.800 +8\.00")
+        # Player movement: server/client per column, then the times.
+        self.assertIn("player movement per in-play frame", text)
+        self.assertRegex(text, r"\nc1a0c +1/1 +5/40 +6/50 +8/9 +40/360 +2/300 +1/1 +5/40 +3/3 +1/0 +0 +2\n")
+        self.assertIn("c1a0c              sv 1.000 2.000 (1.000) 1.000 0.000 | cl 1.000 3.000 (2.000) 1.000", text)
         page = fr.render_html(self.rec, self.rows, s, ["spans.bin"], source="xemu")
         self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
         self.assertIn('id="spans"', page)

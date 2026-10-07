@@ -19,6 +19,7 @@ GNU General Public License for more details.
 #include "pm_local.h"
 #include "event_flags.h"
 #include "studio.h"
+#include "platform/xbox/xbox_frametime_pmove.h" // the recorder's player movement breakdown, docs/r3d/divergences.md #141
 
 static qboolean has_update = false;
 static void SV_GetTrueOrigin( sv_client_t *cl, int edictnum, vec3_t origin );
@@ -923,7 +924,7 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 	if( !FBitSet( cl->flags, FCL_FAKECLIENT ))
 		SV_SetupMoveInterpolant( cl );
 
-	svgame.dllFuncs.pfnCmdStart( cl->edict, ucmd, random_seed );
+	XBOX_FT_PM_TIMED( XBOX_FT_PM_SV_THINK, svgame.dllFuncs.pfnCmdStart( cl->edict, ucmd, random_seed ));
 
 	frametime = ((double)ucmd->msec / 1000.0 );
 	cl->timebase += frametime;
@@ -942,22 +943,24 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 	if( ucmd->impulse ) clent->v.impulse = ucmd->impulse;
 
 	svgame.globals->time = cl->timebase;
-	svgame.dllFuncs.pfnPlayerPreThink( clent );
-	SV_PlayerRunThink( clent, frametime, cl->timebase );
+	XBOX_FT_PM_TIMED( XBOX_FT_PM_SV_THINK, svgame.dllFuncs.pfnPlayerPreThink( clent ));
+	XBOX_FT_PM_TIMED( XBOX_FT_PM_SV_THINK, SV_PlayerRunThink( clent, frametime, cl->timebase ));
 
 	// If conveyor, or think, set basevelocity, then send to client asap too.
 	if( !VectorIsNull( clent->v.basevelocity ))
 		VectorCopy( clent->v.basevelocity, clent->v.clbasevelocity );
 
 	// setup playermove state
-	SV_SetupPMove( svgame.pmove, cl, ucmd, cl->physinfo );
+	XBOX_FT_PM_TIMED( XBOX_FT_PM_SV_SETUP, SV_SetupPMove( svgame.pmove, cl, ucmd, cl->physinfo ));
+	XBOX_FT_PM_COUNT_ALWAYS( XBOX_FT_W_PM_SV_CMDS );
 
 	// motor!
-	svgame.dllFuncs.pfnPM_Move( svgame.pmove, true );
+	XBOX_FT_PM_MOVE( 1, XBOX_FT_PM_SV_MOVE, svgame.pmove, svgame.dllFuncs.pfnPM_Move( svgame.pmove, true ));
 
 	// copy results back to client
 	SV_FinishPMove( svgame.pmove, cl );
 
+	XBOX_FT_PM_BEGIN( xbox_ft_touch );
 	if( clent->v.solid != SOLID_NOT && !sv.playersonly )
 	{
 		if( svgame.physFuncs.PM_PlayerTouch != NULL )
@@ -987,14 +990,15 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 			VectorCopy( oldvel, clent->v.velocity );
 		}
 	}
+	XBOX_FT_PM_END( xbox_ft_touch, XBOX_FT_PM_SV_TOUCH );
 
 	svgame.pmove->numtouch = 0;
 	svgame.globals->time = cl->timebase;
 	svgame.globals->frametime = frametime;
 
 	// run post-think
-	svgame.dllFuncs.pfnPlayerPostThink( clent );
-	svgame.dllFuncs.pfnCmdEnd( clent );
+	XBOX_FT_PM_TIMED( XBOX_FT_PM_SV_THINK, svgame.dllFuncs.pfnPlayerPostThink( clent ));
+	XBOX_FT_PM_TIMED( XBOX_FT_PM_SV_THINK, svgame.dllFuncs.pfnCmdEnd( clent ));
 
 	if( !FBitSet( cl->flags, FCL_FAKECLIENT ))
 	{

@@ -344,6 +344,44 @@ enum
 	   the menu's save list, quitting) - wherever it ran, so a counter. */
 	XBOX_FT_W_SAVE_PUMP_KB,
 	XBOX_FT_W_SAVE_FLUSH_KC,
+	/* Player movement (2026-10-06, x9-perf-pmove, xbox_frametime_pmove.h):
+	   the server's SV_RunCmd and the client's prediction both run the
+	   game's PM_Move. The engine queries (traces, position tests, point
+	   contents, texture traces) are counted only while one of the two
+	   PM_Move calls runs, so the client's weapon and event traces are not
+	   in them. Each _SV counter has its _CL twin right after it. Counts,
+	   exact in xemu - except the _KC times. */
+	XBOX_FT_W_PM_SV_CMDS,    /* the server's PM_Move calls (one per usercmd, two for a split one) */
+	XBOX_FT_W_PM_CL_CMDS,    /* the client's PM_Move calls from CL_CreateCmd's prediction */
+	XBOX_FT_W_PM_CL_REDO,    /* the client's PM_Move calls from CL_RedoPrediction (repredicting) */
+	XBOX_FT_W_PM_CL_SOLIDS,  /* CL_SetSolidEntities calls (the client's physent list rebuilt) */
+	XBOX_FT_W_PM_SV_PHYSENTS,/* numphysent summed over the server's moves */
+	XBOX_FT_W_PM_CL_PHYSENTS,/* the same over the client's moves */
+	XBOX_FT_W_PM_SV_VISENTS, /* numvisent summed over the server's moves */
+	XBOX_FT_W_PM_CL_VISENTS,
+	XBOX_FT_W_PM_SV_TRACES,  /* PM_PlayerTraceExt calls inside the server's PM_Move (a position test's own trace included) */
+	XBOX_FT_W_PM_CL_TRACES,
+	XBOX_FT_W_PM_SV_HULLS,   /* physents those traces ran a hull check against */
+	XBOX_FT_W_PM_CL_HULLS,
+	XBOX_FT_W_PM_SV_TESTS,   /* PM_TestPlayerPosition calls */
+	XBOX_FT_W_PM_CL_TESTS,
+	XBOX_FT_W_PM_SV_PTESTS,  /* physents its own loop point-tested (after its trace) */
+	XBOX_FT_W_PM_CL_PTESTS,
+	XBOX_FT_W_PM_SV_PCONT,   /* PM_PointContents calls */
+	XBOX_FT_W_PM_CL_PCONT,
+	XBOX_FT_W_PM_SV_TEX,     /* PM_TraceTexture/PM_TraceSurfacePmove calls */
+	XBOX_FT_W_PM_CL_TEX,
+	XBOX_FT_W_PM_SV_SETUP_KC,/* time: SV_SetupPMove - the player's state and the physent lists */
+	XBOX_FT_W_PM_SV_MOVE_KC, /* time: the game DLL's PM_Move on the server */
+	XBOX_FT_W_PM_SV_QUERY_KC,/* time: of that, inside the engine queries above (outermost) */
+	XBOX_FT_W_PM_SV_THINK_KC,/* time: CmdStart, PlayerPreThink, SV_PlayerRunThink, PlayerPostThink, CmdEnd */
+	XBOX_FT_W_PM_SV_TOUCH_KC,/* time: SV_LinkEdict of the player and its touches after the move */
+	XBOX_FT_W_PM_CL_SOLID_KC,/* time: CL_SetSolidEntities, wherever it runs (CL_CreateCmd, the packet parse) */
+	XBOX_FT_W_PM_CL_MOVE_KC, /* time: the client DLL's PM_Move (both kinds of call) */
+	XBOX_FT_W_PM_CL_QUERY_KC,/* time: of that, inside the engine queries (outermost) */
+	XBOX_FT_W_PM_CL_POST_KC, /* time: the client DLL's PostRunCmd (weapon prediction) */
+	XBOX_FT_W_PM_SV_CULLS,   /* physents a trace or a position test skipped: no solid leaf near (#154) */
+	XBOX_FT_W_PM_CL_CULLS,
 	XBOX_FT_W_END
 };
 

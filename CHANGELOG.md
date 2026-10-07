@@ -5,6 +5,32 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: player movement checks only the entities near the player
+
+Moving the player costs about 0.8 ms a frame on the console, split
+between the server running the movement and the client predicting it.
+The client tests every move against every solid entity the server sent
+(42 on c1a0c, against the server's 6 within reach), so it did eight
+times the collision work for the same movement. A collision test against
+an entity is now skipped when no solid part of that entity can be near
+the move, which leaves every result exactly as it was: the player's
+position, speed, footing, water level and the prediction were compared
+frame by frame over a scripted session (a tram ride, walking, jumps,
+ducks and crouch-jumps among scientists, a ladder, wading and swimming)
+and came out identical, and a check build compared every skipped test
+with the full one (2.7 million, no difference). On c1a0c the client's
+collision tests drop from 336 to 19 a frame; in the emulator the
+client's prediction goes from 0.28-0.29 to 0.22-0.23 ms a frame and,
+where the player is stuck against something (c1a1b in that script),
+both sides from 0.66-0.73 to 0.50-0.53 ms. The console's figures need
+a hardware run.
+
+The frame-time recorder breaks player movement down (`pm_*` counters:
+moves, the entity lists, traces, collision tests and how many were
+skipped, and the time in setup, movement, its collision queries, the
+game's think functions and the client's list rebuild), and its report
+prints a player-movement table. Records grow to 644 bytes.
+
 ### Changed - Xbox: an autosave no longer writes its save file in the frame it happens
 
 An autosave still froze the game for one frame of 206-289 ms on the

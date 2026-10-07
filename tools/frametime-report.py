@@ -92,6 +92,17 @@ G_LABELS = ("g_worst_cls", "g_worst_ent")
 # (kilocycles), so it stays out of the count correlation; a stall lists
 # whichever of them it has.
 LOAD_TIMES = ("snd_load_kc", "cl_parse_kc", "save_flush_kc")
+# Player movement (recorders from 2026-10-06, x9-perf-pmove): the server's
+# SV_RunCmd and the client's prediction, both the game's PM_Move. The
+# counts are the engine queries made inside the two PM_Move calls; each
+# server column has its client twin. The _kc counters are times. "skipped"
+# (pm_*_culls) are the physents a trace or position test passed over
+# because no solid leaf of theirs was near (divergence #154).
+PM_TABLE = [("cmds", "PM_Move"), ("physents", "physents"), ("visents", "visents"), ("traces", "traces"),
+            ("hulls", "hull checks"), ("culls", "skipped"), ("tests", "pos tests"), ("ptests", "test ents"), ("pcont", "pt contents"),
+            ("tex", "tex traces")]
+PM_TIMES = ("pm_sv_setup_kc", "pm_sv_move_kc", "pm_sv_query_kc", "pm_sv_think_kc", "pm_sv_touch_kc",
+            "pm_cl_solid_kc", "pm_cl_move_kc", "pm_cl_query_kc", "pm_cl_post_kc")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -805,7 +816,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
         return []
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
-    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES)
+    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1047,6 +1058,7 @@ def summary_text(rec, rows, sess):
         lines.append("version-1 recording: no work counters")
     lines.extend(spans_text(rec, rows))
     lines.extend(svgame_text(rec, rows))
+    lines.extend(pmove_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -1158,6 +1170,40 @@ def svgame_text(rec, rows):
             lines.append("%-28s %-9s %7.1f %7.2f %8.1f %8.3f %8.3f" % (
                 "(%d more)" % len(rest), "", sum(c["runs_pf"] for c in rest), sum(c["thinks_pf"] for c in rest),
                 sum(c["moves_pf"] for c in rest), sum(c["phys_ms"] for c in rest), sum(c["think_ms"] for c in rest)))
+    return lines
+
+
+def pmove_text(rec, rows):
+    """Player movement: the server's and the client's PM_Move per in-play
+    frame - how many, the physent lists they ran over, the engine queries
+    they made - and where the time went (ms per frame)."""
+    if "pm_sv_cmds" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "player movement per in-play frame, server/client (queries counted inside PM_Move only; "
+             "counts, exact in xemu)"]
+    lines.append("%-18s " % "map" + " ".join("%13s" % h[:13] for _, h in PM_TABLE) + " %7s %7s" % ("cl redo", "cl solid"))
+    for r in maps:
+        a = r["work_avg"]
+        cells = []
+        for key, _ in PM_TABLE:
+            sv = a.get("pm_sv_" + key, 0.0)
+            cl = a.get("pm_cl_" + key, 0.0)
+            cells.append("%13s" % ("%s/%s" % (short(sv), short(cl))))
+        lines.append("%-18s " % r["map"][:18] + " ".join(cells) + " %7s %7s" % (
+            short(a.get("pm_cl_redo", 0.0)), short(a.get("pm_cl_solids", 0.0))))
+    lines.append("player movement time, ms per in-play frame: server setup / PM_Move (of it queries) / think / "
+                 "touch | client solid list / PM_Move (of it queries) / PostRunCmd")
+    for r in maps:
+        a = r["work_avg"]
+        lines.append("%-18s sv %5.3f %5.3f (%5.3f) %5.3f %5.3f | cl %5.3f %5.3f (%5.3f) %5.3f" % (
+            r["map"][:18], a.get("pm_sv_setup_kc", 0) * k, a.get("pm_sv_move_kc", 0) * k,
+            a.get("pm_sv_query_kc", 0) * k, a.get("pm_sv_think_kc", 0) * k, a.get("pm_sv_touch_kc", 0) * k,
+            a.get("pm_cl_solid_kc", 0) * k, a.get("pm_cl_move_kc", 0) * k, a.get("pm_cl_query_kc", 0) * k,
+            a.get("pm_cl_post_kc", 0) * k))
     return lines
 
 

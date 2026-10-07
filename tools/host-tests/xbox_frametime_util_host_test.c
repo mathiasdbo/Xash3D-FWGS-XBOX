@@ -162,11 +162,20 @@ static void test_encoders( void )
 	/* The first-use load counters (2026-10-06), then the deferred
 	   savegame write's (2026-10-06, #153) close the record. */
 	CHECK( XBOX_FT_W_SND_LOADS == 114 && XBOX_FT_W_SND_LOAD_KC == 116 && XBOX_FT_W_TEX_LOAD_KB == 118 && XBOX_FT_W_CL_PARSE_KC == 119 );
-	CHECK( XBOX_FT_W_SAVE_PUMP_KB == 120 && XBOX_FT_W_SAVE_FLUSH_KC == 121 && XBOX_FT_W_COUNT == 122 );
-	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 520 && xbox_ft_frame_bytes( 0 ) == 32 );
+	CHECK( XBOX_FT_W_SAVE_PUMP_KB == 120 && XBOX_FT_W_SAVE_FLUSH_KC == 121 );
+	/* The player movement's (2026-10-06, x9-perf-pmove) close it now:
+	   every _SV counter with its _CL twin right after it. */
+	CHECK( XBOX_FT_W_PM_SV_CMDS == 122 && XBOX_FT_W_PM_CL_SOLIDS == 125 && XBOX_FT_W_PM_SV_PHYSENTS == 126 );
+	CHECK( XBOX_FT_W_PM_CL_PHYSENTS == XBOX_FT_W_PM_SV_PHYSENTS + 1 && XBOX_FT_W_PM_CL_VISENTS == XBOX_FT_W_PM_SV_VISENTS + 1 );
+	CHECK( XBOX_FT_W_PM_CL_TRACES == XBOX_FT_W_PM_SV_TRACES + 1 && XBOX_FT_W_PM_CL_HULLS == XBOX_FT_W_PM_SV_HULLS + 1 );
+	CHECK( XBOX_FT_W_PM_CL_TESTS == XBOX_FT_W_PM_SV_TESTS + 1 && XBOX_FT_W_PM_CL_PTESTS == XBOX_FT_W_PM_SV_PTESTS + 1 );
+	CHECK( XBOX_FT_W_PM_CL_PCONT == XBOX_FT_W_PM_SV_PCONT + 1 && XBOX_FT_W_PM_CL_TEX == XBOX_FT_W_PM_SV_TEX + 1 );
+	CHECK( XBOX_FT_W_PM_SV_SETUP_KC == 142 && XBOX_FT_W_PM_CL_POST_KC == 150 );
+	CHECK( XBOX_FT_W_PM_SV_CULLS == 151 && XBOX_FT_W_PM_CL_CULLS == 152 && XBOX_FT_W_COUNT == 153 );
+	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 644 && xbox_ft_frame_bytes( 0 ) == 32 );
 	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_SPAN_CALLS ) == 112 );
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", XBOX_FT_W_COUNT ) == XBOX_FT_HEADER_BYTES );
-	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 520 );
+	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 644 );
 	/* Version 1 is the same header without counters. */
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", 0 ) == XBOX_FT_HEADER_BYTES );
 	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 );
@@ -192,15 +201,15 @@ static void test_encoders( void )
 	CHECK( xbox_ft_encode_frame( buf, &f, 0 ) == XBOX_FT_FRAME_BYTES );
 	CHECK( rd32( buf ) == 7 && buf[4] == 0xDD && buf[7] == 0xAA && rd32( buf + 24 ) == 6 );
 	CHECK( buf[28] == 0x01 && buf[29] == 0x80 && buf[30] == 0 && buf[31] == 0 );
-	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 520 );
+	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 644 );
 	CHECK( rd32( buf ) == 7 && buf[28] == 0x01 && buf[29] == 0x80 );
 	CHECK( rd32( buf + 32 ) == 0x01000000u && rd32( buf + 32 + 4 * XBOX_FT_W_LM_TEXELS ) == 0x01000000u + XBOX_FT_W_LM_TEXELS );
-	CHECK( rd32( buf + 516 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
+	CHECK( rd32( buf + 640 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
 
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, 0 ) == 16 );
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_FRAMES && rd32( buf + 4 ) == 8 + 3 * 32 && rd32( buf + 8 ) == 10 && rd32( buf + 12 ) == 3 );
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, XBOX_FT_W_COUNT ) == 16 );
-	CHECK( rd32( buf + 4 ) == 8 + 3 * 520 );
+	CHECK( rd32( buf + 4 ) == 8 + 3 * 644 );
 
 	/* The COUNTERS chunk: every name, NUL-padded to 16 bytes. */
 	CHECK( xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ) == 8 + 4 + XBOX_FT_W_COUNT * 16 );
@@ -244,7 +253,15 @@ static void test_encoders( void )
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CL_PARSE_KC, "cl_parse_kc" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SAVE_PUMP_KB, "save_pump_kb" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SAVE_FLUSH_KC, "save_flush_kc" ) == 0 );
-	CHECK( XBOX_FT_W_SAVE_FLUSH_KC == XBOX_FT_W_COUNT - 1 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_SV_CMDS, "pm_sv_cmds" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_CL_REDO, "pm_cl_redo" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_CL_HULLS, "pm_cl_hulls" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_SV_TEX, "pm_sv_tex" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_SV_SETUP_KC, "pm_sv_setup_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_CL_QUERY_KC, "pm_cl_query_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_CL_POST_KC, "pm_cl_post_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_CL_CULLS, "pm_cl_culls" ) == 0 );
+	CHECK( XBOX_FT_W_PM_CL_CULLS == XBOX_FT_W_COUNT - 1 );
 	for( i = 0; i < XBOX_FT_W_COUNT; i++ )
 		CHECK( xbox_ft_work_names[i] && strlen( xbox_ft_work_names[i] ) < XBOX_FT_COUNTER_NAME_BYTES && buf[12 + 16 * i + 15] == 0 );
 
@@ -650,6 +667,13 @@ static int write_fixture_level_change( const char *path, int flagged )
    think 1 000, worst 500), monster_scientist (step, 100 runs, 20 thinks,
    400 moves, 106 000 ticks, think 90 000, worst 8 000) and info_target
    (none, nothing run: left out of the report).
+   Player movement (2026-10-06), every frame: pm_sv_cmds 1, pm_cl_cmds 1,
+   pm_cl_redo 0, pm_cl_solids 2, physents 5 server / 40 client, visents
+   6 / 50, traces 8 / 9, hull checks 40 / 360, position tests 1 / 1,
+   their point tests 5 / 40, point contents 3 / 3, texture traces 1 / 0,
+   physents skipped 2 / 300;
+   times (ms) server setup 1, PM_Move 2 (queries 1), think 1, touch 0,
+   client solid list 1, PM_Move 3 (queries 2), PostRunCmd 1.
    Clean END. */
 static int write_fixture_spans( const char *path )
 {
@@ -702,6 +726,34 @@ static int write_fixture_spans( const char *path )
 		f.work[XBOX_FT_W_G_WORST_KC] = 1;
 		f.work[XBOX_FT_W_G_WORST_CLS] = 2;
 		f.work[XBOX_FT_W_G_WORST_ENT] = 57;
+		f.work[XBOX_FT_W_PM_SV_CMDS] = 1;
+		f.work[XBOX_FT_W_PM_CL_CMDS] = 1;
+		f.work[XBOX_FT_W_PM_CL_SOLIDS] = 2;
+		f.work[XBOX_FT_W_PM_SV_PHYSENTS] = 5;
+		f.work[XBOX_FT_W_PM_CL_PHYSENTS] = 40;
+		f.work[XBOX_FT_W_PM_SV_VISENTS] = 6;
+		f.work[XBOX_FT_W_PM_CL_VISENTS] = 50;
+		f.work[XBOX_FT_W_PM_SV_TRACES] = 8;
+		f.work[XBOX_FT_W_PM_CL_TRACES] = 9;
+		f.work[XBOX_FT_W_PM_SV_HULLS] = 40;
+		f.work[XBOX_FT_W_PM_CL_HULLS] = 360;
+		f.work[XBOX_FT_W_PM_SV_TESTS] = 1;
+		f.work[XBOX_FT_W_PM_CL_TESTS] = 1;
+		f.work[XBOX_FT_W_PM_SV_PTESTS] = 5;
+		f.work[XBOX_FT_W_PM_CL_PTESTS] = 40;
+		f.work[XBOX_FT_W_PM_SV_PCONT] = 3;
+		f.work[XBOX_FT_W_PM_CL_PCONT] = 3;
+		f.work[XBOX_FT_W_PM_SV_TEX] = 1;
+		f.work[XBOX_FT_W_PM_SV_SETUP_KC] = 1;
+		f.work[XBOX_FT_W_PM_SV_MOVE_KC] = 2;
+		f.work[XBOX_FT_W_PM_SV_QUERY_KC] = 1;
+		f.work[XBOX_FT_W_PM_SV_THINK_KC] = 1;
+		f.work[XBOX_FT_W_PM_CL_SOLID_KC] = 1;
+		f.work[XBOX_FT_W_PM_CL_MOVE_KC] = 3;
+		f.work[XBOX_FT_W_PM_CL_QUERY_KC] = 2;
+		f.work[XBOX_FT_W_PM_CL_POST_KC] = 1;
+		f.work[XBOX_FT_W_PM_SV_CULLS] = 2;
+		f.work[XBOX_FT_W_PM_CL_CULLS] = 300;
 		if( i == 40 )
 		{
 			k[XBOX_FT_S_SV_GAME] = 10;

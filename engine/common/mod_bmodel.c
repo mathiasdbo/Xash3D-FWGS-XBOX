@@ -25,6 +25,9 @@ GNU General Public License for more details.
 #include "server.h"			// LUMP_ error codes
 #include "swaplib.h"
 #include "ref_common.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_pm_cull.h" // Xbox_PMCull_Invalidate, docs/r3d/divergences.md #154
+#endif
 #if defined( HAVE_OPENMP )
 #include <omp.h>
 #endif // HAVE_OPENMP
@@ -4504,6 +4507,9 @@ void Mod_LoadBrushModel( model_t *mod, void *buffer, size_t buffersize, qboolean
 {
 	char poolname[MAX_VA_STRING];
 
+#if XASH_XBOX
+	Xbox_PMCull_Invalidate(); // hulls' cached bounds, docs/r3d/divergences.md #154
+#endif
 	Q_snprintf( poolname, sizeof( poolname ), "^2%s^7", mod->name );
 
 	if( loaded ) *loaded = false;

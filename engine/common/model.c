@@ -23,6 +23,9 @@ GNU General Public License for more details.
 #include "enginefeatures.h"
 #include "client.h"
 #include "server.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_pm_cull.h" // Xbox_PMCull_Invalidate, docs/r3d/divergences.md #154
+#endif
 
 static model_info_t	mod_crcinfo[MAX_MODELS];
 static model_t	mod_known[MAX_MODELS];
@@ -139,6 +142,10 @@ void Mod_FreeModel( model_t *mod )
 	// already freed?
 	if( !mod || mod->needload == NL_UNREFERENCED )
 		return;
+
+#if XASH_XBOX
+	Xbox_PMCull_Invalidate(); // its hulls' cached bounds, docs/r3d/divergences.md #154
+#endif
 
 	if( mod->type != mod_brush || mod->name[0] != '*' )
 	{

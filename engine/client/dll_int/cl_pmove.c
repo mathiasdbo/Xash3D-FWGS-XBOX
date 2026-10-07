@@ -19,6 +19,7 @@ GNU General Public License for more details.
 #include "cl_tent.h"
 #include "pm_local.h"
 #include "studio.h"
+#include "platform/xbox/xbox_frametime_pmove.h" // the recorder's player movement breakdown, docs/r3d/divergences.md #141
 
 #define MAX_FORWARD			6	// forward probes for set idealpitch
 #define MIN_CORRECTION_DISTANCE	0.25f	// use smoothing if error is > this
@@ -467,6 +468,7 @@ Builds all the pmove physents for the current frame
 void CL_SetSolidEntities( void )
 {
 	physent_t	*pe = clgame.pmove->physents;
+	XBOX_FT_PM_BEGIN( xbox_ft_solid );
 
 	// setup physents
 	clgame.pmove->numvisent = 1;
@@ -486,6 +488,8 @@ void CL_SetSolidEntities( void )
 
 	// add all other entities exlucde players
 	CL_AddLinksToPmove( &cl.frames[cl.parsecountmod] );
+	XBOX_FT_PM_COUNT_ALWAYS( XBOX_FT_W_PM_CL_SOLIDS );
+	XBOX_FT_PM_END( xbox_ft_solid, XBOX_FT_PM_CL_SOLID );
 }
 
 /*
@@ -925,7 +929,8 @@ static void CL_RunUsercmd( local_state_t *from, local_state_t *to, usercmd_t *u,
 		CL_SetupPMove( clgame.pmove, from, &cmd, runfuncs, *time );
 
 		// motor!
-		clgame.dllFuncs.pfnPlayerMove( clgame.pmove, false );
+		XBOX_FT_PM_COUNT_ALWAYS( cl.local.repredicting ? XBOX_FT_W_PM_CL_REDO : XBOX_FT_W_PM_CL_CMDS );
+		XBOX_FT_PM_MOVE( 2, XBOX_FT_PM_CL_MOVE, clgame.pmove, clgame.dllFuncs.pfnPlayerMove( clgame.pmove, false ));
 
 		// copy results back to client
 		CL_FinishPMove( clgame.pmove, to );
@@ -935,7 +940,7 @@ static void CL_RunUsercmd( local_state_t *from, local_state_t *to, usercmd_t *u,
 		else cl.local.lastground = clgame.pmove->onground; // world(0) or in air(-1)
 	}
 
-	clgame.dllFuncs.pfnPostRunCmd( from, to, &cmd, runfuncs, *time, random_seed );
+	XBOX_FT_PM_TIMED( XBOX_FT_PM_CL_POST, clgame.dllFuncs.pfnPostRunCmd( from, to, &cmd, runfuncs, *time, random_seed ));
 
 	*time += (double)cmd.msec / 1000.0;
 }

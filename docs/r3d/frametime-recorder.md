@@ -228,6 +228,7 @@ site is one add; nothing tests whether the recorder is on.
 | `cl_parse_kc` | (2026-10-06) time, kilocycles: `CL_ParseNetMessage`'s parse call, every server message of the frame's packets (`engine/client/cl_main.c`). Inside `k_cl_read`; a counter rather than a span because `k_cl_pkt_ents` and `k_cl_clientdata`, which it contains, are older spans and a span's parent must come before it in the file |
 | `save_pump_kb` | (2026-10-06, x9-perf-saveasync, divergence #153, at the end of the record) KiB of a savegame's `.sav` written in the frame, each chunk rounded up: by `k_save_pump` (the frames after the save) or by a flush. `engine/server/sv_save.c`, `SaveAsync_Step` |
 | `save_flush_kc` | (2026-10-06, #153) time, kilocycles: a pending `.sav` completed at once (`SV_SaveAsync_Flush`) because something was about to read or change the save folder - a level change, a load, another save, the menu's save list, `killsave`, quitting. It runs under whichever span made that call (`k_cl_begin` for a console command, `k_ui` for the menu), so a counter |
+| `pm_*` | (2026-10-06, x9-perf-pmove, at the end of the record) player movement: see "Player movement" below |
 
 The report adds `verts`, the sum of the five `v_*` counters. Its stalls
 table lists each stall's first-use loads (`snd_*`, `tex_*`) next to its
@@ -523,6 +524,54 @@ most of `g_moves` - the movers' per-entity position tests
 c1a1b in xemu, and its largest parts are now the movers' own walk over
 the edicts (`k_sv_ppush` 0.61) and the monsters (`k_sv_pstep` 0.23).
 
+## Player movement (2026-10-06)
+
+`k_sv_runcmd` (the server's `SV_RunCmd`) and `k_cl_predmove` (the
+client's prediction) were 0.40-0.50 and 0.30-0.35 ms a frame on the
+console's route with nothing under them. Both run the game DLL's
+`PM_Move`, which asks the engine for traces, position tests and point
+contents (`engine/common/pm_trace.c`) against a physent list the engine
+builds for it. `engine/platform/xbox/xbox_frametime_pmove.h` breaks that
+down with 31 counters at the end of the record; every server counter
+(`pm_sv_*`) has its client twin (`pm_cl_*`) at the next index. The engine
+queries count for the side whose `PM_Move` is running (a flag set around
+the DLL call), so the client's weapon and event traces, made outside it,
+are not in them. Counts are exact in xemu.
+
+| counter | counted at |
+|---|---|
+| `pm_sv_cmds` | each server `PM_Move` (`SV_RunCmd`, `engine/server/sv_pmove.c`): one per usercmd, two for a command over 50 ms |
+| `pm_cl_cmds`, `pm_cl_redo` | each client `PM_Move` (`CL_RunUsercmd`, `engine/client/dll_int/cl_pmove.c`), from `CL_CreateCmd`'s prediction or from `CL_RedoPrediction` |
+| `pm_cl_solids` | each `CL_SetSolidEntities`: the client's physent list rebuilt (in `CL_CreateCmd`, after `CL_ProcessPacket`, after each parsed packet) |
+| `pm_*_physents`, `pm_*_visents` | `numphysent` and `numvisent` summed over that side's moves |
+| `pm_*_traces` | `PM_PlayerTraceExt` calls inside a `PM_Move` (a position test's own trace included) |
+| `pm_*_hulls` | the physents those traces ran a hull check against |
+| `pm_*_culls` | the physents a trace or a position test skipped because no solid leaf of theirs was near (divergence #154) |
+| `pm_*_tests`, `pm_*_ptests` | `PM_TestPlayerPosition` calls, and the physents its own loop point-tested |
+| `pm_*_pcont`, `pm_*_tex` | `PM_PointContents` calls; `PM_TraceTexture`/`PM_TraceSurfacePmove` calls |
+| `pm_sv_setup_kc` | time: `SV_SetupPMove` - the player's state and the physent lists |
+| `pm_sv_move_kc`, `pm_cl_move_kc` | time: the DLL's `PM_Move` |
+| `pm_sv_query_kc`, `pm_cl_query_kc` | time: of that, inside the queries above (the outermost one: a position test's trace is in its test) |
+| `pm_sv_think_kc` | time: `CmdStart`, `PlayerPreThink`, `SV_PlayerRunThink`, `PlayerPostThink`, `CmdEnd` |
+| `pm_sv_touch_kc` | time: `SV_LinkEdict` of the player and the touches after the move |
+| `pm_cl_solid_kc` | time: `CL_SetSolidEntities`, all three places |
+| `pm_cl_post_kc` | time: the client DLL's `PostRunCmd` (weapon prediction) |
+
+The times are accumulated in ticks with the renderer's waits taken out,
+like a span, and stored in kilocycles when the frame closes; they
+overlap (the query time is part of the move time). The report prints a
+player-movement table: each column server/client, then the times.
+
+First use (xemu, 2026-10-06, scripted walk, jumps and ducks on each
+map; 1 server and 1 client `PM_Move` a frame everywhere, `pm_cl_redo` 0,
+`pm_cl_solids` 3): on c1a0c the client's list held 42 physents against
+the server's 6.4 (the server takes only those within 256 units,
+`SV_AddLinksToPmove`; the client takes every solid entity of the packet,
+`CL_AddLinksToPmove`), so the client ran 336 hull checks a frame against
+the server's 41 for the same movement, and its `PM_Move` took 0.26 ms
+against 0.07 (0.24 and 0.05 of it in the queries). That is what
+divergence #154 cuts.
+
 ## Cost
 
 - **Off:** one float compare per `Host_Frame`; in ref/nv2a one load and
@@ -530,17 +579,18 @@ the edicts (`k_sv_ppush` 0.61) and the monsters (`k_sv_pstep` 0.23).
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~622 KiB (ring 1024 x 520 B = 520 KiB, the overlay's histogram
-  4 KiB, a 63.5 KiB encode buffer, 4 KiB of notes, the server's classname
+- **On:** ~763 KiB (ring 1024 x 644 B = 644 KiB, the overlay's histogram
+  4 KiB, an 80.5 KiB encode buffer, 4 KiB of notes, the server's classname
   table ~30 KiB);
   a few `rdtsc` per frame plus two per span closed and two per server
   message (below); a ~149 KiB write and `fsync` every 5 s (those frames
-  are flagged); about 29.8 KiB per second of play on disk at 60 fps, plus
-  at most 4 KiB of notes per flush (105 MiB an hour; the file stops at 64
-  MiB, ~36 minutes at 60 fps, ~30 at the 72 fps cap - the owner's 29-minute
-  route of 2026-10-06 was 47 MB at 468-byte records, ~51 MB at 508, ~52
-  MB at 520).
-  Before the menu, music and first-use load
+  are flagged); about 37.7 KiB per second of play on disk at 60 fps, plus
+  at most 4 KiB of notes per flush (133 MiB an hour; the file stops at 64
+  MiB, ~29 minutes at 60 fps, ~24 at the 72 fps cap - the owner's 29-minute
+  route of 2026-10-06 was 47 MB at 468-byte records and would be ~64 MB
+  at 644, just under the cap).
+  Before the player movement counters (2026-10-06) it was ~622 KiB and
+  29.8 KiB/s. Before the menu, music and first-use load
   counters (2026-10-06) it was ~561 KiB and 27.4 KiB/s. Before the
   savegame spans (2026-10-05) it was
   ~507 KiB and 24.6 KiB/s. Before the server game frame's breakdown
@@ -593,10 +643,11 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 520 bytes with today's
-122: the 20 counts, `span_calls`, the 73 spans, `world_walked`, `water_gpu`,
+frame records of 32 bytes plus one u32 per counter - 644 bytes with today's
+153: the 20 counts, `span_calls`, the 73 spans, `world_walked`, `water_gpu`,
 `vp_loads`, the 17 `g_*`, the five first-use load counters,
-`cl_parse_kc`, `save_pump_kb` and `save_flush_kc`; 508 with 72 spans and
+`cl_parse_kc`, `save_pump_kb`, `save_flush_kc` and the 31 `pm_*`; 520
+without the `pm_*`, 508 with 72 spans and
 no save counters, 468 with
 68 spans and no load counters, 420 with 56 spans, 328 with 50 spans and three counts after them, 284
 with 42 spans, 256 with 35, 212 with the first 24, 112 before the spans),

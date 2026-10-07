@@ -20,6 +20,10 @@ GNU General Public License for more details.
 #include "enginefeatures.h"
 #include "studio.h"
 #include "world.h"
+#include "platform/xbox/xbox_frametime_pmove.h" // the recorder's player movement counts, docs/r3d/divergences.md #141
+#if XASH_XBOX
+#include "platform/xbox/xbox_pm_cull.h" // exact per-physent early-outs, docs/r3d/divergences.md #154
+#endif
 
 #define PM_AllowHitBoxTrace( model, hull ) ( model && model->type == mod_studio && ( FBitSet( model->flags, STUDIO_TRACE_HITBOX ) || hull == 2 ))
 
@@ -318,6 +322,7 @@ loc0:
 
 pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int flags, int numents, physent_t *ents, int ignore_pe, pfnIgnore pmFilter )
 {
+	XBOX_FT_PM_QUERY( XBOX_FT_W_PM_SV_TRACES );
 	pmtrace_t trace_total;
 
 	memset( &trace_total, 0, sizeof( trace_total ));
@@ -446,8 +451,19 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 			VectorSubtract( end, offset, end_l );
 		}
 
+#if XASH_XBOX
+		// Resonance3D (divergences.md #154): no solid leaf of this hull is
+		// near the segment, so its check could not lower the fraction or
+		// set startsolid - the result is the same without it
+		if( hullcount == 1 && pe->solid != SOLID_CUSTOM && Xbox_PMCull_TraceMisses( pe->model, hull, start_l, end_l ))
+		{
+			XBOX_FT_PM_COUNT( XBOX_FT_W_PM_SV_CULLS );
+			continue;
+		}
+#endif
 		pmtrace_t trace_bbox;
 		PM_InitPMTrace( &trace_bbox, end );
+		XBOX_FT_PM_COUNT( XBOX_FT_W_PM_SV_HULLS );
 
 		if( hullcount < 1 )
 		{
@@ -527,6 +543,7 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 
 int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, pfnIgnore pmFilter )
 {
+	XBOX_FT_PM_QUERY( XBOX_FT_W_PM_SV_TESTS );
 	pmtrace_t trace = PM_PlayerTraceExt( pmove, pmove->origin, pmove->origin, 0, pmove->numphysent, pmove->physents, -1, pmFilter );
 	if( ptrace ) *ptrace = trace;
 
@@ -611,6 +628,16 @@ int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, p
 			VectorSubtract( pos, offset, pos_l );
 		}
 
+#if XASH_XBOX
+		// Resonance3D (divergences.md #154): the point is in no solid leaf of
+		// this hull, so the test below would not return it
+		if( hullcount == 1 && pe->solid != SOLID_CUSTOM && Xbox_PMCull_PointMisses( pe->model, hull, pos_l ))
+		{
+			XBOX_FT_PM_COUNT( XBOX_FT_W_PM_SV_CULLS );
+			continue;
+		}
+#endif
+		XBOX_FT_PM_COUNT( XBOX_FT_W_PM_SV_PTESTS );
 		if( pe->solid == SOLID_CUSTOM )
 		{
 			pmtrace_t	trace;
@@ -674,6 +701,7 @@ PM_PointContents
 */
 int PM_PointContents( playermove_t *pmove, const vec3_t p )
 {
+	XBOX_FT_PM_QUERY( XBOX_FT_W_PM_SV_PCONT );
 	// sanity check
 	if( !p || !pmove->physents[0].model )
 		return CONTENTS_NONE;
@@ -816,6 +844,7 @@ pmtrace_t *PM_TraceLineEx( playermove_t *pmove, float *start, float *end, int fl
 
 struct msurface_s *PM_TraceSurfacePmove( playermove_t *pmove, int ground, float *vstart, float *vend )
 {
+	XBOX_FT_PM_QUERY( XBOX_FT_W_PM_SV_TEX );
 	if( ground < 0 || ground >= pmove->numphysent )
 		return NULL; // bad ground
 
@@ -824,6 +853,7 @@ struct msurface_s *PM_TraceSurfacePmove( playermove_t *pmove, int ground, float 
 
 const char *PM_TraceTexture( playermove_t *pmove, int ground, float *vstart, float *vend )
 {
+	XBOX_FT_PM_QUERY( XBOX_FT_W_PM_SV_TEX );
 	if( ground < 0 || ground >= pmove->numphysent )
 		return NULL; // bad ground
 
