@@ -3,6 +3,7 @@ nv2a_efx_util.c - X9-X step 7: see nv2a_efx_util.h. Pure C99, no engine
 or pbkit includes, host-tested (tools/host-tests/nv2a_efx_util_host_test.c).
 */
 #include "nv2a_efx_util.h"
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
@@ -99,14 +100,43 @@ static void wrap_clip( wrap_poly_t *out, const wrap_poly_t *in, int axis, float 
 	}
 }
 
+/* (int)floorf( q ) and (int)ceilf( q ) without the libm calls
+   (x9-perf-efx, docs/r3d/divergences.md #159). nxdk's floorf and ceilf
+   (pdclib, platform/xbox/functions/math) switch the x87 rounding mode
+   with two fldcw around an frndint, and wrap_cell_range ran four of them
+   per beam primitive: the largest single cost of a beam in xemu. The
+   truncating conversion compiles to cvttss2si for the Xbox's SSE floats.
+   The result equals the libm form for every q whose floor or ceiling
+   fits an int, which the casts already required: below 2^24 (float)i is
+   exact, and from 2^24 up every float is an integer, so i == q. The
+   parameter is a float, so q is rounded to float before the compare, as
+   the libm call's argument was. */
+static int wrap_floor( float q )
+{
+	int i = (int)q;
+
+	if( (float)i > q && i != INT_MIN ) /* out of range: cvttss2si's INT_MIN, not i - 1 */
+		i--;
+	return i;
+}
+
+static int wrap_ceil( float q )
+{
+	int i = (int)q;
+
+	if( (float)i < q )
+		i++;
+	return i;
+}
+
 /* The cells [first, last] a coordinate range touches. A range ending
    exactly on a boundary does not reach into the next cell: [0, 1] is one
    cell, as GL_REPEAT samples a texture coordinate of exactly 1.0 at the
    texture's last texel edge, not the next copy's first. */
 static void wrap_cell_range( float lo, float hi, float cell, int *first, int *last )
 {
-	*first = (int)floorf( lo / cell );
-	*last = (int)ceilf( hi / cell ) - 1;
+	*first = wrap_floor( lo / cell );
+	*last = wrap_ceil( hi / cell ) - 1;
 	if( *last < *first )
 		*last = *first;
 }

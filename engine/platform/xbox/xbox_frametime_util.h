@@ -446,6 +446,23 @@ enum
 	   draw is part_kc minus part_think_kc. */
 	XBOX_FT_W_PART_KC,       /* time: kilocycles in ref/nv2a's CL_DrawParticles, its CL_ThinkParticle calls included */
 	XBOX_FT_W_PART_THINK_KC, /* time: of that, the CL_ThinkParticle calls (one rdtsc pair per particle, summed before rounding) */
+	/* Beams and tracers (2026-10-08, x9-perf-efx): the rest of k_efx.
+	   CL_DrawBeams draws the server's beam entities (env_beam, env_laser:
+	   ET_BEAM) and the temp-entity beams (gauss, egon, tripmine lasers,
+	   TE_BEAM* messages). `beams` adds one for every beam entity
+	   CL_DrawBeams submits and one more for every beam R_BeamDraw gets
+	   through to the end of, as ref/gl's r_stats does (gl_beams.c:1226,
+	   :1071), so the beams actually drawn are beams - beam_ents.
+	   Per-beam times are summed in ticks and rounded once per pass. */
+	XBOX_FT_W_BEAM_KC,       /* time: ref/nv2a's CL_DrawBeams, both passes (beam entities and temp-entity beams) */
+	XBOX_FT_W_BEAM_NOISE_KC, /* time: of that, FracNoise/SineNoise in R_BeamDraw (R_DrawRing's refills are in beam_geom_kc) */
+	XBOX_FT_W_BEAM_GEOM_KC,  /* time: of that, each beam's Begin..End - R_DrawSegs and its siblings, the TriAPI and its repeat splitter */
+	XBOX_FT_W_BEAM_ENTS,     /* server beam entities CL_DrawBeams submitted (R_BeamDrawCustomEntity calls, culled ones included) */
+	XBOX_FT_W_BEAM_PRIMS,    /* primitives the TriAPI assembled from beam vertices (a strip's triangles, a follow beam's quads) */
+	XBOX_FT_W_BEAM_PIECES,   /* primitives appended for them after the repeat splitter (#133) cut them at texture-cell boundaries */
+	XBOX_FT_W_TRACERS,       /* tracers drawn (not culled) */
+	XBOX_FT_W_TRACER_KC,     /* time: ref/nv2a's CL_DrawTracers, the tracers' own movement included */
+	XBOX_FT_W_TRACER_FAILS,  /* CL_DrawTracers passes that had tracers but could not bind the dot sprite, so drew none */
 	XBOX_FT_W_END
 };
 

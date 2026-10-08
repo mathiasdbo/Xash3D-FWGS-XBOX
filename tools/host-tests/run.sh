@@ -78,6 +78,14 @@ nv2a_efx_util() {
 	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a 		tools/host-tests/nv2a_efx_util_host_test.c ref/nv2a/nv2a_efx_util.c 		-lm -o "$OUT/nv2a_efx_util_test" && "$OUT/nv2a_efx_util_test"
 }
 run_test nv2a_efx_util nv2a_efx_util
+# The same with x87 floats (-mfpmath=387): the splitter's floor/ceil
+# replacement (#159) must match the libm form under both arithmetics.
+nv2a_efx_util_x87() {
+	gcc $HOST_CFLAGS -mfpmath=387 -Wall -std=c99 -Iref/nv2a \
+		tools/host-tests/nv2a_efx_util_host_test.c ref/nv2a/nv2a_efx_util.c \
+		-lm -o "$OUT/nv2a_efx_util_test_x87" && "$OUT/nv2a_efx_util_test_x87"
+}
+run_test nv2a_efx_util_x87 nv2a_efx_util_x87
 
 # tools/host-tests/nv2a_lightmap_util_host_test.c, header.
 nv2a_lightmap_util() {

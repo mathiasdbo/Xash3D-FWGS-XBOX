@@ -28,6 +28,20 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER derive one count from another without reading every early return between their increments
+
+x9-perf-efx (2026-10-08) added `beam_ents` so the report could split
+`beams` into temp and entity beams, on the claim that ref/gl's
+`r_stats` counts an entity beam twice (`gl_beams.c:1226` after
+`R_BeamDrawCustomEntity`, `:1071` at the end of `R_BeamDraw`). The
+reference review found the second increment sits behind seven early
+returns (`R_BeamCull` among them), and beam entities reach the list
+without a frustum test, so an off-screen `env_beam` is counted once and
+the report's "temp" column, `beams - 2 * beam_ents`, could go negative.
+**Before a formula subtracts or multiplies one counter by another,
+trace each increment's path and list the returns that skip one but not
+the other; if any exist, count the quantity you want directly.**
+
 ### NEVER call a rebuild idempotent before checking that it reads nothing it writes
 
 x9-perf-clents (2026-10-07) skipped `CL_SetSolidEntities` calls whose

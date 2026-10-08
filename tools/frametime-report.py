@@ -135,6 +135,10 @@ CE_TIMES = ("ce_delta_kc", "ce_fields_kc", "ce_process_kc", "ce_link_kc", "ce_ad
 # Particles (recorders from 2026-10-08, x9-perf-particles, plan item R6):
 # ref/nv2a's CL_DrawParticles, whole and its CL_ThinkParticle calls. Times.
 PART_TIMES = ("part_kc", "part_think_kc")
+# Beams and tracers (recorders from 2026-10-08, x9-perf-efx): the rest of
+# k_efx - ref/nv2a's CL_DrawBeams with its noise and geometry, and
+# CL_DrawTracers. Times.
+EFX_TIMES = ("beam_kc", "beam_noise_kc", "beam_geom_kc", "tracer_kc")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -1149,7 +1153,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
     timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES) \
-        | set(PART_TIMES)
+        | set(PART_TIMES) | set(EFX_TIMES)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1402,6 +1406,7 @@ def summary_text(rec, rows, sess):
     lines.extend(pmove_text(rec, rows))
     lines.extend(clents_text(rec, rows))
     lines.extend(particles_text(rec, rows))
+    lines.extend(beams_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -1672,6 +1677,54 @@ def particles_text(rec, rows):
             r["map"][:18], "%s/%s" % (short(n), short(r["work_peak"].get("particles", 0.0))),
             r.get("span_ms", {}).get("k_efx", 0.0), part, think, part - think,
             "%.2f" % (part * 1000.0 / n) if n else "-"))
+    return lines
+
+
+def beams_text(rec, rows):
+    """Beams and tracers per in-play frame (recorders from 2026-10-08,
+    x9-perf-efx): the rest of k_efx after the particles. Beams drawn
+    (`beams` counts each beam entity CL_DrawBeams submits once more, as
+    ref/gl's r_stats does, so drawn = beams - beam_ents) and the server
+    beam entities submitted, culled ones included; then the time in
+    CL_DrawBeams: the noise, the geometry (each beam's
+    Begin..End: its segments, the TriAPI and the repeat splitter) and the
+    rest (culling, the sprite frame, the colour). The primitives the
+    TriAPI assembled and the pieces the splitter appended, and the cost
+    per beam drawn; then tracers, their time and the cost per tracer.
+    Nothing for a session with no beam or tracer drawn."""
+    if "beam_kc" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r
+            and (r["work_avg"].get("beams", 0.0) or r["work_avg"].get("tracers", 0.0)
+                 or r["work_avg"].get("tracer_fails", 0.0))]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "beams and tracers per in-play frame: beams drawn/entity beams submitted (exact in xemu); ms: CL_DrawBeams = "
+             "noise + geom (Begin..End) + rest; TriAPI primitives and the pieces appended; us per beam; "
+             "tracers drawn, ms, us per tracer"]
+    lines.append("%-18s %9s %7s %7s %7s %7s %7s %7s %8s %7s %7s %8s" % (
+        "map", "beams", "beam", "noise", "geom", "rest", "prims", "pieces", "us/beam", "tracers", "tracer", "us/trc"))
+    for r in maps:
+        a = r["work_avg"]
+        ents = a.get("beam_ents", 0.0)
+        beams = a.get("beams", 0.0) - ents  # drawn: each submitted entity is counted once more
+        beam = a.get("beam_kc", 0.0) * k
+        noise = a.get("beam_noise_kc", 0.0) * k
+        geom = a.get("beam_geom_kc", 0.0) * k
+        tracers = a.get("tracers", 0.0)
+        tracer = a.get("tracer_kc", 0.0) * k
+        lines.append("%-18s %9s %7.3f %7.3f %7.3f %7.3f %7s %7s %8s %7s %7.3f %8s" % (
+            r["map"][:18], "%s/%s" % (short(beams), short(ents)), beam, noise, geom, beam - noise - geom,
+            short(a.get("beam_prims", 0.0)), short(a.get("beam_pieces", 0.0)),
+            "%.2f" % (beam * 1000.0 / beams) if beams else "-", short(tracers), tracer,
+            "%.2f" % (tracer * 1000.0 / tracers) if tracers else "-"))
+    # tracers that could not be drawn because the dot sprite would not bind:
+    # not an empty pass, so say so (recorders from x9-perf-efx review on)
+    failed = [r for r in maps if r["work_avg"].get("tracer_fails", 0.0)]
+    for r in failed:
+        lines.append("  WARNING %s: the tracer pass could not bind its sprite in %s of in-play frames - tracers there were not drawn"
+                     % (r["map"][:18], "%.1f%%" % (100.0 * r["work_avg"]["tracer_fails"])))
     return lines
 
 

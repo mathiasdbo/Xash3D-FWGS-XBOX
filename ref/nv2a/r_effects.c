@@ -62,6 +62,12 @@ static struct
 	uint c_particle_count;
 } nv2a_efx_stats;
 
+/* Recorder (x9-perf-efx): R_BeamDraw's noise and geometry times, in
+   ticks, summed over one CL_DrawBeams pass and rounded once at its end
+   (beam_noise_kc, beam_geom_kc) - a beam's share is far under a
+   kilocycle in xemu's rdtsc granularity. Zero while not recording. */
+static uint64_t nv2a_efx_ft_noise_ticks, nv2a_efx_ft_geom_ticks;
+
 /* The RI.rvp fields, RI.v* vectors and tr.frametime / tr.palette the
    effects read - set by r_context.c. ref/gl's particles read
    RI.cull_v* (gl_rpart.c:70-80), which R_SetupFrustum copies from RI.v*
@@ -1069,9 +1075,13 @@ static void R_BeamDraw( BEAM *pbeam, float frametime )
 
 	if( pbeam->amplitude != 0 && frametime != 0.0f )
 	{
+		xbox_ft_span_t noise_span;
+
+		xbox_ft_span_begin( &noise_span );
 		if( FBitSet( pbeam->flags, FBEAM_SINENOISE ))
 			SineNoise( rgNoise, NOISE_DIVISIONS );
 		else FracNoise( rgNoise, NOISE_DIVISIONS );
+		nv2a_efx_ft_noise_ticks += xbox_ft_span_ticks_since( &noise_span );
 	}
 
 	// update end points
@@ -1184,6 +1194,9 @@ static void R_BeamDraw( BEAM *pbeam, float frametime )
 	   cell boundaries while this is on. */
 	nv2a_tri_set_texture_repeat( true );
 
+	xbox_ft_span_t geom_span;
+	xbox_ft_span_begin( &geom_span );
+
 	switch( pbeam->type )
 	{
 	case TE_BEAMTORUS:
@@ -1223,6 +1236,7 @@ static void R_BeamDraw( BEAM *pbeam, float frametime )
 		break;
 	}
 
+	nv2a_efx_ft_geom_ticks += xbox_ft_span_ticks_since( &geom_span );
 	nv2a_tri_set_texture_repeat( false );
 
 	GL_Cull_Front();
@@ -1371,6 +1385,13 @@ gl_beams.c:1207. draw beam loop
 */
 void CL_DrawBeams( int fTrans, BEAM *active_beams )
 {
+	/* Recorder (x9-perf-efx): beam_kc, and the noise/geometry ticks
+	   R_BeamDraw sums, rounded once below. */
+	xbox_ft_span_t beam_span;
+
+	xbox_ft_span_begin( &beam_span );
+	nv2a_efx_ft_noise_ticks = nv2a_efx_ft_geom_ticks = 0;
+
 	// pglShadeModel( GL_SMOOTH ): always Gouraud here (pbkit.c:3170)
 	nv2a_2d_desired.depth_mask = fTrans ? false : true;
 
@@ -1390,6 +1411,7 @@ void CL_DrawBeams( int fTrans, BEAM *active_beams )
 		R_BeamDrawCustomEntity( currentbeam );
 		nv2a_efx_stats.c_view_beams_count++;
 		NV2A_FT_ADD( XBOX_FT_W_BEAMS, 1 );
+		NV2A_FT_ADD( XBOX_FT_W_BEAM_ENTS, 1 );
 	}
 
 	// draw temporary entity beams
@@ -1406,6 +1428,13 @@ void CL_DrawBeams( int fTrans, BEAM *active_beams )
 
 	// pglShadeModel( GL_FLAT ): see above
 	nv2a_2d_desired.depth_mask = true;
+
+	if( beam_span.t0 )
+	{
+		xbox_ft_time_add( &beam_span, XBOX_FT_W_BEAM_KC );
+		NV2A_FT_ADD( XBOX_FT_W_BEAM_NOISE_KC, ( nv2a_efx_ft_noise_ticks + 500u ) / 1000u );
+		NV2A_FT_ADD( XBOX_FT_W_BEAM_GEOM_KC, ( nv2a_efx_ft_geom_ticks + 500u ) / 1000u );
+	}
 }
 
 /*
@@ -1571,6 +1600,12 @@ gl_rpart.c:150. update tracer color, position, free expired and draw it
 */
 void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 {
+	/* Recorder (x9-perf-efx): tracer_kc times the pass, tracers counts
+	   the ones drawn. */
+	xbox_ft_span_t tracer_span;
+
+	xbox_ft_span_begin( &tracer_span );
+
 	// update tracer color if this is changed
 	if( FBitSet( tracerred->flags|tracergreen->flags|tracerblue->flags|traceralpha->flags, FCVAR_CHANGED ))
 	{
@@ -1585,10 +1620,18 @@ void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 	}
 
 	if( !cl_active_tracers )
+	{
+		xbox_ft_time_add( &tracer_span, XBOX_FT_W_TRACER_KC );
 		return;	// nothing to draw?
+	}
 
 	if( !TriSpriteTexture( gEngfuncs.GetDefaultSprite( REF_DOT_SPRITE ), 0 ))
+	{
+		// a bind failure is not an empty pass: count it, so the report can tell them apart
+		NV2A_FT_ADD( XBOX_FT_W_TRACER_FAILS, 1 );
+		xbox_ft_time_add( &tracer_span, XBOX_FT_W_TRACER_KC );
 		return;
+	}
 
 	R_AllowFog( false );
 	nv2a_2d_desired.blend_enable = true;
@@ -1657,6 +1700,8 @@ void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 				Vertex3fv( verts[1] );
 				TexCoord2f( 0.0f, 0.0f );
 				Vertex3fv( verts[0] );
+
+			NV2A_FT_ADD( XBOX_FT_W_TRACERS, 1 );
 		}
 
 		// evaluate position
@@ -1680,4 +1725,6 @@ void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 
 	nv2a_2d_desired.depth_mask = true;
 	R_AllowFog( true );
+
+	xbox_ft_time_add( &tracer_span, XBOX_FT_W_TRACER_KC );
 }

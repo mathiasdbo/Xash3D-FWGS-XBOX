@@ -157,7 +157,10 @@ byte *nv2a_mod_get_current_vis( void );
 
 /* X9-X step 7 (divergences.md #133): GL_REPEAT for the TriAPI's 3D
    primitives while on - r_effects.c's R_BeamDraw turns it on around its
-   Begin/End. */
+   Begin/End. While it is on the TriAPI stages its triangles and appends
+   them in runs of up to 64 (#159), under the state current then: a caller must not
+   change the render mode, texture, cull or fog between its Begin and
+   End while repeat is on. */
 void nv2a_tri_set_texture_repeat( qboolean on );
 
 /* X9-X step 11: bind one of the map's own DXT1 directory textures (the

@@ -10270,6 +10270,34 @@ than algorithmic problems. Expect the same shape.
 
 ---
 
+## X12 — Audio (after the nv2a and optimisation tasks; owner-approved 2026-10-08)
+
+Console figures come from the #193 route recording (`route-pr193`). Sound work was held back until the CPU and renderer phases were done. This is the agreed order:
+
+1. **Music baked offline.** While music plays, `k_snd_music` costs 0.44-0.48 ms a frame: decoding the compressed track. As much again as the rest of the sound together.
+   - asset-studio converts the tracks to PCM or Xbox ADPCM, and the engine gets a small decoder for them.
+   - The cost is disk, not RAM: about 10 MB a minute for PCM, about 2.6 for ADPCM, streamed.
+   - ADPCM is also what the APU decodes in hardware (item 4).
+   - **Exit:** `k_snd_music` near zero on the console, same music.
+2. **Native 48 kHz CPU mixer.** The hardware only runs at 48 kHz, so SDL resamples the mixer's 44.1 kHz on its audio thread. That is estimated at 0.25-0.35 ms a frame, and no span shows it.
+   - Mixing at 48 kHz lets SDL pass the samples through and removes one conversion.
+   - #178's fixed-point pitched loop is exact for any step.
+   - The output is no longer bit-identical to upstream, so this needs a divergence and a listening test.
+3. **Sound memory survey, then decide** what best improves clarity within the memory budget (free memory at map start is 13-18 MiB late in the route):
+   - **Bake effects and voices at the mix rate with a high-quality resampler.** This removes runtime resampling for unpitched sounds and the aliasing of 11 kHz samples. But 8-bit 11 kHz to 16-bit 48 kHz is about 8.7x the RAM; 16-bit 22 kHz is about 4x. It may suit only the worst-sounding files.
+   - **And/or cheap fixed-point linear interpolation** (`s_lerping` is off today) and volume ramps against zipper noise.
+4. **Later: the MCPX APU** through the owner's nxdk fork, `nxdk-ex`, whose OpenAL drives the real VP, the GP and the AC97, verified on a retail console.
+   - **Prerequisites in nxdk-ex:**
+     - streaming;
+     - room reverb on the GP (Half-Life's `dsp_*` room effects would otherwise be lost);
+     - ADPCM;
+     - reliable completion.
+   - **Engine side:**
+     - a new sound backend mapping Xash's channels (pitched 11/22/44 kHz samples, sentences and VOX, raw channels) onto VP voices;
+     - lip sync (`SND_MoveMouth` reads mixed samples) computed separately;
+     - a selectable mode beside the classic mixer.
+   - **Estimated saving:** 0.35-0.5 ms a frame. Hardware HRTF and 5.1 come later.
+
 ## Out of scope
 
 - **VGUI1 widgets** — null stub until multiplayer UI is wanted, then adopt

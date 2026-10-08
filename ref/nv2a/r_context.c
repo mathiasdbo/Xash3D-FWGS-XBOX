@@ -8849,8 +8849,34 @@ static uint32_t nv2a_tri_topology_op( nv2a_tri_topology_t topo )
    Begin). */
 static qboolean nv2a_tri_repeat;
 
+/* x9-perf-efx (docs/r3d/divergences.md #159): the triangles the repeat
+   splitter emits, staged and appended to the ring several at a time
+   instead of one nv2a_2d_append each (its batch-key resolve, state
+   comparison and room check: a quarter of a beam's geometry time in
+   xemu). Only triangles are staged - a strip, fan or triangle-list
+   Begin's pieces, and every cut piece - and only while repeat is on,
+   which is only inside R_BeamDraw's Begin/End, where nothing changes the
+   batch state between two vertices (TexCoord2f and Color4f only latch).
+   So the ring receives the same vertices in the same order with the same
+   state; what can move is where a full ring flushes (room is checked for
+   a whole staged run). Emptied at End, at Begin and whenever repeat is
+   switched, and before any piece that is not a triangle (a TRI_QUADS
+   beam's uncut quad) is appended, so the order holds there too. */
+#define NV2A_TRI_STAGE_VERTS 192u /* 64 triangles, 4.5 KiB */
+static nv2a_tri_vert_t nv2a_tri_stage[NV2A_TRI_STAGE_VERTS] __attribute__(( aligned( 32 )));
+static uint32_t nv2a_tri_stage_n;
+
+static void nv2a_tri_stage_flush( void )
+{
+	if( nv2a_tri_stage_n == 0 )
+		return;
+	nv2a_2d_append( NV2A_IMM_SPACE_3D, NV097_SET_BEGIN_END_OP_TRIANGLES, nv2a_tri_stage, nv2a_tri_stage_n );
+	nv2a_tri_stage_n = 0;
+}
+
 void nv2a_tri_set_texture_repeat( qboolean on )
 {
+	nv2a_tri_stage_flush();
 	nv2a_tri_repeat = on;
 }
 
@@ -8871,6 +8897,7 @@ static void nv2a_tri_emit_primitive( const nv2a_tri_vert_t *v, uint32_t n, void 
 
 	if( nv2a_tri_repeat && nv2a_tri_space == NV2A_IMM_SPACE_3D )
 	{
+		NV2A_FT_ADD( XBOX_FT_W_BEAM_PRIMS, 1 ); /* repeat is on only around a beam (R_BeamDraw) */
 		nv2a_efx_wrap_primitive( v, n, nv2a_tri_tex_w, nv2a_tri_tex_h, nv2a_tri_emit_repeated, NULL );
 		return;
 	}
@@ -8898,8 +8925,20 @@ static void nv2a_tri_emit_primitive( const nv2a_tri_vert_t *v, uint32_t n, void 
 
 static void nv2a_tri_emit_repeated( const nv2a_tri_vert_t *v, uint32_t n, int split, void *ctx )
 {
+	uint32_t op = split ? NV097_SET_BEGIN_END_OP_TRIANGLES : nv2a_tri_op;
+
 	(void)ctx;
-	nv2a_2d_append( NV2A_IMM_SPACE_3D, split ? NV097_SET_BEGIN_END_OP_TRIANGLES : nv2a_tri_op, v, n );
+	NV2A_FT_ADD( XBOX_FT_W_BEAM_PIECES, 1 );
+	if( op == NV097_SET_BEGIN_END_OP_TRIANGLES && n == 3 )
+	{
+		if( nv2a_tri_stage_n + 3 > NV2A_TRI_STAGE_VERTS )
+			nv2a_tri_stage_flush();
+		memcpy( &nv2a_tri_stage[nv2a_tri_stage_n], v, 3 * sizeof( *v ));
+		nv2a_tri_stage_n += 3;
+		return;
+	}
+	nv2a_tri_stage_flush();
+	nv2a_2d_append( NV2A_IMM_SPACE_3D, op, v, n );
 }
 
 /* D3: TriTexCoord2f (gl_triapi.c:180) - latches, does not emit. */
@@ -8944,6 +8983,7 @@ void Begin( int primitiveCode )
 	default:                 topo = NV2A_TRI_FAN;             break;
 	}
 
+	nv2a_tri_stage_flush(); /* #159: defensive - End already emptied it */
 	nv2a_tri_open = true;
 	nv2a_tri_space = nv2a_in2d ? NV2A_IMM_SPACE_2D : NV2A_IMM_SPACE_3D;
 	nv2a_tri_dropped = !nv2a_ready || !nv2a_frame_open || ( nv2a_tri_space == NV2A_IMM_SPACE_3D && !nv2a_view_valid );
@@ -9008,6 +9048,7 @@ void End( void )
 		return;
 	if( !nv2a_tri_dropped )
 		nv2a_tri_end( &nv2a_tri_asm );
+	nv2a_tri_stage_flush(); /* #159 */
 	nv2a_tri_open = false;
 }
 

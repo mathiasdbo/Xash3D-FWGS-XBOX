@@ -285,12 +285,299 @@ static void test_wrap_split( void )
 	}
 }
 
+
+/* ---- the splitter against its libm form (x9-perf-efx, #159) ---------
+
+   wrap_cell_range lost its floorf/ceilf calls (nxdk's switch the x87
+   rounding mode twice each). Below is nv2a_efx_wrap_primitive as it was
+   before that change (nv2a_efx_util.c at 0a78dd20, its wrap section
+   verbatim but for the public function's name), and the test feeds both
+   the same primitives and compares every emitted byte: random
+   coordinates over many cells, coordinates on exact cell boundaries,
+   zeros of both signs, negative ranges, tiny and power-of-two and
+   non-power-of-two cell sizes, and values past 2^24 where every float is
+   an integer. The run script builds it twice, with SSE and with x87
+   floats. */
+
+/* A clipped polygon: a triangle or quad gains at most one vertex per
+   clipping plane, and a piece is clipped by four (two per axis). */
+#define WRAP_POLY_MAX 12
+
+typedef struct
+{
+	nv2a_tri_vert_t v[WRAP_POLY_MAX];
+	uint32_t        n;
+} wrap_poly_t;
+
+static float wrap_coord( const nv2a_tri_vert_t *v, int axis )
+{
+	return axis ? v->v : v->u;
+}
+
+static void wrap_lerp( nv2a_tri_vert_t *out, const nv2a_tri_vert_t *a, const nv2a_tri_vert_t *b, float t )
+{
+	int i;
+
+	out->x = a->x + ( b->x - a->x ) * t;
+	out->y = a->y + ( b->y - a->y ) * t;
+	out->z = a->z + ( b->z - a->z ) * t;
+	out->u = a->u + ( b->u - a->u ) * t;
+	out->v = a->v + ( b->v - a->v ) * t;
+
+	for( i = 0; i < 4; i++ )
+	{
+		float c = (float)a->rgba[i] + ((float)b->rgba[i] - (float)a->rgba[i] ) * t;
+		out->rgba[i] = (uint8_t)( c + 0.5f );
+	}
+}
+
+/* Sutherland-Hodgman against one axis-aligned plane: keeps the side
+   where sign * ( coord - bound ) >= 0. An intersection vertex is placed
+   exactly on the bound, so the pieces of neighbouring cells share their
+   edge bit for bit. */
+static void wrap_clip( wrap_poly_t *out, const wrap_poly_t *in, int axis, float bound, float sign )
+{
+	uint32_t i;
+
+	out->n = 0;
+
+	for( i = 0; i < in->n; i++ )
+	{
+		const nv2a_tri_vert_t *a = &in->v[i];
+		const nv2a_tri_vert_t *b = &in->v[( i + 1 ) % in->n];
+		float da = sign * ( wrap_coord( a, axis ) - bound );
+		float db = sign * ( wrap_coord( b, axis ) - bound );
+
+		if( da >= 0.0f && out->n < WRAP_POLY_MAX )
+			out->v[out->n++] = *a;
+
+		if(( da >= 0.0f ) != ( db >= 0.0f ) && out->n < WRAP_POLY_MAX )
+		{
+			nv2a_tri_vert_t *m = &out->v[out->n++];
+
+			wrap_lerp( m, a, b, da / ( da - db ));
+			if( axis ) m->v = bound;
+			else m->u = bound;
+		}
+	}
+}
+
+/* The cells [first, last] a coordinate range touches. A range ending
+   exactly on a boundary does not reach into the next cell: [0, 1] is one
+   cell, as GL_REPEAT samples a texture coordinate of exactly 1.0 at the
+   texture's last texel edge, not the next copy's first. */
+static void wrap_cell_range( float lo, float hi, float cell, int *first, int *last )
+{
+	*first = (int)floorf( lo / cell );
+	*last = (int)ceilf( hi / cell ) - 1;
+	if( *last < *first )
+		*last = *first;
+}
+
+static void wrap_shift( nv2a_tri_vert_t *v, uint32_t n, float du, float dv )
+{
+	uint32_t i;
+
+	for( i = 0; i < n; i++ )
+	{
+		v[i].u -= du;
+		v[i].v -= dv;
+	}
+}
+
+static void ref_wrap_primitive( const nv2a_tri_vert_t *v, uint32_t n, float cell_u, float cell_v,
+	nv2a_efx_wrap_emit_fn emit, void *ctx )
+{
+	nv2a_tri_vert_t shifted[4];
+	float umin, umax, vmin, vmax;
+	int u0, u1, v0, v1, cu, cv;
+	uint32_t i;
+
+	if( n == 0 || n > 4 )
+		return;
+
+	if( !( cell_u > 0.0f ) || !( cell_v > 0.0f ))
+	{
+		emit( v, n, 0, ctx );
+		return;
+	}
+
+	umin = umax = v[0].u;
+	vmin = vmax = v[0].v;
+	for( i = 1; i < n; i++ )
+	{
+		if( v[i].u < umin ) umin = v[i].u;
+		if( v[i].u > umax ) umax = v[i].u;
+		if( v[i].v < vmin ) vmin = v[i].v;
+		if( v[i].v > vmax ) vmax = v[i].v;
+	}
+
+	wrap_cell_range( umin, umax, cell_u, &u0, &u1 );
+	wrap_cell_range( vmin, vmax, cell_v, &v0, &v1 );
+
+	/* One cell (the common case: a beam segment spans a fraction of its
+	   texture), a point or line, or a span past the cap: shift whole. */
+	if(( u0 == u1 && v0 == v1 ) || n < 3
+		|| u1 - u0 >= NV2A_EFX_WRAP_MAX_CELLS || v1 - v0 >= NV2A_EFX_WRAP_MAX_CELLS )
+	{
+		memcpy( shifted, v, n * sizeof( *v ));
+		wrap_shift( shifted, n, (float)u0 * cell_u, (float)v0 * cell_v );
+		emit( shifted, n, 0, ctx );
+		return;
+	}
+
+	for( cv = v0; cv <= v1; cv++ )
+	{
+		wrap_poly_t in, a, b;
+
+		memcpy( in.v, v, n * sizeof( *v ));
+		in.n = n;
+
+		wrap_clip( &a, &in, 1, (float)cv * cell_v, 1.0f );
+		wrap_clip( &b, &a, 1, (float)( cv + 1 ) * cell_v, -1.0f );
+		if( b.n < 3 )
+			continue;
+
+		for( cu = u0; cu <= u1; cu++ )
+		{
+			wrap_poly_t c, d;
+			uint32_t k;
+
+			wrap_clip( &c, &b, 0, (float)cu * cell_u, 1.0f );
+			wrap_clip( &d, &c, 0, (float)( cu + 1 ) * cell_u, -1.0f );
+			if( d.n < 3 )
+				continue;
+
+			wrap_shift( d.v, d.n, (float)cu * cell_u, (float)cv * cell_v );
+
+			/* A clipped convex polygon keeps the input's winding; fan it
+			   from its first vertex. */
+			for( k = 1; k + 1 < d.n; k++ )
+			{
+				nv2a_tri_vert_t tri[3];
+
+				tri[0] = d.v[0];
+				tri[1] = d.v[k];
+				tri[2] = d.v[k + 1];
+				emit( tri, 3, 1, ctx );
+			}
+		}
+	}
+}
+
+static nv2a_tri_vert_t cmp_v[2][MAX_OUT * 4];
+static uint32_t        cmp_n[2][MAX_OUT];
+static int             cmp_split[2][MAX_OUT];
+static int             cmp_count[2];
+
+static void collect_a( const nv2a_tri_vert_t *v, uint32_t n, int split, void *ctx )
+{
+	int *side = (int *)ctx;
+	int k = cmp_count[*side];
+
+	if( k >= MAX_OUT )
+		return;
+	memcpy( &cmp_v[*side][k * 4], v, n * sizeof( *v ));
+	cmp_n[*side][k] = n;
+	cmp_split[*side][k] = split;
+	cmp_count[*side]++;
+}
+
+static uint32_t lcg_state = 12345u;
+
+static uint32_t lcg( void )
+{
+	lcg_state = lcg_state * 1664525u + 1013904223u;
+	return lcg_state >> 8;
+}
+
+/* A coordinate for cell size c: mostly random over +-8 cells, sometimes
+   exactly on a boundary, a signed zero, a tiny value or a huge one. */
+static float rand_coord( float c )
+{
+	uint32_t r = lcg() % 16u;
+	float f = (float)( lcg() % 1000000u ) / 1000000.0f;
+
+	switch( r )
+	{
+	case 0: return (float)((int)( lcg() % 17u ) - 8 ) * c;
+	case 1: return 0.0f;
+	case 2: return -0.0f;
+	case 3: return ( f - 0.5f ) * 1e-6f;
+	case 4: return (float)( lcg() % 2000000u ) * 16.0f * c; /* past 2^24 cells for small c */
+	case 5: return ( f - 0.5f ) * 4.0f * c;
+	default: return ( f - 0.5f ) * 16.0f * c;
+	}
+}
+
+static int same_output( void )
+{
+	int i;
+
+	if( cmp_count[0] != cmp_count[1] )
+		return 0;
+	for( i = 0; i < cmp_count[0]; i++ )
+	{
+		if( cmp_n[0][i] != cmp_n[1][i] || cmp_split[0][i] != cmp_split[1][i] )
+			return 0;
+		if( memcmp( &cmp_v[0][i * 4], &cmp_v[1][i * 4], cmp_n[0][i] * sizeof( nv2a_tri_vert_t )) != 0 )
+			return 0;
+	}
+	return 1;
+}
+
+static void test_wrap_matches_libm_form( void )
+{
+	static const float cells[] = { 1.0f, 2.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f, 24.0f, 100.0f, 0.75f, 3.3f };
+	long prims = 0, pieces = 0, cut = 0, differ = 0;
+	int side0 = 0, side1 = 1;
+	int i;
+
+	for( i = 0; i < 400000; i++ )
+	{
+		nv2a_tri_vert_t v[4];
+		uint32_t n = 3 + ( lcg() & 1u ), k;
+		float cu = cells[lcg() % ( sizeof( cells ) / sizeof( cells[0] ))];
+		float cv = cells[lcg() % ( sizeof( cells ) / sizeof( cells[0] ))];
+
+		/* A beam segment's shape half the time: u across [0, cu], v a
+		   short run somewhere along the scroll. */
+		if( lcg() & 1u )
+		{
+			float v0 = rand_coord( cv ), dv = (float)( lcg() % 1000u ) / 1000.0f * cv;
+			for( k = 0; k < n; k++ )
+				v[k] = vert( (float)( lcg() % 1000u ), (float)( lcg() % 1000u ), ( k & 1u ) ? cu : 0.0f, v0 + ( k >= 2 ? dv : 0.0f ), (unsigned char)( lcg() & 255u ));
+		}
+		else
+		{
+			for( k = 0; k < n; k++ )
+				v[k] = vert( (float)( lcg() % 1000u ), (float)( lcg() % 1000u ), rand_coord( cu ), rand_coord( cv ), (unsigned char)( lcg() & 255u ));
+		}
+
+		cmp_count[0] = cmp_count[1] = 0;
+		ref_wrap_primitive( v, n, cu, cv, collect_a, &side0 );
+		nv2a_efx_wrap_primitive( v, n, cu, cv, collect_a, &side1 );
+		prims++;
+		pieces += cmp_count[1];
+		if( cmp_count[1] && cmp_split[1][0] )
+			cut++;
+		if( !same_output())
+			differ++;
+	}
+
+	printf( "nv2a_efx_util: %ld primitives (%ld cut, %ld pieces) against the libm form, %ld different\n",
+		prims, cut, pieces, differ );
+	CHECK( differ == 0 );
+	CHECK( cut > 1000 && prims - cut > 1000 ); /* both paths exercised */
+}
+
 int main( void )
 {
 	test_frac_noise();
 	test_sine_noise();
 	test_wrap_one_cell();
 	test_wrap_split();
+	test_wrap_matches_libm_form();
 
 	if( failures )
 	{

@@ -5,6 +5,23 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: lightning and laser beams cost about a third less CPU (xemu)
+
+The frame-time recorder now breaks the effects pass down into beams,
+tracers and particles, and it showed where the time went: in xemu, a
+map with electric arcs (c1a0c, the test chamber in c1a0e) spent 2.2-2.4
+ms a frame on its 8-15 beams, and most of it in the step that cuts
+each beam's triangles at the edges of its texture. That step was
+calling a rounding function whose Xbox version changes the processor's
+rounding mode twice per call, four calls per triangle; it now rounds
+with a plain conversion that gives the same numbers. The cut triangles
+are also handed to the GPU's queue in groups instead of one at a time.
+The picture is the same (screenshots of arcs, the egon and the gauss in
+four maps matched pixel for pixel), and the beams pass went from 2.16 to
+1.41 ms a frame in c1a0c and from 2.41 to 1.56 in c1a0e, in xemu. The
+console's own numbers are still to be recorded. Tracers and particles
+turned out to be small (under 0.07 ms a frame each).
+
 ### Added - Xbox: the frame-time recorder times the particle pass
 
 The recorder now measures how long the renderer spends on particles
