@@ -5,6 +5,18 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - Xbox: the frame-time recorder times the particle pass
+
+The recorder now measures how long the renderer spends on particles
+each frame, and how much of that is the engine moving them
+(`part_kc`, `part_think_kc`); the report shows it per map next to the
+effects time. It answered whether particles were worth moving to the
+GPU: in xemu, during scripted fights with gunfire and grenades, they
+cost about 0.05 ms a frame (well under 1 us each), so they were not. A
+faster way of handing them to the GPU from the CPU was also tried: the
+picture was identical, but it saved nothing measurable, so it was left
+out. The console's own numbers are still to be recorded.
+
 ### Changed - Xbox: the menu fonts come back after a map load about 60 ms faster (xemu)
 
 At the end of every map load, behind the loading screen, the menu

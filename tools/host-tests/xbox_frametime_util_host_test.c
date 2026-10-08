@@ -178,11 +178,11 @@ static void test_encoders( void )
 	CHECK( XBOX_FT_W_CE_EVENTS_KC == 164 && XBOX_FT_W_CE_PITCH_KC == 165 && XBOX_FT_W_CE_SOLID_SKIPS == 166 );
 	/* The atlas fast path's count (2026-10-08, #157) after them. */
 	CHECK( XBOX_FT_W_TEX_FAST == 167 );
-	CHECK( XBOX_FT_W_COUNT == 168 );
-	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 704 && xbox_ft_frame_bytes( 0 ) == 32 );
+	CHECK( XBOX_FT_W_COUNT == 170 );
+	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 712 && xbox_ft_frame_bytes( 0 ) == 32 );
 	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_SPAN_CALLS ) == 112 );
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", XBOX_FT_W_COUNT ) == XBOX_FT_HEADER_BYTES );
-	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 704 );
+	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 712 );
 	/* Version 1 is the same header without counters. */
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", 0 ) == XBOX_FT_HEADER_BYTES );
 	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 );
@@ -208,15 +208,15 @@ static void test_encoders( void )
 	CHECK( xbox_ft_encode_frame( buf, &f, 0 ) == XBOX_FT_FRAME_BYTES );
 	CHECK( rd32( buf ) == 7 && buf[4] == 0xDD && buf[7] == 0xAA && rd32( buf + 24 ) == 6 );
 	CHECK( buf[28] == 0x01 && buf[29] == 0x80 && buf[30] == 0 && buf[31] == 0 );
-	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 704 );
+	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 712 );
 	CHECK( rd32( buf ) == 7 && buf[28] == 0x01 && buf[29] == 0x80 );
 	CHECK( rd32( buf + 32 ) == 0x01000000u && rd32( buf + 32 + 4 * XBOX_FT_W_LM_TEXELS ) == 0x01000000u + XBOX_FT_W_LM_TEXELS );
-	CHECK( rd32( buf + 700 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
+	CHECK( rd32( buf + 708 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
 
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, 0 ) == 16 );
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_FRAMES && rd32( buf + 4 ) == 8 + 3 * 32 && rd32( buf + 8 ) == 10 && rd32( buf + 12 ) == 3 );
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, XBOX_FT_W_COUNT ) == 16 );
-	CHECK( rd32( buf + 4 ) == 8 + 3 * 704 );
+	CHECK( rd32( buf + 4 ) == 8 + 3 * 712 );
 
 	/* The COUNTERS chunk: every name, NUL-padded to 16 bytes. */
 	CHECK( xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ) == 8 + 4 + XBOX_FT_W_COUNT * 16 );
@@ -277,7 +277,9 @@ static void test_encoders( void )
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_PITCH_KC, "ce_pitch_kc" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_SOLID_SKIPS, "ce_solid_skips" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_TEX_FAST, "tex_fast" ) == 0 );
-	CHECK( XBOX_FT_W_TEX_FAST == XBOX_FT_W_COUNT - 1 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PART_KC, "part_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PART_THINK_KC, "part_think_kc" ) == 0 );
+	CHECK( XBOX_FT_W_PART_THINK_KC == XBOX_FT_W_COUNT - 1 );
 	for( i = 0; i < XBOX_FT_W_COUNT; i++ )
 		CHECK( xbox_ft_work_names[i] && strlen( xbox_ft_work_names[i] ) < XBOX_FT_COUNTER_NAME_BYTES && buf[12 + 16 * i + 15] == 0 );
 
@@ -523,7 +525,7 @@ static void test_segments( void )
 	seg.tsc_open = 0x1122334455667788ull;
 	memset( buf, 0xCC, sizeof( buf ));
 	CHECK( xbox_ft_encode_header_v3( buf, 1024, 733000000u, 3375000u, 77, 42, 2, "build y", XBOX_FT_W_COUNT, &seg ) == XBOX_FT_HEADER_V3_BYTES );
-	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 && rd32( buf + 8 ) == 3 && rd32( buf + 12 ) == 256 && rd32( buf + 16 ) == 704 );
+	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 && rd32( buf + 8 ) == 3 && rd32( buf + 12 ) == 256 && rd32( buf + 16 ) == 712 );
 	CHECK( rd64( buf + 40 ) == 77 && rd64( buf + 48 ) == 42 && rd32( buf + 56 ) == 2 && strcmp( (const char *)buf + 64, "build y" ) == 0 );
 	CHECK( memcmp( buf + 128, id, 16 ) == 0 );
 	CHECK( rd32( buf + 144 ) == 4 && rd32( buf + 148 ) == XBOX_FT_SEG_SIZE && rd32( buf + 152 ) == 12345 && rd32( buf + 156 ) == 0 );
@@ -885,6 +887,9 @@ static int write_fixture_spans( const char *path )
 		f.work[XBOX_FT_W_CE_TENTS_KC] = 1;
 		f.work[XBOX_FT_W_CE_PITCH_KC] = 1;
 		f.work[XBOX_FT_W_CE_SOLID_SKIPS] = 2;
+		f.work[XBOX_FT_W_PARTICLES] = 40;
+		f.work[XBOX_FT_W_PART_KC] = 2;
+		f.work[XBOX_FT_W_PART_THINK_KC] = ( i & 1 ) ? 1 : 0; /* 0.5 a frame on average */
 		if( i == 40 )
 		{
 			k[XBOX_FT_S_SV_GAME] = 10;

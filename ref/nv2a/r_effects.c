@@ -62,9 +62,12 @@ static struct
 	uint c_particle_count;
 } nv2a_efx_stats;
 
-/* The RI.rvp fields, RI.v* vectors (RI.cull_v* are the same vectors on
-   the one pass this renderer draws, gl_rmain.c's R_SetupFrustum) and
-   tr.frametime / tr.palette the effects read - set by r_context.c. */
+/* The RI.rvp fields, RI.v* vectors and tr.frametime / tr.palette the
+   effects read - set by r_context.c. ref/gl's particles read
+   RI.cull_v* (gl_rpart.c:70-80), which R_SetupFrustum copies from RI.v*
+   only while r_lockfrustum is 0 (gl_rmain.c:349-355): its default, and a
+   cheat cvar this renderer does not have - the same reason as
+   divergences.md #98's eye origin. */
 static struct
 {
 	int     rvp_flags;
@@ -1438,8 +1441,17 @@ gl_rpart.c:47. update particle color, position, free expired and draw it
 */
 void CL_DrawParticles( double frametime, particle_t *cl_active_particles, float partsize )
 {
+	/* Recorder (x9-perf-particles, R6): part_kc times the whole pass,
+	   part_think_kc its CL_ThinkParticle calls - per particle, summed in
+	   ticks and rounded once (a think is far under a kilocycle). With the
+	   recorder off, one test per particle. */
+	xbox_ft_span_t part_span, think_span;
+	uint64_t think_ticks = 0;
+
 	if( !cl_active_particles )
 		return;	// nothing to draw?
+
+	xbox_ft_span_begin( &part_span );
 
 	nv2a_2d_desired.blend_enable = true;
 	nv2a_2d_desired.alpha_test_enable = false;
@@ -1492,11 +1504,26 @@ void CL_DrawParticles( double frametime, particle_t *cl_active_particles, float 
 			NV2A_FT_ADD( XBOX_FT_W_PARTICLES, 1 );
 		}
 
-		gEngfuncs.CL_ThinkParticle( frametime, p );
+		if( part_span.t0 )
+		{
+			xbox_ft_span_begin( &think_span );
+			gEngfuncs.CL_ThinkParticle( frametime, p );
+			think_ticks += xbox_ft_span_ticks_since( &think_span );
+		}
+		else
+		{
+			gEngfuncs.CL_ThinkParticle( frametime, p );
+		}
 	}
 
 	End();
 	nv2a_2d_desired.depth_mask = true;
+
+	if( part_span.t0 )
+	{
+		xbox_ft_time_add( &part_span, XBOX_FT_W_PART_KC );
+		NV2A_FT_ADD( XBOX_FT_W_PART_THINK_KC, ( think_ticks + 500u ) / 1000u );
+	}
 }
 
 /*

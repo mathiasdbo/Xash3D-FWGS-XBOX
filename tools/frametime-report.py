@@ -132,6 +132,9 @@ PM_TIMES = ("pm_sv_setup_kc", "pm_sv_move_kc", "pm_sv_query_kc", "pm_sv_think_kc
 # (k_cl_emit). The counts are exact in xemu; the _kc counters are times.
 CE_TIMES = ("ce_delta_kc", "ce_fields_kc", "ce_process_kc", "ce_link_kc", "ce_add_kc", "ce_tents_kc",
             "ce_events_kc", "ce_pitch_kc")
+# Particles (recorders from 2026-10-08, x9-perf-particles, plan item R6):
+# ref/nv2a's CL_DrawParticles, whole and its CL_ThinkParticle calls. Times.
+PART_TIMES = ("part_kc", "part_think_kc")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -1145,7 +1148,8 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
         return []
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
-    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES)
+    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES) \
+        | set(PART_TIMES)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1397,6 +1401,7 @@ def summary_text(rec, rows, sess):
     lines.extend(svgame_text(rec, rows))
     lines.extend(pmove_text(rec, rows))
     lines.extend(clents_text(rec, rows))
+    lines.extend(particles_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -1638,6 +1643,35 @@ def clents_text(rec, rows):
                          a.get("ce_fields_kc", 0) * k, a.get("ce_process_kc", 0) * k, sp.get("k_cl_emit", 0.0),
                          a.get("ce_link_kc", 0) * k, a.get("ce_add_kc", 0) * k, a.get("ce_tents_kc", 0) * k,
                          a.get("ce_events_kc", 0) * k, a.get("ce_pitch_kc", 0) * k))
+    return lines
+
+
+def particles_text(rec, rows):
+    """Particles per in-play frame (recorders from 2026-10-08): how many
+    ref/nv2a drew (exact in xemu), then the time in CL_DrawParticles split
+    into the engine's per-particle physics (CL_ThinkParticle) and the rest
+    - the billboard maths and the TriAPI appends - next to k_efx, which
+    contains it with the beams and tracers. Nothing for a session with no
+    particle drawn."""
+    if "part_kc" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r
+            and (r["work_avg"].get("particles", 0.0) or r["work_avg"].get("part_kc", 0.0))]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "particles per in-play frame: drawn avg/peak (exact in xemu); ms: k_efx, of it "
+             "CL_DrawParticles = think (CL_ThinkParticle) + draw (the rest); us per particle drawn"]
+    lines.append("%-18s %11s %7s %7s %7s %7s %8s" % ("map", "particles", "k_efx", "part", "think", "draw", "us/part"))
+    for r in maps:
+        a = r["work_avg"]
+        n = a.get("particles", 0.0)
+        part = a.get("part_kc", 0.0) * k
+        think = a.get("part_think_kc", 0.0) * k
+        lines.append("%-18s %11s %7.3f %7.3f %7.3f %7.3f %8s" % (
+            r["map"][:18], "%s/%s" % (short(n), short(r["work_peak"].get("particles", 0.0))),
+            r.get("span_ms", {}).get("k_efx", 0.0), part, think, part - think,
+            "%.2f" % (part * 1000.0 / n) if n else "-"))
     return lines
 
 

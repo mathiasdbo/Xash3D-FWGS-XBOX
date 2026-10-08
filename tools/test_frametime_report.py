@@ -529,7 +529,7 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 168)
+        self.assertEqual(len(r["counters"]), 170)
         self.assertEqual(r["counters"][20], "span_calls")
         self.assertEqual(len(r["spans"]), 73)
         # Counts after the spans (2026-10-02, R5) are plain counters.
@@ -547,7 +547,7 @@ class Spans(unittest.TestCase):
         self.assertEqual(r["counters"][153:158], ["ce_ents", "ce_deltas", "ce_nochange", "ce_fields", "ce_visents"])
         self.assertEqual(r["counters"][158:], ["ce_delta_kc", "ce_fields_kc", "ce_process_kc", "ce_link_kc",
                                                "ce_add_kc", "ce_tents_kc", "ce_events_kc", "ce_pitch_kc",
-                                               "ce_solid_skips", "tex_fast"])
+                                               "ce_solid_skips", "tex_fast", "part_kc", "part_think_kc"])
         self.assertNotIn("ce_ents", fr.span_names(r))
         self.assertNotIn("pm_sv_cmds", fr.span_names(r))
         self.assertNotIn("snd_loads", fr.span_names(r))
@@ -718,6 +718,9 @@ class Spans(unittest.TestCase):
         self.assertRegex(text, r"\nc1a0c +120 +30 +2 +150 +5\.0 +40 +2/2\n")
         self.assertIn("c1a0c              pkt 1.000: deltas 2.000 (fields 1.000) process 1.000 | "
                       "emit 0.000: link 3.000 (add 2.000) tents 1.000 events 0.000 pitch 1.000", text)
+        # Particles: 40 drawn, 2 ms in CL_DrawParticles of which 0.5 thinking.
+        self.assertIn("particles per in-play frame", text)
+        self.assertRegex(text, r"\nc1a0c +40/40 +0\.000 +2\.000 +0\.500 +1\.500 +50\.00(\n|$)")
         page = fr.render_html(self.rec, self.rows, s, ["spans.bin"], source="xemu")
         self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
         self.assertIn('id="spans"', page)
@@ -822,7 +825,7 @@ class Sessions(unittest.TestCase):
         self.assertTrue(s["id"].startswith(s["short"]))
         self.assertEqual(fr.systime_date(s["systime"]).year, 2022)
         self.assertEqual(r["end"], {"tsc": r["end"]["tsc"], "lost": 1, "next": fr.SEG_SIZE})
-        self.assertEqual(len(r["counters"]), 168)            # every segment has its own COUNTERS ...
+        self.assertEqual(len(r["counters"]), 170)            # every segment has its own COUNTERS ...
         self.assertEqual(len(r["spans"]), 73)                # ... and SPANS
         self.assertEqual(self.seg[3]["session"]["reason"], fr.SEG_SIZE)
         self.assertEqual(self.seg[3]["end"]["next"], fr.SEG_SESSION)

@@ -440,6 +440,12 @@ enum
 	XBOX_FT_W_CE_PITCH_KC,   /* time: in k_cl_emit, CL_SetIdealPitch - up to six CL_TraceLine calls down ahead of the player */
 	XBOX_FT_W_CE_SOLID_SKIPS,/* of pm_cl_solids, the CL_SetSolidEntities calls that found the lists current (#156) */
 	XBOX_FT_W_TEX_FAST,      /* of tex_loads, the menu's glyph atlases ref/nv2a uploaded straight from their cached TGA (2026-10-08, #157) */
+	/* Particles (2026-10-08, x9-perf-particles, plan item R6): where
+	   k_efx's particle pass goes. CL_DrawParticles interleaves its draw
+	   with the engine's per-particle physics (CL_ThinkParticle), so the
+	   draw is part_kc minus part_think_kc. */
+	XBOX_FT_W_PART_KC,       /* time: kilocycles in ref/nv2a's CL_DrawParticles, its CL_ThinkParticle calls included */
+	XBOX_FT_W_PART_THINK_KC, /* time: of that, the CL_ThinkParticle calls (one rdtsc pair per particle, summed before rounding) */
 	XBOX_FT_W_END
 };
 

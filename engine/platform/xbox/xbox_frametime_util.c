@@ -72,6 +72,7 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"ce_link_kc", "ce_add_kc", "ce_tents_kc", "ce_events_kc", "ce_pitch_kc",
 	"ce_solid_skips",
 	"tex_fast",
+	"part_kc", "part_think_kc",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,

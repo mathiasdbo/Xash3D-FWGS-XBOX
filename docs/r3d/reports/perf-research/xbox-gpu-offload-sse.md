@@ -436,6 +436,13 @@ on counts, which are identical in xemu (`frametime-recorder.md:139-148`).
 - **Measured by:** xemu for `particles` and `tri_appends`; hardware-only for
   `particles_kcyc`.
 - **divergences.md:** amend #161 (ref/nv2a, form 1).
+- **Measured (2026-10-08, x9-perf-particles, divergences.md #158): not
+  built.** xemu, scripted combat in c1a0c, c1a0e, c1a1b and c2a2a: 45-71
+  particles a frame (peak 216), the whole `CL_DrawParticles` pass
+  0.04-0.06 ms a frame, of it about 0.015 ms `CL_ThinkParticle`. A CPU
+  alternative (quads built directly, appended 64 at a time) was
+  pixel-identical and gained nothing measurable, so it was withdrawn too.
+  The recorder's `part_kc`/`part_think_kc` give the console's split.
 
 ### R7: MMX in the software mixer's final stages, gated on `snd_kcyc`
 
