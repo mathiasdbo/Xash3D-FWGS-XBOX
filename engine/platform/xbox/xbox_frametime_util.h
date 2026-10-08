@@ -21,37 +21,74 @@ file is host-tested (tools/host-tests/xbox_frametime_util_host_test.c) and
 the same encoder writes the fixture tools/frametime-report.py's own tests
 parse. The recorder that drives it is xbox_frametime.c.
 
-File format (version 2; every integer little-endian, the Xbox's own byte
+File format (version 3; every integer little-endian, the Xbox's own byte
 order - the encoder below writes bytes explicitly, so a host of either
 endianness produces the same file). Version 1 is the same file without
 work counters: 32-byte frame records and no COUNTERS chunk. The encoders
 still write it when given zero counters (the tests' v1 fixture).
+Version 2 is one file per recording (ft_NNN.bin) with the 128-byte
+header below; version 3 (2026-10-07) is the same chunks split into
+SEGMENTS - one file per map and per XBOX_FT_SEGMENT_MB of recording,
+named ft_<label>_<session>_<seq>.bin - each with the 256-byte header
+(the v2 fields, then the session's id, the label, the segment's number
+and why it began) and its own COUNTERS and SPANS chunks, so every
+segment reads on its own and a reader stitches a session back together
+by session id and segment number. xbox_ft_encode_header still writes
+v1/v2 headers (the tests' older fixtures); xbox_ft_encode_segment_open
+writes v3.
 
-  header, XBOX_FT_HEADER_BYTES (128):
+  header, XBOX_FT_HEADER_BYTES (128; v3: XBOX_FT_HEADER_V3_BYTES, 256):
     0  char[8] magic "R3DFTIME"
-    8  u32 version (2; 1 without counters)
-    12 u32 header bytes (128)
+    8  u32 version (3; 2 for a single-file recording, 1 without counters)
+    12 u32 header bytes (128; v3 256 - a reader starts the chunks here)
     16 u32 frame record bytes (32 + 4 x the counter count; 32 in v1)
     20 u32 ring frames (the recorder's in-memory ring size)
     24 u64 TSC rate estimate at open, Hz (nominal until calibrated -
            the CALIB chunks are the real calibration)
     32 u64 performance-counter rate, Hz (KeQueryPerformanceFrequency)
-    40 u64 TSC at open
-    48 u64 performance counter at open
+    40 u64 TSC at open (v3: when the SESSION opened - the same in every
+           segment, so each one calibrates over the whole session so far)
+    48 u64 performance counter at open (v3: the session's, likewise)
     56 u32 mode (host_frametime_analysis at open: 1 record, 2 overlay)
     60 u32 reserved (0)
-    64 char[64] build id, NUL-padded
+    64 char[64] build id, NUL-padded (the XBE's link timestamp in it)
+  v3 only:
+    128 u8[16] session id (XBOX_FT_SESSION_ID_BYTES; xbox_ft_session_id:
+           the kernel clock, the TSC and the performance counter mixed,
+           version/variant bits set like a random UUID); the file name
+           carries its first 4 bytes as 8 lowercase hex digits
+    144 u32 segment number (0 for the session's first)
+    148 u32 why the segment began (XBOX_FT_SEG_*: 0 the session started,
+           1 a map started, 2 the previous segment reached its size cap)
+    152 u32 the sequence number of the first frame it holds (the next
+           frame after the previous segment's last - a reader checks the
+           seam)
+    156 u32 reserved (0)
+    160 u64 TSC when the segment opened
+    168 u64 kernel system time when the session opened (KeQuerySystemTime:
+           100 ns units since 1601-01-01; the console's clock, so only as
+           right as it was set)
+    176 char[32] label (host_frametime_label sanitised: [A-Za-z0-9_-],
+           at most XBOX_FT_LABEL_MAX characters, "untagged" when empty),
+           NUL-padded
+    208 48 bytes reserved (0)
   then chunks until end of file, each { u32 type, u32 payload bytes,
   payload }; a reader skips a type it does not know by its length:
     1 FRAMES  u32 first sequence number, u32 count, count frame records
     2 MAP     u64 TSC at map start, u64 load ticks, u32 free pages when
               the load began, u32 free pages at map start, u32 total
               pages, u32 flags (bit 0: no load start seen - the first map
-              after recording began), char[64] map name
+              after recording began; bit 1, v3: the map CONTINUES from
+              the previous segment, which the size cap closed - the first
+              chunk of such a segment, so it reads on its own; a reader
+              stitching the session drops it), char[64] map name
     3 CALIB   u64 TSC, u64 performance counter (one per flush)
-    4 END     u64 TSC, u32 frames lost to a full ring, u32 reserved -
-              written when recording stops cleanly (a file without it
-              was cut by a power-off or a crash)
+    4 END     u64 TSC, u32 frames lost to a full ring, u32 why the file
+              ended (v3: XBOX_FT_SEG_* of the segment that follows it, 0
+              when the session ended; older files 0) - written when
+              recording stops cleanly or a segment closes (a file without
+              it was cut by a power-off or a crash). v3: the frames lost
+              while that segment was open; older files: in the recording
     5 COUNTERS (v2, right after the header, before any FRAMES chunk)
               u32 count, then count x char[16] names, NUL-padded: the
               names of the work counters at the end of every frame
@@ -111,9 +148,11 @@ still write it when given zero counters (the tests' v1 fixture).
 #include <stddef.h>
 #include <stdint.h>
 
-#define XBOX_FT_VERSION        2u
+#define XBOX_FT_VERSION        3u   /* segments (2026-10-07) */
+#define XBOX_FT_VERSION_SINGLE 2u   /* one file per recording, the 128-byte header */
 #define XBOX_FT_VERSION_NO_WORK 1u   /* a file without work counters */
 #define XBOX_FT_HEADER_BYTES   128u
+#define XBOX_FT_HEADER_V3_BYTES 256u
 #define XBOX_FT_FRAME_BYTES    32u   /* the fixed part; v2 appends 4 bytes per counter */
 #define XBOX_FT_COUNTER_NAME_BYTES 16u
 #define XBOX_FT_CHUNK_BYTES    8u  /* type + payload length */
@@ -443,6 +482,9 @@ uint64_t xbox_ft_span_self( const uint64_t *span, uint64_t *self );
 #define XBOX_FT_F_LOAD       0x0020u
 
 #define XBOX_FT_MAP_F_NO_LOAD_START 0x0001u
+/* v3: the map continues from the previous segment (the size cap closed
+   it mid-map). Written with NO_LOAD_START: there is no load to time. */
+#define XBOX_FT_MAP_F_CONTINUED     0x0002u
 
 /* The overlay's and the report's two guidelines, microseconds. A frame
    counts as "over" a guideline when it is strictly longer (a frame at
@@ -613,5 +655,91 @@ typedef struct xbox_ft_note_s
    count x { u32 seq, u32 kind, u32 kilocycles, u32 bytes, char[48]
    name } - XBOX_FT_NOTES_CHUNK_BYTES( count ) bytes, and returns that. */
 size_t xbox_ft_encode_notes( uint8_t *out, const xbox_ft_note_t *notes, uint32_t count, uint32_t dropped );
+
+/* Sessions and segments (version 3, 2026-10-07). A SESSION is one run of
+   the recorder: from host_frametime_analysis going non-zero to it going
+   back to 0 or the game quitting. It is written as SEGMENTS, one file
+   each, which the recorder rotates to at each map start (the new map's
+   MAP chunk opens the new segment) and when a segment passes the size
+   cap at a flush (the new one opens with a MAP chunk flagged
+   XBOX_FT_MAP_F_CONTINUED). Each segment has its own header, COUNTERS
+   and SPANS chunks, so it parses on its own; a crash loses only the end
+   of the segment being written, and a fetch can take just the new ones.
+
+   The file name, at most XBOX_FT_FILE_NAME_MAX characters (FATX's limit
+   for one name):
+     ft_<label>_<session>_<seq>.bin
+       "ft_"       3   kept from the single-file names, so a listing or a
+                       fetch filter still finds every recording
+       label       1-22 (XBOX_FT_LABEL_MAX) host_frametime_label sanitised
+       "_"         1
+       session     8   the id's first 4 bytes, lowercase hex
+       "_"         1
+       seq         3   the segment number, decimal, zero-padded
+                       (XBOX_FT_SEGMENT_SEQ_MAX segments per session)
+       ".bin"      4
+   = 20 + label, so a 22-character label makes exactly 42. The label may
+   itself contain '_': a reader splits the name from the right. */
+#define XBOX_FT_SESSION_ID_BYTES 16u
+#define XBOX_FT_SESSION_HEX      8u    /* hex digits of the id in a file name */
+#define XBOX_FT_LABEL_BYTES      32u   /* the header's label field */
+#define XBOX_FT_LABEL_MAX        22u   /* label characters that fit the name */
+#define XBOX_FT_SEGMENT_SEQ_MAX  999u  /* three digits */
+#define XBOX_FT_FILE_NAME_MAX    42u   /* FATX: characters in one file name */
+#define XBOX_FT_LABEL_EMPTY      "untagged"
+
+/* Why a segment began (header) - and, in an END chunk, why the file
+   ended: the reason the NEXT segment begins, 0 when the session ended. */
+#define XBOX_FT_SEG_SESSION      0u    /* the session started (END: it stopped) */
+#define XBOX_FT_SEG_MAP          1u    /* a map started */
+#define XBOX_FT_SEG_SIZE         2u    /* the previous segment reached the size cap */
+
+typedef struct xbox_ft_segment_s
+{
+	uint8_t session[XBOX_FT_SESSION_ID_BYTES];
+	uint64_t systime;           /* KeQuerySystemTime at the session's start */
+	char label[XBOX_FT_LABEL_BYTES]; /* sanitised (xbox_ft_label_sanitise) */
+	uint32_t seq;               /* this segment's number in the session */
+	uint32_t reason;            /* XBOX_FT_SEG_*: why it began */
+	uint32_t first_frame;       /* the sequence number of its first frame */
+	uint64_t tsc_open;          /* TSC when it opened */
+} xbox_ft_segment_t;
+
+/* Writes `label` (any string, NULL allowed) as a name part into `out`
+   (room for XBOX_FT_LABEL_MAX + 1): letters, digits, '-' and '_' kept;
+   every run of other characters becomes one '-'; leading and trailing
+   '-'/'_' dropped; cut to XBOX_FT_LABEL_MAX (trailing '-'/'_' dropped
+   again); XBOX_FT_LABEL_EMPTY when nothing is left. Returns its length. */
+size_t xbox_ft_label_sanitise( const char *label, char *out );
+/* A session id from `n` values that differ between sessions (the kernel
+   clock, the TSC, the performance counter...): two 64-bit mixes of all of
+   them, with the version (4) and variant bits a random UUID has. */
+void xbox_ft_session_id( const uint64_t *inputs, uint32_t n, uint8_t id[XBOX_FT_SESSION_ID_BYTES] );
+/* The segment's file name, without a directory, into `out` (room for
+   XBOX_FT_FILE_NAME_MAX + 1): ft_<label>_<8 hex>_<seq>.bin, `label`
+   sanitised again (so any string is safe) and `seq` clamped to
+   XBOX_FT_SEGMENT_SEQ_MAX. Returns its length, at most
+   XBOX_FT_FILE_NAME_MAX. */
+size_t xbox_ft_segment_name( char *out, const char *label, const uint8_t id[XBOX_FT_SESSION_ID_BYTES], uint32_t seq );
+/* Whether to close the segment being written and open the next, decided
+   right after a flush: at a map start when the segment already holds
+   frames (XBOX_FT_SEG_MAP - a map that starts in an empty segment, the
+   first one after recording began mid-load, stays in it), otherwise when
+   it holds `cap_bytes` or more (XBOX_FT_SEG_SIZE; `cap_bytes` 0: no cap).
+   0: keep writing it. */
+uint32_t xbox_ft_segment_rotation( int map_start, uint32_t seg_frames, uint64_t seg_bytes, uint64_t cap_bytes );
+
+/* A v3 header: the v2 fields (`tsc_open`/`qpc_open` are the SESSION's)
+   and the segment's. */
+size_t xbox_ft_encode_header_v3( uint8_t *out, uint32_t ring_frames, uint64_t tsc_hz, uint64_t qpc_hz, uint64_t tsc_open, uint64_t qpc_open, uint32_t mode, const char *build, uint32_t counters, const xbox_ft_segment_t *seg );
+/* Everything a segment opens with: the v3 header, the COUNTERS chunk and
+   the SPANS chunk for `counters` counters - at most
+   XBOX_FT_SEGMENT_OPEN_BYTES. */
+#define XBOX_FT_SEGMENT_OPEN_BYTES ( XBOX_FT_HEADER_V3_BYTES + XBOX_FT_CHUNK_BYTES + 4u + XBOX_FT_W_COUNT * XBOX_FT_COUNTER_NAME_BYTES + XBOX_FT_SPANS_CHUNK_BYTES )
+size_t xbox_ft_encode_segment_open( uint8_t *out, uint32_t ring_frames, uint64_t tsc_hz, uint64_t qpc_hz, uint64_t tsc_open, uint64_t qpc_open, uint32_t mode, const char *build, uint32_t counters, const xbox_ft_segment_t *seg );
+/* The END chunk with the reason the file ended (XBOX_FT_SEG_* of the
+   segment that follows; XBOX_FT_SEG_SESSION: the session stopped).
+   xbox_ft_encode_end is this with XBOX_FT_SEG_SESSION. */
+size_t xbox_ft_encode_segment_end( uint8_t *out, uint64_t tsc, uint32_t lost, uint32_t next );
 
 #endif /* XBOX_FRAMETIME_UTIL_H */

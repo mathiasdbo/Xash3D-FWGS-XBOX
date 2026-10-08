@@ -449,6 +449,101 @@ static void test_notes( void )
 	CHECK( rd32( buf + 80 + 4 ) == XBOX_FT_NOTE_MSG && buf[80 + 16] == 'y' && buf[80 + 16 + 46] == 'y' && buf[80 + 16 + 47] == 0 );
 }
 
+/* Sessions and segments (v3, 2026-10-07): the label's sanitising, the
+   session id, the file name and its 42-character budget, the rotation
+   decision and the v3 header's bytes. */
+static void test_segments( void )
+{
+	static uint8_t buf[XBOX_FT_SEGMENT_OPEN_BYTES + 64];
+	char out[64];
+	uint8_t id[XBOX_FT_SESSION_ID_BYTES], id2[XBOX_FT_SESSION_ID_BYTES];
+	uint64_t in[3] = { 1, 2, 3 };
+	xbox_ft_segment_t seg;
+	size_t n;
+
+	/* The label: kept, replaced (one '-' per run), trimmed, cut, empty. */
+	CHECK( xbox_ft_label_sanitise( "pr190-clents", out ) == 12 && strcmp( out, "pr190-clents" ) == 0 );
+	CHECK( xbox_ft_label_sanitise( "route_c0a0", out ) == 10 && strcmp( out, "route_c0a0" ) == 0 );
+	CHECK( xbox_ft_label_sanitise( "PR #190: clents!", out ) && strcmp( out, "PR-190-clents" ) == 0 );
+	CHECK( xbox_ft_label_sanitise( "  --x9 perf.saves__ ", out ) && strcmp( out, "x9-perf-saves" ) == 0 );
+	CHECK( xbox_ft_label_sanitise( "", out ) == 8 && strcmp( out, XBOX_FT_LABEL_EMPTY ) == 0 );
+	CHECK( xbox_ft_label_sanitise( NULL, out ) == 8 && strcmp( out, "untagged" ) == 0 );
+	CHECK( xbox_ft_label_sanitise( " .:/ ", out ) == 8 && strcmp( out, "untagged" ) == 0 );
+	CHECK( xbox_ft_label_sanitise( "abcdefghijklmnopqrstuvwxyz", out ) == XBOX_FT_LABEL_MAX && strcmp( out, "abcdefghijklmnopqrstuv" ) == 0 );
+	/* Cut right after a separator: the separator goes too. */
+	CHECK( xbox_ft_label_sanitise( "abcdefghijklmnopqrstu_vwxyz", out ) == 21 && strcmp( out, "abcdefghijklmnopqrstu" ) == 0 );
+
+	/* The id: deterministic in its inputs, different for different ones,
+	   and marked as a version-4 UUID. */
+	xbox_ft_session_id( in, 3, id );
+	xbox_ft_session_id( in, 3, id2 );
+	CHECK( memcmp( id, id2, sizeof( id )) == 0 );
+	in[1] = 4;
+	xbox_ft_session_id( in, 3, id2 );
+	CHECK( memcmp( id, id2, 4 ) != 0 );
+	CHECK(( id[6] >> 4 ) == 4 && ( id[8] & 0xC0u ) == 0x80u );
+
+	/* The name: ft_<label>_<8 hex>_<seq>.bin, 20 + the label. */
+	memset( id, 0, sizeof( id ));
+	id[0] = 0x0a; id[1] = 0xbc; id[2] = 0xde; id[3] = 0xf1; id[4] = 0xff;
+	n = xbox_ft_segment_name( out, "pr190-clents", id, 7 );
+	CHECK( n == 32 && strcmp( out, "ft_pr190-clents_0abcdef1_007.bin" ) == 0 );
+	n = xbox_ft_segment_name( out, "", id, 0 );
+	CHECK( strcmp( out, "ft_untagged_0abcdef1_000.bin" ) == 0 && n == 28 );
+	/* The longest: a 22-character label and the last segment number
+	   make exactly FATX's 42; a longer label or number cannot pass it. */
+	n = xbox_ft_segment_name( out, "abcdefghijklmnopqrstuvwxyz0123", id, 5000 );
+	CHECK( n == XBOX_FT_FILE_NAME_MAX && strlen( out ) == 42 );
+	CHECK( strcmp( out, "ft_abcdefghijklmnopqrstuv_0abcdef1_999.bin" ) == 0 );
+	n = xbox_ft_segment_name( out, "a b", id, 123 );
+	CHECK( strcmp( out, "ft_a-b_0abcdef1_123.bin" ) == 0 );
+
+	/* Rotation: at a map start only when the segment has frames; else at
+	   the cap, none without one. */
+	CHECK( xbox_ft_segment_rotation( 1, 0, 5000, 0 ) == 0 );
+	CHECK( xbox_ft_segment_rotation( 1, 1, 10, 0 ) == XBOX_FT_SEG_MAP );
+	CHECK( xbox_ft_segment_rotation( 1, 1, 1u << 30, 1024 ) == XBOX_FT_SEG_MAP );
+	CHECK( xbox_ft_segment_rotation( 0, 100, 1023, 1024 ) == 0 );
+	CHECK( xbox_ft_segment_rotation( 0, 100, 1024, 1024 ) == XBOX_FT_SEG_SIZE );
+	CHECK( xbox_ft_segment_rotation( 0, 0, 4096, 1024 ) == XBOX_FT_SEG_SIZE );
+	CHECK( xbox_ft_segment_rotation( 0, 100, (uint64_t)1 << 40, 0 ) == 0 );
+
+	/* The v3 header: the v2 fields with version 3 and 256 bytes, then
+	   the segment's. */
+	memset( &seg, 0, sizeof( seg ));
+	memcpy( seg.session, id, sizeof( id ));
+	seg.systime = 0x01DC000000000001ull;
+	strcpy( seg.label, "pr190-clents" );
+	seg.seq = 4;
+	seg.reason = XBOX_FT_SEG_SIZE;
+	seg.first_frame = 12345;
+	seg.tsc_open = 0x1122334455667788ull;
+	memset( buf, 0xCC, sizeof( buf ));
+	CHECK( xbox_ft_encode_header_v3( buf, 1024, 733000000u, 3375000u, 77, 42, 2, "build y", XBOX_FT_W_COUNT, &seg ) == XBOX_FT_HEADER_V3_BYTES );
+	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 && rd32( buf + 8 ) == 3 && rd32( buf + 12 ) == 256 && rd32( buf + 16 ) == 700 );
+	CHECK( rd64( buf + 40 ) == 77 && rd64( buf + 48 ) == 42 && rd32( buf + 56 ) == 2 && strcmp( (const char *)buf + 64, "build y" ) == 0 );
+	CHECK( memcmp( buf + 128, id, 16 ) == 0 );
+	CHECK( rd32( buf + 144 ) == 4 && rd32( buf + 148 ) == XBOX_FT_SEG_SIZE && rd32( buf + 152 ) == 12345 && rd32( buf + 156 ) == 0 );
+	CHECK( rd64( buf + 160 ) == 0x1122334455667788ull && rd64( buf + 168 ) == 0x01DC000000000001ull );
+	CHECK( strcmp( (const char *)buf + 176, "pr190-clents" ) == 0 && buf[207] == 0 );
+	{
+		int zero = 1, i;
+
+		for( i = 208; i < 256; i++ )
+			zero &= buf[i] == 0;
+		CHECK( zero && buf[256] == 0xCC );
+	}
+	/* What a segment opens with: the header, COUNTERS, SPANS - within
+	   the bound the recorder's encode buffer is checked against. */
+	n = xbox_ft_encode_segment_open( buf, 1024, 733000000u, 3375000u, 77, 42, 2, "build y", XBOX_FT_W_COUNT, &seg );
+	CHECK( n == 256 + 8 + 4 + XBOX_FT_W_COUNT * 16 + 8 + 4 + XBOX_FT_S_COUNT * 32 && n <= XBOX_FT_SEGMENT_OPEN_BYTES );
+	CHECK( rd32( buf + 256 ) == XBOX_FT_CHUNK_COUNTERS && rd32( buf + 256 + 12 + XBOX_FT_W_COUNT * 16 ) == XBOX_FT_CHUNK_SPANS );
+
+	/* END says what follows; the plain encoder is "the session ended". */
+	CHECK( xbox_ft_encode_segment_end( buf, 9, 3, XBOX_FT_SEG_MAP ) == 24 && rd32( buf + 16 ) == 3 && rd32( buf + 20 ) == XBOX_FT_SEG_MAP );
+	CHECK( xbox_ft_encode_end( buf, 9, 3 ) == 24 && rd32( buf + 20 ) == XBOX_FT_SEG_SESSION );
+}
+
 /* A recording the Python parser test knows the contents of: 1 MHz TSC
    (a tick is a microsecond), map "c1a0" loaded in 2.5 s with 6000 free
    pages before and 5500 after, then 40 frames of 20 ms (16 CPU, 3 GPU),
@@ -824,6 +919,223 @@ static int write_fixture_spans( const char *path )
 	return fclose( fp ) != 0;
 }
 
+/* The session fixtures (v3, 2026-10-07; tools/test_frametime_report.py,
+   class Sessions). One recording, 1 MHz TSC, written twice: as the
+   recorder's segments and as one file as the single-file recorder wrote
+   it, so the report's stitched session can be compared with the single
+   file field by field. Frames (`slow` adds 5 ms to every 20 ms frame):
+     seq 0..9     before the first map: not active, 10 ms (host 9)
+     seq 10..56   c1a0 in play, 20 ms (host 18, GPU 2); seq 33 a flush
+                  frame; seq 50 a 400 ms stall inside Host_Frame (host
+                  399) with a note (sound "fvox/flatline.wav" 120 ms)
+     seq 57       the changelevel frame: LOAD, 500 ms, host 10
+     seq 58       the last frame starting in play: 100 ms, host 10
+     seq 59..63   loading: not active, 100 ms (host 90)
+     seq 64..139  c1a0e in play, 20 ms; seq 80 lost (a gap, counted in
+                  the END); seq 120 a 300 ms frame with host 10 (between
+                  frames: a stall, no load after it) and a note (message
+                  "svc_sound" 30 ms)
+   Every frame carries the counters: draws = 100 + seq, k_sv_game = 4 ms
+   (seq 50: 300), studio_models = 10, g_worst_cls = 1. Classes: c1a0
+   monster_scientist 100 runs, 2000 phys kc; c1a0e func_door 40 runs
+   (60 in the second part), 500 phys kc (300), worst 7 (9).
+   Segments: 000 the menu frames 0..9 (END: a map follows), 001 MAP c1a0
+   and 10..63, CLASSES (END: a map follows), 002 MAP c1a0e and 64..99,
+   CLASSES of that part (END: the size cap), 003 MAP c1a0e CONTINUED,
+   100..139, CLASSES (END: the session stopped); each note is in the
+   segment that holds its frame, before the frames. A CALIB
+   pair closes each segment's frames, as a flush writes it. The single
+   file: a v2 header, COUNTERS, SPANS, then the same chunks without the
+   headers, the ENDs but the last and the CONTINUED map, and with c1a0e's
+   two CLASSES parts as the one chunk the single-file recorder wrote. */
+static uint64_t sess_frame( uint32_t i, int slow, xbox_ft_frame_t *f )
+{
+	memset( f, 0, sizeof( *f ));
+	f->seq = i;
+	if( i < 10 )
+	{
+		f->total = 10000; f->host = 9000;
+	}
+	else if( i < 57 || ( i >= 64 && i < 140 ))
+	{
+		f->flags = XBOX_FT_F_ACTIVE;
+		f->total = 20000 + ( slow ? 5000 : 0 );
+		f->host = f->total - 2000;
+		f->gpu = 2000;
+		if( i == 33 )
+			f->flags |= XBOX_FT_F_FLUSH;
+		if( i == 50 )
+		{
+			f->total = 400000; f->host = 399000;
+		}
+		if( i == 120 )
+		{
+			f->total = 300000; f->host = 10000;
+		}
+	}
+	else if( i == 57 || i == 58 )
+	{
+		f->flags = XBOX_FT_F_ACTIVE | ( i == 57 ? XBOX_FT_F_LOAD : 0 );
+		f->total = i == 57 ? 500000 : 100000;
+		f->host = 10000;
+	}
+	else
+	{
+		f->total = 100000; f->host = 90000;
+	}
+	f->work[XBOX_FT_W_DRAWS] = 100 + i;
+	f->work[XBOX_FT_W_STUDIO_MODELS] = 10;
+	f->work[XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SV_GAME] = i == 50 ? 300 : 4;
+	f->work[XBOX_FT_W_SPAN_FIRST + XBOX_FT_S_SV] = i == 50 ? 300 : 4;
+	f->work[XBOX_FT_W_G_WORST_CLS] = 1;
+	return f->total;
+}
+
+/* Frames [a, b) as a FRAMES chunk, then a CALIB pair at the time after
+   them. `*tsc` is the session's clock. Seq 80 is lost the way the ring
+   loses one: the flush point moves past it, so the frames around it are
+   two chunks and the gap is between them. */
+static void sess_frames( FILE *fp, uint32_t a, uint32_t b, int slow, uint64_t *tsc )
+{
+	uint8_t buf[XBOX_FT_CHUNK_BYTES + 8u + 700u];
+	xbox_ft_frame_t f;
+	uint32_t i;
+
+	for( i = a; i < b; i++ )
+	{
+		uint64_t t;
+
+		if( i == a || i == 81 )
+		{
+			uint32_t end = ( i < 80 && 80 < b ) ? 80 : b;
+
+			fwrite( buf, 1, xbox_ft_encode_frames_chunk_head( buf, i, end - i, XBOX_FT_W_COUNT ), fp );
+		}
+		t = sess_frame( i, slow, &f );
+		*tsc += t;
+		if( i == 80 )
+			continue;
+		fwrite( buf, 1, xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ), fp );
+	}
+	fwrite( buf, 1, xbox_ft_encode_calib( buf, *tsc, *tsc ), fp );
+}
+
+static void sess_classes( FILE *fp, const char *name, uint32_t movetype, uint32_t runs, uint64_t phys, uint64_t worst )
+{
+	uint8_t buf[256];
+	xbox_ft_class_t c[2];
+
+	memset( c, 0, sizeof( c ));
+	strcpy( c[0].name, "monster_scientist" );
+	c[0].movetype = 4;
+	strcpy( c[1].name, "func_door" );
+	c[1].movetype = 7;
+	c[strcmp( name, "func_door" ) == 0].runs = runs;
+	c[strcmp( name, "func_door" ) == 0].phys = phys * 1000u;
+	c[strcmp( name, "func_door" ) == 0].worst = worst * 1000u;
+	fwrite( buf, 1, xbox_ft_encode_classes( buf, c, 2 ), fp );
+}
+
+static void sess_note( FILE *fp, uint32_t seq, uint32_t kind, uint32_t kc, const char *name )
+{
+	uint8_t buf[256];
+	xbox_ft_note_t n;
+
+	memset( &n, 0, sizeof( n ));
+	n.seq = seq;
+	n.kind = kind;
+	n.kcyc = kc;
+	n.bytes = 1000;
+	strcpy( n.name, name );
+	fwrite( buf, 1, xbox_ft_encode_notes( buf, &n, 1, 0 ), fp );
+}
+
+/* Writes the session's segments into directory `dir` (their names are
+   the recorder's), or with `single` the one file at `dir`. */
+static int write_session( const char *dir, const char *label, uint64_t id_input, int slow, int single )
+{
+	static uint8_t buf[XBOX_FT_SEGMENT_OPEN_BYTES];
+	xbox_ft_segment_t seg;
+	uint64_t tsc = 0, in[1] = { id_input };
+	char name[XBOX_FT_FILE_NAME_MAX + 1], path[512];
+	FILE *fp = NULL;
+	uint32_t s;
+	int bad = 0;
+
+	memset( &seg, 0, sizeof( seg ));
+	xbox_ft_session_id( in, 1, seg.session );
+	seg.systime = 133000000000000000ull + id_input; /* 2022-06-22 */
+	xbox_ft_label_sanitise( label, seg.label );
+
+	if( single )
+	{
+		if( !( fp = fopen( dir, "wb" )))
+			return 1;
+		fwrite( buf, 1, xbox_ft_encode_header( buf, 1024, 1000000u, 1000000u, 0, 0, 1, "session", XBOX_FT_W_COUNT ), fp );
+		fwrite( buf, 1, xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ), fp );
+		fwrite( buf, 1, xbox_ft_encode_spans( buf, XBOX_FT_W_COUNT ), fp );
+	}
+
+	for( s = 0; s < 4; s++ )
+	{
+		static const uint32_t first[5] = { 0, 10, 64, 100, 140 };
+		static const uint32_t reason[4] = { XBOX_FT_SEG_SESSION, XBOX_FT_SEG_MAP, XBOX_FT_SEG_MAP, XBOX_FT_SEG_SIZE };
+
+		if( !single )
+		{
+			seg.seq = s;
+			seg.reason = reason[s];
+			seg.first_frame = first[s];
+			seg.tsc_open = tsc;
+			xbox_ft_segment_name( name, seg.label, seg.session, s );
+			snprintf( path, sizeof( path ), "%s/%s", dir, name );
+			if( !( fp = fopen( path, "wb" )))
+				return 1;
+			fwrite( buf, 1, xbox_ft_encode_segment_open( buf, 1024, 1000000u, 1000000u, 0, 0, 1, "session", XBOX_FT_W_COUNT, &seg ), fp );
+		}
+		if( s == 1 )
+			fwrite( buf, 1, xbox_ft_encode_map( buf, tsc, 2000000u, 6000, 5500, 16384, 0, "c1a0" ), fp );
+		else if( s == 2 )
+			fwrite( buf, 1, xbox_ft_encode_map( buf, tsc, 1500000u, 5500, 5400, 16384, 0, "c1a0e" ), fp );
+		else if( s == 3 && !single )
+			fwrite( buf, 1, xbox_ft_encode_map( buf, tsc, 0, 0, 5300, 16384,
+				XBOX_FT_MAP_F_NO_LOAD_START | XBOX_FT_MAP_F_CONTINUED, "c1a0e" ), fp );
+		/* The notes come first in a flush, in the segment their frame is
+		   flushed to; each names its frame. */
+		if( s == 1 )
+			sess_note( fp, 50, XBOX_FT_NOTE_SOUND, 120, "fvox/flatline.wav" );
+		else if( s == 3 )
+			sess_note( fp, 120, XBOX_FT_NOTE_MSG, 30, "svc_sound" );
+		sess_frames( fp, first[s], first[s + 1], slow, &tsc );
+		if( s == 1 )
+			sess_classes( fp, "monster_scientist", 4, 100, 2000, 50 );
+		else if( s == 2 && !single )
+			sess_classes( fp, "func_door", 7, 40, 500, 7 );
+		else if( s == 3 )
+		{
+			if( single ) /* the single-file recorder's one chunk for c1a0e */
+				sess_classes( fp, "func_door", 7, 100, 800, 9 );
+			else
+				sess_classes( fp, "func_door", 7, 60, 300, 9 );
+		}
+		if( !single || s == 3 )
+		{
+			/* Seq 80 is lost in segment 002; the single file counts it at
+			   its one END. */
+			fwrite( buf, 1, xbox_ft_encode_segment_end( buf, tsc, s == 2 || ( single && s == 3 ) ? 1 : 0,
+				single || s == 3 ? XBOX_FT_SEG_SESSION : reason[s + 1] ), fp );
+		}
+		if( !single )
+		{
+			bad |= fclose( fp ) != 0;
+			fp = NULL;
+		}
+	}
+	if( single )
+		bad |= fclose( fp ) != 0;
+	return bad;
+}
+
 int main( int argc, char **argv )
 {
 	test_ring();
@@ -833,6 +1145,7 @@ int main( int argc, char **argv )
 	test_spans();
 	test_classes();
 	test_notes();
+	test_segments();
 
 	/* argv[1]: the version-2 fixture, as a recorder from before the spans
 	   wrote it (the 20 counts, no SPANS chunk); argv[2]: the version-1
@@ -863,6 +1176,19 @@ int main( int argc, char **argv )
 	if( argc > 5 && write_fixture_spans( argv[5] ))
 	{
 		fprintf( stderr, "could not write %s\n", argv[5] );
+		failures++;
+	}
+	/* argv[6]: a directory for the session fixtures' segments - the
+	   "pr190-clents" session and a slower "pr189-base" one to compare
+	   it with; argv[7]: the first session as one single-file recording. */
+	if( argc > 6 && ( write_session( argv[6], "pr190-clents", 190, 0, 0 ) || write_session( argv[6], "pr189 base", 189, 1, 0 )))
+	{
+		fprintf( stderr, "could not write the sessions into %s\n", argv[6] );
+		failures++;
+	}
+	if( argc > 7 && write_session( argv[7], "pr190-clents", 190, 0, 1 ))
+	{
+		fprintf( stderr, "could not write %s\n", argv[7] );
 		failures++;
 	}
 

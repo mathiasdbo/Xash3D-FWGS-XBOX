@@ -750,6 +750,229 @@ class Spans(unittest.TestCase):
         self.assertEqual(len(r["counters"]), 20)
 
 
+SESSIONS = os.environ.get("FRAMETIME_SESSIONS", "")
+FIXTURE_SINGLE = os.environ.get("FRAMETIME_FIXTURE_SINGLE", "")
+
+
+class Sessions(unittest.TestCase):
+    """Format v3 (2026-10-07): write_session in the C test wrote one
+    recording as the recorder's four segments (FRAMETIME_SESSIONS, label
+    "pr190-clents") and as the single file the recorder wrote before
+    segments (FRAMETIME_FIXTURE_SINGLE), plus a second session, "pr189
+    base", 5 ms slower per frame in play. Segments: 000 the menu frames
+    0..9, 001 c1a0 (10..63: the changelevel frame 57, the loading frames
+    59..63), 002 c1a0e 64..99 (seq 80 lost) closed by the size cap, 003
+    c1a0e continued, 100..139."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not SESSIONS or not os.path.isdir(SESSIONS):
+            raise unittest.SkipTest("FRAMETIME_SESSIONS not set - run tools/host-tests/run.sh")
+        cls.single = fr.parse(_read(FIXTURE_SINGLE, "FRAMETIME_FIXTURE_SINGLE"))
+        cls.found = fr.collect([SESSIONS])
+        cls.names = sorted(os.path.basename(p) for p, _ in cls.found)
+        cls.segs = fr.select_session(cls.found, label="pr190-clents")
+        cls.seg = {r["session"]["seq"]: r for r in cls.segs}
+
+    def test_names(self):
+        self.assertEqual(len(self.names), 8)
+        for n in self.names:
+            self.assertLessEqual(len(n), 42)                 # FATX
+            label, short, seq = fr.parse_segment_name(n)
+            self.assertIn(label, ("pr190-clents", "pr189-base"))   # "pr189 base", sanitised as the C did
+            self.assertEqual(n, fr.segment_name(label, short, seq))
+        r = self.seg[2]
+        self.assertEqual(os.path.basename(r["path"]), "ft_pr190-clents_%s_002.bin" % r["session"]["short"])
+        self.assertIsNone(fr.parse_segment_name("ft_000.bin"))
+        self.assertEqual(fr.parse_segment_name("ft_a_b_c_0abcdef1_012.bin"), ("a_b_c", "0abcdef1", 12))
+        # The Python sanitiser is the C one (the C test's cases).
+        for raw, want in (("PR #190: clents!", "PR-190-clents"), ("  --x9 perf.saves__ ", "x9-perf-saves"),
+                          ("", "untagged"), (None, "untagged"), (" .:/ ", "untagged"),
+                          ("abcdefghijklmnopqrstuvwxyz", "abcdefghijklmnopqrstuv"),
+                          ("abcdefghijklmnopqrstu_vwxyz", "abcdefghijklmnopqrstu"), ("pr189 base", "pr189-base")):
+            self.assertEqual(fr.sanitise_label(raw), want, raw)
+        self.assertEqual(len(fr.segment_name("x" * 40, "0abcdef1", 5000)), 42)
+
+    def test_fetch_filters(self):
+        n = self.names[0]
+        self.assertTrue(fr.name_wanted("ft_000.bin"))
+        self.assertTrue(fr.name_wanted(n))
+        self.assertFalse(fr.name_wanted("ft_000.bin", label="pr190-clents"))   # single files carry no label
+        self.assertFalse(fr.name_wanted("notes.txt"))
+        short = self.seg[0]["session"]["short"]
+        self.assertTrue(fr.name_wanted("ft_pr190-clents_%s_003.bin" % short, label="pr190 clents"))
+        self.assertTrue(fr.name_wanted("ft_pr190-clents_%s_003.bin" % short, session=short[:4].upper()))
+        self.assertFalse(fr.name_wanted("ft_pr190-clents_%s_003.bin" % short, label="pr189-base"))
+        self.assertFalse(fr.name_wanted("ft_pr190-clents_%s_003.bin" % short, label="pr190-clents", session="ffff"))
+        # Only a v3 name of the same size counts as fetched.
+        path = self.seg[3]["path"]
+        size = os.path.getsize(path)
+        self.assertTrue(fr.already_fetched(path, os.path.basename(path), size))
+        self.assertFalse(fr.already_fetched(path, os.path.basename(path), size + 1))
+        self.assertFalse(fr.already_fetched(path, os.path.basename(path), None))
+        self.assertFalse(fr.already_fetched(FIXTURE_SINGLE, "ft_000.bin", os.path.getsize(FIXTURE_SINGLE)))
+
+    def test_v3_header(self):
+        r = self.seg[2]
+        s = r["session"]
+        self.assertEqual(r["version"], 3)
+        self.assertEqual((s["seq"], s["reason"], s["first_frame"], s["label"]), (2, fr.SEG_MAP, 64, "pr190-clents"))
+        self.assertEqual(len(s["id"]), 36)
+        self.assertEqual(s["id"][14], "4")                   # a version-4 UUID
+        self.assertTrue(s["id"].startswith(s["short"]))
+        self.assertEqual(fr.systime_date(s["systime"]).year, 2022)
+        self.assertEqual(r["end"], {"tsc": r["end"]["tsc"], "lost": 1, "next": fr.SEG_SIZE})
+        self.assertEqual(len(r["counters"]), 167)            # every segment has its own COUNTERS ...
+        self.assertEqual(len(r["spans"]), 73)                # ... and SPANS
+        self.assertEqual(self.seg[3]["session"]["reason"], fr.SEG_SIZE)
+        self.assertEqual(self.seg[3]["end"]["next"], fr.SEG_SESSION)
+        self.assertEqual(self.seg[0]["end"]["next"], fr.SEG_MAP)
+
+    def _strip(self, sess):
+        return {k: v for k, v in sess.items() if k not in ("session", "version", "continues")}
+
+    def test_stitched_equals_single_file(self):
+        st = fr.stitch(self.segs)
+        self.assertEqual(st["session"]["segments"], [0, 1, 2, 3])
+        self.assertEqual(st["session"]["issues"], [])
+        self.assertEqual(st["frames"], self.single["frames"])
+        self.assertEqual([(m["name"], m["frame"]) for m in st["maps"]], [("c1a0", 10), ("c1a0e", 64)])
+        self.assertEqual(st["gaps"], self.single["gaps"])
+        self.assertEqual(st["lost_frames"], 1)
+        for flush in (False, True):
+            for lc in (False, True):
+                _, rows_s, sess_s = fr.analyse_rec(fr.stitch(self.segs), flush, lc)
+                _, rows_1, sess_1 = fr.analyse_rec(fr.parse(_read(FIXTURE_SINGLE, "")), flush, lc)
+                self.assertEqual(rows_s, rows_1)
+                self.assertEqual(self._strip(sess_s), self._strip(sess_1))
+                # A single file's session dict (and so its page) has no v3 keys.
+                self.assertNotIn("session", sess_1)
+                self.assertNotIn("continues", sess_1)
+                text_s = fr.summary_text(st, rows_s, sess_s).splitlines()
+                text_1 = fr.summary_text(self.single, rows_1, sess_1).splitlines()
+                self.assertEqual([l for l in text_s if not l.startswith("session ")], text_1)
+        # The per-map attribution the single file has: the changelevel frame
+        # in c1a0 (its segment), the stall and the notes in their maps, and
+        # c1a0e's classes summed over its two segments.
+        lc = fr.level_change_list(st)
+        self.assertEqual([(r["seq"], r["map"], r["next"]) for r in lc], [(57, "c1a0", "c1a0e")])
+        self.assertEqual([(r["seq"], r["map"]) for r in fr.stall_list(st)], [(50, "c1a0"), (120, "c1a0e")])
+        self.assertEqual(sorted((n["seq"], n["map"]) for n in fr.notes_list(st)), [(50, "c1a0"), (120, "c1a0e")])
+        row = [r for r in rows_s if r["map"] == "c1a0e"][0]
+        door = [c for c in row["classes"] if c["name"] == "func_door"][0]
+        self.assertEqual((door["runs"], door["phys_kc"], door["worst_kc"]), (100, 800, 9))
+
+    def test_segment_alone(self):
+        # 003 alone: the continued map, no warm-up, its own note, a clean end.
+        rec, rows, sess = fr.analyse_rec(self.seg[3])
+        self.assertEqual([r["map"] for r in rows], ["c1a0e (cont.)"])
+        self.assertIsNone(rows[0]["load_s"])
+        self.assertEqual(rows[0]["frames"], 40)              # seq 100..139, warm-up already past
+        self.assertEqual([n["seq"] for n in rec["notes"]], [120])
+        self.assertEqual(sess["continues"], 0)
+        text = fr.summary_text(rec, rows, sess)
+        self.assertIn("segment 003 alone (began at a size cap)", text)
+        self.assertIn("--session %s" % rec["session"]["short"], text)
+        # 002 alone: closed by the size cap, the session goes on.
+        rec, rows, sess = fr.analyse_rec(self.seg[2])
+        self.assertEqual(sess["continues"], fr.SEG_SIZE)
+        self.assertIn("this segment closed at a size cap; the session continues in segment 003",
+                      fr.summary_text(rec, rows, sess))
+        self.assertEqual(sess["lost"], 1)
+        # 001 alone: c1a0 with its changelevel frame (no next map in it).
+        rec, rows, sess = fr.analyse_rec(self.seg[1])
+        self.assertEqual([r["map"] for r in rows], ["c1a0"])
+        self.assertEqual([(r["seq"], r["next"]) for r in fr.level_change_list(rec)], [(57, None)])
+        self.assertAlmostEqual(rows[0]["load_s"], 2.0)
+        # Each segment's statistics for c1a0 are the session's.
+        _, rows_s, _ = fr.analyse_rec(fr.stitch(self.segs))
+        self.assertEqual(rows[0], [r for r in rows_s if r["map"] == "c1a0"][0])
+
+    def test_seams(self):
+        # A missing segment: listed, its frames counted lost, and the
+        # continued map kept (the map before it is another).
+        st = fr.stitch([self.seg[0], self.seg[1], self.seg[3]])
+        self.assertIn("segment(s) 002-002 missing", st["session"]["issues"])
+        self.assertEqual(st["lost_frames"], 100 - 64)
+        self.assertEqual([m["name"] for m in fr.segments(st)][-1], "c1a0e (cont.)")
+        # The session's start missing, and its end not fetched yet.
+        st = fr.stitch([self.seg[1], self.seg[2]])
+        self.assertEqual(st["session"]["issues"],
+                         ["segment(s) 000-000 missing: the session's start",
+                          "segment 002 says segment 003 follows (size cap): not fetched yet?"])
+        rows = [fr.segment_stats(st, s) for s in fr.segments(st)]
+        self.assertIn("WARNING: segment 002 says segment 003 follows", fr.summary_text(st, rows, fr.session_stats(st, rows)))
+        # Two sessions, a file given twice: refused.
+        other = fr.select_session(self.found, label="pr189-base")
+        with self.assertRaises(fr.FormatError):
+            fr.stitch(self.segs + other)
+        with self.assertRaises(fr.FormatError):
+            fr.stitch([self.seg[1], self.seg[1]])
+        with self.assertRaises(fr.FormatError):
+            fr.stitch([self.single])
+
+    def test_select(self):
+        short = self.seg[0]["session"]["short"]
+        self.assertEqual(len(fr.select_session(self.found, token=short[:3])), 4)
+        self.assertEqual(fr.select_session(self.found, token="pr189 base")[0]["session"]["label"], "pr189-base")
+        with self.assertRaises(fr.FormatError):
+            fr.select_session(self.found, token="nothing")
+        # A folder with two sessions needs a filter; one file is read alone.
+        with self.assertRaises(fr.FormatError):
+            fr.resolve([SESSIONS])
+        rec, files = fr.resolve([SESSIONS], session=short)
+        self.assertEqual(len(files), 4)
+        rec, files = fr.resolve([self.seg[2]["path"]])
+        self.assertFalse(rec["session"]["stitched"])
+
+    def test_compare(self):
+        a = fr.analyse_rec(fr.stitch(fr.select_session(self.found, token="pr189-base")))
+        b = fr.analyse_rec(fr.stitch(self.segs))
+        rows = fr.compare_rows(a[1], b[1])
+        self.assertEqual([k for k, _, _ in rows], ["c1a0", "c1a0e"])
+        # c1a0e in play past the warm-up: seq 94..139 but the lost 80 - 45
+        # frames, one of them the 300 ms seq 120, the rest 25 ms (A) or 20 ms (B).
+        self.assertAlmostEqual(rows[1][1]["avg_fps"], 45 / 1.400)
+        self.assertAlmostEqual(rows[1][2]["avg_fps"], 45 / 1.180)
+        text = fr.compare_text("pr189-base", a[2], a[1], "pr190-clents", b[2], b[1])
+        self.assertRegex(text, r"\nc1a0e +\d+/\d+ +32\.1 +38\.1 +\+18\.6 ")
+        self.assertIn("label pr189-base segments 4", text)
+        # A map played twice is two rows.
+        twice = fr.compare_rows(a[1] + [r for r in a[1] if r["map"] == "c1a0e"], b[1])
+        self.assertEqual([k for k, _, _ in twice], ["c1a0", "c1a0e", "c1a0e #2"])
+        self.assertIsNone(twice[2][2])
+
+    def test_cli(self):
+        tool = os.path.join(_HERE, "frametime-report.py")
+
+        def run(*args):
+            return subprocess.run([sys.executable, tool] + list(args), capture_output=True, text=True, timeout=60)
+        out = run("summary", SESSIONS, "--label", "pr190-clents")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("segments 000-003 stitched (4 files)", out.stdout)
+        out = run("summary", SESSIONS, "--compare", "pr189-base", "pr190-clents")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("compare: A = pr189-base, B = pr190-clents", out.stdout)
+        out = run("summary", SESSIONS)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("pick one with --label or --session", out.stderr)
+        out = run("sessions", SESSIONS)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(out.stdout.splitlines()), 2)
+        out = run("summary", self.seg[3]["path"])
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("c1a0e (cont.)", out.stdout)
+        with tempfile.TemporaryDirectory() as d:
+            page = os.path.join(d, "s.html")
+            out = run("report", SESSIONS, "--session", self.seg[0]["session"]["short"], "-o", page)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            with open(page, encoding="utf-8") as f:
+                html_page = f.read()
+            self.assertEqual(re.findall(r"__[A-Z]+__", html_page), [])
+            self.assertIn("pr190-clents", html_page)
+            run_page_script(html_page)
+
+
 if __name__ == "__main__":
     res = unittest.main(exit=False, verbosity=1).result
     # A skipped fixture is a broken run, not a pass.

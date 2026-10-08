@@ -1,20 +1,30 @@
 """Frame-time recordings (host_frametime_analysis) -> fetch, summarise, HTML report.
 
-    # 1. fetch the recordings off the console over FTP (read-only: LIST/RETR)
-    python tools/frametime-report.py fetch --host <console IP> --out recordings/
+    # 1. fetch the recordings off the console over FTP (read-only: LIST/SIZE/RETR);
+    #    segments already in --out are skipped
+    python tools/frametime-report.py fetch --host <console IP> --out recordings/ [--label pr190-clents] [--session 0abc]
     #    (the console gets its address from DHCP: read it on the dashboard)
-    #    ... or off xemu's hard disk image (xemu stopped)
-    python tools/frametime-report.py fetch-xemu --out recordings/
-    # 2. the per-map table in the terminal
+    #    ... or off xemu's hard disk image (xemu closed)
+    python tools/frametime-report.py fetch-xemu --out recordings/ [--label ...] [--session ...]
+    python tools/frametime-report.py sessions recordings/          # what is there
+    # 2. the per-map table in the terminal: one session, stitched from its segments ...
+    python tools/frametime-report.py summary recordings/ --label pr190-clents
+    #    ... one file (a segment alone, or a single-file ft_NNN.bin) ...
     python tools/frametime-report.py summary recordings/ft_000.bin
-    # 3. the HTML report
-    python tools/frametime-report.py report recordings/ft_000.bin -o ft_000.html
+    #    ... or two sessions side by side, per map
+    python tools/frametime-report.py summary recordings/ --compare pr189-base pr190-clents
+    # 3. the HTML report (the same ways of naming what to read)
+    python tools/frametime-report.py report recordings/ --label pr190-clents -o pr190.html
     #    (--include-flush keeps the frames that wrote the file in the statistics;
     #     --include-level-change keeps the frames whose time is a level load)
 
-The file is written by engine/platform/xbox/xbox_frametime.c; its byte
+The files are written by engine/platform/xbox/xbox_frametime.c; the byte
 layout is documented in engine/platform/xbox/xbox_frametime_util.h (and
-parse() below follows it field by field). Python 3 standard library only.
+parse() below follows it field by field). Since format v3 (2026-10-07) a
+recording is a SESSION written as SEGMENTS, ft_<label>_<session>_<seq>.bin
+- one per map and per host_frametime_segment_mb - each readable alone;
+stitch() puts a session's segments back into the recording the
+single-file recorder would have written. Python 3 standard library only.
 
 What the numbers mean (the recorder's header comment has the detail):
   total   Host_Frame start to the next one: the frame as the player sees it
@@ -64,14 +74,28 @@ import argparse
 import ftplib
 import html
 import json
+import datetime
 import math
 import os
+import re
 import struct
 import sys
 
 MAGIC = b"R3DFTIME"
-VERSIONS = (1, 2)           # 1: no work counters; 2: COUNTERS chunk + counters in each frame
+VERSIONS = (1, 2, 3)        # 1: no work counters; 2: COUNTERS chunk + counters in each frame; 3: session segments
 HEADER_BYTES = 128
+HEADER_V3_BYTES = 256       # v3: the v2 header, then the session and segment fields
+SESSION_ID_BYTES = 16
+LABEL_BYTES = 32
+LABEL_MAX = 22              # label characters that fit a FATX file name (42 characters in all)
+LABEL_EMPTY = "untagged"
+SESSION_HEX = 8             # hex digits of the session id in a file name
+# Why a segment began (v3 header), and in an END chunk what follows the file.
+SEG_SESSION, SEG_MAP, SEG_SIZE = 0, 1, 2
+SEG_REASONS = {SEG_SESSION: "session start", SEG_MAP: "map change", SEG_SIZE: "size cap"}
+# ft_<label>_<8 hex session>_<3-digit segment>.bin (xbox_ft_segment_name);
+# the label may contain '_', so the match anchors on the right.
+SEGMENT_NAME_RE = re.compile(r"^ft_(?P<label>[A-Za-z0-9_-]+)_(?P<session>[0-9a-fA-F]{8})_(?P<seq>[0-9]{3})\.bin$")
 FRAME_BYTES = 32            # the fixed part of a frame record
 COUNTER_NAME_BYTES = 16
 CHUNK_FRAMES, CHUNK_MAP, CHUNK_CALIB, CHUNK_END, CHUNK_COUNTERS = 1, 2, 3, 4, 5
@@ -121,6 +145,7 @@ SPAN_CALLS = "span_calls"   # the counter of span closures in a frame (the spans
 F_ACTIVE, F_MENU, F_FLUSH, F_SATURATED, F_OVERLAY = 0x1, 0x2, 0x4, 0x8, 0x10
 F_LOAD = 0x20               # the frame's Host_Frame queued a load (recorders from 2026-10-01)
 MAP_F_NO_LOAD_START = 0x1
+MAP_F_CONTINUED = 0x2       # v3: the map continues from the previous segment (closed by the size cap)
 
 GUIDE_60_MS = 1000.0 / 60.0
 GUIDE_30_MS = 1000.0 / 30.0
@@ -165,6 +190,10 @@ def parse(data):
         raise FormatError("unsupported version %d (this tool reads %s)" % (version, ", ".join(map(str, VERSIONS))))
     if header_bytes < HEADER_BYTES or frame_bytes < FRAME_BYTES or (frame_bytes - FRAME_BYTES) % 4:
         raise FormatError("header says %d-byte header, %d-byte frames" % (header_bytes, frame_bytes))
+    if version >= 3 and header_bytes < HEADER_V3_BYTES:
+        raise FormatError("version %d header of %d bytes (needs %d)" % (version, header_bytes, HEADER_V3_BYTES))
+    if len(data) < header_bytes:
+        raise FormatError("file too short for its %d-byte header (%d bytes)" % (header_bytes, len(data)))
     # v2: the counters are the u32s after the fixed 32 bytes; a v1 record may
     # only be padded (nothing in it is a counter).
     ncount = (frame_bytes - FRAME_BYTES) // 4 if version >= 2 else 0
@@ -178,7 +207,17 @@ def parse(data):
         "build": build, "frames": [], "maps": [], "calibs": [], "end": None,
         "truncated": False, "gaps": 0, "lost_frames": 0, "unknown_chunks": 0,
         "counters": [], "spans": [], "classes": [], "notes": [], "notes_dropped": 0,
+        "session": None,
     }
+    if version >= 3:
+        # The session and the segment (xbox_frametime_util.h, v3 header).
+        sid = data[128:128 + SESSION_ID_BYTES]
+        seq, reason, first_frame = struct.unpack_from("<III", data, 144)
+        seg_tsc, systime = struct.unpack_from("<QQ", data, 160)
+        label = data[176:176 + LABEL_BYTES].split(b"\0", 1)[0].decode("latin-1")
+        rec["session"] = {"id": session_uuid(sid), "short": sid[:SESSION_HEX // 2].hex(), "label": label,
+                          "systime": systime, "seq": seq, "reason": reason, "first_frame": first_frame,
+                          "seg_tsc": seg_tsc, "segments": [seq], "issues": [], "stitched": False}
     frames = rec["frames"]
     off = header_bytes
     next_seq = None
@@ -223,8 +262,12 @@ def parse(data):
         elif ctype == CHUNK_CALIB:
             rec["calibs"].append(struct.unpack_from("<QQ", data, body))
         elif ctype == CHUNK_END:
-            tsc, lost = struct.unpack_from("<QI", data, body)
+            # v3: "next" is what follows the file (SEG_*; 0: the session
+            # ended); older files write 0 there.
+            tsc, lost, nxt = struct.unpack_from("<QII", data, body)
             rec["end"] = {"tsc": tsc, "lost": lost}
+            if version >= 3:
+                rec["end"]["next"] = nxt
         elif ctype == CHUNK_COUNTERS:
             n, = struct.unpack_from("<I", data, body)
             if clen < 4 + n * COUNTER_NAME_BYTES:
@@ -297,7 +340,282 @@ def tsc_rate(rec):
 
 def load_file(path):
     with open(path, "rb") as f:
-        return parse(f.read())
+        rec = parse(f.read())
+    rec["path"] = path
+    return rec
+
+
+# --------------------------------------------------------------------------
+# Sessions (format v3): segment names, stitching, selection
+# --------------------------------------------------------------------------
+
+def session_uuid(raw):
+    """The 16-byte session id as a UUID string (8-4-4-4-12 hex)."""
+    h = raw.hex()
+    return "%s-%s-%s-%s-%s" % (h[:8], h[8:12], h[12:16], h[16:20], h[20:32])
+
+
+def sanitise_label(label):
+    """host_frametime_label as the recorder puts it in a name and a header
+    (xbox_ft_label_sanitise): letters, digits, '-' and '_' kept; each run
+    of other characters one '-'; leading and trailing '-'/'_' dropped; cut
+    to LABEL_MAX (and trailing '-'/'_' dropped again); LABEL_EMPTY when
+    nothing is left."""
+    out, replaced = [], False
+    for c in label or "":
+        if len(out) >= LABEL_MAX:
+            break
+        if c.isascii() and (c.isalnum() or c in "-_"):
+            if not out and c in "-_":
+                continue
+            out.append(c)
+            replaced = False
+        elif out and not replaced:
+            out.append("-")
+            replaced = True
+    s = "".join(out).rstrip("-_")
+    return s or LABEL_EMPTY
+
+
+def segment_name(label, short, seq):
+    """A segment's file name, as xbox_ft_segment_name writes it."""
+    return "ft_%s_%s_%03d.bin" % (sanitise_label(label), short.lower(), min(int(seq), 999))
+
+
+def parse_segment_name(name):
+    """(label, session short id, segment number) of a segment's file name,
+    or None for any other name (a single-file ft_NNN.bin included)."""
+    m = SEGMENT_NAME_RE.match(os.path.basename(name))
+    if not m:
+        return None
+    return m.group("label"), m.group("session").lower(), int(m.group("seq"))
+
+
+def name_wanted(name, label=None, session=None):
+    """Whether a recording's file name passes the --label/--session filters:
+    with neither, every ft_*.bin; with either, only segments (single files
+    carry no label) whose label is `label` sanitised and whose session id
+    starts with `session`."""
+    base = os.path.basename(name)
+    if not (base.startswith("ft_") and base.endswith(".bin")):
+        return False
+    if not label and not session:
+        return True
+    p = parse_segment_name(base)
+    if p is None:
+        return False
+    if label and p[0] != sanitise_label(label):
+        return False
+    if session and not p[1].startswith(session.lower()):
+        return False
+    return True
+
+
+def systime_date(systime):
+    """The kernel system time (100 ns since 1601-01-01, the console's own
+    clock) as a datetime, or None when unset."""
+    if not systime:
+        return None
+    try:
+        return datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=systime // 10)
+    except OverflowError:
+        return None
+
+
+def stitch(recs):
+    """One session's segments (parsed v3 files, any order) as one recording:
+    their frames, maps, calibrations, classes and notes in segment order,
+    as the single-file recorder would have written them. A map chunk
+    flagged CONTINUED (the size cap closed the segment before it) is
+    dropped when the map before it is that map. The seams are checked:
+    missing segment numbers, a frame-sequence gap between segments (counted
+    as lost frames, like a gap inside a file), a segment cut short before
+    the last, and a last segment whose END says another follows - each
+    listed in rec["session"]["issues"]. Raises FormatError for files of
+    different sessions or with different counters."""
+    if not recs:
+        raise FormatError("no segments to stitch")
+    for r in recs:
+        if not r.get("session"):
+            raise FormatError("%s is not a session segment (version %d)" % (r.get("path", "a file"), r["version"]))
+    recs = sorted(recs, key=lambda r: r["session"]["seq"])
+    first = recs[0]
+    sid = first["session"]["id"]
+    for r in recs[1:]:
+        if r["session"]["id"] != sid:
+            raise FormatError("segments of two sessions: %s and %s" % (sid, r["session"]["id"]))
+        if r["counters"] != first["counters"] or r["spans"] != first["spans"]:
+            raise FormatError("segment %03d has other counters than segment %03d"
+                              % (r["session"]["seq"], first["session"]["seq"]))
+        if r["session"]["seq"] == recs[recs.index(r) - 1]["session"]["seq"]:
+            raise FormatError("segment %03d given twice" % r["session"]["seq"])
+    out = dict(first)
+    out.update({"frames": [], "maps": [], "calibs": [], "classes": [], "notes": [], "notes_dropped": 0,
+                "gaps": 0, "lost_frames": 0, "unknown_chunks": 0, "truncated": False, "path": None})
+    out.pop("_lc", None)
+    issues = []
+    if first["session"]["seq"] != 0:
+        issues.append("segment(s) 000-%03d missing: the session's start" % (first["session"]["seq"] - 1))
+    next_seq = None
+    lost_end = 0
+    prev = None
+    for r in recs:
+        s = r["session"]
+        if prev is not None:
+            ps = prev["session"]["seq"]
+            if s["seq"] != ps + 1:
+                issues.append("segment(s) %03d-%03d missing" % (ps + 1, s["seq"] - 1))
+            if prev["end"] is None:
+                issues.append("segment %03d has no END chunk: cut short, though %03d follows" % (ps, s["seq"]))
+            elif not prev["end"].get("next"):
+                issues.append("segment %03d ended the session, yet %03d follows" % (ps, s["seq"]))
+        off = len(out["frames"])
+        if r["frames"]:
+            fs = r["frames"][0][0]
+            if next_seq is not None and fs != next_seq:
+                out["gaps"] += 1
+                out["lost_frames"] += (fs - next_seq) & 0xFFFFFFFF
+            next_seq = (r["frames"][-1][0] + 1) & 0xFFFFFFFF
+        out["frames"].extend(r["frames"])
+        for m in r["maps"]:
+            if (m["flags"] & MAP_F_CONTINUED) and out["maps"] and out["maps"][-1]["name"] == m["name"]:
+                continue
+            out["maps"].append(dict(m, frame=m["frame"] + off))
+        out["calibs"].extend(r["calibs"])
+        out["classes"].extend(dict(c, frame=c["frame"] + off) for c in r["classes"])
+        out["notes"].extend(r["notes"])
+        out["notes_dropped"] += r["notes_dropped"]
+        out["gaps"] += r["gaps"]
+        out["lost_frames"] += r["lost_frames"]
+        out["unknown_chunks"] += r["unknown_chunks"]
+        out["truncated"] = out["truncated"] or r["truncated"]
+        if r["end"]:
+            lost_end += r["end"]["lost"]
+        prev = r
+    last = recs[-1]
+    if last["end"] is not None:
+        out["end"] = dict(last["end"], lost=lost_end)
+        if last["end"].get("next"):
+            issues.append("segment %03d says segment %03d follows (%s): not fetched yet?"
+                          % (last["session"]["seq"], last["session"]["seq"] + 1,
+                             SEG_REASONS.get(last["end"]["next"], "reason %d" % last["end"]["next"])))
+    else:
+        out["end"] = None
+    out["session"] = dict(first["session"], seq=None, reason=None, first_frame=None, seg_tsc=None,
+                          segments=[r["session"]["seq"] for r in recs], issues=issues, stitched=True,
+                          paths=[r.get("path") for r in recs])
+    out["tsc_hz"] = tsc_rate(out)
+    return out
+
+
+def collect(paths):
+    """Every recording under `paths` (files, or directories searched for
+    ft_*.bin), parsed: [(path, rec)]. Unreadable files are reported on
+    stderr and skipped."""
+    files = []
+    for p in paths:
+        if os.path.isdir(p):
+            files.extend(os.path.join(p, n) for n in sorted(os.listdir(p)) if name_wanted(n))
+        else:
+            files.append(p)
+    out = []
+    for f in files:
+        try:
+            out.append((f, load_file(f)))
+        except (FormatError, OSError) as e:
+            print("frametime-report: %s: %s (skipped)" % (f, e), file=sys.stderr)
+    return out
+
+
+def sessions_of(found):
+    """[(path, rec)] grouped: {session id: [rec, ...]} for v3 segments, in
+    no particular order; single files are left out."""
+    out = {}
+    for _, rec in found:
+        if rec.get("session"):
+            out.setdefault(rec["session"]["id"], []).append(rec)
+    return out
+
+
+def _session_key(segs):
+    # Newest first: the console's clock at the session start, then the name.
+    s = segs[0]["session"]
+    return (s["systime"], s["short"])
+
+
+def select_session(found, token=None, label=None, session=None):
+    """The segments of the one session `token` (a label or a session id
+    prefix), `label` or `session` names: [rec, ...]. With several matches
+    the newest (by the console's clock at the session start) is taken and
+    a note goes to stderr. Raises FormatError when nothing matches."""
+    groups = sessions_of(found)
+    cands = []
+    for segs in groups.values():
+        s = segs[0]["session"]
+        if token is not None and not (s["label"] == sanitise_label(token) or s["short"].startswith(token.lower())
+                                      or s["id"].startswith(token.lower())):
+            continue
+        if label is not None and s["label"] != sanitise_label(label):
+            continue
+        if session is not None and not (s["short"].startswith(session.lower()) or s["id"].startswith(session.lower())):
+            continue
+        cands.append(segs)
+    if not cands:
+        want = " ".join(x for x in (token and "'%s'" % token, label and "label '%s'" % label,
+                                    session and "session '%s'" % session) if x)
+        raise FormatError("no session matches %s (%s)" % (want or "", "; ".join(session_listing(found)) or "no sessions found"))
+    cands.sort(key=_session_key, reverse=True)
+    if len(cands) > 1:
+        print("frametime-report: %d sessions match; using the newest, %s (%s) - --session picks another"
+              % (len(cands), cands[0][0]["session"]["short"], cands[0][0]["session"]["label"]), file=sys.stderr)
+    return cands[0]
+
+
+def session_info(rec):
+    """The session fields the summary and the page show (v3), or None for
+    a single-file recording."""
+    s = rec.get("session")
+    if not s:
+        return None
+    d = systime_date(s["systime"])
+    return {"id": s["id"], "short": s["short"], "label": s["label"], "segments": list(s["segments"]),
+            "stitched": s["stitched"], "issues": list(s["issues"]), "seq": s["seq"], "reason": s["reason"],
+            "started": d.strftime("%Y-%m-%d %H:%M:%S") if d else None}
+
+
+def session_text(si, cont):
+    """The summary's session lines: which session, which segments, and
+    any seam problem stitching found."""
+    if not si:
+        return []
+    segs = si["segments"]
+    started = (", started %s (console clock)" % si["started"]) if si["started"] else ""
+    if si["stitched"]:
+        lines = ["session %s, label %s: segments %03d-%03d stitched (%d file%s)%s" % (
+            si["short"], si["label"], segs[0], segs[-1], len(segs), "" if len(segs) == 1 else "s", started)]
+    else:
+        lines = ["session %s, label %s: segment %03d alone (began at a %s)%s; `summary <folder> --session %s` "
+                 "stitches the whole session" % (si["short"], si["label"], si["seq"],
+                                                  SEG_REASONS.get(si["reason"], "reason %d" % (si["reason"] or 0)),
+                                                  started, si["short"])]
+    if cont and not si["stitched"]:
+        lines.append("this segment closed at a %s; the session continues in segment %03d"
+                     % (SEG_REASONS.get(cont, "reason %d" % cont), si["seq"] + 1))
+    lines.extend("WARNING: %s" % i for i in si["issues"])
+    return lines
+
+
+def session_listing(found):
+    """One line per session found, oldest first: id, label, segments,
+    start time."""
+    lines = []
+    for segs in sorted(sessions_of(found).values(), key=_session_key):
+        s = segs[0]["session"]
+        seqs = sorted(r["session"]["seq"] for r in segs)
+        d = systime_date(s["systime"])
+        lines.append("%s %-22s segments %03d-%03d (%d)%s" % (s["short"], s["label"], seqs[0], seqs[-1], len(seqs),
+                                                            d.strftime("  %Y-%m-%d %H:%M") if d else ""))
+    return lines
 
 
 # --------------------------------------------------------------------------
@@ -324,7 +642,9 @@ def frame_ms(rec, fr):
 
 def segments(rec):
     """Split the frames at each MAP chunk. Frames before the first map
-    (menus, the first load) form a segment named '(before first map)'."""
+    (menus, the first load) form a segment named '(before first map)'. A
+    map that continues from an earlier file (v3, a segment read alone
+    whose predecessor the size cap closed) is named "<map> (cont.)"."""
     maps = rec["maps"]
     out = []
     starts = [m["frame"] for m in maps]
@@ -333,7 +653,8 @@ def segments(rec):
                     "end": starts[0] if maps else len(rec["frames"])})
     for i, m in enumerate(maps):
         end = starts[i + 1] if i + 1 < len(maps) else len(rec["frames"])
-        out.append({"name": m["name"], "map": m, "start": m["frame"], "end": end})
+        name = m["name"] + (" (cont.)" if m["flags"] & MAP_F_CONTINUED else "")
+        out.append({"name": name, "map": m, "start": m["frame"], "end": end})
     return out
 
 
@@ -446,8 +767,11 @@ def segment_classes(rec, seg):
 def play_frames(rec, seg):
     """The segment's in-play frames - ACTIVE, not MENU, past the first
     WARMUP_FRAMES active ones - as (frame tuple, frame_ms(...)) pairs,
-    flush frames included (the caller decides)."""
-    active_seen = 0
+    flush frames included (the caller decides). A map continued from an
+    earlier file (v3, MAP_F_CONTINUED) has no warm-up: it was over in the
+    file before."""
+    m = seg.get("map")
+    active_seen = WARMUP_FRAMES if m and m["flags"] & MAP_F_CONTINUED else 0
     for fr in rec["frames"][seg["start"]:seg["end"]]:
         flags = fr[7]
         if not (flags & F_ACTIVE) or (flags & F_MENU):
@@ -880,7 +1204,7 @@ def session_stats(rec, rows, include_flush=False, include_level_change=False):
     ps = sum(r["seconds"] for r in play)
     frees = [r["free_after"] for r in rows if r.get("free_after") is not None]
     loads = [r["load_s"] for r in rows if r.get("load_s") is not None]
-    return {
+    out = {
         "minutes": total_ms / 60000.0, "frames": len(rec["frames"]), "loads": len(loads),
         "avg_fps": pf / ps if ps else 0.0,
         "free_min": min(frees) if frees else None, "free_max": max(frees) if frees else None,
@@ -897,6 +1221,13 @@ def session_stats(rec, rows, include_flush=False, include_level_change=False):
         "lc_included": include_level_change,
         "stalls": stall_list(rec, include_level_change),
     }
+    if rec.get("session"):
+        # v3 only, so an older file's page is byte for byte what it was:
+        # the session, and what follows the last file read (0: the session
+        # ended there).
+        out["session"] = session_info(rec)
+        out["continues"] = rec["end"].get("next", 0) if rec["end"] else 0
+    return out
 
 
 def timeline(rec):
@@ -974,6 +1305,7 @@ def summary_text(rec, rows, sess):
         sess["build"], sess["tsc_mhz"], sess["frames"], sess["minutes"],
         "clean end" if sess["clean_end"] else "NO END CHUNK (cut short)",
         ", truncated" if sess["truncated"] else ""))
+    lines.extend(session_text(sess.get("session"), sess.get("continues")))
     if sess["lost"]:
         lines.append("frames lost to a full ring: %d" % sess["lost"])
     hdr = "%-18s %6s %6s %6s %6s %6s %7s %6s %6s %5s %6s %6s %6s %6s %6s" % (
@@ -1065,6 +1397,63 @@ def summary_text(rec, rows, sess):
     lines.extend(svgame_text(rec, rows))
     lines.extend(pmove_text(rec, rows))
     lines.extend(clents_text(rec, rows))
+    return "\n".join(lines)
+
+
+# The per-map comparison of two sessions: (key, heading, digits, higher is better).
+COMPARE_COLS = [("avg_fps", "avg fps", 1, True), ("low1_fps", "1% low", 1, True), ("cpu_ms", "cpu ms", 2, False),
+                ("gpu_ms", "gpu ms", 2, False), ("worst_ms", "worst ms", 1, False)]
+
+
+def _map_keys(rows):
+    """{key: row} for the rows with frames in play, a map seen twice keyed
+    "<map> #2" (a session that returns to a map), in order."""
+    out, seen = {}, {}
+    for r in rows:
+        if not r.get("frames"):
+            continue
+        n = seen[r["map"]] = seen.get(r["map"], 0) + 1
+        out[r["map"] if n == 1 else "%s #%d" % (r["map"], n)] = r
+    return out
+
+
+def compare_rows(rows_a, rows_b):
+    """The per-map comparison: one row per map either session played, A's
+    maps first: (key, row A or None, row B or None)."""
+    a, b = _map_keys(rows_a), _map_keys(rows_b)
+    return [(k, a.get(k), b.get(k)) for k in list(a) + [k for k in b if k not in a]]
+
+
+def compare_text(name_a, sess_a, rows_a, name_b, sess_b, rows_b):
+    """Two sessions side by side, per map: played seconds, then for each
+    COMPARE_COLS statistic A, B and B's change in % (+ is better for
+    fps, - for times), then the whole session's mean fps in play."""
+    lines = ["compare: A = %s, B = %s" % (name_a, name_b)]
+    for tag, sess in (("A", sess_a), ("B", sess_b)):
+        si = sess.get("session")
+        lines.append("  %s: %s, build %s, %d frames, %.1f min%s" % (
+            tag, ("session %s label %s segments %d" % (si["short"], si["label"], len(si["segments"]))) if si else "single file",
+            sess["build"], sess["frames"], sess["minutes"],
+            "".join("; WARNING: %s" % i for i in (si["issues"] if si else []))))
+    head = "%-18s %11s" % ("map", "played A/B")
+    for _, h, _, _ in COMPARE_COLS:
+        head += " %8s %8s %6s" % (h + " A", h + " B", "d%")
+    lines.append(head)
+
+    def cell(v, d):
+        return "%8s" % fmt(v, d)
+    for key, ra, rb in compare_rows(rows_a, rows_b):
+        line = "%-18s %11s" % (key[:18], "%s/%s" % (fmt(ra["seconds"] if ra else None, 0), fmt(rb["seconds"] if rb else None, 0)))
+        for k, _, d, _ in COMPARE_COLS:
+            va, vb = (ra or {}).get(k), (rb or {}).get(k)
+            pct = 100.0 * (vb - va) / va if va and vb is not None else None
+            line += " %s %s %6s" % (cell(va, d), cell(vb, d), ("%+.1f" % pct) if pct is not None else "-")
+        lines.append(line)
+    pa, pb = sess_a["avg_fps"], sess_b["avg_fps"]
+    lines.append("%-18s %11s %8.1f %8.1f %6s" % ("all maps in play", "", pa, pb,
+                                                ("%+.1f" % (100.0 * (pb - pa) / pa)) if pa else "-"))
+    lines.append("d% = (B - A) / A: + is better for fps, - is better for the times. Per map over its frames in play "
+                 "(warm-up, flush and level-change frames left out, as in the summary).")
     return "\n".join(lines)
 
 
@@ -1664,6 +2053,8 @@ def render_html(rec, rows, sess, files, title=None, source="xbox", lede=None, in
         "<b>The file has no END chunk</b>: recording was cut by a power-off, a crash or a reboot; everything up to the last flush is here.",
         ("%d frames were lost to a full ring." % sess["lost"]) if sess["lost"] else "No frames were lost.",
         rec["ring_frames"])
+    if sess.get("session"):
+        recnote += " " + " ".join(html.escape(x) for x in session_text(sess["session"], sess.get("continues")))
     fl = sess.get("flush_frames", 0)
     flushnote = ("Frames that wrote the recording to the disk (every 5 s and at each map start; their time includes "
                  "the write) are %s: %d in this file, the Flushes column gives their mean / worst ms."
@@ -1696,18 +2087,62 @@ def render_html(rec, rows, sess, files, title=None, source="xbox", lede=None, in
     return out
 
 
-def analyse(path, include_flush=False, include_level_change=False):
-    rec = load_file(path)
+def analyse_rec(rec, include_flush=False, include_level_change=False):
     rows = [segment_stats(rec, s, include_flush, include_level_change) for s in segments(rec)]
     return rec, rows, session_stats(rec, rows, include_flush, include_level_change)
+
+
+def analyse(path, include_flush=False, include_level_change=False):
+    return analyse_rec(load_file(path), include_flush, include_level_change)
+
+
+def resolve(paths, label=None, session=None):
+    """What `summary`/`report` read: (rec, [file paths]). One file and no
+    filter: that file alone (a single-file recording, or one segment).
+    Otherwise the recordings under `paths` (folders searched for ft_*.bin):
+    the session --label/--session name, stitched; with no filter, the one
+    session or the one file there. Raises FormatError when that is not one
+    recording."""
+    if not label and not session and len(paths) == 1 and os.path.isfile(paths[0]):
+        return load_file(paths[0]), [paths[0]]
+    found = collect(paths)
+    if not found:
+        raise FormatError("no recordings in %s" % ", ".join(paths))
+    if label or session:
+        segs = select_session(found, label=label, session=session)
+    else:
+        groups = sessions_of(found)
+        singles = [f for f, r in found if not r.get("session")]
+        if len(groups) == 1 and not singles:
+            segs = list(groups.values())[0]
+        elif len(found) == 1:
+            return found[0][1], [found[0][0]]
+        else:
+            raise FormatError("%d session(s) and %d single file(s) here - pick one with --label or --session, or "
+                              "give one file: %s" % (len(groups), len(singles),
+                                                     "; ".join(session_listing(found) + singles)))
+    rec = stitch(segs)
+    return rec, list(rec["session"]["paths"])
 
 
 # --------------------------------------------------------------------------
 # Fetching
 # --------------------------------------------------------------------------
 
-def ftp_fetch(host, user, password, remote_dir, out_dir, timeout=8.0):
-    """Download every ft_*.bin from the console. Read-only: LIST/NLST/CWD/RETR."""
+def already_fetched(dst, name, size):
+    """Whether a segment is already in the output folder: a v3 segment's
+    name is unique to its session, so a local file of that name and of
+    the remote size is the same file. A single-file name (ft_NNN.bin) is
+    reused across sessions on the console, so it is always fetched; so
+    is a file whose remote size is unknown."""
+    return (size is not None and parse_segment_name(name) is not None and os.path.isfile(dst)
+            and os.path.getsize(dst) == size)
+
+
+def ftp_fetch(host, user, password, remote_dir, out_dir, timeout=8.0, label=None, session=None, refetch=False):
+    """Download the recordings from the console: every ft_*.bin, or the
+    segments of --label/--session, skipping segments already fetched
+    (unless refetch). Read-only: LIST/NLST/CWD/SIZE/RETR."""
     os.makedirs(out_dir, exist_ok=True)
     try:
         ftp = ftplib.FTP(host, timeout=timeout)
@@ -1721,27 +2156,49 @@ def ftp_fetch(host, user, password, remote_dir, out_dir, timeout=8.0):
         except ftplib.Error as e:
             raise SystemExit("frametime-report: cannot list %s: %s" % (REMOTE_ROOT, e))
         dirs = ["%s/%s/%s" % (REMOTE_ROOT, t, REL_DIR) for t in titles]
-    got = []
+    got, skipped = [], 0
     for d in dirs:
         try:
             names = [n.rsplit("/", 1)[-1] for n in ftp.nlst(d)]
         except ftplib.Error:
             continue
         for n in sorted(names):
-            if not (n.startswith("ft_") and n.endswith(".bin")):
+            if not name_wanted(n, label, session):
                 continue
             dst = os.path.join(out_dir, n)
+            size = None
+            if not refetch:
+                try:
+                    ftp.voidcmd("TYPE I")
+                    size = ftp.size("%s/%s" % (d, n))
+                except (ftplib.Error, OSError):
+                    size = None
+                if already_fetched(dst, n, size):
+                    skipped += 1
+                    got.append(dst)
+                    continue
             with open(dst, "wb") as f:
                 ftp.retrbinary("RETR %s/%s" % (d, n), f.write)
             got.append(dst)
             print("fetched %s/%s -> %s (%d bytes)" % (d, n, dst, os.path.getsize(dst)))
     ftp.quit()
+    if skipped:
+        print("%d segment(s) already in %s, not fetched again (--refetch fetches them)" % (skipped, out_dir))
     if not got:
-        raise SystemExit("frametime-report: no ft_*.bin under %s" % ", ".join(dirs))
+        raise SystemExit("frametime-report: no %s under %s" % (_filter_desc(label, session), ", ".join(dirs)))
     return got
 
 
-def xemu_fetch(qcow2, out_dir):
+def _filter_desc(label, session):
+    parts = ["ft_*.bin"]
+    if label:
+        parts.append("label %s" % sanitise_label(label))
+    if session:
+        parts.append("session %s" % session)
+    return " ".join(parts)
+
+
+def xemu_fetch(qcow2, out_dir, label=None, session=None, refetch=False):
     import importlib.util
     here = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location("xemu_hdd", os.path.join(here, "xemu_hdd.py"))
@@ -1749,7 +2206,7 @@ def xemu_fetch(qcow2, out_dir):
     spec.loader.exec_module(hdd)
     os.makedirs(out_dir, exist_ok=True)
     fx = hdd.open_e(qcow2)
-    got = []
+    got, skipped = [], 0
     for title, is_dir, _ in fx.listdir("UDATA"):
         if not is_dir:
             continue
@@ -1759,21 +2216,31 @@ def xemu_fetch(qcow2, out_dir):
         except hdd.HddError:
             continue
         for n, is_dir, size in entries:
-            if is_dir or not (n.startswith("ft_") and n.endswith(".bin")):
+            if is_dir or not name_wanted(n, label, session):
                 continue
             dst = os.path.join(out_dir, n)
+            if not refetch and already_fetched(dst, n, size):
+                skipped += 1
+                got.append(dst)
+                continue
             with open(dst, "wb") as f:
                 f.write(fx.readfile(d + "/" + n))
             got.append(dst)
             print("copied E:/%s/%s -> %s (%d bytes)" % (d, n, dst, size))
+    if skipped:
+        print("%d segment(s) already in %s, not copied again (--refetch copies them)" % (skipped, out_dir))
     if not got:
-        raise SystemExit("frametime-report: no ft_*.bin under E:/UDATA/*/%s in %s" % (REL_DIR, qcow2))
+        raise SystemExit("frametime-report: no %s under E:/UDATA/*/%s in %s" % (_filter_desc(label, session), REL_DIR, qcow2))
     return got
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Frame-time recordings: fetch, summary, HTML report.")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    def filters(p, what):
+        p.add_argument("--label", help="only the segments of sessions with this label (host_frametime_label)%s" % what)
+        p.add_argument("--session", help="only the segments of this session (its id, or the first hex digits of it)%s" % what)
+
     p = sub.add_parser("fetch", help="download ft_*.bin from the console over FTP (read-only)")
     p.add_argument("--host", required=True,
                    help="the console's IP address (it changes with DHCP; the dashboard shows it)")
@@ -1781,17 +2248,29 @@ def main(argv=None):
     p.add_argument("--password", default="xbox")
     p.add_argument("--remote-dir", help="default: every %s/<title id>/%s" % (REMOTE_ROOT, REL_DIR))
     p.add_argument("--out", default="frametime-recordings")
+    filters(p, "")
+    p.add_argument("--refetch", action="store_true", help="fetch segments already in --out again")
     p = sub.add_parser("fetch-xemu", help="copy ft_*.bin off xemu's hard disk image (stop xemu first)")
     p.add_argument("--qcow2", default=r"G:\Games\Xemu\xbox_hdd.qcow2")
     p.add_argument("--out", default="frametime-recordings")
-    p = sub.add_parser("summary", help="print the per-map table")
-    p.add_argument("file")
+    filters(p, "")
+    p.add_argument("--refetch", action="store_true", help="copy segments already in --out again")
+    p = sub.add_parser("sessions", help="list the sessions (and single-file recordings) in folders or files")
+    p.add_argument("paths", nargs="+")
+    p = sub.add_parser("summary", help="print the per-map table (of a file, a session, or two sessions compared)")
+    p.add_argument("paths", nargs="+", metavar="path",
+                   help="a recording or segment file, or folders/files to pick a session from")
+    filters(p, ": stitched into one recording")
+    p.add_argument("--compare", nargs=2, metavar=("A", "B"),
+                   help="two sessions (each a label or a session id) side by side, per map")
     p.add_argument("--include-flush", action="store_true",
                    help="keep the frames that wrote the file in the statistics (left out by default)")
     p.add_argument("--include-level-change", action="store_true",
                    help="keep the frames whose time is a level load in the statistics (left out by default)")
     p = sub.add_parser("report", help="write the HTML report")
-    p.add_argument("file")
+    p.add_argument("paths", nargs="+", metavar="path",
+                   help="a recording or segment file, or folders/files to pick a session from")
+    filters(p, ": stitched into one recording")
     p.add_argument("--include-flush", action="store_true",
                    help="keep the frames that wrote the file in the statistics (left out by default)")
     p.add_argument("--include-level-change", action="store_true",
@@ -1804,21 +2283,51 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     if a.cmd == "fetch":
-        ftp_fetch(a.host, a.user, a.password, a.remote_dir, a.out)
+        ftp_fetch(a.host, a.user, a.password, a.remote_dir, a.out, label=a.label, session=a.session,
+                  refetch=a.refetch)
     elif a.cmd == "fetch-xemu":
-        xemu_fetch(a.qcow2, a.out)
+        xemu_fetch(a.qcow2, a.out, label=a.label, session=a.session, refetch=a.refetch)
+    elif a.cmd == "sessions":
+        found = collect(a.paths)
+        for line in session_listing(found):
+            print(line)
+        for f, r in found:
+            if not r.get("session"):
+                print("%s  single file, version %d, %d frames" % (f, r["version"], len(r["frames"])))
+        if not found:
+            print("frametime-report: no recordings in %s" % ", ".join(a.paths), file=sys.stderr)
+            return 1
+    elif a.cmd == "summary" and a.compare:
+        try:
+            found = collect(a.paths)
+            side = []
+            for token in a.compare:
+                rec = stitch(select_session(found, token=token))
+                side.append((token,) + analyse_rec(rec, a.include_flush, a.include_level_change))
+        except (FormatError, OSError) as e:
+            print("frametime-report: %s" % e, file=sys.stderr)
+            return 1
+        (na, _, rows_a, sess_a), (nb, _, rows_b, sess_b) = side
+        print(compare_text(na, sess_a, rows_a, nb, sess_b, rows_b))
     else:
         try:
-            rec, rows, sess = analyse(a.file, a.include_flush, a.include_level_change)
+            rec, files = resolve(a.paths, a.label, a.session)
+            rec, rows, sess = analyse_rec(rec, a.include_flush, a.include_level_change)
         except (FormatError, OSError) as e:
-            print("frametime-report: %s: %s" % (a.file, e), file=sys.stderr)
+            print("frametime-report: %s: %s" % (", ".join(a.paths), e), file=sys.stderr)
             return 1
         if a.cmd == "summary":
             print(summary_text(rec, rows, sess))
         else:
-            out = a.output or os.path.splitext(a.file)[0] + ".html"
+            si = rec.get("session")
+            if a.output:
+                out = a.output
+            elif si and si["stitched"]:
+                out = os.path.join(os.path.dirname(files[0]), "ft_%s_%s.html" % (si["label"], si["short"]))
+            else:
+                out = os.path.splitext(files[0])[0] + ".html"
             with open(out, "w", encoding="utf-8") as f:
-                f.write(render_html(rec, rows, sess, [a.file], a.title, a.source, a.lede, a.include_flush,
+                f.write(render_html(rec, rows, sess, files, a.title, a.source, a.lede, a.include_flush,
                                     a.include_level_change))
             print(summary_text(rec, rows, sess))
             print("wrote %s" % out)

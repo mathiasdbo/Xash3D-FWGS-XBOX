@@ -21,28 +21,61 @@ code). `cl_showfps` is unchanged.
    `0` off (the default), `1` record only, `2` record and draw the overlay.
    The cvar is not saved to `config.cfg` on purpose: delete the line and
    the next boot records nothing. It can also be changed from the console
-   while playing; each change from `0` starts a new file.
+   while playing; each change from `0` starts a new session.
+
+   The **label** says what the session measures - the epic, task or PR
+   (`pr190-clents`, `route-c0a0`). Claude sets it with each upload, in
+   `valve/userconfig.d/91-frametime.cfg`, so the owner never types it:
+
+       host_frametime_label "pr190-clents"
+
+   It is archived (saved in `config.cfg`) and privileged (a server cannot set it), read when a session starts,
+   and goes into every file's header and name, cleaned to letters,
+   digits, `-` and `_` and cut to 22 characters; empty is `untagged`.
 2. **Play.** Every frame goes into a 1024-frame ring in memory, written to
-   the drive every 5 seconds and at each map start, and closed on quit. A
-   power-off loses at most the last 5 seconds.
-3. **Fetch the file** (the game must be closed and the dashboard's FTP
+   the drive every 5 seconds and at each map start, and closed on quit.
+   The session is written as **segments**: a new file at each map start
+   and when one reaches `host_frametime_segment_mb` (8 MiB, about 3.3
+   minutes at 60 fps) - see "Sessions and segments" below. A power-off
+   loses at most the last 5 seconds of the segment being written; the
+   earlier segments are complete files.
+3. **Fetch the files** (the game must be closed and the dashboard's FTP
    server running; the tool only lists and downloads):
 
        python tools/frametime-report.py fetch --host <console IP> --out recordings
+       python tools/frametime-report.py fetch --host <console IP> --out recordings --label pr190-clents
 
    `--host` is required: the console gets its address from DHCP, so it
    changes; the dashboard shows the current one.
 
    It looks in `/HDD0-E/UDATA/<title id>/valve/valve/frametime/` (the
    engine's write directory, not the game folder) and downloads every
-   `ft_NNN.bin`. Each session writes the next free number, so old files are
-   never overwritten; delete them over FTP when done. From xemu instead,
-   with xemu stopped: `python tools/frametime-report.py fetch-xemu --out recordings`.
+   `ft_*.bin` - the segments, `ft_<label>_<session>_<seq>.bin`, and any
+   older single-file `ft_NNN.bin` - or with `--label` and/or `--session`
+   (a session id or its first hex digits) only those segments. A segment
+   already in `--out` with the same size is not downloaded again
+   (`--refetch` does); a segment's name is unique to its session, so new
+   sessions never overwrite old files on either side. Delete them over
+   FTP when done. From xemu instead, with xemu closed:
+   `python tools/frametime-report.py fetch-xemu --out recordings` (the
+   same filters). `sessions recordings` lists what a folder holds.
 4. **Open the report:**
 
-       python tools/frametime-report.py report recordings/ft_000.bin -o ft_000.html
+       python tools/frametime-report.py report recordings --label pr190-clents -o pr190.html
+       python tools/frametime-report.py summary recordings --label pr190-clents
+       python tools/frametime-report.py summary recordings --compare pr189-base pr190-clents
+       python tools/frametime-report.py summary recordings/ft_000.bin
 
-   It prints the per-map table and writes the HTML page (per-map table,
+   A folder with `--label` or `--session` reads that session, its
+   segments stitched back into one timeline (a label several sessions
+   share picks the newest, and says so); one file reads that file alone
+   - a single-file recording exactly as before, or one segment, which
+   then says which session it belongs to and whether more follow.
+   `--compare A B` (each a label or a session id) prints two sessions
+   side by side per map: played seconds, average fps, 1% low, CPU and GPU
+   ms and the worst frame, each with B's change in %.
+
+   `report` prints the per-map table and writes the HTML page (per-map table,
    fps timeline with 60/30 fps lines and level loads, CPU/GPU breakdown
    timeline, and for a version-2 file the work counters: per map mean /
    peak, a work-over-time chart, each counter's correlation with CPU time
@@ -105,8 +138,9 @@ second:
 - `mdl` studio models / their triangles, `lm` lightmap faces / texels
   rebuilt, `water` vertices warped, `dec` decals, `part` particles,
   `beam`, `spr` sprites;
-- the map, the file being written, and the overlay's own drawing time
-  (the half-second mean);
+- the map, the number of the segment being written (`seg 3`; the file
+  name is up to 42 glyphs), and the overlay's own drawing time (the
+  half-second mean);
 - `self ms` - the six CPU spans (see "CPU spans" below) with the most time
   of their own (a span minus the spans inside it), largest first, then
   `none`: CPU that no span saw. The shown values, the other spans' own
@@ -621,6 +655,123 @@ the same session after them, the field loop 0.010 ms and the three
 `k_cl_pkt_ents` 0.115 and `k_cl_read` 0.19 (0.23 before).
 `CL_SetIdealPitch` is the largest piece left.
 
+## Sessions and segments (format version 3, 2026-10-07)
+
+Until 2026-10-07 a recording was one `ft_NNN.bin` of up to 80 MiB (~33
+minutes): slow to fetch over FTP, stopped at the cap, and lost whole if
+the game crashed before the end. A recording is now a **session** - from
+`host_frametime_analysis` going non-zero to it going back to `0` or the
+game quitting - written as **segments**, one file each.
+
+**Names.** `ft_<label>_<session>_<seq>.bin`, at most 42 characters
+(FATX's limit for one name; read back off xemu's FATX disk, "First use" below):
+
+| part | characters | |
+|---|---|---|
+| `ft_` | 3 | kept from the single-file names, so every listing and filter still finds recordings |
+| label | 1-22 | `host_frametime_label`, sanitised: letters, digits, `-`, `_`; every run of other characters one `-`; leading and trailing `-`/`_` dropped; empty is `untagged` |
+| `_` | 1 | |
+| session | 8 | the session id's first 4 bytes, lowercase hex |
+| `_` | 1 | |
+| seq | 3 | the segment number, `000`-`999` |
+| `.bin` | 4 | |
+
+20 characters plus the label, so the longest label makes exactly 42:
+`ft_pr190-clents_a8646741_002.bin` is 32. The label may contain `_`; the
+tool splits a name from the right.
+
+**Session id.** 16 bytes from the kernel clock (`KeQuerySystemTime`),
+the TSC, the performance counter, the free and total pages and the XBE
+timestamp, mixed (two splitmix64 chains) and marked as a version-4 UUID
+(`xbox_ft_session_id`). The header has all 16 bytes, the name the first
+4. The recorder checks that its first file name is free and draws again
+if not, so a session never overwrites one that was not fetched.
+
+**Rotation.** A segment closes and the next one opens:
+
+- **at a map start** (the first active frame, where the MAP chunk is
+  written), when the segment holds frames. The flush at that point
+  writes every frame so far, then the CLASSES rows that close the map,
+  then an END; the new segment opens with the MAP chunk and the frame in
+  progress. So the old segment keeps the map's play, the frame that
+  queued the load (`LOAD`) and the loading frames - exactly the frames a
+  single file has before that MAP chunk - and the level-change frame,
+  the stalls and the notes stay with the map they belong to. A map that
+  starts in a segment with no frames yet (recording switched on during a
+  load) stays in it.
+- **at the size cap**, `host_frametime_segment_mb` (8 MiB by default;
+  `0` only at map starts; values under 1 count as 1, over 512 as 512; not archived),
+  checked after each periodic flush, so the old segment holds every
+  frame so far and the new one starts at a frame boundary. The old one
+  gets the CLASSES rows of the part of the map it holds; the new one
+  opens with a MAP chunk flagged `CONTINUED` (and `NO_LOAD_START`) for
+  the map in progress, so it reads on its own.
+
+Whichever comes first. A session stops at 512 MiB in all (~3.5 hours at
+60 fps; the single file stopped at 80 MiB) or at segment 999.
+
+**Self-contained segments.** Each opens with a 256-byte v3 header (the
+version-2 fields, then the session id, the segment number, why it
+began, the sequence number of its first frame, the TSC when it opened,
+the console's clock when the session began, the label), its own
+COUNTERS and SPANS chunks, and ends with an END that says what follows
+(a map change, the size cap, or nothing: the session ended) and the
+frames the ring lost while it was open. The TSC/performance-counter pair
+at offsets 40/48 is the session's, so every segment calibrates over the
+whole session so far. A CLASSES chunk always lists every classname seen
+in the session, so `g_worst_cls` names the same row in any segment.
+
+**Reading.** `stitch()` in `tools/frametime-report.py` sorts a
+session's segments by number and concatenates their frames, maps,
+calibrations, CLASSES and notes with the frame offsets applied, drops a
+`CONTINUED` MAP chunk that follows the same map, sums the lost frames
+and the CLASSES rows per map (`segment_classes` adds every chunk inside
+a map's frames), and checks the seams: a missing segment number, a
+frame-sequence gap between two segments (counted as lost, like a gap
+inside a file), a segment without END before the last, and a last
+segment whose END says more follows (not fetched yet). The result is the
+recording the single-file recorder would have written, so every table
+is computed as before. The host test writes one session both ways and
+the report's tests compare them field by field and line by line. A
+segment read alone names a continued map `<map> (cont.)` and skips its
+warm-up (the earlier segment had it); its "t s" column counts from its
+own first frame.
+
+**First use** (xemu, 2026-10-07, the branch's XBE 6AC6F5B2): a scripted
+session with label `recsess-x1` and `host_frametime_segment_mb 1` - `map
+c1a0`, `changelevel c1a0d`, `save`, `changelevel c1a0a`, `load` (back to
+c1a0d), then `host_frametime_analysis 0` - wrote six segments, read back
+off xemu's FATX disk with `fetch-xemu --label recsess-x1`:
+`ft_recsess-x1_d1b4eda8_000.bin` (the menu frames before the first map,
+END: a map follows) to `_005.bin`, 30 characters each on the disk; 001
+c1a0, 002 c1a0d closed by the size cap at 1.06 MB, 003 c1a0d
+`CONTINUED`, 004 c1a0a, 005 c1a0d after the load (END: the session
+ended). Every seam's first frame was the frame after the previous
+segment's last, nothing lost. The six segments concatenated chunk by
+chunk into one version-2 file (a throwaway script independent of
+`stitch()`: the first header and COUNTERS/SPANS, every other chunk but
+the inner ENDs and the CONTINUED MAP) gave the same `summary`, line for
+line, as the stitched session, with and without `--include-flush` and
+`--include-level-change`: 4797 frames, four map rows, three level-change
+frames (each in the map it left), 14 flush frames, one deferred save
+run, 25 notes. The same script on the branch's final XBE (6AC6FD0B,
+label `recsess-x2`) gave the same six segments and the same equality;
+`summary --compare recsess-x1 recsess-x2` printed the two runs map by
+map (c1a0d's second visit as `c1a0d #2`). 23 of the owner's single-file recordings (up to 30 MB)
+gave the same summary and byte-identical HTML with this tool and
+main's.
+
+**Cost.** Nothing per frame. A rotation is a file close, an open and
+~5.2 KiB of header, COUNTERS and SPANS, written from the encode buffer
+the flush has just finished with, in a frame that is already a flush
+frame (flagged, out of the statistics). At 8 MiB that is ~5.4 KiB more
+disk per 8 MiB (0.07%) plus one per map. Memory: no new allocation; the
+recorder's static state grows by ~160 bytes (the segment's fields and
+the build string), and the ~5.3 KiB of stack buffers the start used for
+the header, COUNTERS and SPANS are gone (the opening chunks are encoded
+in the encode buffer, `XBOX_FT_SEGMENT_OPEN_BYTES` checked against it at
+compile time).
+
 ## Cost
 
 - **Off:** one float compare per `Host_Frame`; in ref/nv2a one load and
@@ -634,11 +785,12 @@ the same session after them, the field loop 0.010 ms and the three
   a few `rdtsc` per frame plus two per span closed and two per server
   message (below); a ~205 KiB write and `fsync` every 5 s (those frames
   are flagged); about 41 KiB per second of play on disk at 60 fps, plus
-  at most 4 KiB of notes per flush (144 MiB an hour; the file stops at 80
-  MiB, ~33 minutes at 60 fps, ~27 at the 72 fps cap - the owner's 29-minute
-  route of 2026-10-06 was 47 MB at 468-byte records and would be ~70 MB
-  at 700). The cap was 64 MiB until the client entity counters
-  (2026-10-07): at 700-byte records that route would no longer have fit.
+  at most 4 KiB of notes per flush (144 MiB an hour), in 8 MiB segments
+  (above); a session stops at 512 MiB. Until segments (2026-10-07) the
+  one file stopped at 80 MiB, ~33 minutes at 60 fps, ~27 at the 72 fps
+  cap - the owner's 29-minute route of 2026-10-06 was 47 MB at 468-byte
+  records and would be ~70 MB at 700. That cap was 64 MiB until the
+  client entity counters (2026-10-07).
   Before the client entity counters (2026-10-07) it was ~763 KiB and
   37.7 KiB/s. Before the player movement counters (2026-10-06) it was ~622 KiB and
   29.8 KiB/s. Before the menu, music and first-use load
@@ -691,6 +843,14 @@ the same session after them, the field loop 0.010 ms and the three
   against the spans build.
 
 ## File format
+
+Version 3 (2026-10-07) is version 2 split into session segments (above):
+the same chunks, a 256-byte header - the 128 bytes below, then the
+session id, segment number, start reason, first frame, segment-open TSC,
+the console's clock at the session start and the label - a MAP flag
+`CONTINUED` (0x2) and an END field saying what follows (it was reserved
+and 0, so older files read "the session ended"). The reader takes
+versions 1, 2 and 3; a version-1 or -2 file parses exactly as before.
 
 Version 2, little-endian: a 128-byte header (magic `R3DFTIME`, version,
 header and frame-record sizes, TSC and performance-counter rates and the

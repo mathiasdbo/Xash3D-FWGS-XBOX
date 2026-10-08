@@ -5,6 +5,27 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: frame-time recordings are written as small, labelled files per session
+
+A frame-time recording used to be one file of up to 80 MiB: slow to
+copy off the console, stopped after about 33 minutes, and lost entirely
+if the game crashed before the end. A recording is now a session written
+as a series of small files: a new one at every map start and every 8 MiB
+(`host_frametime_segment_mb`). Each file stands on its own, so a crash
+only loses the last few seconds of the file being written and the
+fetch can skip the files it already has. The files are named after
+what the session measures - `host_frametime_label`, e.g. `pr190-clents`
+- and a session id, e.g. `ft_pr190-clents_a8646741_002.bin`, within the
+console file system's 42-character limit.
+
+`tools/frametime-report.py` fetches by label or session, joins a
+session's files back into one timeline (its tables are identical to what
+one file of the same run gives: the test suite writes a session both
+ways and compares them), reads a single file on its own, and compares
+two sessions map by map (`summary --compare A B`). Older recordings
+read exactly as before. The recorder costs nothing more per frame; a
+session now stops at 512 MiB (about 3.5 hours) instead of 80 MiB.
+
 ### Changed - Xbox: the client decodes entity updates and rebuilds its collision lists with less work
 
 Every frame the client decodes the entity updates the server sent and

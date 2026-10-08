@@ -395,7 +395,7 @@ size_t xbox_ft_encode_header( uint8_t *out, uint32_t ring_frames, uint64_t tsc_h
 
 	memcpy( p, "R3DFTIME", 8 );
 	p += 8;
-	p = put_u32( p, counters ? XBOX_FT_VERSION : XBOX_FT_VERSION_NO_WORK );
+	p = put_u32( p, counters ? XBOX_FT_VERSION_SINGLE : XBOX_FT_VERSION_NO_WORK );
 	p = put_u32( p, XBOX_FT_HEADER_BYTES );
 	p = put_u32( p, (uint32_t)xbox_ft_frame_bytes( counters ));
 	p = put_u32( p, ring_frames );
@@ -511,13 +511,18 @@ size_t xbox_ft_encode_calib( uint8_t *out, uint64_t tsc, uint64_t qpc )
 
 size_t xbox_ft_encode_end( uint8_t *out, uint64_t tsc, uint32_t lost )
 {
+	return xbox_ft_encode_segment_end( out, tsc, lost, XBOX_FT_SEG_SESSION );
+}
+
+size_t xbox_ft_encode_segment_end( uint8_t *out, uint64_t tsc, uint32_t lost, uint32_t next )
+{
 	uint8_t *p = out;
 
 	p = put_u32( p, XBOX_FT_CHUNK_END );
 	p = put_u32( p, XBOX_FT_END_BYTES );
 	p = put_u64( p, tsc );
 	p = put_u32( p, lost );
-	p = put_u32( p, 0 );
+	p = put_u32( p, next );
 	return (size_t)( p - out );
 }
 
@@ -565,4 +570,142 @@ size_t xbox_ft_encode_notes( uint8_t *out, const xbox_ft_note_t *notes, uint32_t
 		p = put_name( p, n->name, XBOX_FT_NOTE_NAME_BYTES );
 	}
 	return (size_t)( p - out );
+}
+
+/* Sessions and segments (version 3, 2026-10-07): the layout and the name
+   budget are in xbox_frametime_util.h. */
+
+static int label_char_ok( char c )
+{
+	return ( c >= 'a' && c <= 'z' ) || ( c >= 'A' && c <= 'Z' ) || ( c >= '0' && c <= '9' ) || c == '-' || c == '_';
+}
+
+static int label_edge( char c )
+{
+	return c == '-' || c == '_';
+}
+
+size_t xbox_ft_label_sanitise( const char *label, char *out )
+{
+	size_t n = 0;
+	int replaced = 0;
+
+	for( ; label && *label && n < XBOX_FT_LABEL_MAX; label++ )
+	{
+		if( label_char_ok( *label ))
+		{
+			if( n == 0 && label_edge( *label ))
+				continue; /* no leading separator */
+			out[n++] = *label;
+			replaced = 0;
+		}
+		else if( n > 0 && !replaced )
+		{
+			/* One '-' for a whole run of other characters: "PR #190" is
+			   "PR-190", not "PR--190". */
+			out[n++] = '-';
+			replaced = 1;
+		}
+	}
+	while( n > 0 && label_edge( out[n - 1] ))
+		n--;
+	if( n == 0 )
+	{
+		memcpy( out, XBOX_FT_LABEL_EMPTY, sizeof( XBOX_FT_LABEL_EMPTY ));
+		return sizeof( XBOX_FT_LABEL_EMPTY ) - 1;
+	}
+	out[n] = 0;
+	return n;
+}
+
+/* splitmix64's finaliser: every input bit reaches every output bit. */
+static uint64_t mix64( uint64_t z )
+{
+	z = ( z ^ ( z >> 30 )) * 0xBF58476D1CE4E5B9ull;
+	z = ( z ^ ( z >> 27 )) * 0x94D049BB133111EBull;
+	return z ^ ( z >> 31 );
+}
+
+void xbox_ft_session_id( const uint64_t *inputs, uint32_t n, uint8_t id[XBOX_FT_SESSION_ID_BYTES] )
+{
+	uint64_t a = 0x9E3779B97F4A7C15ull, b = 0xD1B54A32D192ED03ull;
+	uint32_t i;
+
+	for( i = 0; i < n; i++ )
+	{
+		a = mix64( a ^ inputs[i] );
+		b = mix64( b + inputs[i] + a );
+	}
+	put_u64( id, a );
+	put_u64( id + 8, b );
+	/* RFC 4122's random-UUID marks, so the full id prints as one: version
+	   4 in byte 6's high nibble, variant 10 in byte 8's top bits. The
+	   name's 8 hex digits are bytes 0-3, untouched by either. */
+	id[6] = (uint8_t)(( id[6] & 0x0Fu ) | 0x40u );
+	id[8] = (uint8_t)(( id[8] & 0x3Fu ) | 0x80u );
+}
+
+size_t xbox_ft_segment_name( char *out, const char *label, const uint8_t id[XBOX_FT_SESSION_ID_BYTES], uint32_t seq )
+{
+	static const char hex[] = "0123456789abcdef";
+	char *p = out;
+	uint32_t i;
+
+	memcpy( p, "ft_", 3 );
+	p += 3;
+	p += xbox_ft_label_sanitise( label, p );
+	*p++ = '_';
+	for( i = 0; i < XBOX_FT_SESSION_HEX / 2; i++ )
+	{
+		*p++ = hex[id[i] >> 4];
+		*p++ = hex[id[i] & 15];
+	}
+	*p++ = '_';
+	if( seq > XBOX_FT_SEGMENT_SEQ_MAX )
+		seq = XBOX_FT_SEGMENT_SEQ_MAX;
+	*p++ = (char)( '0' + seq / 100 );
+	*p++ = (char)( '0' + seq / 10 % 10 );
+	*p++ = (char)( '0' + seq % 10 );
+	memcpy( p, ".bin", 5 );
+	p += 4;
+	return (size_t)( p - out );
+}
+
+uint32_t xbox_ft_segment_rotation( int map_start, uint32_t seg_frames, uint64_t seg_bytes, uint64_t cap_bytes )
+{
+	if( map_start )
+		return seg_frames ? XBOX_FT_SEG_MAP : 0;
+	if( cap_bytes && seg_bytes >= cap_bytes )
+		return XBOX_FT_SEG_SIZE;
+	return 0;
+}
+
+size_t xbox_ft_encode_header_v3( uint8_t *out, uint32_t ring_frames, uint64_t tsc_hz, uint64_t qpc_hz, uint64_t tsc_open, uint64_t qpc_open, uint32_t mode, const char *build, uint32_t counters, const xbox_ft_segment_t *seg )
+{
+	uint8_t *p = out + xbox_ft_encode_header( out, ring_frames, tsc_hz, qpc_hz, tsc_open, qpc_open, mode, build, counters );
+
+	/* The v2 header with this version and size. */
+	put_u32( out + 8, XBOX_FT_VERSION );
+	put_u32( out + 12, XBOX_FT_HEADER_V3_BYTES );
+
+	memcpy( p, seg->session, XBOX_FT_SESSION_ID_BYTES );
+	p += XBOX_FT_SESSION_ID_BYTES;
+	p = put_u32( p, seg->seq );
+	p = put_u32( p, seg->reason );
+	p = put_u32( p, seg->first_frame );
+	p = put_u32( p, 0 );
+	p = put_u64( p, seg->tsc_open );
+	p = put_u64( p, seg->systime );
+	p = put_name( p, seg->label, XBOX_FT_LABEL_BYTES );
+	memset( p, 0, XBOX_FT_HEADER_V3_BYTES - (size_t)( p - out ));
+	return XBOX_FT_HEADER_V3_BYTES;
+}
+
+size_t xbox_ft_encode_segment_open( uint8_t *out, uint32_t ring_frames, uint64_t tsc_hz, uint64_t qpc_hz, uint64_t tsc_open, uint64_t qpc_open, uint32_t mode, const char *build, uint32_t counters, const xbox_ft_segment_t *seg )
+{
+	size_t n = xbox_ft_encode_header_v3( out, ring_frames, tsc_hz, qpc_hz, tsc_open, qpc_open, mode, build, counters, seg );
+
+	n += xbox_ft_encode_counters( out + n, counters );
+	n += xbox_ft_encode_spans( out + n, counters );
+	return n;
 }

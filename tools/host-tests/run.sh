@@ -134,20 +134,24 @@ xbox_frametime_util() {
 	# Stale fixtures from an earlier run must not stand in for ones this
 	# run failed to write.
 	rm -f "$OUT"/frametime_fixture*.bin
+	rm -rf "$OUT/frametime_sessions" && mkdir -p "$OUT/frametime_sessions" || return 1
 	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
 		tools/host-tests/xbox_frametime_util_host_test.c engine/platform/xbox/xbox_frametime_util.c \
 		-o "$OUT/xbox_frametime_util_test" && "$OUT/xbox_frametime_util_test" "$OUT/frametime_fixture.bin" "$OUT/frametime_fixture_v1.bin" \
-		"$OUT/frametime_fixture_lc.bin" "$OUT/frametime_fixture_lc_v1.bin" "$OUT/frametime_fixture_spans.bin"
+		"$OUT/frametime_fixture_lc.bin" "$OUT/frametime_fixture_lc_v1.bin" "$OUT/frametime_fixture_spans.bin" \
+		"$OUT/frametime_sessions" "$OUT/frametime_fixture_single.bin"
 }
 run_test xbox_frametime_util xbox_frametime_util
 
 frametime_report() {
-	for f in frametime_fixture.bin frametime_fixture_v1.bin frametime_fixture_lc.bin frametime_fixture_lc_v1.bin frametime_fixture_spans.bin; do
+	for f in frametime_fixture.bin frametime_fixture_v1.bin frametime_fixture_lc.bin frametime_fixture_lc_v1.bin frametime_fixture_spans.bin \
+		frametime_fixture_single.bin; do
 		[ -f "$OUT/$f" ] || { echo "host-tests: no fixture $f - the C test above did not write it" >&2; return 1; }
 	done
 	FRAMETIME_FIXTURE="$OUT/frametime_fixture.bin" FRAMETIME_FIXTURE_V1="$OUT/frametime_fixture_v1.bin" \
 	FRAMETIME_FIXTURE_LC="$OUT/frametime_fixture_lc.bin" FRAMETIME_FIXTURE_LC_V1="$OUT/frametime_fixture_lc_v1.bin" \
 	FRAMETIME_FIXTURE_SPANS="$OUT/frametime_fixture_spans.bin" \
+	FRAMETIME_SESSIONS="$OUT/frametime_sessions" FRAMETIME_FIXTURE_SINGLE="$OUT/frametime_fixture_single.bin" \
 		python tools/test_frametime_report.py
 }
 run_test frametime_report frametime_report

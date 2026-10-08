@@ -20,8 +20,16 @@ replaces the temporary probe patched into ref/nv2a/r_context.c for item
 records every frame.
 
   host_frametime_analysis 0  nothing: one compare per Host_Frame, no memory
-  host_frametime_analysis 1  record every frame to frametime/ft_NNN.bin
+  host_frametime_analysis 1  record every frame to frametime/ft_<label>_<session>_<seq>.bin
   host_frametime_analysis 2  record, and draw the overlay over the HUD
+
+A recording is a SESSION (from the cvar going non-zero to it going back
+to 0, or the game quitting) written as SEGMENTS (format v3, 2026-10-07):
+a new file at each map start and when one passes host_frametime_segment_mb
+at a flush. Each opens with its own header, COUNTERS and SPANS, so it
+reads alone; tools/frametime-report.py stitches a session back together.
+host_frametime_label names what the session measures, in every header
+and file name.
 
 Each frame is flagged by the state it starts in (in play, menu), plus
 XBOX_FT_F_LOAD when its Host_Frame queued a changelevel or other load:
@@ -51,11 +59,12 @@ frame (pb_end kicks the DMA, pbkit.c:1824-1850). It is the GPU's excess
 over the CPU - near zero when the CPU is the bottleneck (the GPU finished
 before the CPU asked), and the frame's GPU-bound share when it is not.
 
-The file lives in the engine's write directory (E:\UDATA\<title id>\valve\
+The files live in the engine's write directory (E:\UDATA\<title id>\valve\
 on the Xbox, filesystem_engine.c), flushed with fsync every
 XBOX_FT_FLUSH_SECONDS, when half the ring is waiting, before a map chunk
 and when recording stops - a power-off loses at most the last few
-seconds. tools/frametime-report.py fetches and reads it.
+seconds of the segment being written. tools/frametime-report.py fetches
+and reads them.
 */
 
 #include "common.h"
@@ -75,7 +84,25 @@ seconds. tools/frametime-report.py fetches and reads it.
    writing to the drive until someone remembers it. The owner turns it on
    per session in userconfig.d, where it is visible. */
 static CVAR_DEFINE_AUTO( host_frametime_analysis, "0", FCVAR_FILTERABLE,
-	"frame-time analysis: 0 off, 1 record to frametime/ft_NNN.bin, 2 record and draw the overlay" );
+	"frame-time analysis: 0 off, 1 record to frametime/ft_<label>_<session>_<seq>.bin, 2 record and draw the overlay" );
+
+/* What a session measures (an epic, a task, a PR: "pr190-clents",
+   "route-c0a0"): in every segment's header and file name, sanitised to
+   [A-Za-z0-9_-] and cut to 22 characters (xbox_ft_label_sanitise; empty:
+   "untagged"). Archived, unlike the recorder itself: a label left over
+   names nothing until recording is switched on, and the uploads set it
+   in userconfig.d anyway. Read when a session starts. */
+/* FCVAR_PRIVILEGED like upstream's other archived cvar that ends up in a
+   file name (hpk_custom_file, hpak.c): a server's stufftext cannot set it
+   (the sanitiser would make that harmless anyway). */
+static CVAR_DEFINE_AUTO( host_frametime_label, "", FCVAR_ARCHIVE | FCVAR_PRIVILEGED,
+	"frame-time recordings: what the session measures, in the file names (letters, digits, - and _)" );
+
+/* The size at which a segment is closed at the next flush and the next
+   one opened, MiB; 0 only at map starts. Read at each flush. Not archived:
+   lowering it is a test setting. */
+static CVAR_DEFINE_AUTO( host_frametime_segment_mb, "8", FCVAR_FILTERABLE,
+	"frame-time recordings: start a new file when one reaches this many MiB (0: only at map starts; at least 1)" );
 
 /* The per-subsystem CPU spans (M2): on by default whenever the recorder
    is, so a recording has them; 0 measures what they cost (the same view
@@ -140,7 +167,11 @@ void Xbox_FT_ClEnts_CloseFrame( void )
 #define XBOX_FT_FLUSH_SECONDS   5u
 #define XBOX_FT_ENCODE_FRAMES   128u
 #define XBOX_FT_WARMUP_FRAMES   30u     /* left out of a map's statistics, as item 12's report did */
-#define XBOX_FT_MAX_FILE_BYTES  ( 80u * 1024u * 1024u )  /* ~33 min at 60 fps (41 KiB/s); 64 MiB until 700-byte records (2026-10-07) */
+/* A session stops here: a recorder left on cannot fill the drive. ~3.5
+   hours at 60 fps (41 KiB/s). Until segments (2026-10-07) the one file
+   stopped at 80 MiB (~33 min), 64 MiB before 700-byte records. */
+#define XBOX_FT_MAX_SESSION_BYTES ( 512ull * 1024u * 1024u )
+#define XBOX_FT_SEGMENT_MB_MIN  1u
 #define XBOX_FT_NOMINAL_TSC_HZ  733333333u /* until calibrated: the retail Pentium III clock */
 
 /* The overlay. The graph shows the last XBOX_FT_GRAPH_FRAMES frames as
@@ -167,9 +198,14 @@ void Xbox_FT_ClEnts_CloseFrame( void )
 typedef struct xbox_ft_state_s
 {
 	int mode;                   /* the mode in effect; 0 = not recording */
-	file_t *file;
-	char filename[64];
-	uint64_t file_bytes;
+	file_t *file;               /* the segment being written */
+	char filename[64];          /* "frametime/" + at most XBOX_FT_FILE_NAME_MAX */
+	uint64_t seg_bytes;         /* written to this segment */
+	uint64_t session_bytes;     /* written to every segment of the session */
+	uint32_t seg_frames;        /* frames this segment's FRAMES chunks hold */
+	uint32_t seg_lost_base;     /* ring.lost when the segment opened */
+	xbox_ft_segment_t seg;      /* the session's id and label, the segment's number */
+	char build[64];
 
 	void *block;                /* the one allocation: ring + stats + encode buffer + notes */
 	xbox_ft_ring_t ring;
@@ -244,9 +280,14 @@ static qboolean FT_Write( const void *data, size_t bytes )
 		Con_Printf( S_ERROR "frametime: write to %s failed, recording stopped\n", ft.filename );
 		FS_Close( ft.file );
 		ft.file = NULL;
+		/* Stopped for good: without this the next map start would rotate
+		   to a new segment and fail again, a truncated file per map on a
+		   full drive. The session ends at the next frame (FT_Stop). */
+		Cvar_DirectSet( &host_frametime_analysis, "0" );
 		return false;
 	}
-	ft.file_bytes += bytes;
+	ft.seg_bytes += bytes;
+	ft.session_bytes += bytes;
 	return true;
 }
 
@@ -305,6 +346,7 @@ static void FT_Flush( void )
 			}
 		}
 		xbox_ft_ring_mark_flushed( &ft.ring );
+		ft.seg_frames += n;
 	}
 
 	tsc = xbox_ft_rdtsc();
@@ -318,12 +360,6 @@ static void FT_Flush( void )
 	ft.cur.flags |= XBOX_FT_F_FLUSH;
 
 	FT_MemoryPages( &ft.last_free_pages, &i );
-
-	if( ft.file_bytes >= XBOX_FT_MAX_FILE_BYTES )
-	{
-		Con_Printf( S_WARN "frametime: %s reached %u MiB, recording stopped\n", ft.filename, XBOX_FT_MAX_FILE_BYTES >> 20 );
-		Cvar_DirectSet( &host_frametime_analysis, "0" );
-	}
 }
 
 /* The server game frame's per-classname rows since the last ones
@@ -337,20 +373,99 @@ static void FT_WriteClasses( void )
 		FT_Write( classes, bytes );
 }
 
-static void FT_Stop( void )
+/* Opens segment ft.seg.seq, which begins for `reason` (XBOX_FT_SEG_*), and
+   writes what it starts with - the v3 header, COUNTERS, SPANS - from the
+   encode buffer, which no flush is using at the two places this runs
+   (session start, right after a flush). */
+static qboolean FT_OpenSegment( uint32_t reason )
+{
+	char name[XBOX_FT_FILE_NAME_MAX + 1];
+
+	STATIC_ASSERT( XBOX_FT_SEGMENT_OPEN_BYTES <= XBOX_FT_ENCODE_FRAMES * ( XBOX_FT_FRAME_BYTES + 4u * XBOX_FT_W_COUNT ),
+		"FT_OpenSegment: the encode buffer holds a segment's opening chunks" );
+	STATIC_ASSERT( sizeof( "frametime/" ) - 1 + XBOX_FT_FILE_NAME_MAX < sizeof( ft.filename ),
+		"FT_OpenSegment: filename holds the directory and a full-length name" );
+
+	xbox_ft_segment_name( name, ft.seg.label, ft.seg.session, ft.seg.seq );
+	Q_snprintf( ft.filename, sizeof( ft.filename ), "frametime/%s", name );
+	ft.file = FS_Open( ft.filename, "wb", true );
+	if( !ft.file )
+	{
+		Con_Printf( S_ERROR "frametime: couldn't create %s\n", ft.filename );
+		return false;
+	}
+
+	ft.seg.reason = reason;
+	ft.seg.first_frame = ft.ring.flushed_seq;
+	ft.seg.tsc_open = xbox_ft_rdtsc();
+	ft.seg_bytes = 0;
+	ft.seg_frames = 0;
+	ft.seg_lost_base = ft.ring.lost;
+	return FT_Write( ft.encode, xbox_ft_encode_segment_open( ft.encode, XBOX_FT_RING_FRAMES, ft.tsc_hz, ft.qpc_hz,
+		ft.tsc_open, ft.qpc_open, (uint32_t)ft.mode, ft.build, XBOX_FT_W_COUNT, &ft.seg ));
+}
+
+/* Ends the segment being written with an END chunk saying what follows
+   it (`next`, XBOX_FT_SEG_*; XBOX_FT_SEG_SESSION: nothing, the session
+   stopped) and closes it. */
+static void FT_CloseSegment( uint32_t next )
 {
 	uint8_t end[XBOX_FT_CHUNK_BYTES + XBOX_FT_END_BYTES];
 
+	if( !ft.file )
+		return;
+	if( FT_Write( end, xbox_ft_encode_segment_end( end, xbox_ft_rdtsc(), ft.ring.lost - ft.seg_lost_base, next )))
+		FS_Flush( ft.file );
+	if( ft.file )
+		FS_Close( ft.file );
+	ft.file = NULL;
+}
+
+/* Closes the segment being written and opens the next, right after a
+   flush (every frame pushed so far is in the old one; the frame in
+   progress goes to the new one). The caller has written the old one's
+   CLASSES rows; at a size cap the new one opens with a CONTINUED MAP
+   chunk for the map in progress, so it reads on its own. On a failure
+   the session stops at the next frame. */
+static qboolean FT_Rotate( uint32_t reason, uint64_t now )
+{
+	if( !ft.file )
+		return false; /* a write failed: the session is stopping */
+	if( ft.seg.seq >= XBOX_FT_SEGMENT_SEQ_MAX )
+	{
+		Con_Printf( S_WARN "frametime: %u segments in this session, recording stopped\n", ft.seg.seq + 1 );
+		Cvar_DirectSet( &host_frametime_analysis, "0" );
+		return false;
+	}
+	FT_CloseSegment( reason );
+	ft.seg.seq++;
+	if( !FT_OpenSegment( reason ))
+	{
+		Cvar_DirectSet( &host_frametime_analysis, "0" );
+		return false;
+	}
+	if( reason == XBOX_FT_SEG_SIZE && ft.map_name[0] )
+	{
+		uint8_t chunk[XBOX_FT_CHUNK_BYTES + XBOX_FT_MAP_BYTES];
+		uint32_t free_pages, total_pages;
+
+		FT_MemoryPages( &free_pages, &total_pages );
+		FT_Write( chunk, xbox_ft_encode_map( chunk, now, 0, 0, free_pages, total_pages,
+			XBOX_FT_MAP_F_NO_LOAD_START | XBOX_FT_MAP_F_CONTINUED, ft.map_name ));
+	}
+	return ft.file != NULL;
+}
+
+static void FT_Stop( void )
+{
 	if( ft.file )
 	{
 		/* The frame in progress is not pushed: it has no end yet. */
 		FT_Flush();
 		FT_WriteClasses();
-		if( FT_Write( end, xbox_ft_encode_end( end, xbox_ft_rdtsc(), ft.ring.lost )))
-			FS_Flush( ft.file );
-		if( ft.file )
-			FS_Close( ft.file );
-		Con_Printf( "frametime: stopped, %s (%u KiB, %u frames lost)\n", ft.filename, (uint32_t)( ft.file_bytes >> 10 ), ft.ring.lost );
+		FT_CloseSegment( XBOX_FT_SEG_SESSION );
+		Con_Printf( "frametime: stopped, %u segment(s) to %s (%u KiB, %u frames lost)\n", ft.seg.seq + 1, ft.filename,
+			(uint32_t)( ft.session_bytes >> 10 ), ft.ring.lost );
 	}
 
 	xbox_ft_waits.active = 0;
@@ -360,38 +475,34 @@ static void FT_Stop( void )
 	memset( &ft, 0, sizeof( ft ));
 }
 
+/* A new session's id: values that differ from one session to the next
+   (the kernel clock, the TSC, the performance counter, the free pages,
+   the build), mixed (xbox_ft_session_id). `salt` changes it when its
+   first file name is taken. */
+static void FT_NewSessionId( uint64_t salt )
+{
+	uint64_t in[6];
+	uint32_t avail, total;
+
+	FT_MemoryPages( &avail, &total );
+	in[0] = (uint64_t)ft.seg.systime;
+	in[1] = xbox_ft_rdtsc();
+	in[2] = KeQueryPerformanceCounter();
+	in[3] = ( (uint64_t)avail << 32 ) | total;
+	in[4] = CURRENT_XBE_HEADER->TimeDateStamp;
+	in[5] = salt;
+	xbox_ft_session_id( in, ARRAYSIZE( in ), ft.seg.session );
+}
+
 static qboolean FT_Start( int mode )
 {
-	uint8_t header[XBOX_FT_HEADER_BYTES];
-	uint8_t counters[XBOX_FT_CHUNK_BYTES + 4 + XBOX_FT_W_COUNT * XBOX_FT_COUNTER_NAME_BYTES];
-	uint8_t spans[XBOX_FT_SPANS_CHUNK_BYTES];
-	char build[64];
 	size_t ring_bytes = XBOX_FT_RING_FRAMES * sizeof( xbox_ft_frame_t );
+	char name[XBOX_FT_FILE_NAME_MAX + 1];
+	LARGE_INTEGER now;
 	uint32_t total_pages;
-	int i;
+	int tries;
 
 	memset( &ft, 0, sizeof( ft ));
-
-	/* The first unused name: a new session never overwrites the file
-	   from the last one, which may not have been fetched yet. */
-	for( i = 0; i < 1000; i++ )
-	{
-		Q_snprintf( ft.filename, sizeof( ft.filename ), "frametime/ft_%03d.bin", i );
-		if( !FS_FileExists( ft.filename, true ))
-			break;
-	}
-	if( i == 1000 )
-	{
-		Con_Printf( S_ERROR "frametime: frametime/ft_000.bin to ft_999.bin all exist - fetch and delete them\n" );
-		return false;
-	}
-
-	ft.file = FS_Open( ft.filename, "wb", true );
-	if( !ft.file )
-	{
-		Con_Printf( S_ERROR "frametime: couldn't create %s\n", ft.filename );
-		return false;
-	}
 
 	ft.block = Z_Calloc( ring_bytes + sizeof( xbox_ft_stats_t ) + XBOX_FT_ENCODE_FRAMES * xbox_ft_frame_bytes( XBOX_FT_W_COUNT )
 		+ XBOX_FT_NOTES_MAX * sizeof( xbox_ft_note_t ));
@@ -415,19 +526,34 @@ static qboolean FT_Start( int mode )
 	FT_MemoryPages( &ft.last_free_pages, &total_pages );
 
 	/* The XBE header's link timestamp identifies the build on the disc. */
-	Q_snprintf( build, sizeof( build ), "Resonance3D " XASH_VERSION " xbe %08lX",
+	Q_snprintf( ft.build, sizeof( ft.build ), "Resonance3D " XASH_VERSION " xbe %08lX",
 		(unsigned long)CURRENT_XBE_HEADER->TimeDateStamp );
-	xbox_ft_encode_header( header, XBOX_FT_RING_FRAMES, ft.tsc_hz, ft.qpc_hz, ft.tsc_open, ft.qpc_open, (uint32_t)mode, build, XBOX_FT_W_COUNT );
-	if( !FT_Write( header, sizeof( header ))
-		|| !FT_Write( counters, xbox_ft_encode_counters( counters, XBOX_FT_W_COUNT ))
-		|| !FT_Write( spans, xbox_ft_encode_spans( spans, XBOX_FT_W_COUNT )))
+
+	/* The session: its label, read once (a change mid-session names the
+	   next one), and an id whose first file name is free - an id is 128
+	   bits of clock and counters, so a clash is a bug, but a session must
+	   never overwrite one that may not have been fetched yet. */
+	xbox_ft_label_sanitise( host_frametime_label.string, ft.seg.label );
+	KeQuerySystemTime( &now );
+	ft.seg.systime = (uint64_t)now.QuadPart;
+	for( tries = 0; tries < 8; tries++ )
 	{
+		FT_NewSessionId( (uint64_t)tries );
+		xbox_ft_segment_name( name, ft.seg.label, ft.seg.session, 0 );
+		Q_snprintf( ft.filename, sizeof( ft.filename ), "frametime/%s", name );
+		if( !FS_FileExists( ft.filename, true ))
+			break;
+	}
+	if( tries == 8 || !FT_OpenSegment( XBOX_FT_SEG_SESSION ))
+	{
+		if( tries == 8 )
+			Con_Printf( S_ERROR "frametime: no free session file name (last tried %s)\n", ft.filename );
 		FT_Stop();
 		return false;
 	}
 
 	xbox_ft_waits.active = 1;
-	Con_Printf( "frametime: recording to %s (%s)\n", ft.filename, build );
+	Con_Printf( "frametime: recording to %s (%s)\n", ft.filename, ft.build );
 	return true;
 }
 
@@ -465,9 +591,17 @@ static void FT_TrackMap( uint64_t now, qboolean active )
 		Q_strncpy( ft.map_name, clgame.mapname, sizeof( ft.map_name ));
 
 		/* Frames before the map chunk, so the file stays in order; the
-		   per-classname rows close the map before it. */
+		   per-classname rows close the map before it. Then the new map
+		   gets a segment of its own (v3): the old one keeps every frame
+		   up to this one - the map's play, the frame that queued the
+		   load (XBOX_FT_F_LOAD) and the loading frames, as a single file
+		   would have them before this MAP chunk - and the new one starts
+		   with the MAP chunk and this frame. A map that starts in a
+		   segment with no frames yet stays in it. */
 		FT_Flush();
 		FT_WriteClasses();
+		if( xbox_ft_segment_rotation( true, ft.seg_frames, ft.seg_bytes, 0 ) == XBOX_FT_SEG_MAP )
+			FT_Rotate( XBOX_FT_SEG_MAP, now );
 		FT_Write( chunk, xbox_ft_encode_map( chunk, now, ft.load_seen ? now - ft.load_begin : 0,
 			ft.load_seen ? ft.free_before : 0, free_pages, total_pages, flags, ft.map_name ));
 		ft.last_free_pages = free_pages;
@@ -558,6 +692,8 @@ void Xbox_FrameTime_Init( void )
 {
 	Cvar_RegisterVariable( &host_frametime_analysis );
 	Cvar_RegisterVariable( &host_frametime_spans );
+	Cvar_RegisterVariable( &host_frametime_label );
+	Cvar_RegisterVariable( &host_frametime_segment_mb );
 	/* r3d_membench (#142) rides on this init rather than a call site of
 	   its own in host.c: the same platform, the same lifetime. */
 	Xbox_MemBench_Init();
@@ -629,7 +765,33 @@ void Xbox_FrameTime_BeginFrame( void )
 
 	if( xbox_ft_ring_unflushed( &ft.ring ) >= XBOX_FT_RING_FRAMES / 2
 		|| now - ft.last_flush >= (uint64_t)XBOX_FT_FLUSH_SECONDS * ft.tsc_hz )
+	{
+		float mb = host_frametime_segment_mb.value;
+		uint64_t cap;
+
 		FT_Flush();
+		/* The size cap, at a flush only: the segment holds every frame
+		   so far, so the next one starts at a frame boundary. Its
+		   CLASSES rows close the part of the map it holds; the report
+		   adds a map's rows up across segments. */
+		if( mb > 0.0f && mb < (float)XBOX_FT_SEGMENT_MB_MIN )
+			mb = (float)XBOX_FT_SEGMENT_MB_MIN;
+		/* Past the session cap the size never decides; clamping also keeps
+		   a huge value (or inf) from overflowing the conversion below. */
+		if( mb > (float)( XBOX_FT_MAX_SESSION_BYTES >> 20 ))
+			mb = (float)( XBOX_FT_MAX_SESSION_BYTES >> 20 );
+		cap = mb > 0.0f ? (uint64_t)( mb * 1048576.0f ) : 0;
+		if( xbox_ft_segment_rotation( false, ft.seg_frames, ft.seg_bytes, cap ) == XBOX_FT_SEG_SIZE )
+		{
+			FT_WriteClasses();
+			FT_Rotate( XBOX_FT_SEG_SIZE, now );
+		}
+		if( ft.session_bytes >= XBOX_FT_MAX_SESSION_BYTES )
+		{
+			Con_Printf( S_WARN "frametime: the session reached %u MiB, recording stopped\n", (uint32_t)( XBOX_FT_MAX_SESSION_BYTES >> 20 ));
+			Cvar_DirectSet( &host_frametime_analysis, "0" );
+		}
+	}
 
 	xbox_ft_waits.gpu = xbox_ft_waits.vblank = xbox_ft_waits.swap = 0;
 	memset( &xbox_ft_work, 0, sizeof( xbox_ft_work ));
@@ -838,12 +1000,9 @@ static void FT_FormatText( void )
 		FT_Count( a[4], sizeof( a[4] ), w[XBOX_FT_W_WATER_VERTS] ), FT_Count( a[5], sizeof( a[5] ), w[XBOX_FT_W_DECALS] ),
 		FT_Count( a[6], sizeof( a[6] ), w[XBOX_FT_W_PARTICLES] ), FT_Count( a[7], sizeof( a[7] ), w[XBOX_FT_W_BEAMS] ),
 		FT_Count( a[8], sizeof( a[8] ), w[XBOX_FT_W_SPRITES] ));
-	{
-		/* The file name without "frametime/": every glyph is a quad. */
-		const char *file = Q_strrchr( ft.filename, '/' );
-
-		Q_snprintf( ft.text[5], sizeof( ft.text[5] ), "%s  %s  overlay %.2f ms", ft.map_name, file ? file + 1 : ft.filename, FT_Ms( overlay ) / n );
-	}
+	/* The segment being written by number, not by its file name (up to
+	   42 characters since segments): every glyph is a quad. */
+	Q_snprintf( ft.text[5], sizeof( ft.text[5] ), "%s  seg %u  overlay %.2f ms", ft.map_name, ft.seg.seq, FT_Ms( overlay ) / n );
 
 	FT_FormatSpans( work, cpu, n );
 }
