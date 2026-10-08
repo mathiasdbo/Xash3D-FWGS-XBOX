@@ -40,6 +40,7 @@ Ported from, in order of how closely each piece is followed:
 #include "nv2a_skin_cache.h"
 #include "nv2a_studio_util.h" /* NV2A_STUDIO_NF_MASKED, pinned to studio.h in r_studio.c */
 #include "nv2a_2d_util.h" /* texel classification and DXT sizes (divergences.md #131) */
+#include "nv2a_atlas_util.h" /* the font cache's atlases straight from their TGA (divergences.md #157) */
 #include "nv2a_ft.h" /* the frame-time recorder's k_skin_read span (divergences.md #141) */
 
 /* ------------------------------------------------------------------ */
@@ -1059,6 +1060,84 @@ void nv2a_tex_flush_skin_cache( void )
 /* Entry points (D3).                                                  */
 /* ------------------------------------------------------------------ */
 
+/* divergences.md #157: the menu's cached glyph atlases (mainui font/
+   AtlasTGA.h, #152) uploaded straight from their TGA bytes. Returns the
+   texnum, 0 when the upload failed as the general path's would (no
+   texture memory), or -1 when this is not such an atlas, which then
+   takes the general path unchanged.
+
+   It produces what FS_LoadImage + nv2a_tex_process_image +
+   nv2a_tex_upload produce for the same call, field for field: the same
+   format, size, pitch and storage request, the same texel bytes (the
+   pitch padding is left unwritten by both), flags + TF_HAS_ALPHA when
+   Image_LoadTGA would set IMAGE_HAS_ALPHA, + TF_IMG_UPLOADED, no
+   `original`, the same counters, and imagelib's force flags cleared as
+   FS_LoadImage leaves them (ImagePack, img_main.c:178 in the reference).
+   It is only taken where that general path is fixed:
+   - a '#' name, a buffer and a size: FS_LoadImage goes straight to the
+     buffer (img_main.c:423) and picks Image_LoadTGA by the ".tga"
+     extension (:416, :470; img_utils.c load_game), with no file lookup;
+   - none of TF_KEEP_SOURCE (a kept RGBA copy), TF_MAKELUMA (rewrites
+     texels) or TF_NOFLIP_TGA (IL_DONTFLIP_TGA; harmless for a bottom-up
+     file, img_tga.c:138, but left out rather than argued);
+   - both sides at most 1024, so nv2a_tex_set_dimensions does not halve
+     and nothing is resampled;
+   - the bytes are exactly one of the two shapes nv2a_atlas_tga_probe
+     accepts, every texel present (Image_LoadTGA does not check that).
+   What the renderer cannot see: imagelib's own flags. IL_LOAD_PLAYER_DECAL
+   (Image_ValidSize's smaller limit, IMAGE_PLAYERDECAL's premultiply) is
+   set only by CustomDecal_LoadImage (custom.c), which calls FS_LoadImage
+   right away, and every FS_LoadImage return clears it; IL_DONTFLIP_TGA
+   does not change a bottom-up file; IL_LOAD_DECAL, which pfnPIC_Load
+   sets (cl_gameui.c), is read only by the WAD loader (img_wad.c). The
+   texture memory asked for is the same pitch * height as
+   nv2a_tex_upload's, so arena placement and fallbacks are unchanged;
+   what goes is the decode's width * height * 4 buffer in imagelib's
+   pool. Both paths are host-tested against
+   each other (tools/host-tests/nv2a_atlas_util_host_test.cpp). */
+static int nv2a_tex_load_atlas_tga( const char *name, const byte *buf, size_t size, int flags )
+{
+	nv2a_atlas_tga_t atlas;
+	nv2a_texture_t *tex;
+	uint32_t pitch;
+	byte *dst;
+
+	if( !buf || !size || name[0] != '#' || Q_stricmp( COM_FileExtension( name ), "tga" ))
+		return -1;
+	if( FBitSet( flags, TF_KEEP_SOURCE | TF_MAKELUMA | TF_NOFLIP_TGA ))
+		return -1;
+	if( !nv2a_atlas_tga_probe( buf, size, 1024, &atlas ))
+		return -1;
+
+	/* FS_LoadImage would have consumed these (ImagePack) */
+	gEngfuncs.Image_ClearForceFlags();
+
+	tex = nv2a_tex_alloc_slot( name, (texFlags_t)flags );
+	if( atlas.has_alpha )
+		SetBits( tex->flags, TF_HAS_ALPHA ); /* nv2a_tex_process_image */
+
+	nv2a_tex_set_dimensions( tex, atlas.width, atlas.height ); /* <= 1024: no halving */
+
+	pitch = ALIGN( atlas.width * atlas.dst_bpp, 64 ); /* as nv2a_tex_upload */
+	if( !nv2a_tex_alloc_storage( tex, (size_t)pitch * atlas.height ))
+	{
+		nv2a_tex_fail_slot( tex );
+		return 0;
+	}
+	tex->pitch = pitch;
+	tex->color_format = atlas.dst_bpp == 1 ? NV2A_TEX_COLOR_LU_A8 : NV2A_TEX_COLOR_LU_A8Y8;
+
+	dst = tex->has_arena_storage ? (byte *)nv2a_texture_arena_mem + tex->gpu_offset : (byte *)tex->fallback;
+	nv2a_atlas_tga_copy( &atlas, dst, pitch );
+
+	SetBits( tex->flags, TF_IMG_UPLOADED ); /* as GL_LoadTexture */
+	NV2A_FT_ADD( XBOX_FT_W_TEX_LOADS, 1 );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_LOAD_KB, ( tex->gpu_size + 1023u ) / 1024u );
+	NV2A_FT_ADD( XBOX_FT_W_TEX_FAST, 1 );
+
+	return (int)( tex - nv2a_textures );
+}
+
 int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
 {
 	nv2a_texture_t *tex;
@@ -1070,6 +1149,14 @@ int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
 
 	if(( tex = nv2a_tex_for_name( name )))
 		return (int)( tex - nv2a_textures );
+
+	{
+		/* divergences.md #157: a cached glyph atlas, straight from its TGA */
+		const int texnum = nv2a_tex_load_atlas_tga( name, buf, size, flags );
+
+		if( texnum >= 0 )
+			return texnum;
+	}
 
 	if( FBitSet( flags, TF_NOFLIP_TGA ))
 		SetBits( picFlags, IL_DONTFLIP_TGA );

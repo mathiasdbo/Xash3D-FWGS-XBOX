@@ -5,6 +5,22 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: the menu fonts come back after a map load about 60 ms faster (xemu)
+
+At the end of every map load, behind the loading screen, the menu
+rebuilds its fonts from the font cache - about 230 ms on the console.
+Most of that, in xemu, was turning each cached glyph atlas back into a
+full-colour image and then shrinking it again to the 8- or 16-bit
+texture the Xbox keeps. The renderer now recognises the cache's exact
+file shapes and copies them straight into the texture: the same
+texture, byte for byte (a host test compares the two paths on thousands
+of atlases, and an emulator build compared every atlas it loaded), with
+anything unusual taking the old path. In xemu the rebuild went from
+84-88 ms to 23-26 ms per load and no longer needs a 1 MiB scratch
+buffer; what is left is mostly reading the cache files. The console
+figure is still to be measured. The frame-time recorder counts these
+uploads (`tex_fast`).
+
 ### Changed - Xbox: frame-time recordings are written as small, labelled files per session
 
 A frame-time recording used to be one file of up to 80 MiB: slow to

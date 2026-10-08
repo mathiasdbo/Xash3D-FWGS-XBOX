@@ -439,6 +439,7 @@ enum
 	XBOX_FT_W_CE_EVENTS_KC,  /* time: in k_cl_emit, CL_FireEvents */
 	XBOX_FT_W_CE_PITCH_KC,   /* time: in k_cl_emit, CL_SetIdealPitch - up to six CL_TraceLine calls down ahead of the player */
 	XBOX_FT_W_CE_SOLID_SKIPS,/* of pm_cl_solids, the CL_SetSolidEntities calls that found the lists current (#156) */
+	XBOX_FT_W_TEX_FAST,      /* of tex_loads, the menu's glyph atlases ref/nv2a uploaded straight from their cached TGA (2026-10-08, #157) */
 	XBOX_FT_W_END
 };
 

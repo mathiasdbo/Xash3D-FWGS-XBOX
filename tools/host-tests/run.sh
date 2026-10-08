@@ -246,6 +246,22 @@ mainui_atlas_tga() {
 }
 run_test mainui_atlas_tga mainui_atlas_tga
 
+# tools/host-tests/nv2a_atlas_util_host_test.cpp, header (divergence #157):
+# ref/nv2a's straight-from-TGA atlas upload against the decode-and-pack path.
+nv2a_atlas_util() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
+		-c ref/nv2a/nv2a_atlas_util.c -o "$OUT/nv2a_atlas_util.o" &&
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
+		-c ref/nv2a/nv2a_2d_util.c -o "$OUT/nv2a_2d_util_atlas.o" &&
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iref/nv2a \
+		-c ref/nv2a/nv2a_tri_util.c -o "$OUT/nv2a_tri_util_atlas.o" &&
+	g++ $HOST_CFLAGS -Wall -std=c++11 -Iref/nv2a -I3rdparty/mainui/font \
+		tools/host-tests/nv2a_atlas_util_host_test.cpp \
+		"$OUT/nv2a_atlas_util.o" "$OUT/nv2a_2d_util_atlas.o" "$OUT/nv2a_tri_util_atlas.o" \
+		-o "$OUT/nv2a_atlas_util_test" && "$OUT/nv2a_atlas_util_test"
+}
+run_test nv2a_atlas_util nv2a_atlas_util
+
 if [ "$ran" -eq 0 ]; then
 	echo "host-tests: ran zero tests - that is a broken script, not a pass" >&2
 	exit 1

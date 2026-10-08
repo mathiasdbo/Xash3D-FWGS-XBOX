@@ -33,9 +33,13 @@ under #if XASH_XBOX in a client file, after common.h.
    pages: 8 MiB. Restored, the fonts take 1.0-1.7 MiB of free memory
    (xemu, MmQueryStatistics: atlases that overflow ref/nv2a's
    preallocated texture arena, font files, glyph tables; atlases inside
-   the arena do not show), and a restore needs about 1.3 MiB more while it
-   decodes the largest atlas from the cache (2.5-3 MiB on a cache miss,
-   the first boot after the cache format changes). Below this the fonts
+   the arena do not show). Since divergence #157 ref/nv2a copies each
+   cached atlas straight from the file buffer, so a restore's lowest free
+   memory is at most ~0.3 MiB below where it ends (xemu, against ~0.8 MiB
+   when every atlas was decoded to RGBA32 first); an atlas over 1024 on a
+   side or a coloured one still takes the decode, and a cache miss (the
+   first boot after the cache format changes) renders the atlas in
+   mainui, 2.5-3 MiB more. Below this the fonts
    stay released, and the menu restores them on first use as before. */
 #define XBOX_MENU_FONTS_MIN_FREE_PAGES ( 8u * 256u )
 
