@@ -529,7 +529,7 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 153)
+        self.assertEqual(len(r["counters"]), 167)
         self.assertEqual(r["counters"][20], "span_calls")
         self.assertEqual(len(r["spans"]), 73)
         # Counts after the spans (2026-10-02, R5) are plain counters.
@@ -542,7 +542,13 @@ class Spans(unittest.TestCase):
         self.assertEqual(r["counters"][122:126], ["pm_sv_cmds", "pm_cl_cmds", "pm_cl_redo", "pm_cl_solids"])
         self.assertEqual(r["counters"][126:128], ["pm_sv_physents", "pm_cl_physents"])
         self.assertEqual(r["counters"][142], "pm_sv_setup_kc")
-        self.assertEqual(r["counters"][150:], ["pm_cl_post_kc", "pm_sv_culls", "pm_cl_culls"])
+        self.assertEqual(r["counters"][150:153], ["pm_cl_post_kc", "pm_sv_culls", "pm_cl_culls"])
+        # Client entities (2026-10-07): the counts, then the times.
+        self.assertEqual(r["counters"][153:158], ["ce_ents", "ce_deltas", "ce_nochange", "ce_fields", "ce_visents"])
+        self.assertEqual(r["counters"][158:], ["ce_delta_kc", "ce_fields_kc", "ce_process_kc", "ce_link_kc",
+                                               "ce_add_kc", "ce_tents_kc", "ce_events_kc", "ce_pitch_kc",
+                                               "ce_solid_skips"])
+        self.assertNotIn("ce_ents", fr.span_names(r))
         self.assertNotIn("pm_sv_cmds", fr.span_names(r))
         self.assertNotIn("snd_loads", fr.span_names(r))
         self.assertNotIn("world_walked", fr.span_names(r))
@@ -707,6 +713,11 @@ class Spans(unittest.TestCase):
         self.assertIn("player movement per in-play frame", text)
         self.assertRegex(text, r"\nc1a0c +1/1 +5/40 +6/50 +8/9 +40/360 +2/300 +1/1 +5/40 +3/3 +1/0 +0 +2\n")
         self.assertIn("c1a0c              sv 1.000 2.000 (1.000) 1.000 0.000 | cl 1.000 3.000 (2.000) 1.000", text)
+        # Client entities: the counts, then where k_cl_pkt_ents and k_cl_emit went.
+        self.assertIn("client entities per in-play frame", text)
+        self.assertRegex(text, r"\nc1a0c +120 +30 +2 +150 +5\.0 +40 +2/2\n")
+        self.assertIn("c1a0c              pkt 1.000: deltas 2.000 (fields 1.000) process 1.000 | "
+                      "emit 0.000: link 3.000 (add 2.000) tents 1.000 events 0.000 pitch 1.000", text)
         page = fr.render_html(self.rec, self.rows, s, ["spans.bin"], source="xemu")
         self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
         self.assertIn('id="spans"', page)

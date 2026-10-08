@@ -23,6 +23,10 @@ GNU General Public License for more details.
 #include "event_args.h"
 #include "protocol.h"
 #include "client.h"
+#include "platform/xbox/xbox_frametime_clents.h" // the recorder's client entity breakdown, docs/r3d/divergences.md #141
+#if XASH_XBOX
+#include "platform/xbox/xbox_bitrun.h" // a run of change bits read at once, docs/r3d/divergences.md #155
+#endif
 
 #define DELTA_PATH		"delta.lst"
 
@@ -1495,6 +1499,52 @@ static qboolean Delta_ReadField( sizebuf_t *msg, delta_t *pField, const void *fr
 	return true;
 }
 
+#if XASH_XBOX
+/*
+Resonance3D (docs/r3d/divergences.md #155): a delta's field walk with its
+change bits read a run of zeros at a time.
+
+Upstream reads a delta's fields with one Delta_ReadField each: one
+MSG_ReadOneBit (a call into net_buffer.c), then Delta_CopyField when the
+bit is 0 or Delta_ReadField_ when it is 1. A typical entity delta sets
+one or two of entity_state_t's 56 change bits, so almost all of that is
+reading zeros. Xbox_BitReadZeroRun (platform/xbox/xbox_bitrun.h) takes
+the zeros up to the next set bit at once, leaving the cursor and the
+overflow flag exactly as that many MSG_ReadOneBit calls would, and the
+fields they belong to are copied in order with the same Delta_CopyField;
+a field whose bit is set - or any field once the buffer is at its end or
+has overflowed - goes through upstream's Delta_ReadField. Every field is
+written in the same order with the same value, and the cursor and the
+overflow flag end where upstream leaves them.
+*/
+// The loop `for each field: Delta_ReadField( msg, pField, from, to,
+// timebase )`, as above. Returns how many fields had their bit set.
+static int Delta_ReadFieldRuns( sizebuf_t *msg, delta_t *pField, int numFields, const void *from, void *to, double timebase )
+{
+	int i = 0, changed = 0;
+
+	while( i < numFields )
+	{
+		int zeros = Xbox_BitReadZeroRun( msg->pData, &msg->iCurBit, msg->nDataBits, msg->bOverflow, numFields - i );
+
+		if( zeros > 0 )
+		{
+			for( ; zeros > 0; zeros--, i++, pField++ )
+				Delta_CopyField( pField, from, to, timebase );
+			continue;
+		}
+
+		// the next bit is set, or nothing more can be read: upstream's step
+		if( Delta_ReadField( msg, pField, from, to, timebase ))
+			changed++;
+		i++;
+		pField++;
+	}
+
+	return changed;
+}
+#endif // XASH_XBOX
+
 static void Delta_ParseGSFields( sizebuf_t *msg, const delta_info_t *dt, const void *from, void *to, double timebase )
 {
 	uint8_t bits[8] = { 0 };
@@ -1797,6 +1847,16 @@ void MSG_ReadClientData( sizebuf_t *msg, const clientdata_t *from, clientdata_t 
 
 	qboolean noChanges = !MSG_ReadOneBit( msg );
 
+#if XASH_XBOX
+	// docs/r3d/divergences.md #155: the loop below for a changed
+	// clientdata_t, its change bits read a run of zeros at a time
+	if( !noChanges )
+	{
+		Delta_ReadFieldRuns( msg, pField, dt->numFields, from, to, timebase );
+		return;
+	}
+#endif
+
 	// process fields
 	for( int i = 0; i < dt->numFields; i++, pField++ )
 	{
@@ -1882,11 +1942,17 @@ void MSG_ReadWeaponData( sizebuf_t *msg, const weapon_data_t *from, weapon_data_
 	delta_t *pField = dt->pFields;
 	Assert( pField != NULL );
 
+#if XASH_XBOX
+	// docs/r3d/divergences.md #155: the loop below, the change bits read
+	// a run of zeros at a time
+	Delta_ReadFieldRuns( msg, pField, dt->numFields, from, to, timebase );
+#else
 	// process fields
 	for( int i = 0; i < dt->numFields; i++, pField++ )
 	{
 		Delta_ReadField( msg, pField, from, to, timebase );
 	}
+#endif
 }
 
 /*
@@ -2107,12 +2173,20 @@ qboolean MSG_ReadDeltaEntity( sizebuf_t *msg, const entity_state_t *from, entity
 
 	delta_t *pField = dt->pFields;
 	Assert( pField != NULL );
+	XBOX_FT_CE_BEGIN( xbox_ft_fields );
 
+#if XASH_XBOX
+	// docs/r3d/divergences.md #155: the loop below, the change bits read
+	// a run of zeros at a time
+	XBOX_FT_CE_DELTA( Delta_ReadFieldRuns( msg, pField, dt->numFields, from, to, timebase ));
+#else
 	// process fields
 	for( int i = 0; i < dt->numFields; i++, pField++ )
 	{
 		Delta_ReadField( msg, pField, from, to, timebase );
 	}
+#endif
+	XBOX_FT_CE_END( xbox_ft_fields, XBOX_FT_CE_FIELDS );
 #endif // XASH_DEDICATED
 	// message parsed
 	return true;

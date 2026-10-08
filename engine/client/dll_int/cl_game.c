@@ -21,6 +21,9 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "client.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_cl_solid.h" // #156: a physent handed to the client DLL drops the reuse key
+#endif
 #include "const.h"
 #include "triangleapi.h"
 #include "r_studioint.h"
@@ -2469,6 +2472,9 @@ physent_t *pfnGetPhysent( int idx )
 	if( idx >= 0 && idx < clgame.pmove->numphysent )
 	{
 		// return physent
+#if XASH_XBOX
+		Xbox_CL_SolidInvalidate(); // #156: the DLL gets a writable slot; the next rebuild must not be skipped
+#endif
 		return &clgame.pmove->physents[idx];
 	}
 	return NULL;
@@ -2485,6 +2491,9 @@ static physent_t *pfnGetVisent( int idx )
 	if( idx >= 0 && idx < clgame.pmove->numvisent )
 	{
 		// return physent
+#if XASH_XBOX
+		Xbox_CL_SolidInvalidate(); // #156: the DLL gets a writable slot; the next rebuild must not be skipped
+#endif
 		return &clgame.pmove->visents[idx];
 	}
 	return NULL;

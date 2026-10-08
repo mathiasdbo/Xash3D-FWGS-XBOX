@@ -228,7 +228,8 @@ site is one add; nothing tests whether the recorder is on.
 | `cl_parse_kc` | (2026-10-06) time, kilocycles: `CL_ParseNetMessage`'s parse call, every server message of the frame's packets (`engine/client/cl_main.c`). Inside `k_cl_read`; a counter rather than a span because `k_cl_pkt_ents` and `k_cl_clientdata`, which it contains, are older spans and a span's parent must come before it in the file |
 | `save_pump_kb` | (2026-10-06, x9-perf-saveasync, divergence #153, at the end of the record) KiB of a savegame's `.sav` written in the frame, each chunk rounded up: by `k_save_pump` (the frames after the save) or by a flush. `engine/server/sv_save.c`, `SaveAsync_Step` |
 | `save_flush_kc` | (2026-10-06, #153) time, kilocycles: a pending `.sav` completed at once (`SV_SaveAsync_Flush`) because something was about to read or change the save folder - a level change, a load, another save, the menu's save list, `killsave`, quitting. It runs under whichever span made that call (`k_cl_begin` for a console command, `k_ui` for the menu), so a counter |
-| `pm_*` | (2026-10-06, x9-perf-pmove, at the end of the record) player movement: see "Player movement" below |
+| `pm_*` | (2026-10-06, x9-perf-pmove) player movement: see "Player movement" below |
+| `ce_*` | (2026-10-07, x9-perf-clents, at the end of the record) the client's entity decode and link: see "Client entities" below |
 
 The report adds `verts`, the sum of the five `v_*` counters. Its stalls
 table lists each stall's first-use loads (`snd_*`, `tex_*`) next to its
@@ -572,6 +573,54 @@ the server's 41 for the same movement, and its `PM_Move` took 0.26 ms
 against 0.07 (0.24 and 0.05 of it in the queries). That is what
 divergence #154 cuts.
 
+## Client entities (2026-10-07)
+
+`k_cl_pkt_ents` (`CL_ParsePacketEntities`) and `k_cl_emit`
+(`CL_EmitEntities`) were 0.27-0.51 and 0.27-0.62 ms a frame on the
+console's route with nothing under them.
+`engine/platform/xbox/xbox_frametime_clents.h` breaks them down with 14
+counters at the end of the record. Counts are exact in xemu.
+
+| counter | counted at |
+|---|---|
+| `ce_ents` | the entities in each frame `CL_ParsePacketEntities` built (a valid frame's `num_entities`, `engine/client/cl_frame.c`) |
+| `ce_deltas` | `MSG_ReadDeltaEntity` calls that walked the fields (`engine/common/net_encode.c`; every caller - a frame's deltas, baselines) |
+| `ce_nochange` | of those, deltas with no field's change bit set |
+| `ce_fields` | the fields those deltas decoded (change bit set) |
+| `ce_visents` | entities `CL_LinkPlayers`/`CL_LinkPacketEntities` passed to `CL_AddVisibleEntity` that it accepted |
+| `ce_solid_skips` | of `pm_cl_solids`, the `CL_SetSolidEntities` calls that reused the lists (divergence #156) |
+| `ce_delta_kc` | time: `MSG_ReadDeltaEntity` from `CL_DeltaEntity` - the frame's deltas |
+| `ce_fields_kc` | time: the field loop of every `MSG_ReadDeltaEntity` - in play the field loops of `ce_delta_kc`'s deltas; at a signon the baselines and static entities (`CL_FlushEntityPacket`, `cl_parse.c`'s baseline and static-entity reads) add field time with no delta time |
+| `ce_process_kc` | time: `CL_ProcessPacket` - each entity's state shuffle, `CL_ProcessEntityUpdate`, the latched state |
+| `ce_link_kc` | time: in `k_cl_emit`, `CL_LinkPlayers` + `CL_LinkPacketEntities` |
+| `ce_add_kc` | time: of that, `CL_AddVisibleEntity` - the client's `AddEntity`, `R_AddEntity`, the entity effects |
+| `ce_tents_kc` | time: in `k_cl_emit`, the client's `CreateEntities` and `CL_TempEntUpdate` |
+| `ce_events_kc` | time: in `k_cl_emit`, `CL_FireEvents` |
+| `ce_pitch_kc` | time: in `k_cl_emit`, `CL_SetIdealPitch` - up to six `CL_TraceLine` calls down ahead of the player, against every client physent |
+
+The times are accumulated like the player movement's. What `k_cl_pkt_ents`
+holds besides `ce_delta_kc` and `ce_process_kc` is the frame's
+bookkeeping, the copies of the entities that came without a delta, and
+one `CL_SetSolidEntities` (`pm_cl_solid_kc` is all three calls). The
+report prints a client-entities table: the counts, then the two spans
+and their parts.
+
+First use (xemu, 2026-10-07; c1a0c with walking and firing, c1a1c, c1a1b
+with its door, c2a2a): on c1a0c 57 entities a frame, 4.7 of them with a
+delta, 1.7 fields per delta and none unchanged (an entity with nothing
+changed is not sent: `MSG_WriteDeltaEntity` rewinds, `net_encode.c:1926`
+in the reference), 56 linked visible. `k_cl_pkt_ents` 0.131 ms: deltas
+0.032 (their field loop 0.027), `CL_ProcessPacket` 0.047, and one of the
+three `CL_SetSolidEntities` (0.073 for the three). `k_cl_emit` 0.307 ms:
+`CL_SetIdealPitch` 0.118 (0.020 on c2a2a, with one physent: most of it is
+the physent loop of its six traces), temp entities 0.076, links 0.069
+(of it `CL_AddVisibleEntity` 0.028), events 0.031. Divergences #155 (the
+field loop) and #156 (two of the three list rebuilds) come from it: in
+the same session after them, the field loop 0.010 ms and the three
+`CL_SetSolidEntities` calls 0.032 (`ce_solid_skips` 2 of 3), so
+`k_cl_pkt_ents` 0.115 and `k_cl_read` 0.19 (0.23 before).
+`CL_SetIdealPitch` is the largest piece left.
+
 ## Cost
 
 - **Off:** one float compare per `Host_Frame`; in ref/nv2a one load and
@@ -579,17 +628,19 @@ divergence #154 cuts.
   (an add costs what a test of "is the recorder on" would). No memory: the
   ring and buffers are allocated when recording starts and freed when it
   stops.
-- **On:** ~763 KiB (ring 1024 x 644 B = 644 KiB, the overlay's histogram
-  4 KiB, an 80.5 KiB encode buffer, 4 KiB of notes, the server's classname
+- **On:** ~826 KiB (ring 1024 x 700 B = 700 KiB, the overlay's histogram
+  4 KiB, an 87.5 KiB encode buffer, 4 KiB of notes, the server's classname
   table ~30 KiB);
   a few `rdtsc` per frame plus two per span closed and two per server
-  message (below); a ~149 KiB write and `fsync` every 5 s (those frames
-  are flagged); about 37.7 KiB per second of play on disk at 60 fps, plus
-  at most 4 KiB of notes per flush (133 MiB an hour; the file stops at 64
-  MiB, ~29 minutes at 60 fps, ~24 at the 72 fps cap - the owner's 29-minute
-  route of 2026-10-06 was 47 MB at 468-byte records and would be ~64 MB
-  at 644, just under the cap).
-  Before the player movement counters (2026-10-06) it was ~622 KiB and
+  message (below); a ~205 KiB write and `fsync` every 5 s (those frames
+  are flagged); about 41 KiB per second of play on disk at 60 fps, plus
+  at most 4 KiB of notes per flush (144 MiB an hour; the file stops at 80
+  MiB, ~33 minutes at 60 fps, ~27 at the 72 fps cap - the owner's 29-minute
+  route of 2026-10-06 was 47 MB at 468-byte records and would be ~70 MB
+  at 700). The cap was 64 MiB until the client entity counters
+  (2026-10-07): at 700-byte records that route would no longer have fit.
+  Before the client entity counters (2026-10-07) it was ~763 KiB and
+  37.7 KiB/s. Before the player movement counters (2026-10-06) it was ~622 KiB and
   29.8 KiB/s. Before the menu, music and first-use load
   counters (2026-10-06) it was ~561 KiB and 27.4 KiB/s. Before the
   savegame spans (2026-10-05) it was
@@ -606,8 +657,11 @@ divergence #154 cuts.
   at each end and two adds. The file counts the closures per frame
   (`span_calls`). The fixed sites close ~20 a frame; `k_client_studio`
   closes once per studio draw, `k_studio_points` once per body part
-  drawn, `k_skin_read` once per skin read. In xemu (spans build 6ABEBB7E,
-  nxdk at -O2): 20-47 closures a frame on c1a0c, c1a0e and c1a0d. With
+  drawn, `k_skin_read` once per skin read; since the client entity
+  timers (2026-10-07) one more per entity delta and per visible entity
+  linked (`ce_delta_kc`, `ce_add_kc` - about 60 more a frame on c1a0c,
+  which `ce_link_kc` and `ce_add_kc` carry). In xemu (spans build 6ABEBB7E,
+  nxdk at -O2, before those): 20-47 closures a frame on c1a0c, c1a0e and c1a0d. With
   `host_frametime_spans` toggled mid-session on one c1a0c view, mean CPU
   was 10.47 ms with spans on, 10.53 off and 10.29 on again (709, 1495 and
   1494 frames): no cost visible above the scene's own variation.
@@ -643,10 +697,11 @@ header and frame-record sizes, TSC and performance-counter rates and the
 pair at open, the mode, a build id with the XBE's link timestamp), then
 chunks `{u32 type, u32 length, payload}`: COUNTERS (right after the header:
 the counters' names, 16 bytes each), FRAMES (first sequence number, count,
-frame records of 32 bytes plus one u32 per counter - 644 bytes with today's
+frame records of 32 bytes plus one u32 per counter - 700 bytes with today's
 153: the 20 counts, `span_calls`, the 73 spans, `world_walked`, `water_gpu`,
 `vp_loads`, the 17 `g_*`, the five first-use load counters,
-`cl_parse_kc`, `save_pump_kb`, `save_flush_kc` and the 31 `pm_*`; 520
+`cl_parse_kc`, `save_pump_kb`, `save_flush_kc`, the 31 `pm_*` and the 14
+`ce_*`; 644 without the `ce_*`, 520
 without the `pm_*`, 508 with 72 spans and
 no save counters, 468 with
 68 spans and no load counters, 420 with 56 spans, 328 with 50 spans and three counts after them, 284

@@ -382,6 +382,24 @@ enum
 	XBOX_FT_W_PM_CL_POST_KC, /* time: the client DLL's PostRunCmd (weapon prediction) */
 	XBOX_FT_W_PM_SV_CULLS,   /* physents a trace or a position test skipped: no solid leaf near (#154) */
 	XBOX_FT_W_PM_CL_CULLS,
+	/* Client entities (2026-10-07, x9-perf-clents,
+	   xbox_frametime_clents.h): the client's entity decode
+	   (k_cl_pkt_ents) and its visible-entity link (k_cl_emit) broken
+	   down. Counts, exact in xemu - except the _KC times. */
+	XBOX_FT_W_CE_ENTS,       /* entities in the frames CL_ParsePacketEntities built (a valid frame's num_entities) */
+	XBOX_FT_W_CE_DELTAS,     /* MSG_ReadDeltaEntity calls that walked the fields (every caller: a frame's deltas, baselines) */
+	XBOX_FT_W_CE_NOCHANGE,   /* of those, deltas with no field bit set */
+	XBOX_FT_W_CE_FIELDS,     /* fields those deltas decoded (change bit set) */
+	XBOX_FT_W_CE_VISENTS,    /* entities CL_LinkPlayers/CL_LinkPacketEntities passed to CL_AddVisibleEntity that it accepted */
+	XBOX_FT_W_CE_DELTA_KC,   /* time: MSG_ReadDeltaEntity from CL_DeltaEntity (a frame's deltas) */
+	XBOX_FT_W_CE_FIELDS_KC,  /* time: the field loop of every MSG_ReadDeltaEntity (in play: of ce_delta_kc; baselines add to it) */
+	XBOX_FT_W_CE_PROCESS_KC, /* time: CL_ProcessPacket - each entity's state shuffle, CL_ProcessEntityUpdate, latched state */
+	XBOX_FT_W_CE_LINK_KC,    /* time: in k_cl_emit, CL_LinkPlayers + CL_LinkPacketEntities */
+	XBOX_FT_W_CE_ADD_KC,     /* time: of that, CL_AddVisibleEntity - the client's AddEntity, R_AddEntity, entity effects */
+	XBOX_FT_W_CE_TENTS_KC,   /* time: in k_cl_emit, the client's CreateEntities and CL_TempEntUpdate */
+	XBOX_FT_W_CE_EVENTS_KC,  /* time: in k_cl_emit, CL_FireEvents */
+	XBOX_FT_W_CE_PITCH_KC,   /* time: in k_cl_emit, CL_SetIdealPitch - up to six CL_TraceLine calls down ahead of the player */
+	XBOX_FT_W_CE_SOLID_SKIPS,/* of pm_cl_solids, the CL_SetSolidEntities calls that found the lists current (#156) */
 	XBOX_FT_W_END
 };
 

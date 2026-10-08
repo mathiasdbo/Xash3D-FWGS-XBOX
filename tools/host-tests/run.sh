@@ -152,6 +152,15 @@ frametime_report() {
 }
 run_test frametime_report frametime_report
 
+# tools/host-tests/xbox_bitrun_host_test.c, header (divergence #155): a run
+# of zero change bits read at once, against upstream's MSG_ReadOneBit.
+xbox_bitrun() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_bitrun_host_test.c \
+		-o "$OUT/xbox_bitrun_test" && "$OUT/xbox_bitrun_test"
+}
+run_test xbox_bitrun xbox_bitrun
+
 # tools/host-tests/xbox_audio_hal_util_host_test.c, header (divergence
 # #150): the AC97 buffer accounting against nxdk's, through underruns,
 # under both controller behaviours; and the stall watchdog's decision.

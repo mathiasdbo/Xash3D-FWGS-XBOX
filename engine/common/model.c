@@ -145,6 +145,7 @@ void Mod_FreeModel( model_t *mod )
 
 #if XASH_XBOX
 	Xbox_PMCull_Invalidate(); // its hulls' cached bounds, docs/r3d/divergences.md #154
+	xbox_model_generation++; // the client's physent lists read it, #156
 #endif
 
 	if( mod->type != mod_brush || mod->name[0] != '*' )
@@ -331,6 +332,10 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 		Host_Error( "%s: trying to load model not marked for loading (%d)\n", __func__, mod->needload );
 		return NULL;
 	}
+
+#if XASH_XBOX
+	xbox_model_generation++; // the client's physent lists read it, docs/r3d/divergences.md #156
+#endif
 
 	// store modelname to show error
 	Q_strncpy( tempname, mod->name, sizeof( tempname ));

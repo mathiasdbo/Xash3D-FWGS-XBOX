@@ -103,6 +103,11 @@ PM_TABLE = [("cmds", "PM_Move"), ("physents", "physents"), ("visents", "visents"
             ("tex", "tex traces")]
 PM_TIMES = ("pm_sv_setup_kc", "pm_sv_move_kc", "pm_sv_query_kc", "pm_sv_think_kc", "pm_sv_touch_kc",
             "pm_cl_solid_kc", "pm_cl_move_kc", "pm_cl_query_kc", "pm_cl_post_kc")
+# Client entities (recorders from 2026-10-07, x9-perf-clents): the
+# client's entity decode (k_cl_pkt_ents) and visible-entity link
+# (k_cl_emit). The counts are exact in xemu; the _kc counters are times.
+CE_TIMES = ("ce_delta_kc", "ce_fields_kc", "ce_process_kc", "ce_link_kc", "ce_add_kc", "ce_tents_kc",
+            "ce_events_kc", "ce_pitch_kc")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -816,7 +821,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
         return []
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
-    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES)
+    timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1059,6 +1064,7 @@ def summary_text(rec, rows, sess):
     lines.extend(spans_text(rec, rows))
     lines.extend(svgame_text(rec, rows))
     lines.extend(pmove_text(rec, rows))
+    lines.extend(clents_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -1204,6 +1210,45 @@ def pmove_text(rec, rows):
             a.get("pm_sv_query_kc", 0) * k, a.get("pm_sv_think_kc", 0) * k, a.get("pm_sv_touch_kc", 0) * k,
             a.get("pm_cl_solid_kc", 0) * k, a.get("pm_cl_move_kc", 0) * k, a.get("pm_cl_query_kc", 0) * k,
             a.get("pm_cl_post_kc", 0) * k))
+    return lines
+
+
+def clents_text(rec, rows):
+    """Client entities per in-play frame: the entities in the parsed
+    frames, the deltas read off the wire (and how many changed nothing),
+    the fields they decoded, the entities linked as visible; then where
+    k_cl_pkt_ents and k_cl_emit went (ms per frame)."""
+    if "ce_ents" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "client entities per in-play frame (counts, exact in xemu): entities in the parsed frames, "
+             "deltas read, of them unchanged, fields decoded, fields per delta, entities linked visible, "
+             "CL_SetSolidEntities calls that found the lists current / calls"]
+    lines.append("%-18s %7s %7s %7s %7s %7s %7s %9s" % ("map", "ents", "deltas", "nochg", "fields", "f/delta", "visible",
+                                                         "solid skp"))
+    for r in maps:
+        a = r["work_avg"]
+        d = a.get("ce_deltas", 0.0)
+        lines.append("%-18s %7s %7s %7s %7s %7s %7s %9s" % (
+            r["map"][:18], short(a.get("ce_ents", 0.0)), short(d), short(a.get("ce_nochange", 0.0)),
+            short(a.get("ce_fields", 0.0)), "%.1f" % (a.get("ce_fields", 0.0) / d) if d else "-",
+            short(a.get("ce_visents", 0.0)),
+            "%s/%s" % (short(a.get("ce_solid_skips", 0.0)), short(a.get("pm_cl_solids", 0.0)))))
+    lines.append("client entity time, ms per in-play frame: k_cl_pkt_ents: deltas (of it the field loop) "
+                 "CL_ProcessPacket | k_cl_emit: link (of it CL_AddVisibleEntity) temp entities events "
+                 "CL_SetIdealPitch")
+    for r in maps:
+        a = r["work_avg"]
+        sp = r.get("span_ms", {})
+        lines.append("%-18s pkt %5.3f: deltas %5.3f (fields %5.3f) process %5.3f | "
+                     "emit %5.3f: link %5.3f (add %5.3f) tents %5.3f events %5.3f pitch %5.3f" % (
+                         r["map"][:18], sp.get("k_cl_pkt_ents", 0.0), a.get("ce_delta_kc", 0) * k,
+                         a.get("ce_fields_kc", 0) * k, a.get("ce_process_kc", 0) * k, sp.get("k_cl_emit", 0.0),
+                         a.get("ce_link_kc", 0) * k, a.get("ce_add_kc", 0) * k, a.get("ce_tents_kc", 0) * k,
+                         a.get("ce_events_kc", 0) * k, a.get("ce_pitch_kc", 0) * k))
     return lines
 
 

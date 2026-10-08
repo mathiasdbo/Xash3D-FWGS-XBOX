@@ -22,6 +22,7 @@ GNU General Public License for more details.
 #include "studio.h"
 #include "sound.h"
 #include "input.h"
+#include "platform/xbox/xbox_frametime_clents.h" // the recorder's client entity breakdown, docs/r3d/divergences.md #141
 
 // #define STUDIO_INTERPOLATION_FIX
 
@@ -754,7 +755,7 @@ static void CL_DeltaEntity( sizebuf_t *msg, frame_t *frame, int newnum, entity_s
 	if( newent ) old = &ent->baseline;
 
 	if( has_update )
-		alive = MSG_ReadDeltaEntity( msg, old, state, newnum, delta_type, cl.mtime[0] );
+		XBOX_FT_CE_TIMED( XBOX_FT_CE_DELTA, alive = MSG_ReadDeltaEntity( msg, old, state, newnum, delta_type, cl.mtime[0] ));
 	else *state = *old;
 
 	if( !alive )
@@ -895,8 +896,10 @@ int CL_ParsePacketEntities( sizebuf_t *msg, qboolean delta, connprotocol_t proto
 	if( !newframe->valid )
 		return playerbytes; // frame is not valid but message was parsed
 
+	XBOX_FT_CE_ADD( XBOX_FT_W_CE_ENTS, newframe->num_entities );
+
 	// now process packet.
-	CL_ProcessPacket( newframe );
+	XBOX_FT_CE_TIMED( XBOX_FT_CE_PROCESS, CL_ProcessPacket( newframe ));
 
 	// add new entities into physic lists
 	CL_SetSolidEntities();
@@ -997,7 +1000,7 @@ static void CL_LinkCustomEntity( cl_entity_t *ent, entity_state_t *state )
 	VectorCopy( ent->angles, ent->latched.prevangles );
 	ent->prevstate = ent->curstate;
 
-	CL_AddVisibleEntity( ent, ET_BEAM );
+	XBOX_FT_CE_ADD_VISIBLE( CL_AddVisibleEntity( ent, ET_BEAM ));
 }
 
 /*
@@ -1076,7 +1079,7 @@ static void CL_LinkPlayers( frame_t *frame )
 		VectorCopy( ent->origin, ent->attachment[2] );
 		VectorCopy( ent->origin, ent->attachment[3] );
 
-		CL_AddVisibleEntity( ent, ET_PLAYER );
+		XBOX_FT_CE_ADD_VISIBLE( CL_AddVisibleEntity( ent, ET_PLAYER ));
 	}
 
 	// apply local player effects if entity is not added
@@ -1256,7 +1259,7 @@ static void CL_LinkPacketEntities( frame_t *frame )
 		VectorCopy( ent->origin, ent->attachment[2] );
 		VectorCopy( ent->origin, ent->attachment[3] );
 
-		CL_AddVisibleEntity( ent, ET_NORMAL );
+		XBOX_FT_CE_ADD_VISIBLE( CL_AddVisibleEntity( ent, ET_NORMAL ));
 	}
 }
 
@@ -1306,24 +1309,29 @@ void CL_EmitEntities( void )
 	CL_UpdateFrameLerp ();
 
 	// set client ideal pitch when mlook is disabled
-	CL_SetIdealPitch ();
+	XBOX_FT_CE_TIMED( XBOX_FT_CE_PITCH, CL_SetIdealPitch ());
 
 	ref.dllFuncs.R_ClearScene ();
+
+	XBOX_FT_CE_BEGIN( xbox_ft_link );
 
 	// link all the visible clients first
 	CL_LinkPlayers ( &cl.frames[cl.parsecountmod] );
 
 	// link all the entities that actually have update
 	CL_LinkPacketEntities ( &cl.frames[cl.parsecountmod] );
+	XBOX_FT_CE_END( xbox_ft_link, XBOX_FT_CE_LINK );
+	XBOX_FT_CE_BEGIN( xbox_ft_tents );
 
 	// link custom user temp entities
 	clgame.dllFuncs.pfnCreateEntities();
 
 	// evaluate temp entities
 	CL_TempEntUpdate ();
+	XBOX_FT_CE_END( xbox_ft_tents, XBOX_FT_CE_TENTS );
 
 	// fire events (client and server)
-	CL_FireEvents ();
+	XBOX_FT_CE_TIMED( XBOX_FT_CE_EVENTS, CL_FireEvents ());
 
 	// handle spectator camera movement
 	CL_MoveSpectatorCamera();

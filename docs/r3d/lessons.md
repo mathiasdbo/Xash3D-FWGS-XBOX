@@ -28,6 +28,21 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER call a rebuild idempotent before checking that it reads nothing it writes
+
+x9-perf-clents (2026-10-07) skipped `CL_SetSolidEntities` calls whose
+inputs had not changed since the last rebuild, reasoning that the same
+inputs give the same lists. The verification build's side-by-side check
+found 3 of 7,772 skips wrong: `CL_CopyEntityToPhysEnt` picks
+`pe->model` or `pe->studiomodel` from `pe->solid` (`cl_pmove.c:341` in
+the reference) before it writes `pe->solid = state->solid` (`:357`), so
+the first rebuild after a slot held another entity differs from the
+second. A function that fills a buffer can read the buffer's old
+contents; the key covered every input except that one. **Before
+treating "same inputs" as "same output", read the function for any read
+of its destination before the write, and check the claim with a run that
+does the work anyway and compares.**
+
 ### NEVER call a scripted equivalence run a proof before counting what it exercised
 
 x9-perf-pmove's first movement-log comparison (2026-10-06) scripted a

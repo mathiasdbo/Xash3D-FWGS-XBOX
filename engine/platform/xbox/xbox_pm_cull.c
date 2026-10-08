@@ -64,6 +64,7 @@ typedef struct xbox_pm_slot_s
 
 static xbox_pm_slot_t pm_cull_cache[XBOX_PM_CULL_SLOTS] __attribute__(( aligned( 32 )));
 static qboolean pm_cull_dirty;
+uint32_t xbox_model_generation; /* docs/r3d/divergences.md #156 */
 
 void Xbox_PMCull_Invalidate( void )
 {

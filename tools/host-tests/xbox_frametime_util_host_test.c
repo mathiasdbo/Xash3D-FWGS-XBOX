@@ -171,11 +171,16 @@ static void test_encoders( void )
 	CHECK( XBOX_FT_W_PM_CL_TESTS == XBOX_FT_W_PM_SV_TESTS + 1 && XBOX_FT_W_PM_CL_PTESTS == XBOX_FT_W_PM_SV_PTESTS + 1 );
 	CHECK( XBOX_FT_W_PM_CL_PCONT == XBOX_FT_W_PM_SV_PCONT + 1 && XBOX_FT_W_PM_CL_TEX == XBOX_FT_W_PM_SV_TEX + 1 );
 	CHECK( XBOX_FT_W_PM_SV_SETUP_KC == 142 && XBOX_FT_W_PM_CL_POST_KC == 150 );
-	CHECK( XBOX_FT_W_PM_SV_CULLS == 151 && XBOX_FT_W_PM_CL_CULLS == 152 && XBOX_FT_W_COUNT == 153 );
-	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 644 && xbox_ft_frame_bytes( 0 ) == 32 );
+	CHECK( XBOX_FT_W_PM_SV_CULLS == 151 && XBOX_FT_W_PM_CL_CULLS == 152 );
+	/* The client entity breakdown's (2026-10-07, x9-perf-clents) close
+	   it now: five counts, eight times and the physent-list skips (#156). */
+	CHECK( XBOX_FT_W_CE_ENTS == 153 && XBOX_FT_W_CE_VISENTS == 157 && XBOX_FT_W_CE_DELTA_KC == 158 );
+	CHECK( XBOX_FT_W_CE_EVENTS_KC == 164 && XBOX_FT_W_CE_PITCH_KC == 165 && XBOX_FT_W_CE_SOLID_SKIPS == 166 );
+	CHECK( XBOX_FT_W_COUNT == 167 );
+	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 700 && xbox_ft_frame_bytes( 0 ) == 32 );
 	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_SPAN_CALLS ) == 112 );
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", XBOX_FT_W_COUNT ) == XBOX_FT_HEADER_BYTES );
-	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 644 );
+	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 700 );
 	/* Version 1 is the same header without counters. */
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", 0 ) == XBOX_FT_HEADER_BYTES );
 	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 );
@@ -201,15 +206,15 @@ static void test_encoders( void )
 	CHECK( xbox_ft_encode_frame( buf, &f, 0 ) == XBOX_FT_FRAME_BYTES );
 	CHECK( rd32( buf ) == 7 && buf[4] == 0xDD && buf[7] == 0xAA && rd32( buf + 24 ) == 6 );
 	CHECK( buf[28] == 0x01 && buf[29] == 0x80 && buf[30] == 0 && buf[31] == 0 );
-	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 644 );
+	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 700 );
 	CHECK( rd32( buf ) == 7 && buf[28] == 0x01 && buf[29] == 0x80 );
 	CHECK( rd32( buf + 32 ) == 0x01000000u && rd32( buf + 32 + 4 * XBOX_FT_W_LM_TEXELS ) == 0x01000000u + XBOX_FT_W_LM_TEXELS );
-	CHECK( rd32( buf + 640 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
+	CHECK( rd32( buf + 696 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
 
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, 0 ) == 16 );
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_FRAMES && rd32( buf + 4 ) == 8 + 3 * 32 && rd32( buf + 8 ) == 10 && rd32( buf + 12 ) == 3 );
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, XBOX_FT_W_COUNT ) == 16 );
-	CHECK( rd32( buf + 4 ) == 8 + 3 * 644 );
+	CHECK( rd32( buf + 4 ) == 8 + 3 * 700 );
 
 	/* The COUNTERS chunk: every name, NUL-padded to 16 bytes. */
 	CHECK( xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ) == 8 + 4 + XBOX_FT_W_COUNT * 16 );
@@ -261,7 +266,15 @@ static void test_encoders( void )
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_CL_QUERY_KC, "pm_cl_query_kc" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_CL_POST_KC, "pm_cl_post_kc" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_PM_CL_CULLS, "pm_cl_culls" ) == 0 );
-	CHECK( XBOX_FT_W_PM_CL_CULLS == XBOX_FT_W_COUNT - 1 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_ENTS, "ce_ents" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_NOCHANGE, "ce_nochange" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_VISENTS, "ce_visents" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_FIELDS_KC, "ce_fields_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_PROCESS_KC, "ce_process_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_EVENTS_KC, "ce_events_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_PITCH_KC, "ce_pitch_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_CE_SOLID_SKIPS, "ce_solid_skips" ) == 0 );
+	CHECK( XBOX_FT_W_CE_SOLID_SKIPS == XBOX_FT_W_COUNT - 1 );
 	for( i = 0; i < XBOX_FT_W_COUNT; i++ )
 		CHECK( xbox_ft_work_names[i] && strlen( xbox_ft_work_names[i] ) < XBOX_FT_COUNTER_NAME_BYTES && buf[12 + 16 * i + 15] == 0 );
 
@@ -674,6 +687,12 @@ static int write_fixture_level_change( const char *path, int flagged )
    physents skipped 2 / 300;
    times (ms) server setup 1, PM_Move 2 (queries 1), think 1, touch 0,
    client solid list 1, PM_Move 3 (queries 2), PostRunCmd 1.
+   Client entities (2026-10-07), every frame: k_cl_pkt_ents 1 (all of
+   cl_read; k_cl_emit 0), ce_ents 120, ce_deltas 30,
+   ce_nochange 2, ce_fields 150, ce_visents 40; times (ms) deltas 2 (field
+   loop 1), CL_ProcessPacket 1, link 3 (CL_AddVisibleEntity 2), temp
+   entities 1, events 0, ideal pitch 1; physent-list skips 2 (of
+   pm_cl_solids 2).
    Clean END. */
 static int write_fixture_spans( const char *path )
 {
@@ -754,6 +773,20 @@ static int write_fixture_spans( const char *path )
 		f.work[XBOX_FT_W_PM_CL_POST_KC] = 1;
 		f.work[XBOX_FT_W_PM_SV_CULLS] = 2;
 		f.work[XBOX_FT_W_PM_CL_CULLS] = 300;
+		k[XBOX_FT_S_CL_PKT_ENTS] = 1; /* all of cl_read */
+		f.work[XBOX_FT_W_CE_ENTS] = 120;
+		f.work[XBOX_FT_W_CE_DELTAS] = 30;
+		f.work[XBOX_FT_W_CE_NOCHANGE] = 2;
+		f.work[XBOX_FT_W_CE_FIELDS] = 150;
+		f.work[XBOX_FT_W_CE_VISENTS] = 40;
+		f.work[XBOX_FT_W_CE_DELTA_KC] = 2;
+		f.work[XBOX_FT_W_CE_FIELDS_KC] = 1;
+		f.work[XBOX_FT_W_CE_PROCESS_KC] = 1;
+		f.work[XBOX_FT_W_CE_LINK_KC] = 3;
+		f.work[XBOX_FT_W_CE_ADD_KC] = 2;
+		f.work[XBOX_FT_W_CE_TENTS_KC] = 1;
+		f.work[XBOX_FT_W_CE_PITCH_KC] = 1;
+		f.work[XBOX_FT_W_CE_SOLID_SKIPS] = 2;
 		if( i == 40 )
 		{
 			k[XBOX_FT_S_SV_GAME] = 10;

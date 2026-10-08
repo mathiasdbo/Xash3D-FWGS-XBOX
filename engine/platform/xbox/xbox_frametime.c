@@ -67,6 +67,7 @@ seconds. tools/frametime-report.py fetches and reads it.
 #include "xbox_frametime_util.h"
 #include "xbox_frametime_svgame.h"
 #include "xbox_frametime_pmove.h"
+#include "xbox_frametime_clents.h"
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
 
@@ -88,6 +89,7 @@ xbox_ft_work_t xbox_ft_work;
 xbox_ft_spans_t xbox_ft_spans;
 int xbox_ft_snd_extra;
 xbox_ft_pm_t xbox_ft_pm;
+xbox_ft_ce_t xbox_ft_ce;
 
 /* The player movement's timers (xbox_frametime_pmove.h) into their
    kilocycle counters, at the frame's close. */
@@ -108,10 +110,29 @@ void Xbox_FT_PMove_CloseFrame( void )
 	}
 }
 
-/* 1024 frames x 644 bytes (32 + 153 work counters: 20 counts, span_calls,
-   73 spans and 59 later counts) = 644 KiB ring, plus the per-map
-   histogram (4 KiB), an 80 KiB encode buffer, 4 KiB of notes and the
-   server classname table (~30 KiB, xbox_frametime_svgame.c): ~763 KiB,
+/* The client entity breakdown's timers (xbox_frametime_clents.h) into
+   their kilocycle counters, at the frame's close. */
+void Xbox_FT_ClEnts_CloseFrame( void )
+{
+	static const uint16_t work[XBOX_FT_CE_TIMERS] =
+	{
+		XBOX_FT_W_CE_DELTA_KC, XBOX_FT_W_CE_FIELDS_KC, XBOX_FT_W_CE_PROCESS_KC,
+		XBOX_FT_W_CE_LINK_KC, XBOX_FT_W_CE_ADD_KC, XBOX_FT_W_CE_TENTS_KC,
+		XBOX_FT_W_CE_EVENTS_KC, XBOX_FT_W_CE_PITCH_KC,
+	};
+	int i;
+
+	for( i = 0; i < XBOX_FT_CE_TIMERS; i++ )
+	{
+		xbox_ft_work.c[work[i]] = xbox_ft_span_kcyc( xbox_ft_ce.ticks[i] );
+		xbox_ft_ce.ticks[i] = 0;
+	}
+}
+
+/* 1024 frames x 700 bytes (32 + 167 work counters: 20 counts, span_calls,
+   73 spans and 73 later counts) = 700 KiB ring, plus the per-map
+   histogram (4 KiB), an 87.5 KiB encode buffer, 4 KiB of notes and the
+   server classname table (~30 KiB, xbox_frametime_svgame.c): ~826 KiB,
    allocated when recording starts and freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush
    every 5 s or at half full keeps it from overrunning unless a single
    flush stalls for 7 s. */
@@ -119,7 +140,7 @@ void Xbox_FT_PMove_CloseFrame( void )
 #define XBOX_FT_FLUSH_SECONDS   5u
 #define XBOX_FT_ENCODE_FRAMES   128u
 #define XBOX_FT_WARMUP_FRAMES   30u     /* left out of a map's statistics, as item 12's report did */
-#define XBOX_FT_MAX_FILE_BYTES  ( 64u * 1024u * 1024u )  /* ~29 min at 60 fps (37.7 KiB/s) */
+#define XBOX_FT_MAX_FILE_BYTES  ( 80u * 1024u * 1024u )  /* ~33 min at 60 fps (41 KiB/s); 64 MiB until 700-byte records (2026-10-07) */
 #define XBOX_FT_NOMINAL_TSC_HZ  733333333u /* until calibrated: the retail Pentium III clock */
 
 /* The overlay. The graph shows the last XBOX_FT_GRAPH_FRAMES frames as
@@ -471,6 +492,7 @@ static void FT_CloseFrame( uint64_t now )
 	f->swap = xbox_ft_saturate( xbox_ft_waits.swap, &f->flags );
 	Xbox_FT_SvGame_CloseFrame();
 	Xbox_FT_PMove_CloseFrame();
+	Xbox_FT_ClEnts_CloseFrame();
 	memcpy( f->work, xbox_ft_work.c, sizeof( xbox_ft_work.c ));
 	f->work[XBOX_FT_W_SPAN_CALLS] = xbox_ft_spans.calls;
 	{
@@ -613,6 +635,7 @@ void Xbox_FrameTime_BeginFrame( void )
 	memset( &xbox_ft_work, 0, sizeof( xbox_ft_work ));
 	memset( xbox_ft_spans.t, 0, sizeof( xbox_ft_spans.t ));
 	memset( xbox_ft_pm.ticks, 0, sizeof( xbox_ft_pm.ticks ));
+	memset( xbox_ft_ce.ticks, 0, sizeof( xbox_ft_ce.ticks ));
 	xbox_ft_spans.calls = 0;
 	/* Only here, between frames, so no span is open when it changes. */
 	xbox_ft_spans.on = host_frametime_spans.value != 0.0f;

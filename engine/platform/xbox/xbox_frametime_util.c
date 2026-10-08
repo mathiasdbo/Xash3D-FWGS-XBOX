@@ -67,6 +67,10 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"pm_sv_setup_kc", "pm_sv_move_kc", "pm_sv_query_kc", "pm_sv_think_kc", "pm_sv_touch_kc",
 	"pm_cl_solid_kc", "pm_cl_move_kc", "pm_cl_query_kc", "pm_cl_post_kc",
 	"pm_sv_culls", "pm_cl_culls",
+	"ce_ents", "ce_deltas", "ce_nochange", "ce_fields", "ce_visents",
+	"ce_delta_kc", "ce_fields_kc", "ce_process_kc",
+	"ce_link_kc", "ce_add_kc", "ce_tents_kc", "ce_events_kc", "ce_pitch_kc",
+	"ce_solid_skips",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,

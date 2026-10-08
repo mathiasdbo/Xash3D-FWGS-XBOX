@@ -70,4 +70,10 @@ int Xbox_PMCull_PointMisses( const model_t *model, const hull_t *hull, const vec
    (engine/common/model.c Mod_FreeModel, mod_bmodel.c Mod_LoadBrushModel). */
 void Xbox_PMCull_Invalidate( void );
 
+/* Bumped whenever a model is loaded or freed (Mod_LoadModel,
+   Mod_FreeModel): the client's physent-list skip (xbox_cl_solid.c,
+   docs/r3d/divergences.md #156) keys on it, since a rebuild reads the
+   models' types, flags, bounds and clip hulls. */
+extern uint32_t xbox_model_generation;
+
 #endif /* XBOX_PM_CULL_H */

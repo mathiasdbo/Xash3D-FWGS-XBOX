@@ -20,6 +20,10 @@ GNU General Public License for more details.
 #include "pm_local.h"
 #include "studio.h"
 #include "platform/xbox/xbox_frametime_pmove.h" // the recorder's player movement breakdown, docs/r3d/divergences.md #141
+#include "platform/xbox/xbox_frametime_clents.h" // the recorder's client entity breakdown, #141
+#if XASH_XBOX
+#include "platform/xbox/xbox_cl_solid.h" // the physent lists rebuilt only when they would change, #156
+#endif
 
 #define MAX_FORWARD			6	// forward probes for set idealpitch
 #define MIN_CORRECTION_DISTANCE	0.25f	// use smoothing if error is > this
@@ -470,6 +474,19 @@ void CL_SetSolidEntities( void )
 	physent_t	*pe = clgame.pmove->physents;
 	XBOX_FT_PM_BEGIN( xbox_ft_solid );
 
+#if XASH_XBOX
+	// docs/r3d/divergences.md #156: nothing the rebuild reads changed and
+	// nothing wrote the lists since the last one, so (once settled) they
+	// are already what it would write
+	if( Xbox_CL_SolidReuse( ))
+	{
+		XBOX_FT_CE_ADD( XBOX_FT_W_CE_SOLID_SKIPS, 1 );
+		XBOX_FT_PM_COUNT_ALWAYS( XBOX_FT_W_PM_CL_SOLIDS );
+		XBOX_FT_PM_END( xbox_ft_solid, XBOX_FT_PM_CL_SOLID );
+		return;
+	}
+#endif
+
 	// setup physents
 	clgame.pmove->numvisent = 1;
 	clgame.pmove->numphysent = 1;
@@ -488,6 +505,9 @@ void CL_SetSolidEntities( void )
 
 	// add all other entities exlucde players
 	CL_AddLinksToPmove( &cl.frames[cl.parsecountmod] );
+#if XASH_XBOX
+	Xbox_CL_SolidBuilt(); // docs/r3d/divergences.md #156
+#endif
 	XBOX_FT_PM_COUNT_ALWAYS( XBOX_FT_W_PM_CL_SOLIDS );
 	XBOX_FT_PM_END( xbox_ft_solid, XBOX_FT_PM_CL_SOLID );
 }
@@ -506,6 +526,10 @@ void GAME_EXPORT CL_SetSolidPlayers( int playernum )
 {
 	if( !cl_solid_players.value )
 		return;
+
+#if XASH_XBOX
+	Xbox_CL_SolidPlayers(); // appending below the built slots, docs/r3d/divergences.md #156
+#endif
 
 	for( int i = 0; i < MAX_CLIENTS; i++ )
 	{
@@ -931,6 +955,11 @@ static void CL_RunUsercmd( local_state_t *from, local_state_t *to, usercmd_t *u,
 		// motor!
 		XBOX_FT_PM_COUNT_ALWAYS( cl.local.repredicting ? XBOX_FT_W_PM_CL_REDO : XBOX_FT_W_PM_CL_CMDS );
 		XBOX_FT_PM_MOVE( 2, XBOX_FT_PM_CL_MOVE, clgame.pmove, clgame.dllFuncs.pfnPlayerMove( clgame.pmove, false ));
+#if XASH_XBOX
+		// #156: the client DLL had the playermove_t and so writable physent
+		// and visent slots; the next CL_SetSolidEntities rebuilds as upstream
+		Xbox_CL_SolidInvalidate();
+#endif
 
 		// copy results back to client
 		CL_FinishPMove( clgame.pmove, to );

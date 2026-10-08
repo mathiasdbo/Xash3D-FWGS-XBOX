@@ -26,6 +26,7 @@ GNU General Public License for more details.
 #include "multi_emulator.h"
 #if XASH_XBOX
 #include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
+#include "platform/xbox/xbox_cl_solid.h" // the client's physent lists, docs/r3d/divergences.md #156
 #else
 #define XBOX_FT_SPAN( id, stmt ) stmt
 #endif
@@ -3458,6 +3459,10 @@ static qboolean CL_ShouldRescanFilesystem( void )
 qboolean CL_PrecacheResources( void )
 {
 	resource_t	*pRes;
+
+#if XASH_XBOX
+	Xbox_CL_SolidInvalidate(); // cl.models[] changes, docs/r3d/divergences.md #156
+#endif
 
 	// if we downloaded new WAD files or any other archives they must be added to searchpath
 	if( CL_ShouldRescanFilesystem( ))

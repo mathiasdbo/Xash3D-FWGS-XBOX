@@ -5,6 +5,36 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: the client decodes entity updates and rebuilds its collision lists with less work
+
+Every frame the client decodes the entity updates the server sent and
+rebuilds the list of solid entities its movement prediction collides
+with. Two parts of that did work they did not need, and both now give
+exactly the same result for less:
+
+- An entity update carries a yes/no flag for each of the entity's 56
+  fields, and usually only one or two are set. The flags are now read
+  many at a time instead of one call each. Every update in a scripted
+  session (13,088 entity updates, 1,712 player-data and 4,815 weapon
+  updates) was decoded both ways and compared: no difference.
+- The solid-entity list was rebuilt three times a frame from the same
+  data. It is now rebuilt once per new update; the second call only
+  redoes the one choice a rebuild can make differently the second time
+  round (which model a slot uses, a quirk of the original code), and the
+  third is skipped. A check build rebuilt the list anyway at each of the
+  7,772 skips and compared it byte for byte: no difference.
+
+In the emulator on c1a0c the update decoding goes from 0.027 to 0.010
+ms a frame and the list building from 0.073-0.080 to 0.032; the
+console's figures need a hardware run.
+
+The frame-time recorder breaks the client's entity work down (`ce_*`
+counters: entities, updates, fields, visible entities, the skipped
+rebuilds, and the time in decoding, frame processing, linking, temporary
+entities, events and the camera's pitch traces), and its report prints a
+client-entities table. Records grow to 700 bytes, so a recording file
+can now reach 80 MiB (about 33 minutes at 60 fps) instead of 64.
+
 ### Changed - Xbox: player movement checks only the entities near the player
 
 Moving the player costs about 0.8 ms a frame on the console, split
