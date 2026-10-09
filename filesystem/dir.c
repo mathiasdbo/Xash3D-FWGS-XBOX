@@ -390,6 +390,20 @@ static int FS_FindFile_DIR( searchpath_t *search, const char *path, char *fixedn
 {
 	char netpath[MAX_SYSPATH];
 
+#if XASH_XBOX
+	// divergences.md #165: under a case-insensitive root FS_FixFileCase
+	// only appends the path and stats it for existence (file or folder);
+	// FS_SysFileExists below stats the same path again for a regular
+	// file. The second stat alone gives the same answer, so build the
+	// path without the first (createpath: no existence test, and nothing
+	// created - FS_FixFileCase never creates anything itself).
+	if( search->dir->numentries == DIRENTRY_CASEINSENSITIVE )
+	{
+		if( !FS_FixFileCase( search->dir, path, netpath, sizeof( netpath ), true ))
+			return -1;
+	}
+	else
+#endif
 	if( !FS_FixFileCase( search->dir, path, netpath, sizeof( netpath ), false ))
 		return -1;
 

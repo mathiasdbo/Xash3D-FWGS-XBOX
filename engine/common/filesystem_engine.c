@@ -34,6 +34,7 @@ GNU General Public License for more details.
 #if XASH_XBOX
 #include <windows.h>
 #include <nxdk/mount.h>
+#include "xbox_missing_dirs.h" // r3d_missing_dirs_flush, divergences.md #164
 #endif
 
 static CVAR_DEFINE_AUTO( fs_mount_hd, "0", FCVAR_PRIVILEGED, "mount high definition content folder" );
@@ -369,6 +370,9 @@ static qboolean FS_DetermineRootDirectory( char *out, size_t size )
 			Sys_Error( "couldn't create %s - error %lu", xbox_rootdir, GetLastError( ));
 			return false;
 		}
+		// divergences.md #164: these directories may have been looked
+		// under before they existed; the file layer forgets what it saw
+		r3d_missing_dirs_flush();
 
 		Q_strncpy( out, xbox_rootdir, size );
 		return true;

@@ -2084,6 +2084,14 @@ wrong hit through a `-D` string carrying the path. The normalisation now
 touches only line markers. The rule held; the scope of "the same
 normalisation" had been read wider than the mechanism behind it.
 
+Third data point, a runtime cache (x9-perf-loadtime2, divergence #164):
+the table of missing directories first stripped trailing separators
+from the directory it recorded after a failed lookup, so a lookup of
+`E:\custom\\` (an empty component the kernel fails) recorded `E:\custom`,
+a directory that existed. The host test's model of the kernel caught it
+in the first run. Record exactly the string the kernel answered for; if
+a spelling must be refused, refuse it, never rewrite it into another.
+
 ### NEVER build a test fixture from what a tool is supposed to output - capture it from the tool, or test the tool's own mode that the caller runs
 
 `tools/test_fast_loop.mjs` mocked a docs-only verify as an empty plan

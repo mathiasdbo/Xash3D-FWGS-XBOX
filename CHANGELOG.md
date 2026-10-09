@@ -5,6 +5,28 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: level loads about a fifth faster again
+
+Four pieces of work every level load repeated for nothing are gone, with
+the same game state at the end of the load:
+
+- Loading a map's world looked up each moving brush's origin by reading
+  the whole entity list again, once per brush - several megabytes of text
+  on the bigger maps. It is now read once.
+- Every file lookup asked the hard disk about two folders that do not
+  exist and about game folders the save area never has. The file layer
+  now remembers a folder the console said is missing, until a folder is
+  created.
+- The size of each of the ~350 precached files was found by opening it;
+  for files on the disc it is now one query.
+- Looking up a decal or texture by name listed the whole game folder on
+  the disc, entry by entry, every time. Each disc folder is now listed
+  once and replayed.
+
+In the emulator the test route's 15 loads went from 10.7 to 8.7 seconds,
+every map faster; on the console, where each of the removed disk calls
+costs more, the saving should be larger.
+
 ### Fixed - Xbox: level changes no longer stall up to a second on the first update from the new map
 
 The first update the game received after every level change spent a

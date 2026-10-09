@@ -77,7 +77,7 @@ EXPECTED = {
     "chdir": {"probes"},
     "getcwd": set(),
     "dup": {"meta", "closes"},                  # full-table cleanup close
-    "opendir": {"meta"},
+    "opendir": {"meta", "probes"},              # a failed scan looks the directory up once (#164)
     "readdir": {"meta"},
     "closedir": {"meta"},
     "fileno": set(),                            # registers pdclib's handle, no call

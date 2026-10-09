@@ -882,6 +882,68 @@ qboolean FS_GetFullDiskPath( char *buffer, size_t size, const char *name, qboole
 	return false;
 }
 
+#if XASH_XBOX
+/*
+==================
+FS_OpenForSize
+
+divergences.md #165: FS_Open( filepath, "rb", gamedironly ), except that a
+file found in a plain FS_NOWRITE_PATH directory (the disc's game
+directory, where every model, sound, sprite and event is found; also the
+usually missing valve_downloads/ and valve/custom/) is not opened at
+all: its size, which FS_SysOpen would have read with lseek( SEEK_END ),
+comes from a stat of the path FS_OpenFile_DIR would open, in *length -
+the same number for any regular file not being written at that moment.
+After the lookup, that replaces an open, a stat for the file time,
+three seeks and a close with one stat; SV_CreateResourceList asks for
+every precached file's size on every map load (357 files on c1a0c).
+==================
+*/
+static file_t *FS_OpenForSize( const char *filepath, qboolean gamedironly, int *length )
+{
+	char netpath[MAX_SYSPATH];
+	int pack_ind;
+
+	// FS_Open, its read branch
+	if( !fs_searchpaths )
+		return NULL;
+
+	// some mappers used leading '/' or '\' in path to models or sounds
+	if( filepath[0] == '/' || filepath[0] == '\\' )
+		filepath++;
+
+	if( filepath[0] == '/' || filepath[0] == '\\' )
+		filepath++;
+
+	if( FS_CheckNastyPath( filepath ))
+		return NULL;
+
+	// FS_OpenReadFile
+	searchpath_t *search = FS_FindFile( filepath, &pack_ind, netpath, sizeof( netpath ), gamedironly ? FS_GAMEDIRONLY_SEARCH_FLAGS : 0 );
+
+	// not found?
+	if( search == NULL )
+		return NULL;
+
+	if( search->type == SEARCHPATH_PLAIN && FBitSet( search->flags, FS_NOWRITE_PATH ))
+	{
+		char path[MAX_SYSPATH];
+		struct stat buf;
+
+		// FS_OpenFile_DIR's path
+		Q_snprintf( path, sizeof( path ), "%s%s", search->filename, netpath );
+		if( stat( path, &buf ) == 0 && S_ISREG( buf.st_mode ))
+		{
+			*length = buf.st_size;
+			return NULL;
+		}
+		// gone since the lookup: the open below fails as it would have
+	}
+
+	return search->pfnOpenFile( search, netpath, "rb", pack_ind );
+}
+#endif // XASH_XBOX
+
 /*
 ==================
 FS_FileSize
@@ -892,7 +954,11 @@ return size of file in bytes
 fs_offset_t FS_FileSize( const char *filename, qboolean gamedironly )
 {
 	int length = -1; // in case file was missed
+#if XASH_XBOX
+	file_t *fp = FS_OpenForSize( filename, gamedironly, &length ); // divergences.md #165
+#else
 	file_t *fp = FS_Open( filename, "rb", gamedironly );
+#endif
 
 	if( fp )
 	{

@@ -27,6 +27,7 @@ GNU General Public License for more details.
 #include "ref_common.h"
 #if XASH_XBOX
 #include "platform/xbox/xbox_pm_cull.h" // Xbox_PMCull_Invalidate, docs/r3d/divergences.md #154
+#include "platform/xbox/xbox_bmodel_origin.h" // one parse for every submodel's origin, docs/r3d/divergences.md #163
 #endif
 #if defined( HAVE_OPENMP )
 #include <omp.h>
@@ -2192,6 +2193,16 @@ static void Mod_SetupSubmodels( model_t *mod, dbspmodel_t *bmod )
 	const qboolean qbsp2 = FBitSet( mod->flags, MODEL_QBSP2 ) ? true : false;
 	const char *name = mod->name;
 	model_t *world = mod; // submodels might want to share hulls
+#if XASH_XBOX
+	// divergences.md #163: every submodel's Mod_FindModelOrigin answer from
+	// one parse of the entity lump instead of one parse per submodel; on a
+	// lump the reference would Host_Error on, the reference runs instead
+	xbox_bmodel_origins_t origin_index;
+	vec3_t *origin_values = Mem_Malloc( mod->mempool, mod->numsubmodels * sizeof( vec3_t ));
+	int *origin_state = Mem_Malloc( mod->mempool, mod->numsubmodels * sizeof( int ));
+	const qboolean origin_indexed = Xbox_BmodelOrigins_Build( &origin_index, world->entities,
+		mod->numsubmodels, origin_values, origin_state );
+#endif
 
 	mod->numframes = 2;	// regular and alternate animation
 
@@ -2233,6 +2244,11 @@ static void Mod_SetupSubmodels( model_t *mod, dbspmodel_t *bmod )
 			char temp[MAX_VA_STRING];
 
 			Q_snprintf( temp, sizeof( temp ), "*%i", i );
+#if XASH_XBOX
+			if( origin_indexed ) // divergences.md #163
+				Xbox_BmodelOrigins_Find( &origin_index, i, bm->origin );
+			else
+#endif
 			Mod_FindModelOrigin( world->entities, temp, bm->origin );
 
 			// mark models that have origin brushes
@@ -2276,6 +2292,10 @@ static void Mod_SetupSubmodels( model_t *mod, dbspmodel_t *bmod )
 
 	if( bmod->clipnodes_out != NULL )
 		Mem_Free( bmod->clipnodes_out );
+#if XASH_XBOX
+	Mem_Free( origin_state ); // divergences.md #163
+	Mem_Free( origin_values );
+#endif
 }
 
 /*

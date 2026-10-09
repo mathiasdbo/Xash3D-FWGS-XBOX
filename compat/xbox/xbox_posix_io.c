@@ -29,6 +29,19 @@ anything else here changes.
 #include <stdio.h>   /* SEEK_SET / SEEK_CUR / SEEK_END */
 #include <stdint.h>  /* intptr_t, for _get_osfhandle */
 #include "xbox_io_stats.h" /* the kernel calls counted for the frame-time recorder, #162 */
+#include "xbox_missing_dirs.h" /* lookups under a missing directory answered without the kernel, #164 */
+#include "xbox_dir_cache.h" /* the disc's directory listings scanned once, #166 */
+
+/* #166: bumped by every call that could create, remove or rename
+   anything; a listing is kept only if no such call came between its
+   opendir and its closedir. */
+static uint32_t r3d_fs_changes;
+
+static void r3d_fs_changed( void )
+{
+	r3d_fs_changes++;
+	r3d_dir_cache_flush();
+}
 
 /* Sized for the archives, not for loose files. Every mounted archive holds
  * one descriptor for the whole session (filesystem/mpak.c keeps its handle
@@ -327,6 +340,10 @@ int open( const char *path, int flags, ... )
 		return -1;
 	}
 
+	/* #166: anything but reading may create or truncate a file */
+	if(( flags & ( O_ACCMODE | O_CREAT | O_TRUNC | O_APPEND )) != O_RDONLY )
+		r3d_fs_changed();
+
 	switch( flags & O_ACCMODE )
 	{
 	case O_WRONLY: access = GENERIC_WRITE; break;
@@ -550,11 +567,40 @@ int stat( const char *path, struct stat *st )
 	 * Not FindFirstFileA, still: it treats the last path component as a
 	 * wildcard PATTERN rather than a name, and nxdk's handling of that is its
 	 * own hazard (deps/nxdk/lib/winapi/findfile.c:51-72). */
+	/* #164: under a directory known missing, the kernel's answer is
+	   ERROR_PATH_NOT_FOUND (xbox_missing_dirs.h) */
+	if( r3d_missing_dirs_covers( native ))
+	{
+		errno = r3d_errno_from_win32( ERROR_PATH_NOT_FOUND );
+		return -1;
+	}
+
 	ok = R3D_IO_CALL( probes, GetFileAttributesExA( native, GetFileExInfoStandard, &fad ));
 
 	if( !ok )
 	{
-		errno = r3d_errno_from_win32( GetLastError());
+		const DWORD err = GetLastError();
+
+		/* #164: some directory above the last component is missing or a
+		   file. Record the parent only once its own lookup says it does
+		   not exist, so no driver's reading of "path not found" for a
+		   missing last component can hide a directory that exists */
+		if( err == ERROR_PATH_NOT_FOUND )
+		{
+			char parent[MAX_PATH];
+			const char *slash = strrchr( native, '\\' );
+			DWORD perr;
+
+			if( slash && slash - native > 2 )
+			{
+				memcpy( parent, native, slash - native );
+				parent[slash - native] = '\0';
+				if( !R3D_IO_CALL( probes, GetFileAttributesExA( parent, GetFileExInfoStandard, &fad ))
+					&& (( perr = GetLastError()) == ERROR_FILE_NOT_FOUND || perr == ERROR_PATH_NOT_FOUND ))
+					r3d_missing_dirs_note_dir( parent );
+			}
+		}
+		errno = r3d_errno_from_win32( err );
 		return -1;
 	}
 
@@ -630,6 +676,8 @@ int mkdir( const char *path, mode_t mode )
 		return -1;
 	}
 
+	r3d_missing_dirs_flush(); /* #164: a directory now exists that may have been recorded missing */
+	r3d_fs_changed();         /* #166 */
 	return 0;
 }
 
@@ -647,6 +695,8 @@ int remove( const char *path )
 {
 	char  native[MAX_PATH];
 	DWORD attr;
+
+	r3d_fs_changed(); /* #166 */
 
 	if( !r3d_native_path( path, native, sizeof( native )))
 	{
@@ -669,6 +719,11 @@ int rename( const char *from, const char *to )
 {
 	char nfrom[MAX_PATH], nto[MAX_PATH];
 
+	/* #164: whatever the outcome, a directory may have moved into a
+	   recorded path (renames are rare: the deferred save's .tmp/.new) */
+	r3d_missing_dirs_flush();
+	r3d_fs_changed(); /* #166 */
+
 	if( !r3d_native_path( from, nfrom, sizeof( nfrom ))
 		|| !r3d_native_path( to, nto, sizeof( nto )))
 	{
@@ -689,6 +744,8 @@ int unlink( const char *path )
 {
 	char native[MAX_PATH];
 
+	r3d_fs_changed(); /* #166 */
+
 	if( !r3d_native_path( path, native, sizeof( native )))
 	{
 		errno = ENAMETOOLONG;
@@ -707,6 +764,8 @@ rmdir
 int rmdir( const char *path )
 {
 	char native[MAX_PATH];
+
+	r3d_fs_changed(); /* #166 */
 
 	if( !r3d_native_path( path, native, sizeof( native )))
 	{
@@ -879,7 +938,45 @@ struct DIR
 	WIN32_FIND_DATAA data;
 	int              pending;   /* data holds an entry not yet returned */
 	struct dirent    ent;
+
+	/* #166: a replayed listing (find is NULL then) ... */
+	char            *replay;    /* [type][name]\0 ..., a copy of the cache's */
+	size_t           replay_pos, replay_bytes;
+	/* ... or the one being scanned, kept at closedir if it is complete */
+	char            *rec;
+	size_t           rec_len, rec_cap;
+	int              rec_ok;    /* every entry fit */
+	int              complete;  /* FindNextFileA said there are no more */
+	uint32_t         changes;   /* r3d_fs_changes at opendir */
+	char             pattern[MAX_PATH];
 };
+
+/* #166: append the entry readdir is returning to the scan's record */
+static void r3d_dir_record( DIR *dir, const char *name, int is_dir )
+{
+	const size_t n = strlen( name ) + 2;
+
+	if( !dir->rec_ok )
+		return;
+	if( dir->rec_len + n > dir->rec_cap )
+	{
+		size_t cap = dir->rec_cap ? dir->rec_cap * 2 : 1024;
+		char *grown;
+
+		while( cap < dir->rec_len + n )
+			cap *= 2;
+		if( cap > R3D_DIR_CACHE_BYTES || !( grown = ( char * )realloc( dir->rec, cap )))
+		{
+			dir->rec_ok = 0; /* will not fit the cache anyway */
+			return;
+		}
+		dir->rec = grown;
+		dir->rec_cap = cap;
+	}
+	dir->rec[dir->rec_len] = ( char )is_dir;
+	memcpy( dir->rec + dir->rec_len + 1, name, n - 1 );
+	dir->rec_len += n;
+}
 
 DIR *opendir( const char *path )
 {
@@ -907,6 +1004,14 @@ DIR *opendir( const char *path )
 	native[len++] = '*';
 	native[len]   = '\0';
 
+	/* #164: the pattern lies under the directory; if that is known
+	   missing, the scan would fail like this one */
+	if( r3d_missing_dirs_covers( native ))
+	{
+		errno = ENOENT;
+		return NULL;
+	}
+
 	dir = ( DIR * )calloc( 1, sizeof( DIR ));
 
 	if( !dir )
@@ -915,11 +1020,50 @@ DIR *opendir( const char *path )
 		return NULL;
 	}
 
+	/* #166: a disc directory listed before, with nothing changed since */
+	{
+		r3d_dir_listing_t kept;
+
+		if( r3d_dir_cache_find( native, &kept ))
+		{
+			dir->replay = ( char * )malloc( kept.bytes ? kept.bytes : 1 );
+			if( dir->replay )
+			{
+				memcpy( dir->replay, kept.data, kept.bytes );
+				dir->replay_bytes = kept.bytes;
+				return dir;
+			}
+		}
+	}
+
+	if( r3d_dir_cache_cacheable( native ))
+	{
+		dir->rec_ok = 1;
+		dir->changes = r3d_fs_changes;
+		memcpy( dir->pattern, native, len + 1 );
+	}
+
 	dir->find = R3D_IO_CALL( meta, FindFirstFileA( native, &dir->data ));
 
 	if( dir->find == INVALID_HANDLE_VALUE )
 	{
+		const DWORD err = GetLastError();
+
 		free( dir );
+
+		/* #164: a failed scan is a missing directory or an empty one; one
+		   lookup of the directory itself tells them apart, once */
+		if( err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND )
+		{
+			WIN32_FILE_ATTRIBUTE_DATA fad;
+			DWORD derr;
+
+			native[len - 2] = '\0'; /* the directory, without "\*" */
+			if( !R3D_IO_CALL( probes, GetFileAttributesExA( native, GetFileExInfoStandard, &fad ))
+				&& (( derr = GetLastError()) == ERROR_FILE_NOT_FOUND || derr == ERROR_PATH_NOT_FOUND ))
+				r3d_missing_dirs_note_dir( native );
+		}
+
 		errno = ENOENT;
 		return NULL;
 	}
@@ -932,8 +1076,28 @@ struct dirent *readdir( DIR *dir )
 {
 	if( !dir ) { errno = EBADF; return NULL; }
 
+	/* #166: the kept listing, entry by entry as the scan returned it */
+	if( dir->replay )
+	{
+		const char *name;
+
+		if( dir->replay_pos >= dir->replay_bytes )
+			return NULL;
+		name = dir->replay + dir->replay_pos + 1;
+		dir->ent.d_ino  = 0;
+		dir->ent.d_type = dir->replay[dir->replay_pos] ? DT_DIR : DT_REG;
+		strncpy( dir->ent.d_name, name, NAME_MAX );
+		dir->ent.d_name[NAME_MAX] = '\0';
+		dir->replay_pos += strlen( name ) + 2;
+		return &dir->ent;
+	}
+
 	if( !dir->pending && !R3D_IO_CALL( meta, FindNextFileA( dir->find, &dir->data )))
+	{
+		if( GetLastError() == ERROR_NO_MORE_FILES )
+			dir->complete = 1; /* #166 */
 		return NULL;
+	}
 
 	dir->pending = 0;
 
@@ -944,12 +1108,32 @@ struct dirent *readdir( DIR *dir )
 	strncpy( dir->ent.d_name, dir->data.cFileName, NAME_MAX );
 	dir->ent.d_name[NAME_MAX] = '\0';
 
+	r3d_dir_record( dir, dir->data.cFileName, dir->ent.d_type == DT_DIR ); /* #166 */
+
 	return &dir->ent;
 }
 
 int closedir( DIR *dir )
 {
 	if( !dir ) { errno = EBADF; return -1; }
+
+	if( dir->replay ) /* #166: no handle behind a replayed listing */
+	{
+		free( dir->replay );
+		free( dir );
+		return 0;
+	}
+
+	/* #166: a disc directory read to the end, nothing changed meanwhile */
+	if( dir->rec_ok && dir->complete && dir->changes == r3d_fs_changes )
+	{
+		int count = 0;
+
+		for( size_t at = 0; at < dir->rec_len; at += strlen( dir->rec + at + 1 ) + 2 )
+			count++;
+		r3d_dir_cache_store( dir->pattern, dir->rec ? dir->rec : "", dir->rec_len, count );
+	}
+	free( dir->rec );
 
 	R3D_IO_CALL( meta, FindClose( dir->find ));
 	free( dir );

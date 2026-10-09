@@ -191,6 +191,29 @@ xbox_cl_drop() {
 }
 run_test xbox_cl_drop xbox_cl_drop
 
+# tools/host-tests/xbox_bmodel_origin_host_test.c, header.
+xbox_bmodel_origin() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Ipublic -Icommon -I3rdparty/library_suffix/include \
+		-Iengine/platform/xbox tools/host-tests/xbox_bmodel_origin_host_test.c \
+		engine/platform/xbox/xbox_bmodel_origin.c public/crtlib.c \
+		-o "$OUT/xbox_bmodel_origin_test" && "$OUT/xbox_bmodel_origin_test"
+}
+run_test xbox_bmodel_origin xbox_bmodel_origin
+
+# tools/host-tests/xbox_missing_dirs_host_test.c, header.
+xbox_missing_dirs() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Icompat/xbox tools/host-tests/xbox_missing_dirs_host_test.c \
+		compat/xbox/xbox_missing_dirs.c -o "$OUT/xbox_missing_dirs_test" && "$OUT/xbox_missing_dirs_test"
+}
+run_test xbox_missing_dirs xbox_missing_dirs
+
+# tools/host-tests/xbox_dir_cache_host_test.c, header.
+xbox_dir_cache() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Icompat/xbox tools/host-tests/xbox_dir_cache_host_test.c \
+		compat/xbox/xbox_dir_cache.c -o "$OUT/xbox_dir_cache_test" && "$OUT/xbox_dir_cache_test"
+}
+run_test xbox_dir_cache xbox_dir_cache
+
 # tools/host-tests/xbox_audio_hal_util_host_test.c, header (divergence
 # #150): the AC97 buffer accounting against nxdk's, through underruns,
 # under both controller behaviours; and the stall watchdog's decision.
