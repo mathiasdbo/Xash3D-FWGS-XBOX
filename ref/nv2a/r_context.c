@@ -1008,6 +1008,49 @@ static CVAR_DEFINE_AUTO( nv2a_r_lodbias, "0", 0, "ref_nv2a: mip LOD bias, -3..3 
    blit) - see docs/r3d/x9-x-textures-and-2d.md's verification item 9. */
 static CVAR_DEFINE_AUTO( nv2a_r_2d_pixeloffset, "0", 0, "ref_nv2a: 2D viewport pixel-centre offset, unverified live" );
 
+/* divergences.md #160: console A/B switches for the studio-model depth
+   fixes (nv2a_r_wscale read once a frame in GL_RenderFrame,
+   nv2a_r_znear at each near-cull push). nv2a_r_wscale 1 scales the
+   W-buffer depth by NV2A_WBUFFER_SCALE and gives the view model its
+   W-buffer depth range (nv2a_studio_util.h); 0 is the unscaled depth this
+   renderer had before (one depth step per world unit, view model
+   unranged). nv2a_r_znear is the near plane in world units: 4 is ref/gl's
+   (gl_rmain.c:384); 0 is what this renderer had before - no near plane at
+   all (nv2a_push_near_cull). */
+static CVAR_DEFINE_AUTO( nv2a_r_wscale, "1", 0, "ref_nv2a: scale the W-buffer depth (1) or not (0, the old one-unit depth steps) - divergences.md #160" );
+static CVAR_DEFINE_AUTO( nv2a_r_znear, "4", 0, "ref_nv2a: near plane in world units (4 = ref/gl, 0 = none, the old behaviour) - divergences.md #160" );
+
+/* This frame's W-buffer scales and the view model's view-projection
+   (GL_RenderFrame): the world's matrix, nv2a_map_viewproj, already
+   carries nv2a_frame_w_scale; nv2a_vm_viewproj is the z-ranged copy
+   R_DrawViewModel's draws use, with the view model's own w scale. 1, 1
+   and unset until the first frame. */
+static float nv2a_frame_w_scale = 1.0f;
+static float nv2a_frame_vm_w_scale = 1.0f;
+static float nv2a_vm_viewproj[4][4];
+
+/* nv2a_r_znear, kept to [0, 16]: past 16 it would cut into the view
+   model itself. 0 turns the near cull off (nv2a_push_near_cull). */
+static float nv2a_frame_znear( void )
+{
+	const float z = nv2a_r_znear.value;
+
+	if( !( z > 0.0f ))
+		return 0.0f;
+	return z > 16.0f ? 16.0f : z;
+}
+
+/* The projection's zNear: the near plane, or 1 (the old value) when the
+   near cull is off - a projection needs a positive one. It only shapes z,
+   which under the W-buffer reaches nothing but GetMatrix's report
+   (CFrustum::CalculateFrustum's planes, divergences.md #119). */
+static float nv2a_frame_proj_znear( void )
+{
+	const float z = nv2a_frame_znear();
+
+	return z > 0.0f ? z : 1.0f;
+}
+
 /* The real, live camera eye position, captured once per real frame by
    GL_RenderFrame alongside nv2a_map_viewproj/nv2a_frustum - needed here
    because nv2a_draw_map_geometry() (called later the same frame, from
@@ -1313,6 +1356,11 @@ static qboolean nv2a_sgpu_entered;
    any pixel-program upload, which resets the final combiner. */
 static nv2a_fog_hw_t nv2a_fog_pushed;
 static qboolean      nv2a_fog_pushed_valid;
+static float         nv2a_fog_pushed_w_scale; /* #160: the w scale the pushed parameters were divided by */
+
+/* #160: the NV097_SET_CLIP_MIN last pushed (nv2a_push_near_cull). */
+static float    nv2a_clip_min_pushed;
+static qboolean nv2a_clip_min_pushed_valid;
 
 /* X9-X D1: the 2D pass's own vertex ring - allocated in R_Init, freed in
    R_Shutdown (both well above where the rest of Part F is defined
@@ -1657,7 +1705,15 @@ static uint32_t nv2a_final_combiner_cw0( qboolean fog )
 		| MASK( NV097_SET_COMBINER_SPECULAR_FOG_CW0_C_SOURCE, 0x3 );
 }
 
-static void nv2a_push_fog( const nv2a_fog_hw_t *fog )
+/* divergences.md #160: the vertex programs write the fog coordinate from
+   the w the matrix produced (vs_lit, vs_tri, vs_studio, vs_warp), and that
+   w now carries the frame's W-buffer scale - the world's, or the view
+   model's own. Every fog mode multiplies the coordinate by params[1]
+   (xemu hw/xbox/nv2a/pgraph/glsl/vsh.c: fogParam.y), so dividing it by
+   the same scale gives the fog of the unscaled eye distance, which is
+   ref/gl's (its GL fog reads eye-space depth, glDepthRange or not). The
+   scales are powers of two: the division is exact. */
+static void nv2a_push_fog_scaled( const nv2a_fog_hw_t *fog, float w_scale )
 {
 	nv2a_fog_hw_t want;
 	uint32_t *p;
@@ -1666,7 +1722,8 @@ static void nv2a_push_fog( const nv2a_fog_hw_t *fog )
 	if( fog && fog->enable && ( fog->mode != NV2A_FOG_MODE_LINEAR || fog->end > fog->start ))
 		want = *fog;
 
-	if( nv2a_fog_pushed_valid && !memcmp( &want, &nv2a_fog_pushed, sizeof( want )))
+	if( nv2a_fog_pushed_valid && !memcmp( &want, &nv2a_fog_pushed, sizeof( want ))
+		&& ( !want.enable || nv2a_fog_pushed_w_scale == w_scale ))
 		return;
 
 	p = pb_begin();
@@ -1691,6 +1748,7 @@ static void nv2a_push_fog( const nv2a_fog_hw_t *fog )
 			mode = NV097_SET_FOG_MODE_V_EXP;
 			break;
 		}
+		params[1] /= w_scale;
 
 		p = pb_push1( p, NV097_SET_FOG_MODE, mode );
 		pb_push( p++, NV097_SET_FOG_PARAMS, 3 );
@@ -1703,7 +1761,67 @@ static void nv2a_push_fog( const nv2a_fog_hw_t *fog )
 	pb_end( p );
 
 	nv2a_fog_pushed = want;
+	nv2a_fog_pushed_w_scale = w_scale;
 	nv2a_fog_pushed_valid = true;
+}
+
+/* divergences.md #160: the near plane. ref/gl clips everything nearer
+   than zNear 4 (gl_rmain.c:384), the view model included (R_DrawViewModel
+   changes only the depth range, gl_studio.c:3348). Under the W-buffer the
+   NV2A has no near plane of its own: what it culls is the fragment whose
+   depth - w plus the polygon offset - lies outside [CLIP_MIN, CLIP_MAX]
+   (xemu hw/xbox/nv2a/pgraph/glsl/psh.c, "Depth clipping", taken because
+   pbkit sets SET_ZMIN_MAX_CONTROL to CULL_NEAR_FAR_EN_TRUE |
+   ZCLAMP_EN_CULL; xemu draws with GL_DEPTH_CLAMP, so z clips nothing),
+   and pbkit leaves CLIP_MIN at 0. With nothing culled before w = 0, a
+   v_shotgun.mdl shell about a unit from the eye filled the screen when
+   the player looked down. CLIP_MIN is in the units of the w being drawn:
+   the near plane times that draw's w scale (the world's or the view
+   model's), and 0 for 2D, whose w is 1 (vs_2d). Pushed where the fog is,
+   which every draw path already pushes before it draws.
+
+   This is a per-fragment depth cutoff, not ref/gl's geometric near-plane
+   clip (Codex review of #160). The vertex programs divide by w before
+   rasterisation (vs_lit.vs.cg, vs_tri.vs.cg), so a triangle that crosses
+   w = 4 is projected whole and only its fragments nearer than 4 units are
+   dropped; one that crosses w = 0 projects as it did before this change.
+   It removes geometry lying wholly inside the band (the shotgun part), and
+   leaves crossing triangles exactly as they were. Whether the NV2A clips
+   such triangles in hardware is unverified on the console; geometric
+   clipping against w = 4 is open in divergences.md #160. */
+static void nv2a_push_near_cull( float w_scale )
+{
+	const float clip_min = nv2a_frame_znear() * w_scale;
+	uint32_t *p, word;
+
+	if( nv2a_clip_min_pushed_valid && nv2a_clip_min_pushed == clip_min )
+		return;
+
+	memcpy( &word, &clip_min, sizeof( word ));
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_CLIP_MIN, word );
+	if( !nv2a_clip_min_pushed_valid )
+	{
+		/* The first push of a frame (R_BeginFrame drops the shadow)
+		   restates CLIP_MAX too: the Z24 maximum, the value pb_init's
+		   pb_set_viewport( ..., 0.0f, 1.0f ) leaves (pbkit.c:1961-1972,
+		   3139), which the scaled world (up to about 1.45e7) now nears -
+		   so it no longer rests on nothing else having changed it. */
+		const float clip_max = 16777215.0f;
+
+		memcpy( &word, &clip_max, sizeof( word ));
+		p = pb_push1( p, NV097_SET_CLIP_MAX, word );
+	}
+	pb_end( p );
+	nv2a_clip_min_pushed = clip_min;
+	nv2a_clip_min_pushed_valid = true;
+}
+
+/* Everything but the view model draws with the world's matrix. */
+static void nv2a_push_fog( const nv2a_fog_hw_t *fog )
+{
+	nv2a_push_fog_scaled( fog, nv2a_frame_w_scale );
+	nv2a_push_near_cull( nv2a_frame_w_scale );
 }
 
 static void nv2a_set_attrib_pointer( unsigned int index, unsigned int format, unsigned int size, unsigned int stride, const void *data )
@@ -3935,6 +4053,8 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_anisotropy );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lodbias );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_2d_pixeloffset );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_wscale );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_znear );
 
 	/* X9-X item 14 step 9: the random-tiling table R_TextureAnimation
 	   reads (gl_rsurf.c:536), filled where ref/gl's R_Init fills it
@@ -6245,10 +6365,13 @@ Z_PERSPECTIVE, nv2a_enter_lit_state) the depth the NV2A tests is the
 interpolated w, and NV097_SET_POLYGON_OFFSET_BIAS is added to it in the
 same units (xemu hw/xbox/nv2a/pgraph/glsl/psh.c: zvalue += depthOffset
 before the division by the Z24 range): here w is the eye distance in world
-units, one Z24 step each at the vertex program's scale (vs_lit writes the
-raw eye depth, nv2a_matrix_perspective's out[2][3] = 1): the bias assumes
-that unscaled w, and must scale with it if w is ever scaled. The bias is
--gl_polyoffset, GL's `units` term: 2 world units nearer at any distance,
+units times the frame's W-buffer scale (divergences.md #160: the
+view-projection is multiplied by nv2a_frame_w_scale, NV2A_WBUFFER_SCALE
+Z24 steps per unit), so the bias is multiplied by the same scale. The bias is
+-gl_polyoffset in WORLD units (#139's choice, kept by #160: ref/gl's
+glPolygonOffset(-1, -gl_polyoffset), gl_decals.c:874, counts depth-buffer
+steps, which grow with the square of the distance - no constant matches
+it): 2 world units nearer at any distance,
 so a decal can show through something drawn before it that stands less
 than 2 units in front of its face (a lip seen at a grazing angle). The slope term (GL's factor -1) is left
 at 0: xemu marks the W-buffer slope as partially implemented and it is
@@ -6399,7 +6522,8 @@ int nv2a_decal_gpu_begin( const cl_entity_t *e, float blend )
 	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 0 );
 	if( offset != 0.0f )
 	{
-		const float factor = 0.0f, bias = -offset;
+		/* #160: the bias is in depth units, which are w times the frame's scale */
+		const float factor = 0.0f, bias = -offset * nv2a_frame_w_scale;
 		uint32_t word;
 
 		p = pb_push1( p, NV097_SET_POLY_OFFSET_FILL_ENABLE, 1 );
@@ -6839,14 +6963,38 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   unstated assumption rather than a real invariant. */
 	xscale = 1.0f / tanf( (float)( DEG2RAD( rvp->fov_x ) * 0.5 ));
 	yscale = 1.0f / tanf( (float)( DEG2RAD( rvp->fov_y ) * 0.5 ));
-	nv2a_matrix_perspective( proj, xscale, yscale, 1.0f, 8192.0f );
+	/* divergences.md #160: zNear follows the near plane
+	   (nv2a_frame_proj_znear), ref/gl's 4 (gl_rmain.c:384); it was 1.
+	   The near plane itself is not this matrix's: under the W-buffer z
+	   reaches no clip (nv2a_push_near_cull). */
+	nv2a_matrix_perspective( proj, xscale, yscale, nv2a_frame_proj_znear(), 8192.0f );
 	nv2a_matrix_viewport( ndc_to_screen, 0, 0, (float)nv2a_width, (float)nv2a_height, 0, 65536.0f );
 
 	nv2a_matrix_multiply( combined, view, proj );
 	nv2a_matrix_multiply( nv2a_map_viewproj, combined, ndc_to_screen );
 	/* X9-X step 5 Part C: kept without the viewport, for the view model's
-	   own z-ranged re-combination (nv2a_2d_flush). */
+	   own z-ranged re-combination (below). */
 	memcpy( nv2a_view_proj_combined, combined, sizeof( combined ));
+
+	/* divergences.md #160: the W-buffer depth scale (nv2a_studio_util.h).
+	   The world's matrix and everything drawn with it get
+	   nv2a_frame_w_scale; the view model's - R_DrawViewModel's
+	   glDepthRange(0, 0.3) (gl_studio.c:3348), built once here for both
+	   of its draw paths (nv2a_2d_flush, nv2a_sgpu_push_submodel) - its
+	   own, smaller one. The fog (nv2a_push_fog) and the decal bias are
+	   rescaled to match. */
+	nv2a_frame_w_scale = nv2a_depth_w_scale( nv2a_r_wscale.value != 0.0f );
+	nv2a_frame_vm_w_scale = nv2a_viewmodel_w_scale( nv2a_r_wscale.value != 0.0f );
+	nv2a_matrix_scale_all( nv2a_map_viewproj, nv2a_frame_w_scale );
+	{
+		float viewmodel_viewport[4][4];
+		float z_min, z_max;
+
+		nv2a_studio_viewmodel_zrange( &z_min, &z_max );
+		nv2a_matrix_viewport( viewmodel_viewport, 0, 0, (float)nv2a_width, (float)nv2a_height, z_min, z_max );
+		nv2a_matrix_multiply( nv2a_vm_viewproj, nv2a_view_proj_combined, viewmodel_viewport );
+		nv2a_matrix_scale_all( nv2a_vm_viewproj, nv2a_frame_vm_w_scale );
+	}
 
 	/* X9-F: the view frustum, from the SAME forward/right/up/eye the view
 	   matrix above was just built from - so the cull and the projection
@@ -6915,12 +7063,13 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 	   ref/common's own convention - see nv2a_gl_worldviewproj's own
 	   declaration comment for why this is a second, independent build
 	   rather than a transposed reuse. Port of ref/soft's own
-	   R_SetupModelviewMatrix/R_SetupProjectionMatrix (r_main.c:379-438),
-	   but with the SAME zNear=1/zFar=8192 the TriAPI draw path actually
-	   renders with (nv2a_matrix_perspective( proj, xscale, yscale, 1.0f,
-	   8192.0f ) above, this same function), NOT ref/gl's own
-	   R_GetFarClip-derived zNear=4/zFar=max(256,farclip) (r_main.c:
-	   379-384; byte-for-byte identical in gl_rmain.c:332-337,369-425).
+	   R_SetupModelviewMatrix/R_SetupProjectionMatrix (r_main.c:405-421),
+	   but with the SAME zNear/zFar the TriAPI draw path actually
+	   renders with (nv2a_matrix_perspective( proj, xscale, yscale,
+	   nv2a_frame_proj_znear(), 8192.0f ) above, this same function):
+	   zNear is ref/gl's 4 since divergences.md #160 (it was 1), zFar
+	   stays 8192, NOT ref/gl's R_GetFarClip-derived max(256, farclip)
+	   (gl_rmain.c:333-338 and :384-385; ref/soft r_main.c:411-412).
 	   codex review, real finding (divergences.md #119 point 2): the two
 	   z-ranges used to disagree, and CFrustum::CalculateFrustum
 	   (particleman/CFrustum.cpp:38-104) genuinely reads GetMatrix's
@@ -6935,7 +7084,7 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		matrix4x4 worldview, projection, wvp;
 		float zNear, zFar, yMax, xMax;
 
-		zNear = 1.0f;
+		zNear = nv2a_frame_proj_znear(); /* divergences.md #160: the projection's own */
 		zFar = 8192.0f;
 
 		yMax = zNear * tanf((float)( DEG2RAD( rvp->fov_y ) * 0.5 ));
@@ -7545,8 +7694,12 @@ static void nv2a_2d_flush( void )
 			   z range is [0, 0.3*65536] rather than the world's own
 			   [0, 65536] - the exact glDepthRange(gldepthmin, gldepthmin +
 			   0.3*(gldepthmax-gldepthmin)) remap for this renderer's own
-			   baked-in-the-matrix z range (gl_studio.c:3348/3363). NV097_
-			   SET_CLIP_MIN/MAX are deliberately never written: the new
+			   baked-in-the-matrix z range (gl_studio.c:3348/3363). Under
+			   the W-buffer that z never reaches the depth: the matrix
+			   also carries the view model's smaller w scale, which is
+			   what keeps it in front (divergences.md #160, built in
+			   GL_RenderFrame as nv2a_vm_viewproj). NV097_SET_CLIP_MIN and
+			   CLIP_MAX are nv2a_push_near_cull's (#160); the view model's
 			   range is a sub-range of the world's own, which already
 			   renders on hardware (item 12's frame times). */
 			p = pb_begin();
@@ -7558,14 +7711,8 @@ static void nv2a_2d_flush( void )
 			pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 20 );
 			if( nv2a_2d_batch_state.viewmodel_depthrange )
 			{
-				float viewmodel_viewport[4][4];
-				float viewmodel_viewproj[4][4];
-				float z_min, z_max;
-
-				nv2a_studio_viewmodel_zrange( &z_min, &z_max );
-				nv2a_matrix_viewport( viewmodel_viewport, 0, 0, (float)nv2a_width, (float)nv2a_height, z_min, z_max );
-				nv2a_matrix_multiply( viewmodel_viewproj, nv2a_view_proj_combined, viewmodel_viewport );
-				memcpy( p, viewmodel_viewproj, 16 * 4 );
+				/* GL_RenderFrame's z-ranged, w-scaled copy (#160) */
+				memcpy( p, nv2a_vm_viewproj, 16 * 4 );
 			}
 			else
 			{
@@ -7676,7 +7823,11 @@ static void nv2a_2d_flush( void )
 
 	/* X9-X step 11: the batch's fog (3D only - 2D never fogs), after any
 	   re-entry above, whose program upload resets the final combiner. */
-	nv2a_push_fog( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_3D ? &nv2a_2d_batch_state.fog : NULL );
+	nv2a_push_fog_scaled( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_3D ? &nv2a_2d_batch_state.fog : NULL,
+		nv2a_2d_batch_state.viewmodel_depthrange ? nv2a_frame_vm_w_scale : nv2a_frame_w_scale );
+	/* #160: the near plane in this batch's w units; none for 2D (w = 1) */
+	nv2a_push_near_cull( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_3D
+		? ( nv2a_2d_batch_state.viewmodel_depthrange ? nv2a_frame_vm_w_scale : nv2a_frame_w_scale ) : 0.0f );
 
 	{
 		nv2a_2d_draw_ctx_t ctx;
@@ -7932,12 +8083,8 @@ qboolean nv2a_sgpu_begin_submodel( const nv2a_sgpu_geometry_t *geo, const float 
 	   for the current view-model depth range; c[9]: the light terms. */
 	if( nv2a_2d_desired.viewmodel_depthrange )
 	{
-		float viewmodel_viewport[4][4];
-		float z_min, z_max;
-
-		nv2a_studio_viewmodel_zrange( &z_min, &z_max );
-		nv2a_matrix_viewport( viewmodel_viewport, 0, 0, (float)nv2a_width, (float)nv2a_height, z_min, z_max );
-		nv2a_matrix_multiply( (float (*)[4])block, nv2a_view_proj_combined, viewmodel_viewport );
+		/* GL_RenderFrame's z-ranged, w-scaled copy (#160) */
+		memcpy( block, nv2a_vm_viewproj, 16 * 4 );
 	}
 	else
 	{
@@ -8089,7 +8236,9 @@ void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_
 	b.p = nv2a_emit_stage0( p, &key );
 	nv2a_blk_close( &b );
 
-	nv2a_push_fog( &nv2a_fog_current );
+	/* #160: with the view model's matrix (nv2a_sgpu_push_submodel), its w scale */
+	nv2a_push_fog_scaled( &nv2a_fog_current, nv2a_2d_desired.viewmodel_depthrange ? nv2a_frame_vm_w_scale : nv2a_frame_w_scale );
+	nv2a_push_near_cull( nv2a_2d_desired.viewmodel_depthrange ? nv2a_frame_vm_w_scale : nv2a_frame_w_scale );
 
 	/* The mesh's triangles: whole dwords of two u16 indices, 120 a block
 	   (80 triangles, so no block splits one) - nv2a_draw_index_range's
@@ -9177,6 +9326,7 @@ static void R_BeginFrame( qboolean clearScene )
 	nv2a_lit_state_current = false; /* only the world pass (or a brush entity) establishes it within a frame */
 	nv2a_sgpu_entered = false; /* divergences.md #143: re-entered by the first GPU studio mesh */
 	nv2a_sgpu_invalidate_consts(); /* ... and its gamma segments and other constants reloaded, once a frame */
+	nv2a_clip_min_pushed_valid = false; /* #160: the near cull (and CLIP_MAX) restated by the frame's first draw */
 
 	/* X9-X: releases whatever GL_FreeTexture/GL_UpdateTexture queued last
 	   frame (D4 - safe now, the pb_busy wait above proves the GPU is

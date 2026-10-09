@@ -63,7 +63,7 @@ Where it departs from ref/gl (docs/r3d/divergences.md #137):
 STATIC_ASSERT( NV2A_SKY_SIDES == SKYBOX_MAX_SIDES, "nv2a_sky_util.h and ref_api.h disagree on the side count" );
 
 /* r_context.c's projection zFar is 8192 (nv2a_matrix_perspective( ...,
-   1.0f, 8192.0f )). A box of half-size h reaches h * sqrt(3) from the eye
+   nv2a_frame_proj_znear(), 8192.0f )). A box of half-size h reaches h * sqrt(3) from the eye
    at its corners; 9400 >> 1 = 4700 puts them at 8141, inside it. */
 #define NV2A_SKY_MAX_FARCLIP 9400
 

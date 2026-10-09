@@ -44,3 +44,33 @@ void nv2a_studio_viewmodel_zrange( float *z_min, float *z_max )
 	*z_min = 0.0f;
 	*z_max = 0.3f * 65536.0f;
 }
+
+float nv2a_depth_w_scale( int enabled )
+{
+	return enabled ? NV2A_WBUFFER_SCALE : 1.0f;
+}
+
+float nv2a_viewmodel_w_scale( int enabled )
+{
+	return enabled ? NV2A_WBUFFER_SCALE / NV2A_VIEWMODEL_W_DIVISOR : 1.0f;
+}
+
+void nv2a_matrix_scale_all( float m[4][4], float s )
+{
+	int i, j;
+
+	for( i = 0; i < 4; i++ )
+	{
+		for( j = 0; j < 4; j++ )
+			m[i][j] *= s;
+	}
+}
+
+int32_t nv2a_wbuffer_depth( float w, float scale )
+{
+	const float z = w * scale;
+
+	if( !( z >= 0.0f ) || z > 16777215.0f )
+		return -1;
+	return (int32_t)z; /* floor: z is not negative here */
+}

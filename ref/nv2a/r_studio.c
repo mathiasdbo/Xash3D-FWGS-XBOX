@@ -3619,7 +3619,10 @@ void R_DrawViewModel( void )
 	   matrix already bakes z in [0, 65536] (nv2a_matrix_viewport,
 	   r_context.c), so glDepthRange's own remap becomes a batch-state flag
 	   the flush (r_context.c) uses to push a second, z-ranged copy of that
-	   matrix instead of a real hardware depth-range register. Note: the
+	   matrix instead of a real hardware depth-range register. Under the
+	   W-buffer z reaches no depth, so that copy also carries the view
+	   model's own, smaller w scale, which is the depth range in effect
+	   (divergences.md #160). Note: the
 	   real reference has NO fFlipViewModel/pglFrontFace toggle here - that
 	   logic lives in R_StudioDrawPoints (gl_studio.c:2055-2072, ported
 	   there, not here); an earlier port had invented one at this spot,

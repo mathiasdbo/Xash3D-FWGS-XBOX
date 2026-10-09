@@ -5,6 +5,31 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - Xbox: characters' clothes, mouths and hands no longer show through each other; no giant shotgun shell when looking down
+
+On the Xbox renderer the depth buffer could only tell surfaces apart
+when they were a whole world unit or more from each other. Characters
+are built from layers much closer than that, so the inner one often
+won: a security guard's shirt showed through his vest, teeth and the
+inside of the mouth through closed lips, hands sank into sleeves. The
+depth buffer now has about a thousand steps per unit, the same layers
+come out in the right order, and the faces match the software
+renderer's picture of the same frame.
+
+Two more depth details the PC renderer has were missing. The weapon
+in your hands is drawn with its own depth range so it does not sink
+into a wall you are standing against; that adjustment was ported in a
+form the Xbox's depth buffer ignores, and now works. And the PC (OpenGL)
+renderer draws nothing closer than 4 units to the camera; the Xbox one
+drew everything, so a shell that is part of the shotgun's model, about
+a unit from the camera, filled the screen when you looked down. It is
+gone now: the Xbox drops whatever is drawn closer than 4 units, pixel by
+pixel. Unlike the PC renderer it does not cut a triangle that crosses
+that distance into a smaller one; such triangles are drawn as before.
+
+`nv2a_r_wscale 0` and `nv2a_r_znear 0` bring back the old behaviour of
+each fix, so they can be compared on the console in one session.
+
 ### Changed - Xbox: lightning and laser beams cost about a third less CPU (xemu)
 
 The frame-time recorder now breaks the effects pass down into beams,

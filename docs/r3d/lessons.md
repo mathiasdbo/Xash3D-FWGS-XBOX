@@ -28,6 +28,33 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER port a depth-state call by its arithmetic before reading which value the target's depth test compares
+
+ref/nv2a ported `R_DrawViewModel`'s `glDepthRange(0, 0.3)`
+(`gl_studio.c:3348`) as a viewport matrix with z in [0, 0.3 x 65536] -
+exact as z arithmetic, and it did nothing: the NV2A draws with
+W-buffering, where the depth it tests is the interpolated w (xemu
+`pgraph/glsl/psh.c`). The same unread fact hid a one-unit depth step
+that let a guard's shirt through his vest, and that the projection's
+zNear, whatever its value, clips nothing (xemu draws with
+`GL_DEPTH_CLAMP`; the only near cut is `CLIP_MIN` on w), so a shotgun
+shell part a unit from the eye filled the screen (x9-fix-studio-visuals,
+divergence #160). **Before porting a
+depth range, near plane, polygon offset or depth format, find the line
+in the hardware model (xemu's shader generator) that computes the
+compared depth and the cull, and check the ported value reaches it.**
+
+### ALWAYS check that a reference shot shows something only the reference renderer can produce
+
+x9-fix-studio-visuals took two ref/soft "reference" runs in xemu by
+setting `r_refdll "soft"` in the disc's `video.cfg`; both were ref/nv2a
+(0 pixels different from an nv2a frame), because the HDD's saved
+`video.cfg` shadows the disc's, and one had been compared as if it were
+the reference. A real ref/soft frame is unmistakable (untextured world,
+checkerboards). **Before comparing against a reference picture, name
+the feature of it that proves which renderer drew it - or diff it
+against the renderer under test and expect a difference.**
+
 ### NEVER derive one count from another without reading every early return between their increments
 
 x9-perf-efx (2026-10-08) added `beam_ents` so the report could split

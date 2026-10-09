@@ -520,6 +520,107 @@ static void test_studio_viewmodel_zrange( void )
 	CHECK( z_max == 0.3f * 65536.0f, "viewmodel z range: far plane is 0.3 x 65536" );
 }
 
+/* divergences.md #160: the W-buffer depth scale. */
+static void test_wbuffer_scales( void )
+{
+	CHECK( nv2a_depth_w_scale( 0 ) == 1.0f, "w scale off: the unscaled w" );
+	CHECK( nv2a_viewmodel_w_scale( 0 ) == 1.0f, "view-model w scale off: the unscaled w" );
+	CHECK( nv2a_depth_w_scale( 1 ) == 1024.0f, "w scale on: 1024 steps per unit" );
+	CHECK( nv2a_viewmodel_w_scale( 1 ) == 64.0f, "view-model w scale on: a sixteenth of the world's" );
+}
+
+/* The bug, and the fix: two coplanar-ish layers (a vest 0.05 units over a
+   shirt) at every eye distance from the near plane to 4000 units. Under
+   the old unscaled w they shared a depth for most distances; scaled, they
+   never do, and the nearer one is always the smaller. */
+static void test_wbuffer_layers( void )
+{
+	int same_old = 0, bad_new = 0, n = 0;
+	float d;
+
+	for( d = 4.0f; d < 4000.0f; d += 0.37f )
+	{
+		const float gap = 0.05f;
+		n++;
+		if( nv2a_wbuffer_depth( d, nv2a_depth_w_scale( 0 )) == nv2a_wbuffer_depth( d + gap, nv2a_depth_w_scale( 0 )))
+			same_old++;
+		if( !( nv2a_wbuffer_depth( d, nv2a_depth_w_scale( 1 )) < nv2a_wbuffer_depth( d + gap, nv2a_depth_w_scale( 1 ))))
+			bad_new++;
+	}
+	CHECK( same_old > n * 9 / 10, "unscaled w: layers 0.05 apart mostly share a depth (the bug)" );
+	CHECK( bad_new == 0, "scaled w: layers 0.05 apart always ordered" );
+}
+
+/* Nothing the projection keeps (eye distance up to its 8192 far plane, and
+   the farthest point of a +-4096 map, 8192 * sqrt(3)) is culled by the
+   Z24 range [0, 0xFFFFFF] once scaled. */
+static void test_wbuffer_range( void )
+{
+	CHECK( nv2a_wbuffer_depth( 8192.0f, nv2a_depth_w_scale( 1 )) > 0, "scaled w: the far plane is inside Z24" );
+	CHECK( nv2a_wbuffer_depth( 14189.0f, nv2a_depth_w_scale( 1 )) > 0, "scaled w: a map's farthest corner is inside Z24" );
+	CHECK( nv2a_wbuffer_depth( 16384.0f, nv2a_depth_w_scale( 1 )) == -1, "scaled w: past 16383 units the range culls (the helper models it)" );
+	CHECK( nv2a_wbuffer_depth( -1.0f, nv2a_depth_w_scale( 1 )) == -1, "behind the eye: culled" );
+}
+
+/* R_DrawViewModel's glDepthRange(0, 0.3) (gl_studio.c:3348): with zNear 4
+   a world fragment dw away hides a view-model fragment dv away only when
+   1 - 4/dw < 0.3 * (1 - 4/dv), i.e. dw < 4 / (1 - 0.3 * (1 - 4/dv)) <= 5.72.
+   The W-buffer form: the view model tests as dv * 64 against the world's
+   dw * 1024. Check that for every view-model distance up to 60 units no
+   world fragment past the 4-unit near plane hides it (as in ref/gl,
+   where only the 4-5.7 band could), that the view model still resolves
+   0.05-unit layers within itself, and that it stays in Z24. */
+static void test_wbuffer_viewmodel( void )
+{
+	const float vm = nv2a_viewmodel_w_scale( 1 ), world = nv2a_depth_w_scale( 1 );
+	int hidden = 0, merged = 0;
+	float dv;
+
+	for( dv = 4.0f; dv <= 60.0f; dv += 0.01f )
+	{
+		if( !( nv2a_wbuffer_depth( dv, vm ) < nv2a_wbuffer_depth( 4.0f, world )))
+			hidden++;
+		if( !( nv2a_wbuffer_depth( dv, vm ) < nv2a_wbuffer_depth( dv + 0.05f, vm )))
+			merged++;
+	}
+	CHECK( hidden == 0, "view model: never behind the world past the near plane, up to 60 units" );
+	CHECK( merged == 0, "view model: 0.05-unit layers still ordered" );
+	CHECK( !( nv2a_wbuffer_depth( 70.0f, vm ) < nv2a_wbuffer_depth( 4.0f, world )), "view model past 64 units: the world at the near plane wins again (the documented limit)" );
+}
+
+/* Scaling the whole matrix leaves the projected point where it was. */
+static void test_matrix_scale_all( void )
+{
+	float m[4][4] = {
+		{ 1.5f, 0.25f, 0.0f, 0.5f },
+		{ -0.75f, 2.0f, 0.125f, 0.0f },
+		{ 0.0f, 0.5f, 1.0f, 1.0f },
+		{ 3.0f, -2.0f, -4.0f, 8.0f },
+	};
+	const float v[4] = { 10.0f, -3.0f, 7.0f, 1.0f };
+	float a[4], b[4];
+	int i, j, same = 1;
+
+	for( j = 0; j < 4; j++ )
+	{
+		a[j] = 0.0f;
+		for( i = 0; i < 4; i++ )
+			a[j] += v[i] * m[i][j];
+	}
+	nv2a_matrix_scale_all( m, 1024.0f );
+	for( j = 0; j < 4; j++ )
+	{
+		b[j] = 0.0f;
+		for( i = 0; i < 4; i++ )
+			b[j] += v[i] * m[i][j];
+	}
+	for( j = 0; j < 3; j++ )
+		if( a[j] / a[3] != b[j] / b[3] )
+			same = 0;
+	CHECK( same, "scaled matrix: x/w, y/w, z/w unchanged (power-of-two scale, exact)" );
+	CHECK( b[3] == a[3] * 1024.0f, "scaled matrix: w scaled" );
+}
+
 /* Per the lesson "NEVER trust a new tool's exit code without testing its
    failure path too" (docs/r3d/lessons.md): prove CHECK's own failure path
    actually runs - increments `fails` and `total`, prints FAIL - rather
@@ -646,6 +747,11 @@ int main( void )
 	test_studio_mesh_state_additive_translucent();
 	test_studio_mesh_state_plain();
 	test_studio_viewmodel_zrange();
+	test_wbuffer_scales();
+	test_wbuffer_layers();
+	test_wbuffer_range();
+	test_wbuffer_viewmodel();
+	test_matrix_scale_all();
 
 	printf( "%d checks, %d failures\n", total, fails );
 	return fails != 0;
