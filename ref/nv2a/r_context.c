@@ -1019,6 +1019,10 @@ static CVAR_DEFINE_AUTO( nv2a_r_2d_pixeloffset, "0", 0, "ref_nv2a: 2D viewport p
    all (nv2a_push_near_cull). */
 static CVAR_DEFINE_AUTO( nv2a_r_wscale, "1", 0, "ref_nv2a: scale the W-buffer depth (1) or not (0, the old one-unit depth steps) - divergences.md #160" );
 static CVAR_DEFINE_AUTO( nv2a_r_znear, "4", 0, "ref_nv2a: near plane in world units (4 = ref/gl, 0 = none, the old behaviour) - divergences.md #160" );
+/* divergences.md #168: how far a decal polygon is lifted off its face,
+   along the face's normal, in world units (nv2a_decal_gpu_draw); 0 is the
+   unlifted polygon this renderer drew before. */
+static CVAR_DEFINE_AUTO( nv2a_r_decallift, "0.25", 0, "ref_nv2a: lift decals off their face by this many units (0 = off) - divergences.md #168" );
 
 /* This frame's W-buffer scales and the view model's view-projection
    (GL_RenderFrame): the world's matrix, nv2a_map_viewproj, already
@@ -4055,6 +4059,7 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_2d_pixeloffset );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_wscale );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_znear );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_decallift );
 
 	/* X9-X item 14 step 9: the random-tiling table R_TextureAnimation
 	   reads (gl_rsurf.c:536), filled where ref/gl's R_Init fills it
@@ -6377,6 +6382,10 @@ than 2 units in front of its face (a lip seen at a grazing angle). The slope ter
 at 0: xemu marks the W-buffer slope as partially implemented and it is
 unchecked on hardware, while a decal is coplanar with its face, so the
 constant alone separates them. Unverified on hardware.
+Observed 2026-10-09 (divergences.md #168): in xemu this bias has no
+visible effect (gl_polyoffset -8, a bias of +8 units behind the face,
+still draws the decal), so the decal is separated from its face by
+nv2a_r_decallift in nv2a_decal_gpu_draw instead. Why is open.
 ========================================================================
 */
 
@@ -6505,7 +6514,11 @@ int nv2a_decal_gpu_begin( const cl_entity_t *e, float blend )
 	nv2a_push_fog( &nv2a_fog_current );
 
 	tint = nv2a_decal_tint( e, blend );
-	offset = R_DecalPolyOffset();
+	/* divergences.md #168: the lift in nv2a_decal_gpu_draw replaces the
+	   bias rather than adding to it; the bias is pushed only when the lift
+	   is off, so hardware where the bias does take effect never pulls a
+	   decal 2.25 units forward (Codex review) */
+	offset = nv2a_r_decallift.value != 0.0f ? 0.0f : R_DecalPolyOffset();
 
 	p = pb_begin();
 	/* SAME_FACTOR_ALL (ps_decal.inl): stage 0's factor serves both
@@ -6659,7 +6672,7 @@ static void nv2a_decal_lightmap_origin( const msurface_t *surf, float *bx, float
 	*by = vb->uv1[1];
 }
 
-void nv2a_decal_gpu_draw( int texture, const float *v, int numverts, const msurface_t *surf )
+void nv2a_decal_gpu_draw( int texture, const float *v, int numverts, const msurface_t *surf, qboolean backside )
 {
 	float bx, by;
 	qboolean fixed;
@@ -6681,18 +6694,43 @@ void nv2a_decal_gpu_draw( int texture, const float *v, int numverts, const msurf
 
 	nv2a_decal_lightmap_origin( surf, &bx, &by, &fixed );
 
-	out = &nv2a_decal_vb[nv2a_decal_vb_used];
-	for( i = 0; i < numverts; i++, v += VERTEXSIZE, out++ )
+	/* divergences.md #168: the polygon lifted off its face along the
+	   face's normal (model space, so a brush entity's matrix carries it
+	   too). The depth bias pushed in nv2a_decal_gpu_begin does not reach
+	   the depth test in xemu (gl_polyoffset -8, a bias of +8 units behind the face, still
+	   draws the decal), so the decal relied on testing equal to its face;
+	   since #160 scaled the W-buffer to 1024 steps a unit, that tie breaks
+	   either way from frame to frame and the decal flickers out. */
 	{
-		out->pos[0] = v[0];
-		out->pos[1] = v[1];
-		out->pos[2] = v[2];
-		out->uv0[0] = v[3] * nv2a_decal_scale_s;
-		out->uv0[1] = v[4] * nv2a_decal_scale_t;
-		out->uv1[0] = fixed ? bx : bx + v[5];
-		out->uv1[1] = fixed ? by : by + v[6];
-	}
+		const float lift = nv2a_r_decallift.value;
+		vec3_t n = { 0.0f, 0.0f, 0.0f };
 
+		if( lift != 0.0f && surf && surf->plane )
+		{
+			/* the face's own side is the plane's, flipped by
+			   SURF_PLANEBACK; a surface drawn from behind it
+			   (CULL_BACKSIDE, a kRenderTransTexture entity's far
+			   side) is lifted the other way, so the decal still
+			   moves toward the viewer (Codex review) */
+			qboolean flip = FBitSet( surf->flags, SURF_PLANEBACK ) ? true : false;
+
+			if( backside )
+				flip = !flip;
+			VectorScale( surf->plane->normal, flip ? -lift : lift, n );
+		}
+
+		out = &nv2a_decal_vb[nv2a_decal_vb_used];
+		for( i = 0; i < numverts; i++, v += VERTEXSIZE, out++ )
+		{
+			out->pos[0] = v[0] + n[0];
+			out->pos[1] = v[1] + n[1];
+			out->pos[2] = v[2] + n[2];
+			out->uv0[0] = v[3] * nv2a_decal_scale_s;
+			out->uv0[1] = v[4] * nv2a_decal_scale_t;
+			out->uv1[0] = fixed ? bx : bx + v[5];
+			out->uv1[1] = fixed ? by : by + v[6];
+		}
+	}
 	/* GL_POLYGON: a convex polygon, the same triangles as a fan. The
 	   vertex fetch cache is broken first: these vertices were written
 	   after the GPU started on the previous polygon, whose last cache

@@ -5,6 +5,17 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - Xbox: decals no longer flicker out while moving
+
+Since the depth-precision fix for studio models, blood, scorch marks and
+bullet holes could vanish for a frame, whole or in pieces, as the player
+moved: in the emulator, the depth offset meant to keep a decal in front of
+its wall had no visible effect, and decals had only been drawn because they
+tested equal to the wall, which the finer depth broke. Each decal is now
+drawn a quarter of a unit off its surface. In the emulator, the same
+strafing run that lost the decal in about a third of the frames now
+shows it in every frame (`nv2a_r_decallift 0` gives the old drawing).
+
 ### Changed - Xbox: level loads about a fifth faster again
 
 Four pieces of work every level load repeated for nothing are gone, with

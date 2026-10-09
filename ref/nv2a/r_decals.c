@@ -920,7 +920,9 @@ void R_DecalShoot( int textureIndex, int entityIndex, int modelIndex, float *pos
 =============================================================
 */
 
-static void DrawSingleDecal( decal_t *pDecal, msurface_t *fa )
+/* `backside`: the surface is drawn from behind its face (DrawSurfaceDecals'
+   reverse), so the #168 lift goes the other way, toward the viewer. */
+static void DrawSingleDecal( decal_t *pDecal, msurface_t *fa, qboolean backside )
 {
 	int numVerts;
 	float *v = R_DecalSetupVerts( pDecal, fa, pDecal->texture, &numVerts );
@@ -928,7 +930,7 @@ static void DrawSingleDecal( decal_t *pDecal, msurface_t *fa )
 
 	/* GL_Bind, the TF_PREMULTIPLIED blend and the GL_POLYGON
 	   (gl_decals.c:832-846) */
-	nv2a_decal_gpu_draw( pDecal->texture, v, numVerts, fa );
+	nv2a_decal_gpu_draw( pDecal->texture, v, numVerts, fa, backside );
 	nv2a_decal_stats.decals++;
 	nv2a_decal_stats.verts += (unsigned int)numVerts;
 	NV2A_FT_ADD( XBOX_FT_W_DECALS, 1 );
@@ -956,14 +958,14 @@ static void DrawSurfaceDecals( msurface_t *fa, qboolean reverse, const cl_entity
 			if( p->texture ) list[count++] = p;
 
 		for( i = count - 1; i >= 0; i-- )
-			DrawSingleDecal( list[i], fa );
+			DrawSingleDecal( list[i], fa, reverse );
 	}
 	else
 	{
 		for( p = fa->pdecals; p; p = p->pnext )
 		{
 			if( !p->texture ) continue;
-			DrawSingleDecal( p, fa );
+			DrawSingleDecal( p, fa, reverse );
 		}
 	}
 }

@@ -91,8 +91,10 @@ int  nv2a_decal_gpu_begin( const struct cl_entity_s *e, float blend );
 
 /* DrawSingleDecal (gl_decals.c:826) for one polygon: `numverts` vertices
    of VERTEXSIZE floats (x y z, decal s t, lightmap luxel s t within the
-   face's block) on `surf`, textured with engine texture `texture`. */
-void nv2a_decal_gpu_draw( int texture, const float *verts, int numverts, const struct msurface_s *surf );
+   face's block) on `surf`, textured with engine texture `texture`.
+   `backside` is true when the surface is drawn from behind its face
+   (CULL_BACKSIDE), which turns the #168 lift toward the viewer. */
+void nv2a_decal_gpu_draw( int texture, const float *verts, int numverts, const struct msurface_s *surf, qboolean backside );
 
 /* Undoes nv2a_decal_gpu_begin (gl_decals.c:953-978, 1007-1018): the next
    lit draw re-enters the lit state, the TriAPI its own. */
