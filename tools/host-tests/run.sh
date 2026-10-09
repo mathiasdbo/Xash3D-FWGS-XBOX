@@ -214,6 +214,19 @@ xbox_dir_cache() {
 }
 run_test xbox_dir_cache xbox_dir_cache
 
+# tools/host-tests/xbox_wad_search_host_test.c, header (divergence #167):
+# FS_Search_WAD over the narrowed run against the whole table; the retail
+# WADs too when the staged disc holds them. -iquote, not -I: compat/xbox
+# carries its own sys/types.h for the Xbox build.
+xbox_wad_search() {
+	local wads=""
+	[ -f .sweep-xiso/hl/valve/halflife.wad ] && wads=".sweep-xiso/hl/valve"
+	gcc $HOST_CFLAGS -Wall -std=c99 -Ipublic -Icommon -I3rdparty/library_suffix/include -iquote compat/xbox \
+		tools/host-tests/xbox_wad_search_host_test.c compat/xbox/xbox_wad_search.c public/crtlib.c \
+		-o "$OUT/xbox_wad_search_test" && "$OUT/xbox_wad_search_test" $wads
+}
+run_test xbox_wad_search xbox_wad_search
+
 # tools/host-tests/xbox_audio_hal_util_host_test.c, header (divergence
 # #150): the AC97 buffer accounting against nxdk's, through underruns,
 # under both controller behaviours; and the stall watchdog's decision.

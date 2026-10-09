@@ -5,6 +5,17 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: decal textures load faster
+
+Finding a decal's texture by name checked every one of the 3,661 entries
+in the game's texture files, for each decal texture a map uses. The
+entries are already kept in sorted order, so the lookup now goes straight
+to the matching ones and finds the same texture. In the emulator, the
+static decals of c1a0c load in 53 ms instead of 95 ms (139 to 82 ms over
+the four maps on the test route that have them). The first bullet hole or
+blood splat of each kind in play is about 2 ms cheaper too. Screenshots
+of decal walls and floors are identical before and after.
+
 ### Fixed - Xbox: decals no longer flicker out while moving
 
 Since the depth-precision fix for studio models, blood, scorch marks and

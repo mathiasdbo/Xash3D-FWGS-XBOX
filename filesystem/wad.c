@@ -29,6 +29,9 @@ GNU General Public License for more details.
 #include "crtlib.h"
 #include "common/com_strings.h"
 #include "wadfile.h"
+#if XASH_XBOX
+#include "xbox_wad_search.h" // divergences.md #167
+#endif
 
 /*
 ========================================================================
@@ -57,6 +60,9 @@ struct wfile_s
 	file_t		*handle;
 	dlumpinfo_t	*lumps;
 	time_t		filetime;
+#if XASH_XBOX
+	int		separator_names; // divergences.md #167: a lump name holds '/', '\\' or ':'
+#endif
 };
 
 // WAD errors
@@ -385,6 +391,10 @@ static wfile_t *W_Open( const char *filename, int *error, uint flags )
 	// release source lumps
 	Mem_Free( srclumps );
 
+#if XASH_XBOX
+	wad->separator_names = R3D_WadHasSeparatorNames( wad->lumps, wad->numlumps ); // divergences.md #167
+#endif
+
 	// and leave the file open
 	return wad;
 }
@@ -507,7 +517,16 @@ static void FS_Search_WAD( searchpath_t *search, stringlist_t *list, const char 
 	if( !anywadname && Q_stricmp( wadname, temp2 ))
 		return;
 
+#if XASH_XBOX
+	// divergences.md #167: only the run of the sorted table that
+	// matchpattern can accept, visited in the same order
+	int first, end;
+
+	R3D_WadSearchRange( search->wad->lumps, search->wad->numlumps, wadpattern, search->wad->separator_names, &first, &end );
+	for( int i = first; i < end; i++ )
+#else
 	for( int i = 0; i < search->wad->numlumps; i++ )
+#endif
 	{
 		// if type not matching, we already have no chance ...
 		if( type != TYP_ANY && search->wad->lumps[i].type != type )
