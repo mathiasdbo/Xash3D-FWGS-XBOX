@@ -19,6 +19,13 @@ GNU General Public License for more details.
 #include "library.h"
 #include "voice.h"
 #include "pm_local.h"
+#if XASH_XBOX && !XASH_DEDICATED
+#include "platform/xbox/xbox_frametime.h" // the load stages' notes, docs/r3d/divergences.md #162
+#else
+#define XBOX_FT_LOAD_BEGIN( var )
+#define XBOX_FT_LOAD_END( var, stage )
+#define XBOX_FT_LOAD_ACCUM( var, acc )
+#endif
 
 #if XASH_LOW_MEMORY != 2
 int SV_UPDATE_BACKUP = SINGLEPLAYER_BACKUP;
@@ -585,6 +592,8 @@ void SV_ActivateServer( int runPhysics )
 	if( !svs.initialized )
 		return;
 
+	XBOX_FT_LOAD_BEGIN( ft_load ); // #162
+
 	MSG_Init( &msg, "ActivateServer", msg_buf, sizeof( msg_buf ));
 
 	// always clearing newunit variable
@@ -676,6 +685,8 @@ void SV_ActivateServer( int runPhysics )
 
 	if( sv.ignored_world_decals )
 		Con_Printf( S_WARN "%i static decals was rejected due buffer overflow\n", sv.ignored_world_decals );
+
+	XBOX_FT_LOAD_END( ft_load, "sv_activate" );
 }
 
 /*
@@ -939,6 +950,7 @@ clients along with it.
 qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean background )
 {
 	int		i;
+	XBOX_FT_LOAD_BEGIN( ft_load ); // #162
 
 	SV_SetupClients();
 
@@ -1031,7 +1043,9 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 
 	Q_snprintf( sv.model_precache[WORLD_INDEX], sizeof( sv.model_precache[0] ), "maps/%s.bsp", sv.name );
 	SetBits( sv.model_precache_flags[WORLD_INDEX], RES_FATALIFMISSING );
+	XBOX_FT_LOAD_BEGIN( ft_world ); // #162
 	sv.worldmodel = sv.models[WORLD_INDEX] = Mod_LoadWorld( sv.model_precache[WORLD_INDEX], true );
+	XBOX_FT_LOAD_END( ft_world, "sv_world" );
 	CRC32_MapFile( &sv.worldmapCRC, sv.model_precache[WORLD_INDEX], svs.maxclients > 1 );
 
 	if( FBitSet( host.features, ENGINE_QUAKE_COMPATIBLE ) && FS_FileExists( "progs.dat", false ))
@@ -1076,6 +1090,7 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 	// pregenerate test packet
 	SV_GenerateTestPacket();
 
+	XBOX_FT_LOAD_END( ft_load, "sv_spawn" );
 	return true;
 }
 
@@ -1106,7 +1121,9 @@ void SV_ExecLoadLevel( void )
 	SV_SetStringArrayMode( false );
 	if( SV_SpawnServer( GameState->levelName, NULL, GameState->backgroundMap ))
 	{
+		XBOX_FT_LOAD_BEGIN( ft_load ); // #162
 		SV_SpawnEntities( GameState->levelName );
+		XBOX_FT_LOAD_END( ft_load, "sv_ents" );
 		SV_ActivateServer( true );
 	}
 }
@@ -1122,8 +1139,10 @@ void SV_ExecLoadGame( void )
 {
 	if( SV_SpawnServer( GameState->levelName, NULL, false ))
 	{
+		XBOX_FT_LOAD_BEGIN( ft_load ); // #162
 		if( !SV_LoadGameState( GameState->levelName ))
 			SV_SpawnEntities( GameState->levelName );
+		XBOX_FT_LOAD_END( ft_load, "sv_loadgame" );
 		SV_ActivateServer( false );
 	}
 }

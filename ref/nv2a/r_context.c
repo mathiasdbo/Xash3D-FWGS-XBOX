@@ -9407,7 +9407,11 @@ static void nv2a_try_pending_upload( void )
 		memcpy( name, nv2a_pending_upload.name, sizeof( name ));
 		memcpy( &header, &nv2a_pending_upload.header, sizeof( header ));
 		memcpy( first_sector, nv2a_pending_upload.first_sector, sizeof( first_sector ));
-		if( !nv2a_load_map_geometry( &header, first_sector, name ))
+		xbox_ft_load_t ft_tables; /* the frame-time recorder's load stages (divergences.md #162) */
+		Xbox_FT_LoadBegin( &ft_tables );
+		const qboolean built = nv2a_load_map_geometry( &header, first_sector, name );
+		Xbox_FT_LoadEnd( &ft_tables, "nv_tables" );
+		if( !built )
 		{
 			if( retried )
 			{
@@ -9426,13 +9430,19 @@ static void nv2a_try_pending_upload( void )
 		nv2a_pending_upload.tables_built = true;
 	}
 
-	if( nv2a_upload_map_gpu_data())
+	xbox_ft_load_t ft_gpu; /* #162 */
+	Xbox_FT_LoadBegin( &ft_gpu );
+	const qboolean uploaded = nv2a_upload_map_gpu_data();
+	Xbox_FT_LoadEnd( &ft_gpu, "nv_gpu" );
+	if( uploaded )
 	{
 		nv2a_pending_upload.pending = false;
 		nv2a_map_ready = true;
 		/* R5 (#147): the water's static vertex buffer, after the map's own
 		   (its bytes are in the ledger above, R_WarpGpuMapBytes). */
+		Xbox_FT_LoadBegin( &ft_gpu );
 		R_WarpGpuNewMap( nv2a_map_owner );
+		Xbox_FT_LoadEnd( &ft_gpu, "nv_water" );
 	}
 	else if( nv2a_pending_upload.retried )
 	{

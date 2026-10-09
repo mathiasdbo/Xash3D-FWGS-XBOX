@@ -654,12 +654,22 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
                          (xbox_menu_fonts.c, divergences.md #127): name
                          says which and the free memory before, bytes =
                          what the restore took from free memory
+     XBOX_FT_NOTE_LOAD   (2026-10-08, x9-perf-loadtime, divergences.md
+                         #162) one stage of a level load (SV_SpawnServer,
+                         R_NewMap...), or the total of one kind of
+                         resource loaded since the last map start (an
+                         "acc_" stage: every studio model, every sound):
+                         kilocycles = the stage's whole time, wall clock
+                         (disk waits included); bytes = what it read
+                         from files; name = xbox_ft_load_note_name below,
+                         the stage then its file-layer counters
    The recorder keeps up to XBOX_FT_NOTES_MAX between flushes and counts
    the rest as dropped. */
 #define XBOX_FT_CHUNK_NOTES      8u
 #define XBOX_FT_NOTE_SOUND       1u
 #define XBOX_FT_NOTE_MSG         2u
 #define XBOX_FT_NOTE_MENU        3u
+#define XBOX_FT_NOTE_LOAD        4u
 #define XBOX_FT_NOTE_NAME_BYTES  48u
 #define XBOX_FT_NOTE_BYTES       ( 16u + XBOX_FT_NOTE_NAME_BYTES )
 #define XBOX_FT_NOTES_MAX        64u
@@ -679,6 +689,39 @@ typedef struct xbox_ft_note_s
    count x { u32 seq, u32 kind, u32 kilocycles, u32 bytes, char[48]
    name } - XBOX_FT_NOTES_CHUNK_BYTES( count ) bytes, and returns that. */
 size_t xbox_ft_encode_notes( uint8_t *out, const xbox_ft_note_t *notes, uint32_t count, uint32_t dropped );
+
+/* A load note's name (XBOX_FT_NOTE_LOAD):
+     "<stage> <io>,<opens>,<reads>,<seeks>,<probes>,<writes>,<meta>[,<count>]"
+   io = kilocycles inside the file layer's kernel calls (compat/xbox/
+   xbox_io_stats.h: open, read, write, lseek, stat/access, close and the
+   metadata calls), so the stage's CPU time is its kilocycles minus io;
+   opens, reads, seeks and writes count those calls, probes the
+   stat/access existence tests, meta the rest (flushes, directory changes
+   and scans); ",<count>" only on an accumulated stage (count != 0): how
+   many loads it adds up. Positional and unlabelled so a console-sized
+   load (7-digit io, 4-digit probes) still leaves 14 characters of the
+   48-byte field for the stage (console-performance review). The numbers
+   are kept whole: when the name does not fit `size`
+   (XBOX_FT_NOTE_NAME_BYTES in a note), the stage is cut first, and the
+   counters only when they alone do not fit. Writes out[] NUL-terminated
+   (size >= 1) and returns its length. */
+size_t xbox_ft_load_note_name( char *out, size_t size, const char *stage, uint32_t io_kc, uint32_t opens,
+	uint32_t reads, uint32_t seeks, uint32_t probes, uint32_t writes, uint32_t meta, uint32_t count );
+
+/* The accumulated load stages: every load of one kind between two map
+   starts, summed into one note at the second (XBOX_FT_NOTE_LOAD,
+   "acc_" + xbox_ft_load_acc_names[i]). */
+enum
+{
+	XBOX_FT_LACC_STUDIO,    /* Mod_LoadModel of a studio model (.mdl) */
+	XBOX_FT_LACC_SPRITE,    /* ... of a sprite (.spr) */
+	XBOX_FT_LACC_BRUSH,     /* ... of a brush model: the world */
+	XBOX_FT_LACC_OTHER,     /* ... of anything else (a failed load returns before it is counted) */
+	XBOX_FT_LACC_SOUND,     /* S_LoadSound outside play (the precache) */
+	XBOX_FT_LACC_BSPDECAL,  /* one svc_bspdecal message parsed */
+	XBOX_FT_LACC_COUNT
+};
+extern const char *const xbox_ft_load_acc_names[XBOX_FT_LACC_COUNT];
 
 /* Sessions and segments (version 3, 2026-10-07). A SESSION is one run of
    the recorder: from host_frametime_analysis going non-zero to it going

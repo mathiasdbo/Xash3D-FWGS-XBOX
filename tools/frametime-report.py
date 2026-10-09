@@ -103,7 +103,16 @@ CHUNK_SPANS = 6             # span name -> parent span name (recorders from 2026
 CHUNK_CLASSES = 7           # per-classname server game frame totals (recorders from 2026-10-05)
 CHUNK_NOTES = 8             # named one-off events: sounds loaded in play, slow server messages (2026-10-06)
 NOTE_BYTES = 64
-NOTE_KINDS = {1: "sound", 2: "message", 3: "menu"}
+NOTE_KINDS = {1: "sound", 2: "message", 3: "menu", 4: "load"}
+NOTE_LOAD = 4               # a level-load stage (recorders from 2026-10-08, divergences.md #162)
+# A load note's name: "<stage> <io kc>,<opens>,<reads>,<seeks>,<probes>,
+# <writes>,<meta>[,<count>]" (xbox_ft_load_note_name, xbox_frametime_util.h);
+# the first build (b64de841) wrote "<stage> i<io> o<opens> r<reads> s<seeks>
+# p<probes> w<writes>[ n<count>]", without meta.
+LOAD_NAME_RE = re.compile(r"^(?P<stage>.*?) (?P<io>\d+),(?P<opens>\d+),(?P<reads>\d+),(?P<seeks>\d+),"
+                          r"(?P<probes>\d+),(?P<writes>\d+),(?P<meta>\d+)(?:,(?P<count>\d+))?$")
+LOAD_NAME_RE_V1 = re.compile(r"^(?P<stage>.*?) i(?P<io>\d+) o(?P<opens>\d+) r(?P<reads>\d+) s(?P<seeks>\d+) "
+                             r"p(?P<probes>\d+) w(?P<writes>\d+)(?: n(?P<count>\d+))?$")
 NOTES_TOP = 12              # notes the summary lists, slowest first
 CLASS_NAME_BYTES = 32
 CLASS_BYTES = CLASS_NAME_BYTES + 7 * 4
@@ -914,8 +923,103 @@ def notes_list(rec):
             seg_of[rec["frames"][i][0]] = seg["name"]
     k = 1e6 / rec["tsc_hz"]
     out = [{"t": start_s.get(n["seq"]), "map": seg_of.get(n["seq"], "?"), "kind": NOTE_KINDS.get(n["kind"], str(n["kind"])),
-            "name": n["name"], "ms": n["kc"] * k, "bytes": n["bytes"], "seq": n["seq"]} for n in rec["notes"]]
+            "name": n["name"], "ms": n["kc"] * k, "bytes": n["bytes"], "seq": n["seq"]} for n in rec["notes"]
+           if n["kind"] != NOTE_LOAD]
     return sorted(out, key=lambda r: (-r["ms"], r["seq"]))
+
+
+def parse_load_name(name):
+    """A load note's name split into its stage and file-layer counters, or
+    None when it does not have the shape (a name cut by the 48-byte field)."""
+    m = LOAD_NAME_RE.match(name) or LOAD_NAME_RE_V1.match(name)
+    if not m:
+        return None
+    out = {"stage": m.group("stage")}
+    for key in ("io", "opens", "reads", "seeks", "probes", "writes"):
+        out[key] = int(m.group(key))
+    out["meta"] = int(m.group("meta")) if "meta" in m.groupdict() and m.group("meta") else 0
+    out["count"] = int(m.group("count")) if m.group("count") else 0
+    return out
+
+
+def load_stage_rows(rec):
+    """The level loads with their stages (recorders from 2026-10-08): one
+    entry per map start the recording timed, in order, holding every load
+    note from after the previous map start up to this one (the accumulated
+    "acc_" stages are written at the map start itself), and the server
+    messages and menu notes of the load's own frames - the LOAD-flagged
+    frame to the map start. Stage times are wall clock; io is the time
+    inside the file layer's kernel calls, cpu the rest."""
+    k = 1e6 / rec["tsc_hz"]
+    frames = rec["frames"]
+    if not frames:
+        return []
+    seqs = [f[0] for f in frames]
+    out = []
+    prev_seq = None
+    for m in rec["maps"]:
+        if m["frame"] >= len(frames):
+            break
+        start_seq = seqs[m["frame"]]
+        lo = m["frame"]
+        while lo > 0 and not (frames[lo][7] & F_LOAD) and m["frame"] - lo < 400:
+            lo -= 1
+        if not (frames[lo][7] & F_LOAD):
+            lo = m["frame"]
+        first_seq = seqs[lo]
+        stages, msgs = [], []
+        for n in rec["notes"]:
+            if n["kind"] == NOTE_LOAD and (prev_seq is None or n["seq"] > prev_seq) and n["seq"] <= start_seq:
+                parsed = parse_load_name(n["name"]) or {"stage": n["name"], "io": 0, "opens": 0, "reads": 0,
+                                                          "seeks": 0, "probes": 0, "writes": 0, "meta": 0,
+                                                          "count": 0}
+                ms = n["kc"] * k
+                io_ms = parsed["io"] * k
+                stages.append(dict(parsed, ms=ms, io_ms=io_ms, cpu_ms=max(0.0, ms - io_ms), kib=n["bytes"] / 1024.0,
+                                   seq=n["seq"]))
+            elif n["kind"] in (2, 3) and first_seq <= n["seq"] <= start_seq:
+                msgs.append({"name": n["name"], "ms": n["kc"] * k, "kind": NOTE_KINDS[n["kind"]]})
+        prev_seq = start_seq
+        if not stages and not msgs:
+            continue
+        load_ms = None if m["flags"] & MAP_F_NO_LOAD_START else m["load_ticks"] * 1000.0 / rec["tsc_hz"]
+        out.append({"map": m["name"], "load_ms": load_ms, "stages": stages, "msgs": msgs})
+    return out
+
+
+def loads_text(rec):
+    """The load-stage section of the summary."""
+    loads = load_stage_rows(rec)
+    if not loads:
+        return []
+    lines = ["", "level loads by stage (wall ms; io = inside the file layer's kernel calls, cpu = the rest; "
+             "KiB read; o/r/s/p/w/m = opens, reads, seeks, existence probes, writes, metadata calls; n = loads summed). "
+             "Stages nest: sv_changelevel holds sv_spawn, which holds sv_world; cl_register holds r_newmap, "
+             "which holds nv_*. In xemu io is the driver's copy, not the disk."]
+    head = "    %-16s %8s %8s %8s %8s %6s %6s %6s %6s %5s %5s %5s" % ("stage", "ms", "io", "cpu", "KiB", "o", "r", "s",
+                                                                     "p", "w", "m", "n")
+    agg = {}
+    for ld in loads:
+        lines.append("%s: load %s ms" % (ld["map"], fmt(ld["load_ms"], 0)))
+        lines.append(head)
+        for st in ld["stages"]:
+            lines.append("    %-16s %8.1f %8.1f %8.1f %8.0f %6d %6d %6d %6d %5d %5d %5s" % (
+                st["stage"][:16], st["ms"], st["io_ms"], st["cpu_ms"], st["kib"], st["opens"], st["reads"],
+                st["seeks"], st["probes"], st["writes"], st["meta"], st["count"] or ""))
+            a = agg.setdefault(st["stage"], [0, 0.0, 0.0, 0.0, 0])
+            a[0] += 1
+            a[1] += st["ms"]
+            a[2] += st["io_ms"]
+            a[3] += st["kib"]
+            a[4] += st["reads"]
+        for msg in sorted(ld["msgs"], key=lambda x: -x["ms"])[:4]:
+            lines.append("    %-16s %8.1f   (%s)" % (msg["name"][:16], msg["ms"], msg["kind"]))
+    lines.append("stage means, each over the loads that ran it (loads column; %d loads above):" % len(loads))
+    lines.append("    %-16s %6s %8s %8s %8s %8s %8s" % ("stage", "loads", "ms", "io", "cpu", "KiB", "reads"))
+    for stage, (n, ms, io, kib, reads) in sorted(agg.items(), key=lambda kv: -kv[1][1] / kv[1][0]):
+        lines.append("    %-16s %6d %8.1f %8.1f %8.1f %8.0f %8.0f" % (stage[:16], n, ms / n, io / n, (ms - io) / n,
+                                                                    kib / n, reads / float(n)))
+    return lines
 
 
 def _loads_label(loads):
@@ -1377,7 +1481,8 @@ def summary_text(rec, rows, sess):
     if rec.get("notes") or rec.get("notes_dropped"):
         notes = notes_list(rec)
         lines.append("")
-        lines.append("notes: %d named events (sounds loaded in play, server messages over 5 ms, the menu font restore at a map load)%s; the slowest %d:"
+        lines.append("notes: %d named events (sounds loaded in play, server messages over 5 ms, the menu font restore at a map load; "
+                     "the load stages have their own table)%s; the slowest %d:"
                      % (len(notes), (", %d dropped" % rec["notes_dropped"]) if rec.get("notes_dropped") else "",
                         min(NOTES_TOP, len(notes))))
         lines.append("%8s  %-12s %-8s %-34s %8s %8s" % ("t s", "map", "kind", "name", "ms", "KiB"))
@@ -1401,6 +1506,7 @@ def summary_text(rec, rows, sess):
             lines.append("%-18s " % r["map"][:18] + " ".join(cells))
     elif sess.get("version") == 1:
         lines.append("version-1 recording: no work counters")
+    lines.extend(loads_text(rec))
     lines.extend(spans_text(rec, rows))
     lines.extend(svgame_text(rec, rows))
     lines.extend(pmove_text(rec, rows))
@@ -1464,6 +1570,20 @@ def compare_text(name_a, sess_a, rows_a, name_b, sess_b, rows_b):
                                                 ("%+.1f" % (100.0 * (pb - pa) / pa)) if pa else "-"))
     lines.append("d% = (B - A) / A: + is better for fps, - is better for the times. Per map over its frames in play "
                  "(warm-up, flush and level-change frames left out, as in the summary).")
+    loads = [(key, (ra or {}).get("load_s"), (rb or {}).get("load_s")) for key, ra, rb in compare_rows(rows_a, rows_b)]
+    loads = [(key, a, b) for key, a, b in loads if a is not None or b is not None]
+    if loads:
+        lines.append("")
+        lines.append("level loads, s (the load that started each map: the queuing frame to the first frame in play)")
+        lines.append("%-18s %8s %8s %6s" % ("map", "load A", "load B", "d%"))
+        for key, a, b in loads:
+            pct = 100.0 * (b - a) / a if a and b is not None else None
+            lines.append("%-18s %8s %8s %6s" % (key[:18], fmt(a, 2), fmt(b, 2), ("%+.1f" % pct) if pct is not None else "-"))
+        both = [(a, b) for _, a, b in loads if a is not None and b is not None]
+        if both:
+            ta, tb = sum(a for a, _ in both), sum(b for _, b in both)
+            lines.append("%-18s %8.2f %8.2f %6s" % ("all %d loads" % len(both), ta, tb,
+                                                   ("%+.1f" % (100.0 * (tb - ta) / ta)) if ta else "-"))
     return "\n".join(lines)
 
 

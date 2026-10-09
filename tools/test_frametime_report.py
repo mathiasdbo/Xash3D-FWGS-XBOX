@@ -434,6 +434,40 @@ class LevelChange(unittest.TestCase):
             # The changelevel frame flushed the rest of a pending save (#153).
             self.assertEqual(st[1]["loads"], {"save": (20, 30.0)} if source == "flag" else {})
 
+    def test_load_stages(self):
+        # Load stages (2026-10-08, #162): the c1a0e load holds the
+        # changelevel frame's stage and the accumulated one written at
+        # its first frame; c1a0, timed from no load note, has none.
+        for source, rec in self._recs():
+            loads = fr.load_stage_rows(rec)
+            if source != "flag":
+                self.assertEqual(loads, [])
+                continue
+            self.assertEqual(len(loads), 1)
+            ld = loads[0]
+            self.assertEqual(ld["map"], "c1a0e")
+            self.assertAlmostEqual(ld["load_ms"], 1500.0)
+            self.assertEqual(ld["msgs"], [])
+            a, b = ld["stages"]
+            self.assertEqual((a["stage"], a["io"], a["opens"], a["reads"], a["seeks"], a["probes"], a["writes"], a["meta"],
+                              a["count"]), ("sv_changelevel", 100, 2, 10, 3, 4, 5, 6, 0))
+            self.assertAlmostEqual(a["ms"], 480.0)
+            self.assertAlmostEqual(a["io_ms"], 100.0)
+            self.assertAlmostEqual(a["cpu_ms"], 380.0)
+            self.assertAlmostEqual(a["kib"], 2048.0)
+            self.assertEqual((b["stage"], b["count"], b["opens"]), ("acc_studio", 5, 5))
+            self.assertAlmostEqual(b["cpu_ms"], 40.0)
+            # the load notes stay out of the generic notes list
+            self.assertEqual(sorted(n["name"] for n in fr.notes_list(rec)), ["fvox/flatline.wav", "svc_sound"])
+        self.assertIsNone(fr.parse_load_name("svc_sound"))
+        self.assertEqual(fr.parse_load_name("x y 1,2,3,4,5,6,8,7"),
+                         {"stage": "x y", "io": 1, "opens": 2, "reads": 3, "seeks": 4, "probes": 5, "writes": 6, "meta": 8,
+                          "count": 7})
+        # the first build's labelled form (b64de841) still reads, meta 0
+        self.assertEqual(fr.parse_load_name("x y i1 o2 r3 s4 p5 w6 n7"),
+                         {"stage": "x y", "io": 1, "opens": 2, "reads": 3, "seeks": 4, "probes": 5, "writes": 6, "meta": 0,
+                          "count": 7})
+
     def test_save_pump_runs(self):
         # The deferred .sav write (2026-10-06, #153): seq 36-38 wrote it,
         # the last of them in a flush.
@@ -480,7 +514,13 @@ class LevelChange(unittest.TestCase):
                 self.assertIn("save_sav 400, save_ents 100, save 30", text)
                 self.assertIn("sounds loaded 2 (300 KiB, 250 ms); textures loaded 6 (4096 KiB); messages parsed in 50 ms", text)
                 self.assertIn("message svc_sound 200 ms, sound fvox/flatline.wav 120 ms", text)
-                self.assertIn("notes: 2 named events (sounds loaded in play, server messages over 5 ms, the menu font restore at a map load), 1 dropped", text)
+                self.assertIn("notes: 2 named events (sounds loaded in play, server messages over 5 ms, the menu font restore at a map load; "
+                              "the load stages have their own table), 1 dropped", text)
+                # The load stages (2026-10-08, #162), in their own table.
+                self.assertIn("level loads by stage", text)
+                self.assertIn("c1a0e: load 1500 ms", text)
+                self.assertRegex(text, r"sv_changelevel +480\.0 +100\.0 +380\.0 +2048 +2 +10 +3 +4 +5 +6 +\n")
+                self.assertRegex(text, r"acc_studio +60\.0 +20\.0 +40\.0 +512 +5 +6 +7 +8 +0 +1 +5\n")
                 self.assertRegex(text, r"c1a0 +message +svc_sound +200\.0 +0\.0")
                 self.assertRegex(text, r"c1a0 +sound +fvox/flatline\.wav +120\.0 +128\.0")
             else:

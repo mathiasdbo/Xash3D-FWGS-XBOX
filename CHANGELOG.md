@@ -5,6 +5,25 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - Xbox: level changes no longer stall up to a second on the first update from the new map
+
+The first update the game received after every level change spent a
+long time marking old network frames as dropped: since the server
+started picking a random starting packet number, that bookkeeping walked
+through up to 134 million numbers to update 16 slots. On the console it
+was 70-900 ms of each level change, different every time. It now
+touches each slot once and leaves exactly the same state.
+
+### Added - Xbox frame-time recorder: level loads broken down by stage
+
+With the recorder on, each level load now records its stages - the old
+level saved, the new one spawned, the world loaded, models and sounds
+precached, the renderer's new map - with how long each took and how
+much of that was spent inside file reads, seeks and opens, so a console
+recording can tell disk waiting from CPU work. `frametime-report.py
+summary` prints them per load, and `--compare` lists both sessions'
+load times side by side.
+
 ### Fixed - Xbox: characters' clothes, mouths and hands no longer show through each other; no giant shotgun shell when looking down
 
 On the Xbox renderer the depth buffer could only tell surfaces apart

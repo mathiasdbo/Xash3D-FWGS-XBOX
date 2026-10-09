@@ -26,6 +26,9 @@ GNU General Public License for more details.
 #define XBOX_FT_SPAN( id, stmt ) stmt
 #define XBOX_FT_SPAN_BEGIN( var )
 #define XBOX_FT_SPAN_END( var, id )
+#define XBOX_FT_LOAD_BEGIN( var )
+#define XBOX_FT_LOAD_END( var, stage )
+#define XBOX_FT_LOAD_ACCUM( var, acc )
 #endif
 
 #if XASH_XBOX
@@ -2764,9 +2767,14 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 	char		_startspot[MAX_QPATH];
 	char		*startspot = NULL;
 	SAVERESTOREDATA	*pSaveData = NULL;
+	XBOX_FT_LOAD_BEGIN( ft_all ); // #162: the whole change; its stages below and in sv_init.c
 
 #if XASH_XBOX
-	SV_SaveAsync_Flush(); // #153: a map change, smooth or not, with nothing pending across it
+	{
+		XBOX_FT_LOAD_BEGIN( ft_flush );
+		SV_SaveAsync_Flush(); // #153: a map change, smooth or not, with nothing pending across it
+		XBOX_FT_LOAD_END( ft_flush, "sv_saveflush" );
+	}
 #endif
 
 	if( sv.state != ss_active )
@@ -2790,7 +2798,9 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 		svgame.globals->changelevel = true;
 
 		// save the current level's state
+		XBOX_FT_LOAD_BEGIN( ft_save ); // #162
 		pSaveData = SaveGameState( true );
+		XBOX_FT_LOAD_END( ft_save, "sv_lvlsave" );
 
 		if( !pSaveData )
 		{
@@ -2802,15 +2812,19 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 		}
 	}
 
+	XBOX_FT_LOAD_BEGIN( ft_deact ); // #162
 	SV_InactivateClients ();
 	SV_FinalMessage( "", true );
 	SV_DeactivateServer ();
+	XBOX_FT_LOAD_END( ft_deact, "sv_deactivate" );
 
 	if( !SV_SpawnServer( level, startspot, background ))
 		return;	// ???
 
 	if( loadfromsavedgame )
 	{
+		XBOX_FT_LOAD_BEGIN( ft_restore ); // #162
+
 		// finish saving gamestate
 		SaveFinish( pSaveData );
 
@@ -2820,15 +2834,20 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 
 		if( sv_newunit.value )
 			ClearSaveDir();
+		XBOX_FT_LOAD_END( ft_restore, "sv_lvlrestore" );
 		SV_ActivateServer( false );
 	}
 	else
 	{
 		// classic quake changelevel
 		svgame.dllFuncs.pfnResetGlobalState();
+		XBOX_FT_LOAD_BEGIN( ft_ents ); // #162
 		SV_SpawnEntities( level );
+		XBOX_FT_LOAD_END( ft_ents, "sv_ents" );
 		SV_ActivateServer( true );
 	}
+
+	XBOX_FT_LOAD_END( ft_all, "sv_changelevel" );
 }
 
 /*

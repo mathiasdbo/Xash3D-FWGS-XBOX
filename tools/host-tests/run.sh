@@ -164,6 +164,14 @@ frametime_report() {
 }
 run_test frametime_report frametime_report
 
+# tools/test_posix_io_counters.py, header (divergence #162): every
+# Win32/kernel call in compat/xbox/xbox_posix_io.c goes through
+# R3D_IO_CALL, in its category.
+posix_io_counters() {
+	python tools/test_posix_io_counters.py
+}
+run_test posix_io_counters posix_io_counters
+
 # tools/host-tests/xbox_bitrun_host_test.c, header (divergence #155): a run
 # of zero change bits read at once, against upstream's MSG_ReadOneBit.
 xbox_bitrun() {
@@ -172,6 +180,16 @@ xbox_bitrun() {
 		-o "$OUT/xbox_bitrun_test" && "$OUT/xbox_bitrun_test"
 }
 run_test xbox_bitrun xbox_bitrun
+
+# tools/host-tests/xbox_cl_drop_host_test.c, header (divergence #161):
+# CL_ParseClientData's dropped-frame loop from its clamped start, against
+# upstream's loop.
+xbox_cl_drop() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_cl_drop_host_test.c \
+		-o "$OUT/xbox_cl_drop_test" && "$OUT/xbox_cl_drop_test"
+}
+run_test xbox_cl_drop xbox_cl_drop
 
 # tools/host-tests/xbox_audio_hal_util_host_test.c, header (divergence
 # #150): the AC97 buffer accounting against nxdk's, through underruns,

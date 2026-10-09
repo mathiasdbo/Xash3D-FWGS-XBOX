@@ -28,6 +28,7 @@ anything else here changes.
 #include <errno.h>
 #include <stdio.h>   /* SEEK_SET / SEEK_CUR / SEEK_END */
 #include <stdint.h>  /* intptr_t, for _get_osfhandle */
+#include "xbox_io_stats.h" /* the kernel calls counted for the frame-time recorder, #162 */
 
 /* Sized for the archives, not for loose files. Every mounted archive holds
  * one descriptor for the whole session (filesystem/mpak.c keeps its handle
@@ -106,6 +107,10 @@ gamedir, fs_rootdir, "D:\" itself); everything else - GoldSrc's own
 "./", "valve/", "valve/maps/c1a3.bsp" - is relative and needs r3d_cwd.
 ====================
 */
+/* docs/r3d/divergences.md #162: every kernel call below counted, with
+   the ticks spent inside it (xbox_io_stats.h). */
+r3d_io_stats_t r3d_io_stats;
+
 static int r3d_path_is_absolute( const char *path )
 {
 	return path && path[0] && path[1] == ':';
@@ -279,7 +284,7 @@ static int r3d_alloc_fd( HANDLE h )
 	int fd = r3d_take_fd( h );
 
 	if( fd < 0 )
-		CloseHandle( h );
+		R3D_IO_CALL( closes, CloseHandle( h ));
 
 	return fd;
 }
@@ -340,17 +345,18 @@ int open( const char *path, int flags, ... )
 		creation = ( flags & O_TRUNC ) ? TRUNCATE_EXISTING : OPEN_EXISTING;
 	}
 
-	h = CreateFileA( native, access, FILE_SHARE_READ, NULL, creation,
-		FILE_ATTRIBUTE_NORMAL, NULL );
+	h = R3D_IO_CALL( opens, CreateFileA( native, access, FILE_SHARE_READ, NULL, creation,
+		FILE_ATTRIBUTE_NORMAL, NULL ));
 
 	if( h == INVALID_HANDLE_VALUE )
 	{
+		r3d_io_stats.open_fails++;
 		errno = r3d_errno_from_win32( GetLastError());
 		return -1;
 	}
 
 	if( flags & O_APPEND )
-		SetFilePointer( h, 0, NULL, FILE_END );
+		R3D_IO_CALL( seeks, SetFilePointer( h, 0, NULL, FILE_END ));
 
 	return r3d_alloc_fd( h );
 }
@@ -363,15 +369,19 @@ read
 ssize_t read( int fd, void *buf, size_t count )
 {
 	DWORD got;
+	BOOL ok;
 
 	if( !FD_VALID( fd )) { errno = EBADF; return -1; }
 
-	if( !ReadFile( r3d_fds[fd], buf, ( DWORD )count, &got, NULL ))
+	ok = R3D_IO_CALL( reads, ReadFile( r3d_fds[fd], buf, ( DWORD )count, &got, NULL ));
+
+	if( !ok )
 	{
 		errno = EIO;
 		return -1;
 	}
 
+	r3d_io_stats.read_bytes += got;
 	return ( ssize_t )got;
 }
 
@@ -383,15 +393,19 @@ write
 ssize_t write( int fd, const void *buf, size_t count )
 {
 	DWORD put;
+	BOOL ok;
 
 	if( !FD_VALID( fd )) { errno = EBADF; return -1; }
 
-	if( !WriteFile( r3d_fds[fd], buf, ( DWORD )count, &put, NULL ))
+	ok = R3D_IO_CALL( writes, WriteFile( r3d_fds[fd], buf, ( DWORD )count, &put, NULL ));
+
+	if( !ok )
 	{
 		errno = EIO;
 		return -1;
 	}
 
+	r3d_io_stats.write_bytes += put;
 	return ( ssize_t )put;
 }
 
@@ -414,7 +428,7 @@ off_t lseek( int fd, off_t offset, int whence )
 	default:       errno = EINVAL; return -1;
 	}
 
-	pos = SetFilePointer( r3d_fds[fd], ( LONG )offset, NULL, method );
+	pos = R3D_IO_CALL( seeks, SetFilePointer( r3d_fds[fd], ( LONG )offset, NULL, method ));
 
 	if( pos == INVALID_SET_FILE_POINTER )
 	{
@@ -437,7 +451,7 @@ int close( int fd )
 	/* A borrowed handle belongs to pdclib's FILE. Release the slot, leave the
 	 * handle alone; fclose will close it. */
 	if( !r3d_borrowed[fd] )
-		CloseHandle( r3d_fds[fd] );
+		R3D_IO_CALL( closes, CloseHandle( r3d_fds[fd] ));
 
 	r3d_borrowed[fd] = 0;
 	r3d_borrowed_file[fd] = NULL;
@@ -459,7 +473,7 @@ int fsync( int fd )
 
 	if( !FD_VALID( fd )) { errno = EBADF; return -1; }
 
-	if( !NT_SUCCESS( NtFlushBuffersFile( r3d_fds[fd], &iosb )))
+	if( !NT_SUCCESS( R3D_IO_CALL( meta, NtFlushBuffersFile( r3d_fds[fd], &iosb ))))
 	{
 		errno = EIO;
 		return -1;
@@ -482,14 +496,14 @@ int ftruncate( int fd, off_t length )
 {
 	if( !FD_VALID( fd )) { errno = EBADF; return -1; }
 
-	if( SetFilePointer( r3d_fds[fd], ( LONG )length, NULL, FILE_BEGIN )
+	if( R3D_IO_CALL( seeks, SetFilePointer( r3d_fds[fd], ( LONG )length, NULL, FILE_BEGIN ))
 		== INVALID_SET_FILE_POINTER )
 	{
 		errno = EINVAL;
 		return -1;
 	}
 
-	return SetEndOfFile( r3d_fds[fd] ) ? 0 : ( errno = EIO, -1 );
+	return R3D_IO_CALL( meta, SetEndOfFile( r3d_fds[fd] )) ? 0 : ( errno = EIO, -1 );
 }
 
 /*
@@ -502,6 +516,7 @@ int stat( const char *path, struct stat *st )
 	char   native[MAX_PATH];
 	size_t len;
 	WIN32_FILE_ATTRIBUTE_DATA fad;
+	BOOL ok;
 
 	if( !st || !r3d_native_path( path, native, sizeof( native )))
 	{
@@ -535,7 +550,9 @@ int stat( const char *path, struct stat *st )
 	 * Not FindFirstFileA, still: it treats the last path component as a
 	 * wildcard PATTERN rather than a name, and nxdk's handling of that is its
 	 * own hazard (deps/nxdk/lib/winapi/findfile.c:51-72). */
-	if( !GetFileAttributesExA( native, GetFileExInfoStandard, &fad ))
+	ok = R3D_IO_CALL( probes, GetFileAttributesExA( native, GetFileExInfoStandard, &fad ));
+
+	if( !ok )
 	{
 		errno = r3d_errno_from_win32( GetLastError());
 		return -1;
@@ -572,7 +589,7 @@ int fstat( int fd, struct stat *st )
 
 	if( !FD_VALID( fd ) || !st ) { errno = EBADF; return -1; }
 
-	if( !GetFileInformationByHandle( r3d_fds[fd], &info ))
+	if( !R3D_IO_CALL( meta, GetFileInformationByHandle( r3d_fds[fd], &info )))
 	{
 		errno = EIO;
 		return -1;
@@ -607,7 +624,7 @@ int mkdir( const char *path, mode_t mode )
 		return -1;
 	}
 
-	if( !CreateDirectoryA( native, NULL ))
+	if( !R3D_IO_CALL( meta, CreateDirectoryA( native, NULL )))
 	{
 		errno = r3d_errno_from_win32( GetLastError());
 		return -1;
@@ -638,13 +655,13 @@ int remove( const char *path )
 	}
 
 	/* POSIX remove() removes directories too. */
-	attr = GetFileAttributesA( native );
+	attr = R3D_IO_CALL( probes, GetFileAttributesA( native ));
 
 	if( attr != INVALID_FILE_ATTRIBUTES && ( attr & FILE_ATTRIBUTE_DIRECTORY ))
-		return RemoveDirectoryA( native )
+		return R3D_IO_CALL( meta, RemoveDirectoryA( native ))
 			? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
 
-	return DeleteFileA( native )
+	return R3D_IO_CALL( meta, DeleteFileA( native ))
 		? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
 }
 
@@ -659,7 +676,7 @@ int rename( const char *from, const char *to )
 		return -1;
 	}
 
-	return MoveFileA( nfrom, nto )
+	return R3D_IO_CALL( meta, MoveFileA( nfrom, nto ))
 		? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
 }
 
@@ -678,7 +695,7 @@ int unlink( const char *path )
 		return -1;
 	}
 
-	return DeleteFileA( native )
+	return R3D_IO_CALL( meta, DeleteFileA( native ))
 		? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
 }
 
@@ -697,7 +714,7 @@ int rmdir( const char *path )
 		return -1;
 	}
 
-	return RemoveDirectoryA( native )
+	return R3D_IO_CALL( meta, RemoveDirectoryA( native ))
 		? 0 : ( errno = r3d_errno_from_win32( GetLastError()), -1 );
 }
 
@@ -723,7 +740,7 @@ int access( const char *path, int mode )
 		return -1;
 	}
 
-	attr = GetFileAttributesA( native );
+	attr = R3D_IO_CALL( probes, GetFileAttributesA( native ));
 	return ( attr == INVALID_FILE_ATTRIBUTES )
 		? ( errno = r3d_errno_from_win32( GetLastError()), -1 ) : 0;
 }
@@ -765,7 +782,7 @@ int chdir( const char *path )
 		return -1;
 	}
 
-	attr = GetFileAttributesA( resolved );
+	attr = R3D_IO_CALL( probes, GetFileAttributesA( resolved ));
 	if( attr == INVALID_FILE_ATTRIBUTES )
 	{
 		errno = r3d_errno_from_win32( GetLastError());
@@ -839,7 +856,7 @@ int dup( int fd )
 
 	if( !FD_VALID( fd )) { errno = EBADF; return -1; }
 
-	if( !NT_SUCCESS( NtDuplicateObject( r3d_fds[fd], &dst, DUPLICATE_SAME_ACCESS )))
+	if( !NT_SUCCESS( R3D_IO_CALL( meta, NtDuplicateObject( r3d_fds[fd], &dst, DUPLICATE_SAME_ACCESS ))))
 	{
 		errno = EMFILE;
 		return -1;
@@ -898,7 +915,7 @@ DIR *opendir( const char *path )
 		return NULL;
 	}
 
-	dir->find = FindFirstFileA( native, &dir->data );
+	dir->find = R3D_IO_CALL( meta, FindFirstFileA( native, &dir->data ));
 
 	if( dir->find == INVALID_HANDLE_VALUE )
 	{
@@ -915,7 +932,7 @@ struct dirent *readdir( DIR *dir )
 {
 	if( !dir ) { errno = EBADF; return NULL; }
 
-	if( !dir->pending && !FindNextFileA( dir->find, &dir->data ))
+	if( !dir->pending && !R3D_IO_CALL( meta, FindNextFileA( dir->find, &dir->data )))
 		return NULL;
 
 	dir->pending = 0;
@@ -934,7 +951,7 @@ int closedir( DIR *dir )
 {
 	if( !dir ) { errno = EBADF; return -1; }
 
-	FindClose( dir->find );
+	R3D_IO_CALL( meta, FindClose( dir->find ));
 	free( dir );
 	return 0;
 }
@@ -1159,7 +1176,7 @@ long long _filelengthi64( int fd )
 		return -1;
 	}
 
-	if( !GetFileSizeEx( r3d_fds[fd], &size ))
+	if( !R3D_IO_CALL( meta, GetFileSizeEx( r3d_fds[fd], &size )))
 	{
 		errno = EIO;
 		return -1;

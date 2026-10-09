@@ -192,6 +192,35 @@ static inline uint32_t xbox_ft_load_end( const xbox_ft_span_t *s, int count_id, 
    loaded in play, a slow server message. Nothing while not recording. */
 void Xbox_FT_Note( uint32_t kind, const char *name, uint32_t kcyc, uint32_t bytes );
 
+/* Load stages (2026-10-08, x9-perf-loadtime, docs/r3d/divergences.md
+   #162): a stage of a level load - SV_SpawnServer, R_NewMap, the
+   precache - timed by the wall clock with the file layer's kernel calls
+   inside it (compat/xbox/xbox_io_stats.h), so a note can say how much of
+   it waited on the disk. Xbox_FT_LoadEnd writes it as an
+   XBOX_FT_NOTE_LOAD note now; Xbox_FT_LoadAccum adds it to accumulator
+   `acc` (XBOX_FT_LACC_*), written as one note per kind at the next map
+   start. Nothing while not recording: Begin reads no clock then. Unlike
+   a span, a stage keeps the renderer's waits and the disk's in its time:
+   a load's question is how long the player waits. */
+typedef struct xbox_ft_load_s
+{
+	uint64_t t0;            /* 0: not timing */
+	uint64_t io_ticks;
+	uint64_t read_bytes;
+	uint32_t opens, reads, seeks, probes, writes, meta;
+} xbox_ft_load_t;
+
+void Xbox_FT_LoadBegin( xbox_ft_load_t *l );
+void Xbox_FT_LoadEnd( const xbox_ft_load_t *l, const char *stage );
+void Xbox_FT_LoadAccum( const xbox_ft_load_t *l, int acc );
+
+/* Two inserted lines around a region of upstream code, like
+   XBOX_FT_SPAN_BEGIN/END; files that use them define all three as nothing
+   outside an Xbox build (#162). */
+#define XBOX_FT_LOAD_BEGIN( var ) xbox_ft_load_t var; Xbox_FT_LoadBegin( &var )
+#define XBOX_FT_LOAD_END( var, stage ) Xbox_FT_LoadEnd( &var, ( stage ))
+#define XBOX_FT_LOAD_ACCUM( var, acc ) Xbox_FT_LoadAccum( &var, ( acc ))
+
 /* Times one statement as span `id` (XBOX_FT_S_*). Engine files that use
    it include this header under #if XASH_XBOX && !XASH_DEDICATED and
    define XBOX_FT_SPAN( id, stmt ) as plain `stmt` otherwise

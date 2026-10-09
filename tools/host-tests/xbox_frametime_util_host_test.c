@@ -465,6 +465,37 @@ static void test_notes( void )
 	CHECK( rd32( buf + 80 + 4 ) == XBOX_FT_NOTE_MSG && buf[80 + 16] == 'y' && buf[80 + 16 + 46] == 'y' && buf[80 + 16 + 47] == 0 );
 }
 
+/* A load note's name (2026-10-08, #162): the stage, then the counters,
+   positional, ",<count>" only for an accumulated stage; a stage too long
+   for the field is cut and the counters kept; counters that alone
+   overflow are cut too, never past the field. The longest stage name
+   still fits next to console-sized counters. */
+static void test_load_note_name( void )
+{
+	char out[XBOX_FT_NOTE_NAME_BYTES];
+	char small[8];
+	size_t n;
+
+	n = xbox_ft_load_note_name( out, sizeof( out ), "sv_changelevel", 1234, 2, 30, 4, 5, 6, 7, 0 );
+	CHECK( strcmp( out, "sv_changelevel 1234,2,30,4,5,6,7" ) == 0 && n == strlen( out ));
+	n = xbox_ft_load_note_name( out, sizeof( out ), "acc_studio", 0, 1, 2, 3, 4, 0, 9, 17 );
+	CHECK( strcmp( out, "acc_studio 0,1,2,3,4,0,9,17" ) == 0 && n == strlen( out ));
+	n = xbox_ft_load_note_name( out, sizeof( out ), "sv_changelevel", 9999999, 999, 999, 9999, 9999, 99, 99, 0 );
+	CHECK( strcmp( out, "sv_changelevel 9999999,999,999,9999,9999,99,99" ) == 0 && n == strlen( out ));
+	n = xbox_ft_load_note_name( out, sizeof( out ), "a_stage_name_much_longer_than_the_field_allows", 9999999, 999, 99999, 9999, 999, 99, 9, 0 );
+	CHECK( n == sizeof( out ) - 1 && strlen( out ) == n );
+	CHECK( strcmp( out + n - strlen( " 9999999,999,99999,9999,999,99,9" ), " 9999999,999,99999,9999,999,99,9" ) == 0 );
+	CHECK( strncmp( out, "a_stage_n", 9 ) == 0 );
+	n = xbox_ft_load_note_name( out, sizeof( out ), NULL, 1, 2, 3, 4, 5, 6, 7, 0 );
+	CHECK( strcmp( out, " 1,2,3,4,5,6,7" ) == 0 && n == strlen( out ));
+	n = xbox_ft_load_note_name( small, sizeof( small ), "stage", 1, 2, 3, 4, 5, 6, 7, 8 );
+	CHECK( n == sizeof( small ) - 1 && strlen( small ) == n && strncmp( small, " 1,2,3,", 7 ) == 0 );
+	n = xbox_ft_load_note_name( out, sizeof( out ), "x", 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u );
+	CHECK( n == sizeof( out ) - 1 && strlen( out ) == n );
+	CHECK( strcmp( xbox_ft_load_acc_names[XBOX_FT_LACC_STUDIO], "acc_studio" ) == 0
+		&& strcmp( xbox_ft_load_acc_names[XBOX_FT_LACC_BSPDECAL], "acc_bspdecal" ) == 0 );
+}
+
 /* Sessions and segments (v3, 2026-10-07): the label's sanitising, the
    session id, the file name and its 42-character budget, the rotation
    decision and the v3 header's bytes. */
@@ -644,7 +675,12 @@ static int write_fixture( const char *path, uint32_t counters )
              cl_parse_kc 50 - and,
              at the end of the file, a NOTES chunk naming two events
              in it: sound fvox/flatline.wav 120 ms 131072 bytes, message
-             svc_sound 200 ms 40 bytes; one more note dropped;
+             svc_sound 200 ms 40 bytes; one more note dropped; and two
+             load stages (2026-10-08, #162): seq 38 "sv_changelevel" 480
+             ms, io 100, 2 MiB read, 2 opens, 10 reads, 3 seeks, 4
+             probes, 5 writes, 6 metadata calls; seq 45 (c1a0e's first
+             frame) the accumulated "acc_studio" of 5 loads, 60 ms, io
+             20, 512 KiB, o5 r6 s7 p8 w0 m1;
      seq 36, 37  when `flagged`, the deferred .sav write (2026-10-06,
              #153): k_save_pump 8 and 6 ms, save_pump_kb 64 and 40;
      seq 38  the changelevel frame: 500 ms, host 10 ms - 490 ms between
@@ -750,7 +786,7 @@ static int write_fixture_level_change( const char *path, int flagged )
 	{
 		/* NOTES (2026-10-06): seq 35 loaded a sound in a slow svc_sound
 		   (1 MHz: kilocycles are ms); one more note was dropped. */
-		xbox_ft_note_t n[2];
+		xbox_ft_note_t n[4];
 
 		memset( n, 0, sizeof( n ));
 		n[0].seq = 35;
@@ -763,7 +799,18 @@ static int write_fixture_level_change( const char *path, int flagged )
 		n[1].kcyc = 200;
 		n[1].bytes = 40;
 		strcpy( n[1].name, "svc_sound" );
-		fwrite( buf, 1, xbox_ft_encode_notes( buf, n, 2, 1 ), fp );
+		/* the load stages (#162), named by the recorder's own formatter */
+		n[2].seq = 38;
+		n[2].kind = XBOX_FT_NOTE_LOAD;
+		n[2].kcyc = 480;
+		n[2].bytes = 2097152;
+		xbox_ft_load_note_name( n[2].name, sizeof( n[2].name ), "sv_changelevel", 100, 2, 10, 3, 4, 5, 6, 0 );
+		n[3].seq = 45;
+		n[3].kind = XBOX_FT_NOTE_LOAD;
+		n[3].kcyc = 60;
+		n[3].bytes = 524288;
+		xbox_ft_load_note_name( n[3].name, sizeof( n[3].name ), xbox_ft_load_acc_names[XBOX_FT_LACC_STUDIO], 20, 5, 6, 7, 8, 0, 1, 5 );
+		fwrite( buf, 1, xbox_ft_encode_notes( buf, n, 4, 1 ), fp );
 	}
 	fwrite( buf, 1, xbox_ft_encode_end( buf, 9000000u, 0 ), fp );
 	return fclose( fp ) != 0;
@@ -1173,6 +1220,7 @@ int main( int argc, char **argv )
 	test_spans();
 	test_classes();
 	test_notes();
+	test_load_note_name();
 	test_segments();
 
 	/* argv[1]: the version-2 fixture, as a recorder from before the spans

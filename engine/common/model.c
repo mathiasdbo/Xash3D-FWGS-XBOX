@@ -23,6 +23,13 @@ GNU General Public License for more details.
 #include "enginefeatures.h"
 #include "client.h"
 #include "server.h"
+#if XASH_XBOX && !XASH_DEDICATED
+#include "platform/xbox/xbox_frametime.h" // the load stages' notes, docs/r3d/divergences.md #162
+#else
+#define XBOX_FT_LOAD_BEGIN( var )
+#define XBOX_FT_LOAD_END( var, stage )
+#define XBOX_FT_LOAD_ACCUM( var, acc )
+#endif
 #if XASH_XBOX
 #include "platform/xbox/xbox_pm_cull.h" // Xbox_PMCull_Invalidate, docs/r3d/divergences.md #154
 #endif
@@ -337,6 +344,8 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 	xbox_model_generation++; // the client's physent lists read it, docs/r3d/divergences.md #156
 #endif
 
+	XBOX_FT_LOAD_BEGIN( ft_load ); // #162: summed per model type, written at the map start
+
 	// store modelname to show error
 	Q_strncpy( tempname, mod->name, sizeof( tempname ));
 	COM_FixSlashes( tempname );
@@ -445,6 +454,8 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 	}
 	Mem_Free( buf );
 
+	XBOX_FT_LOAD_ACCUM( ft_load, mod->type == mod_studio ? XBOX_FT_LACC_STUDIO : mod->type == mod_sprite ? XBOX_FT_LACC_SPRITE
+		: mod->type == mod_brush ? XBOX_FT_LACC_BRUSH : XBOX_FT_LACC_OTHER );
 	return mod;
 }
 

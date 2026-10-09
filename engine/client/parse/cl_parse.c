@@ -25,8 +25,12 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_frametime.h" // the frame-time recorder's CPU spans, docs/r3d/divergences.md #141
 #include "platform/xbox/xbox_frametime_client.h" // per-message timing, #141 (11)
 #include "platform/xbox/xbox_menu_fonts.h" // the menu's fonts rebuilt after the load, #127
+#include "platform/xbox/xbox_cl_drop.h" // the dropped-frame loop's start, #161
 #else
 #define XBOX_FT_SPAN( id, stmt ) stmt
+#define XBOX_FT_LOAD_BEGIN( var )
+#define XBOX_FT_LOAD_END( var, stage )
+#define XBOX_FT_LOAD_ACCUM( var, acc )
 #endif
 
 #if XASH_LOW_MEMORY != 2
@@ -539,7 +543,9 @@ static void CL_StartResourceDownloading( const char *pszMessage, qboolean bCusto
 		Con_DPrintf( "%s", pszMessage );
 
 	cls.dl.nTotalSize = COM_SizeofResourceList( &cl.resourcesneeded, &ri );
+	XBOX_FT_LOAD_BEGIN( ft_estimate ); // #162
 	cls.dl.nTotalToTransfer = CL_EstimateNeededResources();
+	XBOX_FT_LOAD_END( ft_estimate, "cl_estimate" );
 
 	if( bCustom )
 	{
@@ -1008,10 +1014,20 @@ void CL_ParseClientData( sizebuf_t *msg, connprotocol_t proto )
 	i = cls.netchan.incoming_sequence;
 
 	// did we drop some frames?
+#if XASH_XBOX
+	if( Xbox_CL_FramesDropped( cl.last_incoming_sequence, i )) // #161: no overflow at INT_MAX
+#else
 	if( i > cl.last_incoming_sequence + 1 )
+#endif
 	{
 		// mark as dropped
+#if XASH_XBOX
+		// docs/r3d/divergences.md #161: one pass over the slots, not up to
+		// 2^27 sequences after the server's random initial one
+		for( j = Xbox_CL_FirstDropToMark( cl.last_incoming_sequence, i, CL_UPDATE_BACKUP ); j < i; j++ )
+#else
 		for( j = cl.last_incoming_sequence + 1; j < i; j++ )
+#endif
 		{
 			if( cl.frames[j & CL_UPDATE_MASK].receivedtime >= 0.0 )
 			{
@@ -1681,6 +1697,8 @@ void CL_RegisterResources( sizebuf_t *msg, connprotocol_t proto )
 		return;
 	}
 
+	XBOX_FT_LOAD_BEGIN( ft_reg ); // #162: the whole registration, and its stages below
+
 	if( !cls.demoplayback )
 		CL_SendConsistencyInfo( msg, proto );
 
@@ -1697,7 +1715,9 @@ void CL_RegisterResources( sizebuf_t *msg, connprotocol_t proto )
 			Con_Printf( "Setting up renderer...\n" );
 
 			// load tempent sprites (glowshell, muzzleflashes etc)
+			XBOX_FT_LOAD_BEGIN( ft_sprites ); // #162
 			CL_LoadClientSprites ();
+			XBOX_FT_LOAD_END( ft_sprites, "cl_sprites" );
 
 			// invalidate all decal indexes
 			memset( cl.decal_index, 0, sizeof( cl.decal_index ));
@@ -1707,12 +1727,18 @@ void CL_RegisterResources( sizebuf_t *msg, connprotocol_t proto )
 			CL_ClearWorld ();
 
 			// load skybox
+			XBOX_FT_LOAD_BEGIN( ft_sky ); // #162
 			R_SetupSky( clgame.movevars.skyName );
+			XBOX_FT_LOAD_END( ft_sky, "r_sky" );
 
 			// tell rendering system we have a new set of models.
+			XBOX_FT_LOAD_BEGIN( ft_newmap ); // #162
 			ref.dllFuncs.R_NewMap ();
+			XBOX_FT_LOAD_END( ft_newmap, "r_newmap" );
 
+			XBOX_FT_LOAD_BEGIN( ft_detail ); // #162
 			Mod_LoadDetailTextures( cl.worldmodel );
+			XBOX_FT_LOAD_END( ft_detail, "cl_detail" );
 
 			// check if this map must start from dark screen
 			CL_StartDark ();
@@ -1720,6 +1746,7 @@ void CL_RegisterResources( sizebuf_t *msg, connprotocol_t proto )
 			CL_SetupOverviewParams();
 
 			// release unused SpriteTextures
+			XBOX_FT_LOAD_BEGIN( ft_free ); // #162
 			for( i = 1, mod = clgame.sprites; i < MAX_CLIENT_SPRITES; i++, mod++ )
 			{
 				if( mod->needload == NL_FREE_UNUSED )
@@ -1727,6 +1754,7 @@ void CL_RegisterResources( sizebuf_t *msg, connprotocol_t proto )
 			}
 
 			Mod_FreeUnused ();
+			XBOX_FT_LOAD_END( ft_free, "cl_freeunused" );
 
 #if XASH_XBOX
 			// Resonance3D (docs/r3d/divergences.md #127): the map is
@@ -1755,6 +1783,8 @@ void CL_RegisterResources( sizebuf_t *msg, connprotocol_t proto )
 		Con_Printf( S_ERROR "client world model is NULL\n" );
 		CL_Disconnect();
 	}
+
+	XBOX_FT_LOAD_END( ft_reg, "cl_register" );
 }
 
 static void CL_ParseConsistencyInfo( sizebuf_t *msg, connprotocol_t proto )
@@ -2681,7 +2711,11 @@ void CL_ParseServerMessage( sizebuf_t *msg )
 			cl.paused = ( MSG_ReadOneBit( msg ) != 0 );
 			break;
 		case svc_bspdecal:
-			CL_ParseStaticDecal( msg );
+			{
+				XBOX_FT_LOAD_BEGIN( ft_load ); // #162: summed, written at the map start
+				CL_ParseStaticDecal( msg );
+				XBOX_FT_LOAD_ACCUM( ft_load, XBOX_FT_LACC_BSPDECAL );
+			}
 			break;
 		case svc_packetentities:
 			XBOX_FT_SPAN( XBOX_FT_S_CL_PKT_ENTS, playerbytes = CL_ParsePacketEntities( msg, false, PROTO_CURRENT ));

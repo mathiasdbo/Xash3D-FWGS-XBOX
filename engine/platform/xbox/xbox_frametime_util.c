@@ -17,6 +17,7 @@ GNU General Public License for more details.
    field: xbox_frametime_util.h. No engine, kernel or GPU dependency - this
    file is compiled for the host by tools/host-tests/run.sh. */
 
+#include <stdio.h>
 #include <string.h>
 #include "xbox_frametime_util.h"
 
@@ -574,6 +575,40 @@ size_t xbox_ft_encode_notes( uint8_t *out, const xbox_ft_note_t *notes, uint32_t
 		p = put_name( p, n->name, XBOX_FT_NOTE_NAME_BYTES );
 	}
 	return (size_t)( p - out );
+}
+
+const char *const xbox_ft_load_acc_names[XBOX_FT_LACC_COUNT] =
+{
+	"acc_studio", "acc_sprite", "acc_brush", "acc_model", "acc_sound", "acc_bspdecal",
+};
+
+size_t xbox_ft_load_note_name( char *out, size_t size, const char *stage, uint32_t io_kc, uint32_t opens,
+	uint32_t reads, uint32_t seeks, uint32_t probes, uint32_t writes, uint32_t meta, uint32_t count )
+{
+	char tail[96];
+	size_t tail_len, stage_len;
+	int n;
+
+	if( !size )
+		return 0;
+	n = count
+		? snprintf( tail, sizeof( tail ), " %u,%u,%u,%u,%u,%u,%u,%u", (unsigned)io_kc, (unsigned)opens,
+			(unsigned)reads, (unsigned)seeks, (unsigned)probes, (unsigned)writes, (unsigned)meta, (unsigned)count )
+		: snprintf( tail, sizeof( tail ), " %u,%u,%u,%u,%u,%u,%u", (unsigned)io_kc, (unsigned)opens,
+			(unsigned)reads, (unsigned)seeks, (unsigned)probes, (unsigned)writes, (unsigned)meta );
+	tail_len = n > 0 ? (size_t)n : 0;
+	if( tail_len >= sizeof( tail ))
+		tail_len = sizeof( tail ) - 1; /* snprintf's would-be length */
+	if( tail_len > size - 1 )
+		tail_len = size - 1; /* counters too long for the field (some above 10^7): cut, and no stage */
+	stage_len = stage ? strlen( stage ) : 0;
+	if( stage_len > size - 1 - tail_len )
+		stage_len = size - 1 - tail_len;
+	if( stage_len )
+		memcpy( out, stage, stage_len );
+	memcpy( out + stage_len, tail, tail_len );
+	out[stage_len + tail_len] = 0;
+	return stage_len + tail_len;
 }
 
 /* Sessions and segments (version 3, 2026-10-07): the layout and the name

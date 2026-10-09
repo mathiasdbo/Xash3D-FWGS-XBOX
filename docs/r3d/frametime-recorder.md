@@ -487,8 +487,9 @@ numbers for the decision come from the owner's hardware route.
 ## Notes: named one-off events (2026-10-06)
 
 A span says where a stall's time went; it cannot say which sound or which
-server message it was. The NOTES chunk does, for three kinds of event,
-each with the sequence number of the frame it happened in:
+server message it was. The NOTES chunk does, for three kinds of event
+(and a fourth, the load stages, below), each with the sequence number of
+the frame it happened in:
 
 | kind | written when | name | bytes |
 |---|---|---|---|
@@ -508,6 +509,68 @@ message note is many small messages when it is high, and work around the
 parser - netchan, fragment reassembly, resource requests - when it is
 low. The report lists each stall's notes next
 to its spans and loads, and the slowest twelve of the session.
+
+## Load stages (2026-10-08, x9-perf-loadtime)
+
+A level load is a handful of very long frames, and a span per frame
+cannot say what inside them took the time, or whether it was the CPU or
+the disk. A fourth kind of note, `load` (divergence #162), times the
+stages of a load by the wall clock, with the file layer's kernel calls
+inside each one:
+
+| stage | where (call site) | what it holds |
+|---|---|---|
+| `sv_changelevel` | `SV_ChangeLevel`, `engine/server/sv_save.c` | the whole smooth or classic level change on the server: the stages below with `sv_` |
+| `sv_saveflush` | its first call, `SV_SaveAsync_Flush` (#153) | a deferred `.sav` still being written when the change came |
+| `sv_lvlsave` | `SaveGameState( true )` | the old level's `.HL?` files written |
+| `sv_deactivate` | `SV_InactivateClients` .. `SV_DeactivateServer` | the old level freed |
+| `sv_spawn` | `SV_SpawnServer`, `engine/server/sv_init.c` | the new level's server state, world model included |
+| `sv_world` | its `Mod_LoadWorld` | the map's classic BSP prefix read and built (`Mod_LoadBrushModel`, the renderer's `Mod_ProcessRenderData`) |
+| `sv_lvlrestore` | `SaveFinish` .. `LoadAdjacentEnts` | the new level's `.HL?` restored, or spawned, and the entities carried across |
+| `sv_ents` | `SV_SpawnEntities` (a new game, a classic change) | the entity lump spawned: the game DLL's precaches load every model it names |
+| `sv_loadgame` | `SV_LoadGameState` in `SV_ExecLoadGame` | a saved game's level restored |
+| `sv_activate` | `SV_ActivateServer` | the physics frames, the baselines and the resource list |
+| `cl_estimate` | `CL_EstimateNeededResources`, `cl_parse.c` | an existence test for every model and sound the server listed |
+| `cl_register` | `CL_RegisterResources` | the client's side of the map: the stages below |
+| `cl_sprites`, `r_sky`, `r_newmap`, `cl_detail`, `cl_freeunused` | the calls of that name inside it | the client's tempent sprites, the sky, the renderer's new map, detail textures, the previous map's unused models freed |
+| `nv_tables`, `nv_gpu`, `nv_water` | ref/nv2a's `nv2a_try_pending_upload` (`R_NewMap`) | the renderer's tables read from the `.mpak`, its GPU buffers, the water's buffer |
+| `acc_studio`, `acc_sprite`, `acc_brush`, `acc_model` | `Mod_LoadModel`, `engine/common/model.c`, by the loaded type | every model loaded since the last map start, summed (`n` = how many) |
+| `acc_sound` | `S_LoadSound` outside play | every sound the precache decoded |
+| `acc_bspdecal` | one `svc_bspdecal` message | the map's static decals |
+
+Stages nest - `sv_changelevel` holds `sv_spawn`, which holds `sv_world`;
+`cl_register` holds `r_newmap`, which holds the `nv_` stages - so they do
+not add up. A stage's time is the whole wall-clock time: unlike a span it
+keeps the renderer's waits and the disk's, because the question a load
+asks is how long the player waits. Each note's name carries the file
+layer's counters for the stage (`compat/xbox/xbox_io_stats.h`): every
+Win32 or kernel call `compat/xbox/xbox_posix_io.c` makes goes through
+`R3D_IO_CALL`, which counts it in one category and adds its ticks -
+opens (CreateFileA), reads (ReadFile), writes (WriteFile), seeks
+(SetFilePointer: lseek, open's O_APPEND, ftruncate's positioning),
+probes (GetFileAttributes(Ex)A: stat, access, chdir, remove's directory
+test), closes (CloseHandle: close, and the cleanup when the descriptor
+table is full) and metadata (fsync's flush, SetEndOfFile, fstat,
+mkdir, rmdir, remove, unlink, rename, dup, the file-size query, and
+the directory scans' FindFirstFileA, FindNextFileA and FindClose);
+`tools/test_posix_io_counters.py` checks that no call bypasses it. The
+counters are positional after the stage: kilocycles inside those
+kernel calls, opens, reads, seeks, existence probes, writes, metadata
+calls, then the number of loads for an accumulated stage (`sv_changelevel 1234,2,30,4,5,6,7`); the note's bytes
+are what the stage read. The rest of the stage's time is the CPU's -
+and the renderer's waits, which a stage keeps; none were seen in load
+frames (their `gpu`/`vblank` read 0 on the console, route-pr193). Reads
+through pdclib's `FILE *` (opusfile, the console log) bypass the
+counters. Loads made in play (a late model or sound) are summed into the
+next load's `acc_` notes. Inside the kernel
+is both the FATX/CDFS driver's copy out of its cache and the wait for
+the IDE transfer: xemu models no seek or transfer time, so there it is
+mostly the copy, and on the console the difference is the disk. The
+named stages are written when they end; the `acc_` ones once per load, at
+the new map's first frame. The report prints each load's stages (`level
+loads by stage`), with the server messages over 5 ms of the same frames,
+and a mean per stage across the session; `summary --compare` adds the two
+sessions' load times side by side.
 
 ## The server game frame (2026-10-05)
 

@@ -77,6 +77,7 @@ and reads them.
 #include "xbox_frametime_svgame.h"
 #include "xbox_frametime_pmove.h"
 #include "xbox_frametime_clents.h"
+#include "xbox_io_stats.h" /* compat/xbox: the file layer's kernel calls, for the load notes (#162) */
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
 
@@ -244,6 +245,19 @@ typedef struct xbox_ft_state_s
 } xbox_ft_state_t;
 
 static xbox_ft_state_t ft;
+
+/* The accumulated load stages (#162, XBOX_FT_LACC_*): summed since the
+   last map start, written as notes at the next. Cleared with the
+   session. */
+typedef struct xbox_ft_load_acc_s
+{
+	uint64_t ticks, io_ticks, read_bytes;
+	uint32_t count, opens, reads, seeks, probes, writes, meta;
+} xbox_ft_load_acc_t;
+
+static xbox_ft_load_acc_t ft_load_acc[XBOX_FT_LACC_COUNT];
+
+static void FT_WriteLoadAccums( void );
 
 static void FT_MemoryPages( uint32_t *avail, uint32_t *total )
 {
@@ -503,6 +517,7 @@ static qboolean FT_Start( int mode )
 	int tries;
 
 	memset( &ft, 0, sizeof( ft ));
+	memset( ft_load_acc, 0, sizeof( ft_load_acc ));
 
 	ft.block = Z_Calloc( ring_bytes + sizeof( xbox_ft_stats_t ) + XBOX_FT_ENCODE_FRAMES * xbox_ft_frame_bytes( XBOX_FT_W_COUNT )
 		+ XBOX_FT_NOTES_MAX * sizeof( xbox_ft_note_t ));
@@ -589,6 +604,9 @@ static void FT_TrackMap( uint64_t now, qboolean active )
 
 		FT_MemoryPages( &free_pages, &total_pages );
 		Q_strncpy( ft.map_name, clgame.mapname, sizeof( ft.map_name ));
+		/* #162: the load's accumulated stages, credited to this frame
+		   (the map's first), flushed with the rest just below. */
+		FT_WriteLoadAccums();
 
 		/* Frames before the map chunk, so the file stays in order; the
 		   per-classname rows close the map before it. Then the new map
@@ -686,6 +704,88 @@ void Xbox_FT_Note( uint32_t kind, const char *name, uint32_t kcyc, uint32_t byte
 	n->kcyc = kcyc;
 	n->bytes = bytes;
 	Q_strncpy( n->name, name ? name : "", sizeof( n->name ));
+}
+
+/* Load stages (#162, xbox_frametime.h). The recorder's own flushes write
+   between frames, never inside a stage, so a stage's counters are its
+   own. */
+void Xbox_FT_LoadBegin( xbox_ft_load_t *l )
+{
+	l->t0 = 0;
+	if( !xbox_ft_waits.active )
+		return;
+	l->io_ticks = r3d_io_stats.ticks;
+	l->read_bytes = r3d_io_stats.read_bytes;
+	l->opens = r3d_io_stats.opens;
+	l->reads = r3d_io_stats.reads;
+	l->seeks = r3d_io_stats.seeks;
+	l->probes = r3d_io_stats.probes;
+	l->writes = r3d_io_stats.writes;
+	l->meta = r3d_io_stats.meta;
+	l->t0 = xbox_ft_rdtsc();
+}
+
+static uint32_t FT_Kc( uint64_t ticks )
+{
+	const uint64_t kc = ( ticks + 500u ) / 1000u;
+
+	return kc > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)kc;
+}
+
+static uint32_t FT_U32( uint64_t v )
+{
+	return v > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)v;
+}
+
+void Xbox_FT_LoadEnd( const xbox_ft_load_t *l, const char *stage )
+{
+	char name[XBOX_FT_NOTE_NAME_BYTES];
+	uint64_t now;
+
+	if( !l->t0 || !xbox_ft_waits.active )
+		return;
+	now = xbox_ft_rdtsc();
+	xbox_ft_load_note_name( name, sizeof( name ), stage, FT_Kc( r3d_io_stats.ticks - l->io_ticks ),
+		r3d_io_stats.opens - l->opens, r3d_io_stats.reads - l->reads, r3d_io_stats.seeks - l->seeks,
+		r3d_io_stats.probes - l->probes, r3d_io_stats.writes - l->writes, r3d_io_stats.meta - l->meta, 0 );
+	Xbox_FT_Note( XBOX_FT_NOTE_LOAD, name, FT_Kc( now - l->t0 ), FT_U32( r3d_io_stats.read_bytes - l->read_bytes ));
+}
+
+void Xbox_FT_LoadAccum( const xbox_ft_load_t *l, int acc )
+{
+	xbox_ft_load_acc_t *a;
+
+	if( !l->t0 || !xbox_ft_waits.active || acc < 0 || acc >= XBOX_FT_LACC_COUNT )
+		return;
+	a = &ft_load_acc[acc];
+	a->ticks += xbox_ft_rdtsc() - l->t0;
+	a->io_ticks += r3d_io_stats.ticks - l->io_ticks;
+	a->read_bytes += r3d_io_stats.read_bytes - l->read_bytes;
+	a->opens += r3d_io_stats.opens - l->opens;
+	a->reads += r3d_io_stats.reads - l->reads;
+	a->seeks += r3d_io_stats.seeks - l->seeks;
+	a->probes += r3d_io_stats.probes - l->probes;
+	a->writes += r3d_io_stats.writes - l->writes;
+	a->meta += r3d_io_stats.meta - l->meta;
+	a->count++;
+}
+
+static void FT_WriteLoadAccums( void )
+{
+	char name[XBOX_FT_NOTE_NAME_BYTES];
+	int i;
+
+	for( i = 0; i < XBOX_FT_LACC_COUNT; i++ )
+	{
+		const xbox_ft_load_acc_t *a = &ft_load_acc[i];
+
+		if( !a->count )
+			continue;
+		xbox_ft_load_note_name( name, sizeof( name ), xbox_ft_load_acc_names[i], FT_Kc( a->io_ticks ),
+			a->opens, a->reads, a->seeks, a->probes, a->writes, a->meta, a->count );
+		Xbox_FT_Note( XBOX_FT_NOTE_LOAD, name, FT_Kc( a->ticks ), FT_U32( a->read_bytes ));
+	}
+	memset( ft_load_acc, 0, sizeof( ft_load_acc ));
 }
 
 void Xbox_FrameTime_Init( void )

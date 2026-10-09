@@ -118,7 +118,9 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 #if XASH_XBOX
 	// the frame-time recorder's snd_loads/snd_load_kb/snd_load_kc (#141)
 	xbox_ft_span_t ft_load;
+	xbox_ft_load_t ft_stage; // the precache's sounds, summed (#162)
 	xbox_ft_span_begin( &ft_load );
+	Xbox_FT_LoadBegin( &ft_stage );
 #endif
 
 	// load it from disk
@@ -154,6 +156,8 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		// its cvar or its "*default" exclusion)
 		if( cls.state == ca_active )
 			Xbox_FT_Note( XBOX_FT_NOTE_SOUND, sfx->name, kc, (uint32_t)sc->size );
+		else
+			Xbox_FT_LoadAccum( &ft_stage, XBOX_FT_LACC_SOUND );
 	}
 #endif
 
