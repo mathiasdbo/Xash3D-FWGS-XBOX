@@ -1352,8 +1352,9 @@ static nv2a_resident_program_t nv2a_resident_program;
    combiner, stage-1-off and array formats (nv2a_sgpu_enter). Cleared by
    every other program upload (the three nv2a_init_*_shader functions, the
    decal pass's pixel program) and at the start of each frame. The
-   constants it relies on (hardware 0..95 and 101..191) are written by no
-   other path, so they survive another path's draws in between. */
+   constants it relies on (hardware 0..95 and 101..191; 190..191 are the
+   chrome tail's, #170) are written by no other path, so they survive
+   another path's draws in between. */
 static qboolean nv2a_sgpu_entered;
 
 /* X9-X step 11: the fog state last pushed (nv2a_push_fog); invalid after
@@ -1403,9 +1404,11 @@ static uint32_t           nv2a_decal_vb_used;
    (PR #175).
 
    Program memory is written only here: by nv2a_upload_vertex_programs,
-   and for the one program that is not resident, vs_warp (R5,
-   divergences.md #147), by nv2a_vp_load_slots, which puts it over
-   vs_studio's last slots and puts them back before vs_studio runs again.
+   and for the two programs that are not resident, vs_warp (R5,
+   divergences.md #147) and vs_studio's chrome tail (#170), by
+   nv2a_vp_place, which puts them over vs_studio's last slots (and, for
+   the chrome tail, the resident programs after it) and puts those back
+   before their own program runs again (the regions below).
    pbkit never pushes SET_TRANSFORM_PROGRAM (pb_init included), and
    ref/nv2a never selects the fixed-function transform. A future path that
    loads a program of its own must leave the resident ones as it found
@@ -1443,13 +1446,32 @@ STATIC_ASSERT( sizeof( nv2a_vp_warp_words ) % 16 == 0, "a vertex program instruc
 STATIC_ASSERT( sizeof( nv2a_vp_warp_words ) <= sizeof( nv2a_vp_studio_words ),
 	"vs_warp is loaded over vs_studio's last slots and must fit inside them" );
 
+/* divergences.md #170: the chrome tail (vs_chrome.vp). Not a program on
+   its own: vs_studio's first NV2A_VP_CHROME_PREFIX instructions followed
+   by these NV2A_VP_CHROME_TAIL compute R_StudioSetupChrome's texture
+   coordinates instead of vs_studio's. The .inl starts with one
+   instruction that is only there for the compiler (vs_chrome.vp), which
+   is never loaded. */
+static const uint32_t nv2a_vp_chrome_inl[] =
+{
+	#include "vs_chrome.inl"
+};
+#define NV2A_VP_CHROME_TAIL   (( uint32_t )( sizeof( nv2a_vp_chrome_inl ) / 16 - 1 ))
+#define NV2A_VP_CHROME_PREFIX (( uint32_t )( sizeof( nv2a_vp_studio_words ) / 16 - 2 ))
+static const uint32_t *const nv2a_vp_chrome_words = &nv2a_vp_chrome_inl[4];
+STATIC_ASSERT( sizeof( nv2a_vp_chrome_inl ) % 16 == 0, "a vertex program instruction is four dwords" );
+
 typedef enum
 {
+	NV2A_VP_STUDIO, /* the GPU studio path (vs_studio.vp, divergences.md #143) - first, at slot 0 (#170) */
 	NV2A_VP_LIT,    /* the world and brush entities (vs_lit.vs.cg) */
 	NV2A_VP_2D,     /* the 2D pass (vs_2d.vs.cg) */
 	NV2A_VP_TRI,    /* the TriAPI in 3D (vs_tri.vs.cg) */
-	NV2A_VP_STUDIO, /* the GPU studio path (vs_studio.vp, divergences.md #143) */
-	NV2A_VP_COUNT   /* also "none selected yet" */
+	NV2A_VP_COUNT,  /* also "none selected yet" */
+	/* The two programs that are not resident (selection only, no
+	   nv2a_vp_table row): */
+	NV2A_VP_WARP,   /* R5, #147 */
+	NV2A_VP_CHROME  /* #170 */
 } nv2a_vp_t;
 
 #define NV2A_VP_SLOTS 136u /* NV2A_MAX_TRANSFORM_PROGRAM_LENGTH */
@@ -1459,26 +1481,63 @@ STATIC_ASSERT( sizeof( nv2a_vp_lit_words ) % 16 == 0 && sizeof( nv2a_vp_2d_words
 STATIC_ASSERT(( sizeof( nv2a_vp_lit_words ) + sizeof( nv2a_vp_2d_words ) + sizeof( nv2a_vp_tri_words )
 	+ sizeof( nv2a_vp_studio_words )) / 16 <= NV2A_VP_SLOTS,
 	"the resident vertex programs no longer fit the NV2A's 136 program slots together" );
+STATIC_ASSERT( sizeof( nv2a_vp_studio_words ) / 16 - 2 + sizeof( nv2a_vp_chrome_inl ) / 16 - 1 <= NV2A_VP_SLOTS,
+	"vs_studio's prefix and the chrome tail no longer fit the 136 program slots" );
+STATIC_ASSERT( sizeof( nv2a_vp_studio_words ) / 16 - 2 + sizeof( nv2a_vp_chrome_inl ) / 16 - 1 > sizeof( nv2a_vp_studio_words ) / 16,
+	"the chrome tail reaches past vs_studio (region C below is not empty)" );
+STATIC_ASSERT( sizeof( nv2a_vp_warp_words ) / 16 > 2, "vs_warp covers vs_studio's last two slots and more (regions A and B)" );
 
+/* Program memory, in this order from slot 0: vs_studio, vs_lit, vs_2d,
+   vs_tri. vs_studio is first so that the chrome tail, which is longer than
+   the two instructions it replaces, runs on into the programs after it. */
 static const struct
 {
 	const uint32_t *words;
 	uint32_t       instructions;
 } nv2a_vp_table[NV2A_VP_COUNT] =
 {
+	{ nv2a_vp_studio_words, sizeof( nv2a_vp_studio_words ) / 16 },
 	{ nv2a_vp_lit_words,    sizeof( nv2a_vp_lit_words ) / 16 },
 	{ nv2a_vp_2d_words,     sizeof( nv2a_vp_2d_words ) / 16 },
 	{ nv2a_vp_tri_words,    sizeof( nv2a_vp_tri_words ) / 16 },
-	{ nv2a_vp_studio_words, sizeof( nv2a_vp_studio_words ) / 16 },
 };
 
 static uint32_t  nv2a_vp_start[NV2A_VP_COUNT]; /* each program's first slot */
 static nv2a_vp_t nv2a_vp_selected = NV2A_VP_COUNT;
 
-/* R5: vs_warp is in vs_studio's last NV2A_VP_WARP_INSTRUCTIONS slots
-   (loaded), and PROGRAM_START points at it (selected). */
-static qboolean nv2a_vp_warp_loaded;
-static qboolean nv2a_vp_warp_selected;
+/* The resident image of program memory (every resident program back to
+   back, as nv2a_upload_vertex_programs loads it): what a region is put
+   back from. */
+static uint32_t nv2a_vp_image[NV2A_VP_SLOTS * 4];
+static uint32_t nv2a_vp_image_slots;
+
+/* The slots more than one program uses (#147, #170), with vs_studio at
+   slot 0 and S its length (106), W vs_warp's (59), P = S - 2 the chrome
+   prefix and T the chrome tail's length (28):
+     A [S - W, P)   vs_studio's, or vs_warp's first W - 2
+     B [P, S)       vs_studio's last two, vs_warp's last two, or the chrome tail's first two
+     C [S, P + T)   the resident programs after vs_studio (vs_lit, vs_2d, the start of
+                    vs_tri), or the rest of the chrome tail
+   Each program needs:  vs_studio A and B; chrome A (vs_studio's) and B and
+   C (the tail's); vs_warp A and B; vs_lit, vs_2d, vs_tri C. A region is
+   reloaded only when the program about to run needs other contents
+   there, so a frame alternating vs_studio and chrome meshes reloads only
+   B (two instructions) after the first chrome mesh, and the resident
+   programs get C back once, when one of them next runs. */
+typedef enum
+{
+	NV2A_VPR_RESIDENT, /* what nv2a_upload_vertex_programs put there */
+	NV2A_VPR_WARP,
+	NV2A_VPR_CHROME
+} nv2a_vp_region_t;
+
+static nv2a_vp_region_t nv2a_vp_region_a, nv2a_vp_region_b, nv2a_vp_region_c;
+
+#define NV2A_VP_STUDIO_LEN  ( sizeof( nv2a_vp_studio_words ) / 16 )
+#define NV2A_VP_REGION_A    ( NV2A_VP_STUDIO_LEN - NV2A_VP_WARP_INSTRUCTIONS )
+#define NV2A_VP_REGION_B    NV2A_VP_CHROME_PREFIX
+#define NV2A_VP_REGION_C    NV2A_VP_STUDIO_LEN
+#define NV2A_VP_REGION_END  ( NV2A_VP_CHROME_PREFIX + NV2A_VP_CHROME_TAIL )
 
 /* The register-combiner "pixel programs" (ps_*.inl) are state, not
    memory: a switch re-pushes the whole set. Tracked so that a vertex
@@ -1523,6 +1582,7 @@ static void nv2a_upload_vertex_programs( void )
 		uint32_t i = 0, count = nv2a_vp_table[v].instructions;
 
 		nv2a_vp_start[v] = slot;
+		memcpy( &nv2a_vp_image[slot * 4], nv2a_vp_table[v].words, count * 16 );
 		while( i < count )
 		{
 			uint32_t n = count - i, k;
@@ -1541,10 +1601,11 @@ static void nv2a_upload_vertex_programs( void )
 		}
 		slot += count;
 	}
+	nv2a_vp_image_slots = slot;
 
 	nv2a_vp_selected = NV2A_VP_COUNT; /* the next select sets the execution mode too */
-	nv2a_vp_warp_loaded = false;      /* R5: vs_studio is whole again */
-	nv2a_vp_warp_selected = false;
+	/* R5, #170: every shared region holds the resident programs again */
+	nv2a_vp_region_a = nv2a_vp_region_b = nv2a_vp_region_c = NV2A_VPR_RESIDENT;
 }
 
 /* R5 (divergences.md #147): `count` instructions of `words` into program
@@ -1587,52 +1648,68 @@ static void nv2a_vp_load_slots( uint32_t slot, const uint32_t *words, uint32_t c
 	}
 
 	nv2a_vp_selected = NV2A_VP_COUNT; /* the next select pushes the preamble and its PROGRAM_START */
-	nv2a_vp_warp_selected = false;
 	NV2A_FT_ADD( XBOX_FT_W_VP_LOADS, 1 );
 }
 
-/* The slot vs_warp starts at: vs_studio's last NV2A_VP_WARP_INSTRUCTIONS. */
-static uint32_t nv2a_vp_warp_slot( void )
+/* #147, #170: puts what `want` names into the shared regions that differ.
+   Adjacent regions that both need loading from the same program go in
+   one load. */
+static void nv2a_vp_place( nv2a_vp_region_t a, nv2a_vp_region_t b, nv2a_vp_region_t c, qboolean need_a, qboolean need_b, qboolean need_c )
 {
-	return nv2a_vp_start[NV2A_VP_STUDIO] + nv2a_vp_table[NV2A_VP_STUDIO].instructions - NV2A_VP_WARP_INSTRUCTIONS;
+	qboolean load_a = need_a && nv2a_vp_region_a != a;
+	qboolean load_b = need_b && nv2a_vp_region_b != b;
+	qboolean load_c = need_c && nv2a_vp_region_c != c;
+
+	/* A (vs_studio's or vs_warp's) */
+	if( load_a && load_b && a == b )
+	{
+		/* one run [A, C): vs_warp whole, or vs_studio's last W slots */
+		const uint32_t *w = a == NV2A_VPR_WARP ? nv2a_vp_warp_words : &nv2a_vp_image[NV2A_VP_REGION_A * 4];
+
+		nv2a_vp_load_slots( NV2A_VP_REGION_A, w, NV2A_VP_REGION_C - NV2A_VP_REGION_A );
+		load_a = load_b = false;
+	}
+	else if( load_a )
+	{
+		const uint32_t *w = a == NV2A_VPR_WARP ? nv2a_vp_warp_words : &nv2a_vp_image[NV2A_VP_REGION_A * 4];
+
+		nv2a_vp_load_slots( NV2A_VP_REGION_A, w, NV2A_VP_REGION_B - NV2A_VP_REGION_A );
+		load_a = false;
+	}
+	nv2a_vp_region_a = need_a ? a : nv2a_vp_region_a;
+
+	/* B and C: the chrome tail as one run [B, END) when both need it */
+	if( load_b && load_c && b == NV2A_VPR_CHROME && c == NV2A_VPR_CHROME )
+	{
+		nv2a_vp_load_slots( NV2A_VP_REGION_B, nv2a_vp_chrome_words, NV2A_VP_CHROME_TAIL );
+		load_b = load_c = false;
+	}
+	if( load_b )
+	{
+		const uint32_t *w = b == NV2A_VPR_CHROME ? nv2a_vp_chrome_words
+			: b == NV2A_VPR_WARP ? &nv2a_vp_warp_words[( NV2A_VP_REGION_B - NV2A_VP_REGION_A ) * 4]
+			: &nv2a_vp_image[NV2A_VP_REGION_B * 4];
+
+		nv2a_vp_load_slots( NV2A_VP_REGION_B, w, NV2A_VP_REGION_C - NV2A_VP_REGION_B );
+	}
+	if( load_c )
+	{
+		const uint32_t *w = c == NV2A_VPR_CHROME ? &nv2a_vp_chrome_words[( NV2A_VP_REGION_C - NV2A_VP_REGION_B ) * 4]
+			: &nv2a_vp_image[NV2A_VP_REGION_C * 4];
+
+		nv2a_vp_load_slots( NV2A_VP_REGION_C, w, NV2A_VP_REGION_END - NV2A_VP_REGION_C );
+	}
+	if( need_b )
+		nv2a_vp_region_b = b;
+	if( need_c )
+		nv2a_vp_region_c = c;
 }
 
-/* R5: selects vs_warp, loading it first if vs_studio's tail is there. */
-static void nv2a_select_warp_program( void )
+/* Pushes PROGRAM_START for `vp` (at `slot`) unless it is selected, with
+   the program-mode preamble when no program was selected since a load. */
+static void nv2a_vp_start_program( nv2a_vp_t vp, uint32_t slot )
 {
 	uint32_t *p;
-
-	if( !nv2a_vp_warp_loaded )
-	{
-		nv2a_vp_load_slots( nv2a_vp_warp_slot(), nv2a_vp_warp_words, NV2A_VP_WARP_INSTRUCTIONS );
-		nv2a_vp_warp_loaded = true;
-	}
-	if( nv2a_vp_warp_selected )
-		return;
-
-	p = pb_begin();
-	p = pb_push1( p, NV097_SET_TRANSFORM_EXECUTION_MODE,
-		MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_MODE_PROGRAM )
-		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, nv2a_vp_warp_slot());
-	pb_end( p );
-	nv2a_vp_selected = NV2A_VP_COUNT; /* none of the resident ones */
-	nv2a_vp_warp_selected = true;
-}
-
-static void nv2a_select_vertex_program( nv2a_vp_t vp )
-{
-	uint32_t *p;
-
-	/* R5: vs_warp sits over vs_studio's tail; put the tail back first. */
-	if( vp == NV2A_VP_STUDIO && nv2a_vp_warp_loaded )
-	{
-		const uint32_t keep = nv2a_vp_table[NV2A_VP_STUDIO].instructions - NV2A_VP_WARP_INSTRUCTIONS;
-
-		nv2a_vp_load_slots( nv2a_vp_warp_slot(), &nv2a_vp_studio_words[keep * 4], NV2A_VP_WARP_INSTRUCTIONS );
-		nv2a_vp_warp_loaded = false;
-	}
 
 	if( nv2a_vp_selected == vp )
 		return;
@@ -1645,10 +1722,46 @@ static void nv2a_select_vertex_program( nv2a_vp_t vp )
 			| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
 		p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
 	}
-	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, nv2a_vp_start[vp] );
+	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, slot );
 	pb_end( p );
 	nv2a_vp_selected = vp;
-	nv2a_vp_warp_selected = false;
+}
+
+/* R5: selects vs_warp, loading it over vs_studio's tail first if needed. */
+static void nv2a_select_warp_program( void )
+{
+	if( nv2a_vp_selected == NV2A_VP_WARP )
+		return;
+	nv2a_vp_place( NV2A_VPR_WARP, NV2A_VPR_WARP, NV2A_VPR_RESIDENT, true, true, false );
+	nv2a_vp_start_program( NV2A_VP_WARP, NV2A_VP_REGION_A );
+}
+
+/* #170: selects vs_studio with the chrome tail (it starts where vs_studio
+   does, slot 0). */
+static void nv2a_select_chrome_program( void )
+{
+	if( nv2a_vp_selected == NV2A_VP_CHROME )
+		return;
+	nv2a_vp_place( NV2A_VPR_RESIDENT, NV2A_VPR_CHROME, NV2A_VPR_CHROME, true, true, true );
+	nv2a_vp_start_program( NV2A_VP_CHROME, nv2a_vp_start[NV2A_VP_STUDIO] );
+}
+
+static void nv2a_select_vertex_program( nv2a_vp_t vp )
+{
+	/* Selected means its slots are in place: every load clears the
+	   selection (nv2a_vp_load_slots), and selecting another program
+	   changes it. */
+	if( nv2a_vp_selected == vp )
+		return;
+
+	/* R5, #170: put back whatever the non-resident programs left over
+	   this one's slots. */
+	if( vp == NV2A_VP_STUDIO )
+		nv2a_vp_place( NV2A_VPR_RESIDENT, NV2A_VPR_RESIDENT, NV2A_VPR_RESIDENT, true, true, false );
+	else
+		nv2a_vp_place( NV2A_VPR_RESIDENT, NV2A_VPR_RESIDENT, NV2A_VPR_RESIDENT, false, false, true );
+
+	nv2a_vp_start_program( vp, nv2a_vp_start[vp] );
 }
 
 /* ps_lit or ps_2d. Each upload resets the final combiner to its unfogged
@@ -7969,15 +8082,21 @@ static float    nv2a_sgpu_elight_shadow[NV2A_SGPU_ELIGHT_REGS][4];
 static qboolean nv2a_sgpu_elight_valid;
 static float    nv2a_sgpu_mesh_shadow[NV2A_SGPU_MESH_REGS][4];
 static qboolean nv2a_sgpu_mesh_valid;
+static float    nv2a_sgpu_chrome_shadow[NV2A_SGPU_CHROME_REGS][4]; /* #170: c[94..95] */
+static qboolean nv2a_sgpu_chrome_valid;
 static float    nv2a_sgpu_pal_rows_shadow[NV2A_SGPU_MAX_PALETTE * 3][4];
 static float    nv2a_sgpu_pal_lights_shadow[NV2A_SGPU_MAX_PALETTE][4];
 static uint32_t nv2a_sgpu_pal_valid_count; /* palette entries the shadow holds, from 0 */
 
 /* vs_studio (vs_studio.inl, the vp20compiler output of vs_studio.vp,
-   resident: nv2a_vp_table) with the TriAPI's ps_2d combiner. */
-static void nv2a_init_studio_shader( void )
+   resident: nv2a_vp_table), or with the chrome tail (#170), with the
+   TriAPI's ps_2d combiner. */
+static void nv2a_init_studio_shader( qboolean chrome )
 {
-	nv2a_select_vertex_program( NV2A_VP_STUDIO );
+	if( chrome )
+		nv2a_select_chrome_program();
+	else
+		nv2a_select_vertex_program( NV2A_VP_STUDIO );
 	nv2a_select_pixel_program( NV2A_PS_2D );
 }
 
@@ -8057,12 +8176,12 @@ static void nv2a_sgpu_push_consts( uint32_t slot, const float (*v)[4], uint32_t 
    array format reset (then 0/1/2/9 pointed at the submodel's vertices by
    the caller), and c[13..15] once a frame. The constants above c[4]
    survive other paths, so nothing else is reloaded here. */
-static void nv2a_sgpu_enter( void )
+static void nv2a_sgpu_enter( qboolean chrome )
 {
 	nv2a_pb_block_t b;
 	int i;
 
-	nv2a_init_studio_shader();
+	nv2a_init_studio_shader( chrome );
 	nv2a_resident_program = NV2A_RESIDENT_STUDIO;
 
 	nv2a_blk_open( &b );
@@ -8095,6 +8214,7 @@ static void nv2a_sgpu_invalidate_consts( void )
 	nv2a_sgpu_submodel_valid = false;
 	nv2a_sgpu_elight_valid = false;
 	nv2a_sgpu_mesh_valid = false;
+	nv2a_sgpu_chrome_valid = false;
 	nv2a_sgpu_pal_valid_count = 0;
 	nv2a_wgpu_table_valid = false; /* R5: the water's, by the same rule */
 	nv2a_wgpu_params_valid = false;
@@ -8203,7 +8323,8 @@ void nv2a_sgpu_load_palette( const nv2a_sgpu_palette_t *pal, const float (*bones
 		nv2a_sgpu_pal_valid_count = n;
 }
 
-void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_consts[NV2A_SGPU_MESH_REGS][4] )
+qboolean nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_consts[NV2A_SGPU_MESH_REGS][4],
+	const float (*chrome)[4] )
 {
 	const nv2a_sgpu_mesh_t *m = &geo->meshes[mesh];
 	nv2a_2d_batch_key_t key;
@@ -8219,10 +8340,12 @@ void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_
 	   nv2a_tex_mark_used, which keeps the skin cache from evicting a skin
 	   this frame still reads). */
 	if( !nv2a_2d_resolve_batch_key( &key ))
-		return;
+		return false;
 
 	if( !nv2a_sgpu_entered )
-		nv2a_sgpu_enter();
+		nv2a_sgpu_enter( chrome != NULL );
+	else
+		nv2a_init_studio_shader( chrome != NULL ); /* #170: vs_studio, or with the chrome tail */
 	nv2a_lit_state_current = false;
 	nv2a_2d_dirty = true;
 	nv2a_2d_pushed_valid = false;
@@ -8257,6 +8380,13 @@ void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_
 		memcpy( nv2a_sgpu_mesh_shadow, mesh_consts, sizeof( nv2a_sgpu_mesh_shadow ));
 		nv2a_sgpu_mesh_valid = true;
 		nv2a_wgpu_params_valid = false; /* R5: c[10..12] are the water's too */
+	}
+	/* #170: the chrome tail's c[94..95] (chrome origin, RI.vright) */
+	if( chrome && ( !nv2a_sgpu_chrome_valid || memcmp( chrome, nv2a_sgpu_chrome_shadow, sizeof( nv2a_sgpu_chrome_shadow ))))
+	{
+		nv2a_blk_consts( &b, NV2A_SGPU_HW_C0 + NV2A_SGPU_C_CHROME, chrome, NV2A_SGPU_CHROME_REGS );
+		memcpy( nv2a_sgpu_chrome_shadow, chrome, sizeof( nv2a_sgpu_chrome_shadow ));
+		nv2a_sgpu_chrome_valid = true;
 	}
 	nv2a_blk_room( &b, 22 + NV2A_STAGE0_DWORDS );
 	p = b.p;
@@ -8310,6 +8440,7 @@ void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_
 		p = pb_push1( p, NV097_SET_DEPTH_FUNC, NV097_SET_DEPTH_FUNC_V_LEQUAL );
 		pb_end( p );
 	}
+	return true;
 }
 
 /* X9-X step 11 (r_studio_bridge.h): r_warp.c's water pieces, whole

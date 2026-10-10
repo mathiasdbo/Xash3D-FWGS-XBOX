@@ -17,7 +17,11 @@
 # 106 instructions: with vs_lit (12), vs_2d (7) and vs_tri (11) it fills
 # the NV2A's 136 program slots exactly, all four resident at once
 # (r_context.c nv2a_vp_table). Any instruction added here needs one taken
-# out, or one of the others made non-resident.
+# out, or one of the others made non-resident. vs_studio is first in
+# program memory, and its first 104 instructions are also the prefix of
+# the chrome program (vs_chrome.vp, divergences.md #170), whose 28-slot
+# tail replaces the last two and runs on over vs_lit, vs_2d and the start
+# of vs_tri when it is loaded: 104 + 28 = 132 of the 136 slots.
 #
 # What it computes, per vertex (gl_studio.c R_StudioDrawPoints, :1951):
 #   position = bonestransform[vertbone] * v        (Matrix3x4_VectorTransform, :1997)
@@ -99,13 +103,15 @@ MOV o[HPOS].w, R0;
 MOV o[FOGC].x, R0.w;
 
 # --- local lights: R n, then both lights packed (r in xy, |L|^2 in zw) ---
-DP3 R4.x, v[2], c[A0.x + 0];
-DP3 R4.y, v[2], c[A0.x + 1];
-DP3 R4.z, v[2], c[A0.x + 2];
+# R n stays in R10 to the end: the chrome tail (vs_chrome.vp, divergences.md
+# #170) reads it after the last instruction below that it replaces.
+DP3 R10.x, v[2], c[A0.x + 0];
+DP3 R10.y, v[2], c[A0.x + 1];
+DP3 R10.z, v[2], c[A0.x + 2];
 ADD R2.xyz, c[88], -R1;
 ADD R3.xyz, c[90], -R1;
-DP3 R6.x, R4, R2;
-DP3 R6.y, R4, R3;
+DP3 R6.x, R10, R2;
+DP3 R6.y, R10, R3;
 DP3 R6.z, R2, R2;
 DP3 R6.w, R3, R3;
 MUL R6.xy, R6, c[93];
@@ -118,8 +124,8 @@ MUL R8.xy, R8, R6;
 SLT R7.zw, c[93].w, R6.xxxy;
 MAD R9.xyz, R8.x, c[89].w, c[89];
 MUL R9.xyz, R9, R7.z;
-MAD R10.xyz, R8.y, c[91].w, c[91];
-MAD R9.xyz, R10, R7.w, R9;
+MAD R4.xyz, R8.y, c[91].w, c[91];
+MAD R9.xyz, R4, R7.w, R9;
 MAX R9.w, R7.z, R7.w;
 
 # --- illum (R_StudioLighting) ---
@@ -205,7 +211,9 @@ ADD R8.xyz, R8, -R2;
 MAD R2.xyz, R8, R9.w, R2;
 MUL o[COL0].xyz, R2, c[14].z;
 
-# --- texture coordinates: ( s * 1/w ) * texture width, q = 1 ---
-MUL o[TEX0].xy, R11, c[12].zwzw;
+# --- texture coordinates: q = 1, then ( s * 1/w ) * texture width ---
+# These two are the last two slots, which vs_chrome.vp's tail replaces
+# (divergences.md #170): everything above is the chrome variant's too.
 MOV o[TEX0].zw, c[9];
+MUL o[TEX0].xy, R11, c[12].zwzw;
 END

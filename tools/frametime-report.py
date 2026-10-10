@@ -148,6 +148,9 @@ PART_TIMES = ("part_kc", "part_think_kc")
 # k_efx - ref/nv2a's CL_DrawBeams with its noise and geometry, and
 # CL_DrawTracers. Times.
 EFX_TIMES = ("beam_kc", "beam_noise_kc", "beam_geom_kc", "tracer_kc")
+# Chrome studio meshes (recorders from 2026-10-09, x9-perf-chrome-vp,
+# divergence #170): the CPU studio work the chrome meshes caused. A time.
+CHROME_TIMES = ("chrome_kc",)
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -1257,7 +1260,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
     timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES) \
-        | set(PART_TIMES) | set(EFX_TIMES)
+        | set(PART_TIMES) | set(EFX_TIMES) | set(CHROME_TIMES)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1513,6 +1516,7 @@ def summary_text(rec, rows, sess):
     lines.extend(clents_text(rec, rows))
     lines.extend(particles_text(rec, rows))
     lines.extend(beams_text(rec, rows))
+    lines.extend(chrome_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -1845,6 +1849,34 @@ def beams_text(rec, rows):
     for r in failed:
         lines.append("  WARNING %s: the tracer pass could not bind its sprite in %s of in-play frames - tracers there were not drawn"
                      % (r["map"][:18], "%.1f%%" % (100.0 * r["work_avg"]["tracer_fails"])))
+    return lines
+
+
+def chrome_text(rec, rows):
+    """Chrome studio meshes per in-play frame (recorders from 2026-10-09,
+    x9-perf-chrome-vp, divergence #170): the STUDIO_NF_CHROME meshes of
+    submodels the GPU studio path would otherwise draw, drawn on the CPU
+    (meshes and tricmd vertices, exact in xemu) and on the vertex unit,
+    then the CPU time the CPU ones cost (their draws, and the submodel's
+    transform and lighting when they were its only CPU meshes) next to
+    k_studio_points, which contains it. Nothing for a session with no
+    chrome mesh drawn."""
+    if "chrome_kc" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r
+            and (r["work_avg"].get("chrome_meshes", 0.0) or r["work_avg"].get("chrome_gpu", 0.0))]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "chrome studio meshes per in-play frame: CPU meshes avg/peak, their tricmd verts, GPU meshes "
+             "(exact in xemu); ms: k_studio_points, of it the CPU work the chrome meshes caused"]
+    lines.append("%-18s %11s %9s %9s %8s %8s" % ("map", "chrome cpu", "verts", "chrome gpu", "k_points", "chrome"))
+    for r in maps:
+        a = r["work_avg"]
+        lines.append("%-18s %11s %9s %9s %8.3f %8.3f" % (
+            r["map"][:18], "%s/%s" % (short(a.get("chrome_meshes", 0.0)), short(r["work_peak"].get("chrome_meshes", 0.0))),
+            short(a.get("chrome_verts", 0.0)), short(a.get("chrome_gpu", 0.0)),
+            r.get("span_ms", {}).get("k_studio_points", 0.0), a.get("chrome_kc", 0.0) * k))
     return lines
 
 

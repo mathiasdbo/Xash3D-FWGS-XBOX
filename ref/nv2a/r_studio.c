@@ -162,6 +162,10 @@ CVAR_DEFINE_AUTO( r_studio_builtin_renderer, "0", 0, "use built-in studio model 
 /* divergences.md #143: not in ref/gl - the A/B switch for the GPU studio
    path (0 = every submodel through the CPU path below, as before). */
 CVAR_DEFINE_AUTO( r_studio_gpu, "1", 0, "ref_nv2a: skin and light studio models on the GPU (0 = CPU path)" );
+/* divergences.md #170: not in ref/gl - the A/B switch for chrome meshes
+   on the GPU path (vs_studio's chrome tail); 0 draws them on the CPU
+   path, as before. */
+CVAR_DEFINE_AUTO( r_studio_chrome_gpu, "1", 0, "ref_nv2a: chrome studio meshes on the GPU (0 = CPU path)" );
 static cvar_t *cl_righthand = NULL;
 
 static r_studio_interface_t *pStudioDraw;
@@ -323,6 +327,7 @@ void R_StudioInit( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_sort_textures );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_builtin_renderer );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_gpu );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_chrome_gpu );
 	cl_righthand = gEngfuncs.pfnGetCvarPointer( "cl_righthand" );
 
 	nv2a_studio_ctx.viewent = (cl_entity_t *)ENGINE_GET_PARM( PARM_GET_VIEWENT_PTR );
@@ -1367,6 +1372,32 @@ static void R_StudioGenerateNormals( void )
 		VectorNormalize( g_studio.norms[i] );
 }
 
+/* divergences.md #170: the body of R_StudioSetupChrome's cache refill
+   (gl_studio.c:1124-1141), unchanged, with its two results passed out so
+   the GPU path (R_StudioGpuChromeBones) can compute a bone's vectors the
+   same way without stamping the cache. */
+static void R_StudioChromeVectors( int bone, vec3_t chromeright, vec3_t chromeup )
+{
+	// calculate vectors from the viewer to the bone. This roughly adjusts for position
+	vec3_t chromeupvec;    // g_studio.chrome t vector in world reference frame
+	vec3_t chromerightvec; // g_studio.chrome s vector in world reference frame
+	vec3_t tmp;            // vector pointing at bone in world reference frame
+
+	VectorNegate( g_studio.chrome_origin, tmp );
+	tmp[0] += g_studio.lighttransform[bone][0][3];
+	tmp[1] += g_studio.lighttransform[bone][1][3];
+	tmp[2] += g_studio.lighttransform[bone][2][3];
+
+	VectorNormalize( tmp );
+	CrossProduct( tmp, nv2a_studio_ctx.vright, chromeupvec );
+	VectorNormalize( chromeupvec );
+	CrossProduct( chromeupvec, tmp, chromerightvec );
+	VectorNormalize( chromerightvec );
+
+	Matrix3x4_VectorIRotate( g_studio.lighttransform[bone], chromeupvec, chromeup );
+	Matrix3x4_VectorIRotate( g_studio.lighttransform[bone], chromerightvec, chromeright );
+}
+
 /*
 ====================
 StudioSetupChrome
@@ -1379,25 +1410,7 @@ static void R_StudioSetupChrome( float *pchrome, int bone, vec3_t normal )
 
 	if( g_studio.chromeage[bone] != g_studio.framecount )
 	{
-		// calculate vectors from the viewer to the bone. This roughly adjusts for position
-		vec3_t chromeupvec;    // g_studio.chrome t vector in world reference frame
-		vec3_t chromerightvec; // g_studio.chrome s vector in world reference frame
-		vec3_t tmp;            // vector pointing at bone in world reference frame
-
-		VectorNegate( g_studio.chrome_origin, tmp );
-		tmp[0] += g_studio.lighttransform[bone][0][3];
-		tmp[1] += g_studio.lighttransform[bone][1][3];
-		tmp[2] += g_studio.lighttransform[bone][2][3];
-
-		VectorNormalize( tmp );
-		CrossProduct( tmp, nv2a_studio_ctx.vright, chromeupvec );
-		VectorNormalize( chromeupvec );
-		CrossProduct( chromeupvec, tmp, chromerightvec );
-		VectorNormalize( chromerightvec );
-
-		Matrix3x4_VectorIRotate( g_studio.lighttransform[bone], chromeupvec, g_studio.chromeup[bone] );
-		Matrix3x4_VectorIRotate( g_studio.lighttransform[bone], chromerightvec, g_studio.chromeright[bone] );
-
+		R_StudioChromeVectors( bone, g_studio.chromeright[bone], g_studio.chromeup[bone] );
 		g_studio.chromeage[bone] = g_studio.framecount;
 	}
 
@@ -2001,6 +2014,23 @@ static void R_StudioDrawChromeMesh( short *ptricmds, vec3_t *pstudionorms, float
 }
 
 
+/* divergences.md #170, the recorder's chrome_verts: the vertices a
+   mesh's tricmds draw (each strip or fan's count, gl_studio.c:1666-1673). */
+static uint32_t R_StudioTricmdVerts( const short *ptricmds )
+{
+	uint32_t n = 0;
+	int      i;
+
+	while(( i = *( ptricmds++ )))
+	{
+		if( i < 0 )
+			i = -i;
+		n += (uint32_t)i;
+		ptricmds += 4 * i;
+	}
+	return n;
+}
+
 /*
 ====================
 divergences.md #143: the GPU studio path
@@ -2026,8 +2056,12 @@ uploaded per draw. Everything else stays on the CPU path, unchanged
   - kRenderFxGlowShell (the shell's vertex offset, :2003-2009) and a forced
     chrome face (g_nForceFaceFlags);
   - kRenderTransAdd entities (the light value is the blend, :2023-2031);
-  - chrome meshes (R_StudioSetupChrome's texture coordinates, :2042) and
-    a mesh whose bones do not fit the palette (none in the retail game);
+  - chrome meshes (R_StudioSetupChrome's texture coordinates, :2042)
+    while r_studio_chrome_gpu is 0, or whose vertex and normal bones
+    differ, or whose bones' cached chrome vectors this model would not
+    compute itself (R_StudioGpuChromeBones; divergences.md #170 draws the
+    rest with vs_studio's chrome tail), and a mesh whose bones do not fit
+    the palette (none in the retail game);
   - every studio model while the gamma table cannot be represented within
     half a colour byte by the program's 32 segments (non-default
     gamma/brightness cvars: R_StudioGpuGamma);
@@ -2202,6 +2236,75 @@ static qboolean R_StudioGpuElightBones( void )
 	return true;
 }
 
+/* gpu_mesh[] in R_StudioDrawPointsInternal (divergences.md #143, #170) */
+#define SGPU_MESH_CPU        0 /* the CPU path */
+#define SGPU_MESH_GPU        1 /* the GPU path, a chrome mesh through vs_studio's chrome tail */
+#define SGPU_MESH_CHROME_CPU 2 /* a chrome mesh the GPU path would draw but for the chrome
+                                  conditions: the CPU path, counted (chrome_meshes) */
+
+/* divergences.md #170: whether vs_studio's chrome tail may draw chrome
+   mesh `mesh` (its normals from `first_norm`), with the reference's
+   per-bone cache kept as the CPU path would keep it. R_StudioSetupChrome
+   (gl_studio.c:1120-1153) computes a bone's chrome vectors once per
+   g_studio.framecount - a cookie each model draw bumps, except that a
+   player's weapon model is drawn without a new one (see
+   R_StudioGpuElightBones) - from the first model to reach the bone, and
+   later normals of that bone reuse them. The tail computes them per
+   vertex from this model's bone, so for each normal bone of the mesh:
+   a bone not yet computed this cookie is computed and stamped here, as
+   the CPU path's lighting loop would have (so a later CPU draw reuses
+   exactly what the reference would); a bone already computed must hold
+   exactly what this model computes now, or the mesh stays on the CPU and
+   reuses them there. The tail also reads the bone's bonestransform rows
+   where the reference reads its lighttransform: they must be equal.
+   `seen` holds the bones this submodel already passed (all its chrome
+   meshes share one model, transform and cookie, so a bone passes once).
+   Bodyparts and a glow shell's two passes share one cookie too, and the
+   glow shell's R_StudioBuildNormalTable resets the cache and moves the
+   chrome origin (gl_studio.c:988-990, :1013-1015): the glow shell never
+   reaches this path, and the exact compare sends any mesh whose bones it
+   left stamped to the CPU, which reuses them as the reference does. */
+static qboolean R_StudioGpuChromeBones( int first_norm, int numnorms, uint32_t seen[( MAXSTUDIOBONES + 31 ) / 32] )
+{
+	const byte *pnormbone = (const byte *)m_pStudioHeader + m_pSubModel->norminfoindex;
+	int i;
+
+	if( first_norm < 0 || numnorms < 0 || first_norm + numnorms > m_pSubModel->numnorms )
+		return false;
+
+	for( i = first_norm; i < first_norm + numnorms; i++ )
+	{
+		int bone = pnormbone[i];
+		vec3_t right, up;
+
+		if( bone >= MAXSTUDIOBONES )
+			return false;
+		if( seen[bone >> 5] & ( 1u << ( bone & 31 )))
+			continue;
+
+		if( memcmp( g_studio.lighttransform[bone], g_studio.bonestransform[bone], sizeof( matrix3x4 )))
+			return false;
+
+		R_StudioChromeVectors( bone, right, up );
+		if( g_studio.chromeage[bone] != g_studio.framecount )
+		{
+			VectorCopy( right, g_studio.chromeright[bone] );
+			VectorCopy( up, g_studio.chromeup[bone] );
+			g_studio.chromeage[bone] = g_studio.framecount;
+		}
+		else if( !VectorCompare( right, g_studio.chromeright[bone] ) || !VectorCompare( up, g_studio.chromeup[bone] ))
+		{
+			return false;
+		}
+
+		/* marked only once every check above passed: a bone that failed
+		   is checked again, and fails again, for the next mesh that
+		   shares it (Codex review) */
+		seen[bone >> 5] |= 1u << ( bone & 31 );
+	}
+	return true;
+}
+
 /* Whether the program can light this entity's local lights (the list
    above). */
 static qboolean R_StudioGpuElights( void )
@@ -2263,11 +2366,21 @@ static const nv2a_sgpu_geometry_t *R_StudioGpuGeometry( mstudiotexture_t *ptextu
 
 /* One mesh through the GPU path: R_StudioDrawNormalMesh/
    R_StudioDrawFloatMesh's output, with the same colour (blend * 255,
-   R_StudioSetColorArray, gl_studio.c:1435) and texture-coordinate scale. */
+   R_StudioSetColorArray, gl_studio.c:1435) and texture-coordinate scale;
+   or, for a chrome mesh (divergences.md #170), the chrome mesh's: the
+   same colour (R_StudioSetColorBegin, gl_studio.c:1695), and the chrome
+   coordinates times 1/width and 1/height (:2087-2088) whatever the
+   coordinate format - R_StudioSubmitMesh tests STUDIO_NF_CHROME before
+   STUDIO_NF_UV_COORDS (:1924, :1934). The reference's default path is
+   R_StudioBuildArrayChromeMesh (r_studio_drawelements 1, :124; texture
+   coordinates :1873-1874), the same arithmetic as R_StudioDrawChromeMesh's
+   (:1696). */
 static void R_StudioDrawGpuMesh( const nv2a_sgpu_geometry_t *geo, int mesh, float flat_illum, float s, float t, int *loaded_palette )
 {
 	const nv2a_sgpu_mesh_t *m = &geo->meshes[mesh];
 	float consts[NV2A_SGPU_MESH_REGS][4];
+	float chrome[NV2A_SGPU_CHROME_REGS][4];
+	qboolean is_chrome = FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ) ? true : false;
 	byte alpha = nv2a_studio_ctx.blend * 255;
 
 	if( (int)m->palette != *loaded_palette )
@@ -2276,10 +2389,18 @@ static void R_StudioDrawGpuMesh( const nv2a_sgpu_geometry_t *geo, int mesh, floa
 		*loaded_palette = m->palette;
 	}
 
-	if( m->uv_float )
+	if( m->uv_float && !is_chrome )
 		s = t = 1.0f;
 	nv2a_sgpu_mesh_consts( g_nFaceFlags, flat_illum, g_studio.lightcolor, alpha, s, t, 1.0f, 1.0f, consts );
-	nv2a_sgpu_draw_mesh( geo, mesh, consts );
+	if( is_chrome )
+	{
+		nv2a_sgpu_chrome_consts( g_studio.chrome_origin, nv2a_studio_ctx.vright, chrome );
+		/* counted only when drawn (Codex review) */
+		if( nv2a_sgpu_draw_mesh( geo, mesh, consts, (const float (*)[4])chrome ))
+			NV2A_FT_ADD( XBOX_FT_W_CHROME_GPU, 1 );
+	}
+	else
+		nv2a_sgpu_draw_mesh( geo, mesh, consts, NULL );
 }
 
 /*
@@ -2304,10 +2425,17 @@ static void R_StudioDrawPointsInternal( void )
 	/* divergences.md #143 */
 	const nv2a_sgpu_geometry_t *gpu = NULL;
 	qboolean         cpu_needed = true, gpu_drawing = false;
+	/* SGPU_MESH_*: read only when gpu is set */
 	byte             gpu_mesh[MAXSTUDIOMESHES];
 	mstudiomesh_t    *pmesh_base;
 	float            gpu_flat_illum = 0.0f;
 	int              gpu_palette = -1;
+	/* divergences.md #170, the recorder's chrome counters: chrome_only, a
+	   submodel whose CPU transform and lighting run only for chrome
+	   meshes the GPU path could not take (SGPU_MESH_CHROME_CPU). */
+	qboolean         chrome_only = false;
+	xbox_ft_span_t   chrome_span;
+	uint64_t         chrome_ticks = 0;
 
 	if( !m_pStudioHeader )
 		return;
@@ -2356,17 +2484,40 @@ static void R_StudioDrawPointsInternal( void )
 
 	if( gpu )
 	{
+		qboolean other_cpu = false;
+		int first_norm = 0;
+		uint32_t chrome_seen[( MAXSTUDIOBONES + 31 ) / 32];
+
+		memset( chrome_seen, 0, sizeof( chrome_seen ));
 		cpu_needed = false;
-		for( j = 0; j < m_pSubModel->nummesh; j++ )
+		for( j = 0; j < m_pSubModel->nummesh; first_norm += pmesh[j].numnorms, j++ )
 		{
 			int flags = ptexture[pskinref[pmesh[j].skinref]].flags | g_nForceFaceFlags;
-
-			gpu_mesh[j] = !FBitSet( flags, STUDIO_NF_CHROME ) && gpu->meshes[j].palette != NV2A_SGPU_NO_PALETTE
+			qboolean fits = gpu->meshes[j].palette != NV2A_SGPU_NO_PALETTE
 				&& ( FBitSet( flags, STUDIO_NF_UV_COORDS ) ? 1 : 0 ) == gpu->meshes[j].uv_float;
-			if( !gpu_mesh[j] )
+
+			if( !FBitSet( flags, STUDIO_NF_CHROME ))
+				gpu_mesh[j] = fits ? SGPU_MESH_GPU : SGPU_MESH_CPU;
+			else if( !fits )
+				gpu_mesh[j] = SGPU_MESH_CPU;
+			else if( r_studio_chrome_gpu.value && gpu->meshes[j].same_bone
+				&& R_StudioGpuChromeBones( first_norm, pmesh[j].numnorms, chrome_seen ))
+				gpu_mesh[j] = SGPU_MESH_GPU; /* divergences.md #170: vs_studio's chrome tail */
+			else
+				gpu_mesh[j] = SGPU_MESH_CHROME_CPU;
+
+			if( gpu_mesh[j] != SGPU_MESH_GPU )
+			{
 				cpu_needed = true;
+				if( gpu_mesh[j] != SGPU_MESH_CHROME_CPU )
+					other_cpu = true;
+			}
 		}
+		chrome_only = cpu_needed && !other_cpu;
 	}
+
+	if( chrome_only )
+		xbox_ft_span_begin( &chrome_span );
 
 	if( !cpu_needed )
 	{
@@ -2448,6 +2599,9 @@ static void R_StudioDrawPointsInternal( void )
 			}
 		}
 	}
+
+	if( chrome_only )
+		chrome_ticks += xbox_ft_span_ticks_since( &chrome_span );
 
 	if( r_studio_sort_textures.value && need_sort )
 	{
@@ -2537,13 +2691,25 @@ static void R_StudioDrawPointsInternal( void )
 
 			R_StudioSetupSkin( m_pStudioHeader, pskinref[pmesh->skinref] );
 
-			if( gpu && gpu_mesh[pmesh - pmesh_base] )
+			if( gpu && gpu_mesh[pmesh - pmesh_base] == SGPU_MESH_GPU )
 			{
 				if( gpu_drawing )
 					R_StudioDrawGpuMesh( gpu, (int)( pmesh - pmesh_base ), gpu_flat_illum, s, t, &gpu_palette );
 			}
 			else if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
-				R_StudioDrawChromeMesh( ptricmds, pstudionorms, s, t, shellscale );
+			{
+				if( gpu && gpu_mesh[pmesh - pmesh_base] == SGPU_MESH_CHROME_CPU )
+				{
+					xbox_ft_span_begin( &chrome_span );
+					R_StudioDrawChromeMesh( ptricmds, pstudionorms, s, t, shellscale );
+					chrome_ticks += xbox_ft_span_ticks_since( &chrome_span );
+					NV2A_FT_ADD( XBOX_FT_W_CHROME_MESHES, 1 );
+					if( chrome_span.t0 ) /* the vertex count only while recording */
+						NV2A_FT_ADD( XBOX_FT_W_CHROME_VERTS, R_StudioTricmdVerts( ptricmds ));
+				}
+				else
+					R_StudioDrawChromeMesh( ptricmds, pstudionorms, s, t, shellscale );
+			}
 			else if( FBitSet( g_nFaceFlags, STUDIO_NF_UV_COORDS ))
 				R_StudioDrawFloatMesh( ptricmds, pstudionorms );
 			else
@@ -2560,6 +2726,8 @@ static void R_StudioDrawPointsInternal( void )
 		nv2a_studio_ctx.blend = oldblend;
 	}
 	nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_TRI;
+	if( chrome_ticks )
+		NV2A_FT_ADD( XBOX_FT_W_CHROME_KC, ( chrome_ticks + 500u ) / 1000u );
 }
 
 /* M2 span k_studio_points (#141). A wrapper, not a span at a call site:

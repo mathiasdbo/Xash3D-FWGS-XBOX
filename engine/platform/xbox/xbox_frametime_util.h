@@ -463,6 +463,16 @@ enum
 	XBOX_FT_W_TRACERS,       /* tracers drawn (not culled) */
 	XBOX_FT_W_TRACER_KC,     /* time: ref/nv2a's CL_DrawTracers, the tracers' own movement included */
 	XBOX_FT_W_TRACER_FAILS,  /* CL_DrawTracers passes that had tracers but could not bind the dot sprite, so drew none */
+	/* Chrome studio meshes (2026-10-09, x9-perf-chrome-vp, divergence
+	   #170): STUDIO_NF_CHROME meshes of a submodel the GPU studio path
+	   (#143) would otherwise draw - its geometry built, the mesh's bones
+	   in its palette, its coordinate format the built one. chrome_kc is
+	   the CPU time they cost: their draws, plus the submodel's CPU
+	   transform and lighting when they are its only CPU meshes. */
+	XBOX_FT_W_CHROME_MESHES, /* such chrome meshes the CPU path drew (R_StudioDrawChromeMesh) */
+	XBOX_FT_W_CHROME_VERTS,  /* their tricmd vertices */
+	XBOX_FT_W_CHROME_KC,     /* time: kilocycles of CPU studio work only those meshes caused (above) */
+	XBOX_FT_W_CHROME_GPU,    /* chrome meshes the vertex unit drew (vs_studio's chrome variant) */
 	XBOX_FT_W_END
 };
 

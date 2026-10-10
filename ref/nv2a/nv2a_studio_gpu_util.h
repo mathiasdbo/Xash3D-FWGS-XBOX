@@ -72,6 +72,15 @@ extern "C" {
    reaching a vertex and adds exactly nothing. */
 #define NV2A_SGPU_C_ELIGHT       ( NV2A_SGPU_C_END + 4u * ( NV2A_SGPU_MAX_PALETTE - NV2A_SGPU_LOW_BONES ))
 #define NV2A_SGPU_ELIGHT_REGS    6u
+/* divergences.md #170, the chrome tail (vs_chrome.vp): c[94] the chrome
+   origin, c[95] RI.vright - hardware 190 and 191, the last two, which
+   nothing else used. */
+#define NV2A_SGPU_C_CHROME       ( NV2A_SGPU_C_ELIGHT + NV2A_SGPU_ELIGHT_REGS )
+#define NV2A_SGPU_CHROME_REGS    2u
+/* c[94].w: the floor on each squared length before vs_chrome's RSQ, so a
+   zero vector normalises to zero as VectorNormalize leaves it
+   (xash3d_mathlib.h:131) instead of 0 * inf. */
+#define NV2A_SGPU_CHROME_TINY    1e-20f
 #define NV2A_SGPU_MAX_ELIGHTS    2u
 /* The floor on |L|^2 before its inverse square root. At |L| = 0 the
    reference's r is 0 too, so the light adds nothing (gl_studio.c:1393);
@@ -103,7 +112,9 @@ typedef struct
 	uint32_t tris;        /* the mesh's real triangles */
 	uint16_t palette;     /* NV2A_SGPU_NO_PALETTE: more bones than the palette holds, or normals
 	                         outside the mesh's own range - CPU path */
-	uint16_t uv_float;    /* built with HalfToFloat coordinates (STUDIO_NF_UV_COORDS) */
+	uint8_t  uv_float;    /* built with HalfToFloat coordinates (STUDIO_NF_UV_COORDS) */
+	uint8_t  same_bone;   /* divergences.md #170: every tricmd vertex's vertex bone is its normal's
+	                         bone, so vs_chrome's rows are the bone R_StudioSetupChrome reads */
 } nv2a_sgpu_mesh_t;
 
 typedef struct
@@ -282,6 +293,35 @@ void nv2a_sgpu_ref_elight_color( const uint32_t *linear, const uint32_t *screen,
    approximation (NV_vertex_program RoughApproxPower). */
 void nv2a_sgpu_vp_elight_color( const float consts[NV2A_SGPU_ELIGHT_REGS][4], const float rows[3][4],
 	const float localpos[3], const float normal[3], const float color[3], uint8_t out[3] );
+
+/* ------------------------------------------------------------------ */
+/* Chrome (divergences.md #170)                                        */
+/* ------------------------------------------------------------------ */
+
+/* R_StudioSetupChrome's per-bone vectors exactly as r_studio.c computes
+   them (ref/gl/gl_studio.c:1122-1143): from the bone's lighttransform
+   `rows`, g_studio.chrome_origin and RI.vright, the chrome "right" and
+   "up" vectors in the bone's frame. */
+void nv2a_sgpu_ref_chrome_bone( const float rows[3][4], const float origin[3], const float vright[3],
+	float right[3], float up[3] );
+
+/* The texture coordinates R_StudioDrawChromeMesh gives a vertex with
+   that bone's vectors (gl_studio.c:1146-1152, then * s and * t at :1696):
+   ( dot( n, right ) + 1 ) * 32 * s_scale, likewise for t. */
+void nv2a_sgpu_ref_chrome_st( const float right[3], const float up[3], const float normal[3],
+	float s_scale, float t_scale, float out[2] );
+
+/* c[94..95] for the chrome tail. */
+void nv2a_sgpu_chrome_consts( const float origin[3], const float vright[3], float out[NV2A_SGPU_CHROME_REGS][4] );
+
+/* vs_chrome.vp's arithmetic, operation for operation, in IEEE single
+   precision with RSQ as 1 / sqrtf (xemu's inversesqrt): the bone's
+   `rows` (bonestransform, which the CPU side requires to equal the
+   lighttransform), the model-space normal, c[94..95] and the mesh's
+   c[12] scale ( 1/width, 1/height ). The bound texture's scale (c[12].zw)
+   is left out: it multiplies both paths alike. */
+void nv2a_sgpu_vp_chrome_st( const float rows[3][4], const float normal[3], const float consts[NV2A_SGPU_CHROME_REGS][4],
+	float s_scale, float t_scale, float out[2] );
 
 #ifdef __cplusplus
 }

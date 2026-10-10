@@ -89,8 +89,13 @@ qboolean nv2a_sgpu_begin_submodel( const nv2a_sgpu_geometry_t *geo, const float 
 void nv2a_sgpu_load_palette( const nv2a_sgpu_palette_t *pal, const float (*bonestransform)[3][4], const float (*blightvec)[3] );
 /* Draws one mesh with the current GL-like state (nv2a_2d_desired, the
    bound texture, the fog). `mesh_consts` is c[10..12] without the bound
-   texture's scale, which this fills in ([2][2], [2][3]). */
-void nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_consts[NV2A_SGPU_MESH_REGS][4] );
+   texture's scale, which this fills in ([2][2], [2][3]). `chrome`, when
+   not NULL, is c[94..95] (nv2a_sgpu_chrome_consts) and the mesh is drawn
+   with vs_studio's chrome tail (divergences.md #170). Returns false when
+   nothing was drawn (the texture stage did not resolve, as an append
+   would have dropped the polygons too). */
+qboolean nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float mesh_consts[NV2A_SGPU_MESH_REGS][4],
+	const float (*chrome)[4] );
 
 #ifdef __cplusplus
 }

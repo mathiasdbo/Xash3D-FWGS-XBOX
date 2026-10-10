@@ -5,6 +5,20 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: chrome surfaces on weapons and characters drawn on the graphics chip
+
+The shiny "chrome" parts of models - the gloved hands and metal of every
+first-person weapon, spent shell casings, the guards' badges, a few
+items - were the last studio-model surfaces drawn entirely by the
+processor, and one of them made the processor redo the whole body part
+it sits on. They now go through the graphics chip's vertex unit like the
+rest, with the same reflection coordinates. In the emulator, with a
+weapon out on c1a0c, studio-model drawing takes 0.32 ms a frame instead
+of 0.95, and the whole frame's processor time drops by about 0.55 ms
+(7.75 to 7.18); the guard on the c1a0 tram costs 0.27 ms less. Screenshots of 13 scenes are
+identical, or differ by at most one colour level on a few pixels.
+`r_studio_chrome_gpu 0` gives the old drawing.
+
 ### Changed - Xbox: decal textures load faster
 
 Finding a decal's texture by name checked every one of the 3,661 entries

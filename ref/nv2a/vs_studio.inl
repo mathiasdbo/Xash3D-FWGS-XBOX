@@ -16,7 +16,11 @@
 // 106 instructions: with vs_lit (12), vs_2d (7) and vs_tri (11) it fills
 // the NV2A's 136 program slots exactly, all four resident at once
 // (r_context.c nv2a_vp_table). Any instruction added here needs one taken
-// out, or one of the others made non-resident.
+// out, or one of the others made non-resident. vs_studio is first in
+// program memory, and its first 104 instructions are also the prefix of
+// the chrome program (vs_chrome.vp, divergences.md #170), whose 28-slot
+// tail replaces the last two and runs on over vs_lit, vs_2d and the start
+// of vs_tri when it is loaded: 104 + 28 = 132 of the 136 slots.
 //
 // What it computes, per vertex (gl_studio.c R_StudioDrawPoints, :1951):
 //   position = bonestransform[vertbone] * v        (Matrix3x4_VectorTransform, :1997)
@@ -81,6 +85,10 @@
 // not exactly frac() on the console still lands on the right register.
 // Each ARL is followed by an instruction that does not read A0 (no
 // latency is documented for ARL; this costs nothing).
+// R n stays in R10 to the end: the chrome tail (vs_chrome.vp, divergences.md
+// #170) reads it after the last instruction below that it replaces.
+// These two are the last two slots, which vs_chrome.vp's tail replaces
+// (divergences.md #170): everything above is the chrome variant's too.
 0x00000000, 0x01a00200, 0x0836106c, 0x207007f8,
 0x00000000, 0x004d921b, 0x0836186c, 0x2cb007f8,
 0x00000000, 0x00ec001b, 0x0836186c, 0x281007fa,
@@ -94,13 +102,13 @@
 0x00000000, 0x0040001b, 0x0400486c, 0x2070e800,
 0x00000000, 0x0020001b, 0x0436106c, 0x20701800,
 0x00000000, 0x002000ff, 0x0436106c, 0x20708828,
-0x00000000, 0x00ac041b, 0x0836186c, 0x284007fa,
-0x00000000, 0x00ac241b, 0x0836186c, 0x244007fa,
-0x00000000, 0x00ac441b, 0x0836186c, 0x224007fa,
+0x00000000, 0x00ac041b, 0x0836186c, 0x28a007fa,
+0x00000000, 0x00ac241b, 0x0836186c, 0x24a007fa,
+0x00000000, 0x00ac441b, 0x0836186c, 0x22a007fa,
 0x00000000, 0x0077001b, 0x0c36146c, 0x5e2007f8,
 0x00000000, 0x0077401b, 0x0c36146c, 0x5e3007f8,
-0x00000000, 0x00a0001b, 0x4436486c, 0x286007f8,
-0x00000000, 0x00a0001b, 0x4436686c, 0x246007f8,
+0x00000000, 0x00a0001b, 0xa436486c, 0x286007f8,
+0x00000000, 0x00a0001b, 0xa436686c, 0x246007f8,
 0x00000000, 0x00a0001b, 0x2436486c, 0x226007f8,
 0x00000000, 0x00a0001b, 0x3436686c, 0x216007f8,
 0x00000000, 0x0057a01b, 0x6436186c, 0x2c6007f8,
@@ -113,8 +121,8 @@
 0x00000000, 0x0177a0ff, 0x0c02c86c, 0x237007f8,
 0x00000000, 0x00972000, 0x85fe186c, 0x3e9007f8,
 0x00000000, 0x0040001b, 0x9554e86c, 0x2e9007f8,
-0x00000000, 0x00976055, 0x85fe186c, 0x3ea007f8,
-0x00000000, 0x0080001b, 0xa5fee86e, 0x5e9007f8,
+0x00000000, 0x00976055, 0x85fe186c, 0x3e4007f8,
+0x00000000, 0x0080001b, 0x45fee86e, 0x5e9007f8,
 0x00000000, 0x014000aa, 0x75fee86c, 0x219007f8,
 0x00000000, 0x01a00240, 0x0836106c, 0x207007f8,
 0x00000000, 0x002d60ff, 0x0c36106c, 0x20701818,
@@ -185,5 +193,5 @@
 0x00000000, 0x0060001b, 0x8436146c, 0x9e8007f8,
 0x00000000, 0x0080001b, 0x85ff286c, 0x9e2007f8,
 0x00000000, 0x004dc01b, 0x2554186c, 0x2070e818,
-0x00000000, 0x004d801b, 0xb576186c, 0x2070c848,
-0x00000000, 0x002d201b, 0x0c36106c, 0x20703849,
+0x00000000, 0x002d201b, 0x0c36106c, 0x20703848,
+0x00000000, 0x004d801b, 0xb576186c, 0x2070c849,

@@ -28,6 +28,20 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER census a studio model's texture flags without its T.mdl
+
+x9-perf-chrome-vp (#170) first counted the retail chrome meshes with a
+script that read each .mdl's texture table and skipped models with none,
+and concluded that scientists and guards have no chrome. Those models
+keep their textures in a separate `<name>T.mdl` (`numtextures` 0 in the
+main file); read with it, `barney.mdl`'s body has a 58-vertex chrome mesh
+on a 382-vertex submodel, `scientist.mdl` a chrome needle hand and
+`hgrunt.mdl` a chrome shotgun head - and the guard on the c1a0 tram was
+the whole of that map's chrome cost (0.22 ms a frame in xemu). **When a
+census reads per-texture data, load the companion T.mdl for every model
+whose own texture count is 0, and count the models skipped; a census
+that silently skips a class answers a different question.**
+
 ### NEVER port a depth-state call by its arithmetic before reading which value the target's depth test compares
 
 ref/nv2a ported `R_DrawViewModel`'s `glDepthRange(0, 0.3)`

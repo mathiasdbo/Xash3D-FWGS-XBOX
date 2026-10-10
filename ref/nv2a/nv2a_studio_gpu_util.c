@@ -200,12 +200,15 @@ static void sgpu_palette_from_bits( const uint32_t bits[8], nv2a_sgpu_palette_t 
    on even i-2 and (v[i-1], v[i-2], v[i]) on odd, fan (v0, v[i-1], v[i])).
    Returns the triangle count. */
 static uint32_t sgpu_walk_mesh( const nv2a_sgpu_source_t *src, int mesh, sgpu_scratch_t *s, uint32_t vertex_base,
-	nv2a_sgpu_vertex_t *verts, const uint8_t *bone_to_entry, uint16_t *indices )
+	nv2a_sgpu_vertex_t *verts, const uint8_t *bone_to_entry, uint16_t *indices, uint8_t *same_bone )
 {
 	const int16_t *cmd = src->tricmds[mesh];
 	int uv_float = src->uv_float ? src->uv_float[mesh] : 0;
 	uint32_t tris = 0;
 	int n;
+
+	if( same_bone )
+		*same_bone = 1;
 
 	sgpu_scratch_reset( s );
 	while(( n = *cmd++ ) != 0 )
@@ -222,6 +225,10 @@ static uint32_t sgpu_walk_mesh( const nv2a_sgpu_source_t *src, int mesh, sgpu_sc
 			uint32_t local = sgpu_intern( s, cmd, &fresh );
 
 			s->strip[i] = vertex_base + local;
+			/* divergences.md #170: vs_chrome reads the vertex bone's rows
+			   for the normal bone's chrome vectors. */
+			if( same_bone && src->vertbone[cmd[0]] != src->normbone[cmd[1]] )
+				*same_bone = 0;
 			if( fresh && verts )
 			{
 				nv2a_sgpu_vertex_t *v = &verts[vertex_base + local];
@@ -376,7 +383,7 @@ int nv2a_sgpu_measure( const nv2a_sgpu_source_t *src, void *scratch, nv2a_sgpu_s
 
 	for( m = 0; m < src->nummesh; m++ )
 	{
-		uint32_t tris = sgpu_walk_mesh( src, m, &s, 0, NULL, NULL, NULL );
+		uint32_t tris = sgpu_walk_mesh( src, m, &s, 0, NULL, NULL, NULL, NULL );
 		uint32_t n = tris * 3u;
 
 		if( n & 1u )
@@ -409,6 +416,7 @@ int nv2a_sgpu_build( const nv2a_sgpu_source_t *src, void *scratch, nv2a_sgpu_ver
 	{
 		uint32_t tris, n, i;
 		const nv2a_sgpu_palette_t *pal = NULL;
+		uint8_t same_bone;
 
 		memset( bone_to_entry, 0, sizeof( bone_to_entry ));
 		if( mesh_palette[m] != NV2A_SGPU_NO_PALETTE )
@@ -418,7 +426,7 @@ int nv2a_sgpu_build( const nv2a_sgpu_source_t *src, void *scratch, nv2a_sgpu_ver
 				bone_to_entry[pal->bone[i]] = (uint8_t)i;
 		}
 
-		tris = sgpu_walk_mesh( src, m, &s, vbase, verts, bone_to_entry, indices + ibase );
+		tris = sgpu_walk_mesh( src, m, &s, vbase, verts, bone_to_entry, indices + ibase, &same_bone );
 		n = tris * 3u;
 		if( n & 1u )
 		{
@@ -436,7 +444,8 @@ int nv2a_sgpu_build( const nv2a_sgpu_source_t *src, void *scratch, nv2a_sgpu_ver
 		meshes[m].index_count = n;
 		meshes[m].tris = tris;
 		meshes[m].palette = mesh_palette[m];
-		meshes[m].uv_float = (uint16_t)( src->uv_float ? src->uv_float[m] : 0 );
+		meshes[m].uv_float = (uint8_t)( src->uv_float ? src->uv_float[m] : 0 );
+		meshes[m].same_bone = same_bone;
 
 		vbase += s.count;
 		ibase += n;
@@ -935,4 +944,137 @@ void nv2a_sgpu_vp_elight_color( const float k[NV2A_SGPU_ELIGHT_REGS][4], const f
 		   xemu glsl/vsh.c clamps oD0): a byte above 255 is 255. */
 		out[c] = o > 255.0f ? 255 : (uint8_t)o;
 	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Chrome (divergences.md #170)                                        */
+/* ------------------------------------------------------------------ */
+
+/* xash3d_mathlib.h:131 VectorNormalize: the length through a double
+   sqrt rounded to float, then one reciprocal. */
+static void sgpu_ref_normalize( float v[3] )
+{
+	float ilength = (float)sqrt( v[0] * v[0] + v[1] * v[1] + v[2] * v[2] );
+
+	if( ilength )
+		ilength = 1.0f / ilength;
+	v[0] *= ilength;
+	v[1] *= ilength;
+	v[2] *= ilength;
+}
+
+/* xash3d_mathlib.h:99 CrossProduct */
+static void sgpu_ref_cross( const float a[3], const float b[3], float c[3] )
+{
+	c[0] = a[1] * b[2] - a[2] * b[1];
+	c[1] = a[2] * b[0] - a[0] * b[2];
+	c[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+/* public/matrixlib.c:54 Matrix3x4_VectorIRotate */
+static void sgpu_ref_irotate( const float m[3][4], const float v[3], float out[3] )
+{
+	out[0] = v[0] * m[0][0] + v[1] * m[1][0] + v[2] * m[2][0];
+	out[1] = v[0] * m[0][1] + v[1] * m[1][1] + v[2] * m[2][1];
+	out[2] = v[0] * m[0][2] + v[1] * m[1][2] + v[2] * m[2][2];
+}
+
+void nv2a_sgpu_ref_chrome_bone( const float rows[3][4], const float origin[3], const float vright[3],
+	float right[3], float up[3] )
+{
+	float chromeupvec[3], chromerightvec[3], tmp[3];
+
+	/* gl_studio.c:1129-1143 */
+	tmp[0] = -origin[0];
+	tmp[1] = -origin[1];
+	tmp[2] = -origin[2];
+	tmp[0] += rows[0][3];
+	tmp[1] += rows[1][3];
+	tmp[2] += rows[2][3];
+
+	sgpu_ref_normalize( tmp );
+	sgpu_ref_cross( tmp, vright, chromeupvec );
+	sgpu_ref_normalize( chromeupvec );
+	sgpu_ref_cross( chromeupvec, tmp, chromerightvec );
+	sgpu_ref_normalize( chromerightvec );
+
+	sgpu_ref_irotate( rows, chromeupvec, up );
+	sgpu_ref_irotate( rows, chromerightvec, right );
+}
+
+void nv2a_sgpu_ref_chrome_st( const float right[3], const float up[3], const float normal[3],
+	float s_scale, float t_scale, float out[2] )
+{
+	float n, chrome[2];
+
+	/* gl_studio.c:1146-1152 */
+	n = normal[0] * right[0] + normal[1] * right[1] + normal[2] * right[2];
+	chrome[0] = ( n + 1.0f ) * 32.0f;
+	n = normal[0] * up[0] + normal[1] * up[1] + normal[2] * up[2];
+	chrome[1] = ( n + 1.0f ) * 32.0f;
+
+	/* :1696 TexCoord2f( chrome[idx][0] * s, chrome[idx][1] * t ) */
+	out[0] = chrome[0] * s_scale;
+	out[1] = chrome[1] * t_scale;
+}
+
+void nv2a_sgpu_chrome_consts( const float origin[3], const float vright[3], float out[NV2A_SGPU_CHROME_REGS][4] )
+{
+	out[0][0] = origin[0]; out[0][1] = origin[1]; out[0][2] = origin[2]; out[0][3] = NV2A_SGPU_CHROME_TINY;
+	out[1][0] = vright[0]; out[1][1] = vright[1]; out[1][2] = vright[2]; out[1][3] = 0.0f;
+}
+
+static float sgpu_dp3( const float a[3], const float b[3] )
+{
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+void nv2a_sgpu_vp_chrome_st( const float rows[3][4], const float normal[3], const float consts[NV2A_SGPU_CHROME_REGS][4],
+	float s_scale, float t_scale, float out[2] )
+{
+	float r10[3], r0[4], r1[3], r2[4], r3[4], r4[2];
+	const float *co = consts[0], *vr = consts[1];
+	int i;
+
+	/* vs_studio.vp: DP3 R10.x..z, v[2], c[A0.x + 0..2] */
+	for( i = 0; i < 3; i++ )
+		r10[i] = sgpu_dp3( normal, rows[i] );
+
+	/* vs_chrome.vp, line for line */
+	r0[0] = rows[0][3];                                  /* MOV R0.x, c[A0.x + 0].w */
+	r0[1] = rows[1][3];
+	r0[2] = rows[2][3];
+	r0[0] = r0[0] - co[0];                               /* ADD R0.xyz, R0, -c[94] */
+	r0[1] = r0[1] - co[1];
+	r0[2] = r0[2] - co[2];
+	r0[3] = sgpu_dp3( r0, r0 );                          /* DP3 R0.w, R0, R0 */
+	r0[3] = r0[3] > co[3] ? r0[3] : co[3];               /* MAX R0.w, R0.w, c[94].w */
+	r1[0] = 1.0f / sqrtf( r0[3] );                       /* RSQ R1.x, R0.w */
+	r0[0] *= r1[0]; r0[1] *= r1[0]; r0[2] *= r1[0];      /* MUL R0.xyz, R0, R1.x */
+	r2[0] = r0[2] * vr[1];                               /* MUL R2.xyz, R0.zxyw, c[95].yzxw */
+	r2[1] = r0[0] * vr[2];
+	r2[2] = r0[1] * vr[0];
+	r2[0] = r0[1] * vr[2] - r2[0];                       /* MAD R2.xyz, R0.yzxw, c[95].zxyw, -R2 */
+	r2[1] = r0[2] * vr[0] - r2[1];
+	r2[2] = r0[0] * vr[1] - r2[2];
+	r2[3] = sgpu_dp3( r2, r2 );                          /* DP3 R2.w, R2, R2 */
+	r2[3] = r2[3] > co[3] ? r2[3] : co[3];               /* MAX R2.w, R2.w, c[94].w */
+	r1[1] = 1.0f / sqrtf( r2[3] );                       /* RSQ R1.y, R2.w */
+	r2[0] *= r1[1]; r2[1] *= r1[1]; r2[2] *= r1[1];      /* MUL R2.xyz, R2, R1.y */
+	r3[0] = r2[2] * r0[1];                               /* MUL R3.xyz, R2.zxyw, R0.yzxw */
+	r3[1] = r2[0] * r0[2];
+	r3[2] = r2[1] * r0[0];
+	r3[0] = r2[1] * r0[2] - r3[0];                       /* MAD R3.xyz, R2.yzxw, R0.zxyw, -R3 */
+	r3[1] = r2[2] * r0[0] - r3[1];
+	r3[2] = r2[0] * r0[1] - r3[2];
+	r3[3] = sgpu_dp3( r3, r3 );                          /* DP3 R3.w, R3, R3 */
+	r3[3] = r3[3] > co[3] ? r3[3] : co[3];               /* MAX R3.w, R3.w, c[94].w */
+	r1[2] = 1.0f / sqrtf( r3[3] );                       /* RSQ R1.z, R3.w */
+	r3[0] *= r1[2]; r3[1] *= r1[2]; r3[2] *= r1[2];      /* MUL R3.xyz, R3, R1.z */
+	r4[0] = sgpu_dp3( r10, r3 );                         /* DP3 R4.x, R10, R3 */
+	r4[1] = sgpu_dp3( r10, r2 );                         /* DP3 R4.y, R10, R2 */
+	r4[0] += 1.0f; r4[1] += 1.0f;                        /* ADD R4.xy, R4, c[14].x */
+	r4[0] *= 32.0f; r4[1] *= 32.0f;                      /* MUL R4.xy, R4, c[14].w */
+	out[0] = r4[0] * s_scale;                            /* MUL R4.xy, R4, c[12] */
+	out[1] = r4[1] * t_scale;
 }

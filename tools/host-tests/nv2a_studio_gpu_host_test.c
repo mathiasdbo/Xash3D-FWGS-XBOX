@@ -24,7 +24,12 @@ Checks:
   - the local lights: the gamma fit against the engine's linear and
     screen tables, and the program's R_LightLambert (one and two elights,
     flipped or not) against the CPU path's colour bytes: how far apart,
-    and how often.
+    and how often;
+  - chrome (divergences.md #170): vs_chrome.vp's arithmetic against
+    R_StudioSetupChrome's (gl_studio.c:1120-1153) texture coordinates on
+    random bones, normals and chrome origins, eight mutants of the
+    transcription that must each be caught, the zero-vector case, the
+    constant slots, and the .inl files' instruction counts and FLD_FINAL.
 Exit status is nonzero iff a check failed.
 */
 #include "nv2a_studio_gpu_util.h"
@@ -782,6 +787,299 @@ static void test_elights( void )
 	test_elight_case( 2.5, 0, 2, 0, 0, 0, 0, "two random lights, ungated (gamma 2.5)", 255, 100.0 );
 }
 
+/* ------------------------------------------------------------------ */
+/* Chrome (divergences.md #170)                                        */
+/* ------------------------------------------------------------------ */
+
+static void random_unit( float v[3] )
+{
+	float len;
+
+	do
+	{
+		v[0] = frand() * 2.0f - 1.0f;
+		v[1] = frand() * 2.0f - 1.0f;
+		v[2] = frand() * 2.0f - 1.0f;
+		len = sqrtf( v[0] * v[0] + v[1] * v[1] + v[2] * v[2] );
+	} while( len < 0.1f || len > 1.0f );
+	v[0] /= len; v[1] /= len; v[2] /= len;
+}
+
+static float dp3( const float a[3], const float b[3] )
+{
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+/* The test's own copy of vs_chrome.vp's arithmetic, with one deliberate
+   error per `mutant` (0: none). Mutant 0 must equal
+   nv2a_sgpu_vp_chrome_st bit for bit, so the mutants are mutations of
+   the transcription the test checks, and each must be caught. */
+enum
+{
+	MUT_NONE,
+	MUT_NO_PLUS_ONE,     /* ( n ) * 32 instead of ( n + 1 ) * 32 */
+	MUT_CROSS_ORDER,     /* cross( vright, tmp ): up negated */
+	MUT_NO_ORIGIN,       /* tmp from the bone origin alone */
+	MUT_NO_UP_NORMALIZE, /* up not normalised (tmp unnormalised would be an equivalent mutant: both crosses are normalised after it, so its length cancels) */
+	MUT_MODEL_NORMAL,    /* the model-space normal, not R n */
+	MUT_SWAP_ST,         /* s from up, t from right */
+	MUT_SCALE_64,        /* * 64 instead of * 32 */
+	MUT_NO_FLOOR,        /* no MAX before RSQ */
+	MUT_COUNT
+};
+
+static void vp_chrome_mut( const float rows[3][4], const float normal[3], const float k[NV2A_SGPU_CHROME_REGS][4],
+	float ss, float ts, float out[2], int mutant )
+{
+	float rn[3], t[3], up[3], rt[3], l, a, b;
+	const float *co = k[0], *vr = k[1];
+	float floor_ = mutant == MUT_NO_FLOOR ? 0.0f : co[3];
+	int i;
+
+	for( i = 0; i < 3; i++ )
+		rn[i] = mutant == MUT_MODEL_NORMAL ? normal[i] : dp3( normal, rows[i] );
+	for( i = 0; i < 3; i++ )
+		t[i] = mutant == MUT_NO_ORIGIN ? rows[i][3] : rows[i][3] - co[i];
+	l = dp3( t, t ); l = l > floor_ ? l : floor_;
+	l = 1.0f / sqrtf( l );
+	t[0] *= l; t[1] *= l; t[2] *= l;
+	if( mutant == MUT_CROSS_ORDER )
+	{
+		up[0] = vr[2] * t[1]; up[1] = vr[0] * t[2]; up[2] = vr[1] * t[0];
+		up[0] = vr[1] * t[2] - up[0]; up[1] = vr[2] * t[0] - up[1]; up[2] = vr[0] * t[1] - up[2];
+	}
+	else
+	{
+		up[0] = t[2] * vr[1]; up[1] = t[0] * vr[2]; up[2] = t[1] * vr[0];
+		up[0] = t[1] * vr[2] - up[0]; up[1] = t[2] * vr[0] - up[1]; up[2] = t[0] * vr[1] - up[2];
+	}
+	l = dp3( up, up ); l = l > floor_ ? l : floor_;
+	l = 1.0f / sqrtf( l );
+	if( mutant != MUT_NO_UP_NORMALIZE )
+	{
+		up[0] *= l; up[1] *= l; up[2] *= l;
+	}
+	rt[0] = up[2] * t[1]; rt[1] = up[0] * t[2]; rt[2] = up[1] * t[0];
+	rt[0] = up[1] * t[2] - rt[0]; rt[1] = up[2] * t[0] - rt[1]; rt[2] = up[0] * t[1] - rt[2];
+	l = dp3( rt, rt ); l = l > floor_ ? l : floor_;
+	l = 1.0f / sqrtf( l );
+	rt[0] *= l; rt[1] *= l; rt[2] *= l;
+	a = dp3( rn, rt );
+	b = dp3( rn, up );
+	if( mutant == MUT_SWAP_ST )
+	{
+		float c = a; a = b; b = c;
+	}
+	if( mutant != MUT_NO_PLUS_ONE )
+	{
+		a += 1.0f; b += 1.0f;
+	}
+	a *= mutant == MUT_SCALE_64 ? 64.0f : 32.0f;
+	b *= mutant == MUT_SCALE_64 ? 64.0f : 32.0f;
+	out[0] = a * ss;
+	out[1] = b * ts;
+}
+
+/* The CPU path for one vertex: the bone's vectors (R_StudioSetupChrome's
+   cached part) then its texture coordinates. */
+static void ref_chrome( const float rows[3][4], const float origin[3], const float vright[3], const float normal[3],
+	float ss, float ts, float out[2] )
+{
+	float right[3], up[3];
+
+	nv2a_sgpu_ref_chrome_bone( rows, origin, vright, right, up );
+	nv2a_sgpu_ref_chrome_st( right, up, normal, ss, ts, out );
+}
+
+/* Counts the vertex-program instructions in a vp20compiler .inl and
+   whether FLD_FINAL (dword 3, bit 0: vp20compiler main.c:164) is set on
+   the last one only (r_context.c's resident layout depends on it). */
+static int inl_words( const char *path, uint32_t *w, int max )
+{
+	FILE *f = fopen( path, "rb" );
+	char line[512];
+	int n = 0;
+
+	if( !f )
+		return -1;
+	while( fgets( line, sizeof( line ), f ))
+	{
+		char *p = line;
+
+		if( line[0] == '/' )
+			continue;
+		while(( p = strstr( p, "0x" )) != NULL && n < max )
+		{
+			w[n++] = (uint32_t)strtoul( p, &p, 16 );
+		}
+	}
+	fclose( f );
+	return n;
+}
+
+static void test_chrome_inl( void )
+{
+	static uint32_t w[4 * 256];
+	int n, i, finals;
+
+	n = inl_words( "ref/nv2a/vs_chrome.inl", w, 4 * 256 );
+	if( n < 0 )
+	{
+		printf( "note: ref/nv2a/vs_chrome.inl not found (run from the repository root), skipped\n" );
+		return;
+	}
+	finals = 0;
+	for( i = 0; i < n / 4; i++ )
+		finals += ( w[i * 4 + 3] & 1u ) ? 1 : 0;
+	CHECK( n == 29 * 4 && finals == 1 && ( w[n - 1] & 1u ), "vs_chrome.inl: the compiler's stub and the 28-instruction tail, FLD_FINAL on the last only" );
+
+	n = inl_words( "ref/nv2a/vs_studio.inl", w, 4 * 256 );
+	finals = 0;
+	for( i = 0; i < n / 4; i++ )
+		finals += ( w[i * 4 + 3] & 1u ) ? 1 : 0;
+	CHECK( n == 106 * 4 && finals == 1 && ( w[n - 1] & 1u ), "vs_studio.inl: 106 instructions, FLD_FINAL on the last only" );
+	/* The chrome program is vs_studio's first 104 slots and the tail. */
+	CHECK( 104 + 28 <= 136, "vs_studio's prefix and the chrome tail fit the 136 program slots" );
+}
+
+static void test_chrome( void )
+{
+	static const float sizes[][2] = { { 64, 64 }, { 128, 64 }, { 32, 32 }, { 256, 128 } };
+	const long N = 200000;
+	long n, over[MUT_COUNT], harness_diff = 0;
+	double maxerr[MUT_COUNT];
+	int m;
+	char msg[256];
+
+	test_chrome_inl();
+
+	for( m = 0; m < MUT_COUNT; m++ )
+	{
+		over[m] = 0;
+		maxerr[m] = 0.0;
+	}
+
+	for( n = 0; n < N; n++ )
+	{
+		float rows[3][4], origin[3], vright[3], normal[3], dir[3], k[NV2A_SGPU_CHROME_REGS][4], ref[2], vp[2];
+		const float *sz = sizes[n % 4];
+		float ss = 1.0f / sz[0], ts = 1.0f / sz[1], dist;
+		int c;
+
+		random_bone( rows );
+		random_unit( normal );
+		random_unit( vright );
+		/* The chrome origin is the view origin: from a view model's bones
+		   (a few units) to a far NPC's (thousands). */
+		random_unit( dir );
+		dist = n % 3 == 0 ? 1.0f + frand() * 30.0f : 30.0f + frand() * 3000.0f;
+		for( c = 0; c < 3; c++ )
+			origin[c] = rows[c][3] + dir[c] * dist;
+
+		nv2a_sgpu_chrome_consts( origin, vright, k );
+		ref_chrome( (const float (*)[4])rows, origin, vright, normal, ss, ts, ref );
+		nv2a_sgpu_vp_chrome_st( (const float (*)[4])rows, normal, (const float (*)[4])k, ss, ts, vp );
+
+		if( n < 1000 )
+		{
+			float mine[2];
+
+			vp_chrome_mut( (const float (*)[4])rows, normal, (const float (*)[4])k, ss, ts, mine, MUT_NONE );
+			if( memcmp( mine, vp, sizeof( vp )))
+				harness_diff++;
+		}
+
+		for( m = 0; m < MUT_COUNT; m++ )
+		{
+			float out[2];
+			double e;
+
+			if( m == MUT_NONE )
+			{
+				out[0] = vp[0];
+				out[1] = vp[1];
+			}
+			else
+				vp_chrome_mut( (const float (*)[4])rows, normal, (const float (*)[4])k, ss, ts, out, m );
+			/* in texels of the bound skin: the coordinate times its size */
+			e = fabs((double)out[0] - ref[0] ) * sz[0];
+			if( fabs((double)out[1] - ref[1] ) * sz[1] > e )
+				e = fabs((double)out[1] - ref[1] ) * sz[1];
+			if( out[0] != out[0] || out[1] != out[1] )
+				e = 1e30;
+			if( e > maxerr[m] )
+				maxerr[m] = e;
+			if( e > 1.0 / 256.0 )
+				over[m]++;
+		}
+	}
+
+	CHECK( harness_diff == 0, "chrome: the mutant harness without a mutation is nv2a_sgpu_vp_chrome_st, bit for bit" );
+
+	/* The program against the reference: within 1/256 of a texel
+	   everywhere (the sub-texel precision a bilinear fetch resolves), and
+	   in practice far closer. */
+	snprintf( msg, sizeof( msg ), "chrome: vs_chrome vs R_StudioSetupChrome on %ld random bones/normals/origins: max %.2e texel (limit 1/256)",
+		N, maxerr[MUT_NONE] );
+	CHECK( over[MUT_NONE] == 0, msg );
+	printf( "  %s\n", msg );
+
+	/* Every mutant is caught: wrong on a large share of the samples. */
+	for( m = 1; m < MUT_COUNT; m++ )
+	{
+		if( m == MUT_NO_FLOOR )
+			continue; /* only differs at a zero vector: below */
+		snprintf( msg, sizeof( msg ), "chrome mutant %d caught (%.1f%% of samples off by more than 1/256 texel, max %.3g)",
+			m, 100.0 * over[m] / N, maxerr[m] );
+		CHECK( over[m] > N / 4, msg );
+		printf( "  %s\n", msg );
+	}
+
+	/* A bone exactly at the chrome origin: the reference's VectorNormalize
+	   leaves tmp at zero, so up = right = 0 and the coordinates are
+	   ( 32, 32 ) * scale. The floored RSQ gives exactly that; without the
+	   floor, NaN. */
+	{
+		float rows[3][4], vright[3], normal[3], k[NV2A_SGPU_CHROME_REGS][4], origin[3], ref[2], vp[2], mut[2];
+		int c, ok = 1, caught = 1, t;
+
+		for( t = 0; t < 1000; t++ )
+		{
+			random_bone( rows );
+			random_unit( normal );
+			random_unit( vright );
+			for( c = 0; c < 3; c++ )
+				origin[c] = rows[c][3];
+			nv2a_sgpu_chrome_consts( origin, vright, k );
+			ref_chrome( (const float (*)[4])rows, origin, vright, normal, 1.0f / 64.0f, 1.0f / 64.0f, ref );
+			nv2a_sgpu_vp_chrome_st( (const float (*)[4])rows, normal, (const float (*)[4])k, 1.0f / 64.0f, 1.0f / 64.0f, vp );
+			vp_chrome_mut( (const float (*)[4])rows, normal, (const float (*)[4])k, 1.0f / 64.0f, 1.0f / 64.0f, mut, MUT_NO_FLOOR );
+			if( ref[0] != 0.5f || ref[1] != 0.5f )
+				ok = 0;
+			if( vp[0] != ref[0] || vp[1] != ref[1] )
+				ok = 0;
+			if( mut[0] == mut[0] && mut[1] == mut[1] )
+				caught = 0;
+		}
+		CHECK( ok, "chrome: a bone at the chrome origin gets the reference's (32, 32) * scale exactly" );
+		CHECK( caught, "chrome mutant: without the floor, a bone at the chrome origin is NaN" );
+	}
+
+	/* c[94..95] and their slots: the last two hardware constants, clear of
+	   the palette and the local lights. */
+	{
+		float k[NV2A_SGPU_CHROME_REGS][4];
+		const float o[3] = { 1, 2, 3 }, r[3] = { 4, 5, 6 };
+
+		nv2a_sgpu_chrome_consts( o, r, k );
+		CHECK( k[0][0] == 1 && k[0][2] == 3 && k[0][3] == NV2A_SGPU_CHROME_TINY && k[1][1] == 5 && k[1][3] == 0,
+			"chrome consts: ( origin, floor ), ( vright, 0 )" );
+		CHECK( NV2A_SGPU_C_CHROME == 94u && NV2A_SGPU_HW_C0 + NV2A_SGPU_C_CHROME + NV2A_SGPU_CHROME_REGS == 192u
+			&& NV2A_SGPU_C_ELIGHT + NV2A_SGPU_ELIGHT_REGS == NV2A_SGPU_C_CHROME,
+			"chrome consts at c[94..95], hardware 190..191, right after the local lights" );
+	}
+}
+
 int main( int argc, char **argv )
 {
 	uint32_t table[1024];
@@ -797,6 +1095,7 @@ int main( int argc, char **argv )
 	build_lightgamma( 2.5f, 0.0f, 2.5f, table );
 	test_lighting( table, "default cvars (gamma 2.5, lightgamma 2.5, brightness 0)", 0.5f, 10.0 );
 	test_elights();
+	test_chrome();
 
 	for( i = 1; i < argc; i++ )
 		test_model( argv[i] );
