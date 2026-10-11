@@ -673,6 +673,13 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
                          (disk waits included); bytes = what it read
                          from files; name = xbox_ft_load_note_name below,
                          the stage then its file-layer counters
+     XBOX_FT_NOTE_MUSIC  (2026-10-10, x9-audio-music-bake, divergences.md
+                         #171) a music track opened (FS_OpenStream): name
+                         = "xwav adpcm|pcm <file>" when the baked track
+                         plays, "mp3 (<why>) <file>" when a baked one
+                         was there but the mp3 plays; kilocycles = the
+                         open, bytes = the .xwav's size. A track with no
+                         .xwav (main, or not baked) leaves no note.
    The recorder keeps up to XBOX_FT_NOTES_MAX between flushes and counts
    the rest as dropped. */
 #define XBOX_FT_CHUNK_NOTES      8u
@@ -680,6 +687,7 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
 #define XBOX_FT_NOTE_MSG         2u
 #define XBOX_FT_NOTE_MENU        3u
 #define XBOX_FT_NOTE_LOAD        4u
+#define XBOX_FT_NOTE_MUSIC       5u
 #define XBOX_FT_NOTE_NAME_BYTES  48u
 #define XBOX_FT_NOTE_BYTES       ( 16u + XBOX_FT_NOTE_NAME_BYTES )
 #define XBOX_FT_NOTES_MAX        64u

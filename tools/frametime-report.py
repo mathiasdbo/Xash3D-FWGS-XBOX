@@ -103,7 +103,7 @@ CHUNK_SPANS = 6             # span name -> parent span name (recorders from 2026
 CHUNK_CLASSES = 7           # per-classname server game frame totals (recorders from 2026-10-05)
 CHUNK_NOTES = 8             # named one-off events: sounds loaded in play, slow server messages (2026-10-06)
 NOTE_BYTES = 64
-NOTE_KINDS = {1: "sound", 2: "message", 3: "menu", 4: "load"}
+NOTE_KINDS = {1: "sound", 2: "message", 3: "menu", 4: "load", 5: "music"}  # music: divergences.md #171
 NOTE_LOAD = 4               # a level-load stage (recorders from 2026-10-08, divergences.md #162)
 # A load note's name: "<stage> <io kc>,<opens>,<reads>,<seeks>,<probes>,
 # <writes>,<meta>[,<count>]" (xbox_ft_load_note_name, xbox_frametime_util.h);

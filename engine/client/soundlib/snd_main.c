@@ -163,6 +163,17 @@ stream_t *FS_OpenStream( const char *filename )
 	stream_t		*stream = NULL;
 
 	Sound_Reset(); // clear old streaminfo
+#if XASH_XBOX
+	{
+		// Resonance3D: a track baked offline (media/<name>.xwav) before any
+		// of the formats below; NULL leaves the rest of this function to
+		// play it as before. docs/r3d/divergences.md #171
+		stream_t *Xbox_MusicStream_Open( const char *filename );
+
+		if(( stream = Xbox_MusicStream_Open( filename )) != NULL )
+			return stream;
+	}
+#endif
 	Q_strncpy( loadname, filename, sizeof( loadname ));
 
 	if( !COM_StringEmpty( ext ))

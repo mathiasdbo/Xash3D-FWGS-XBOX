@@ -28,6 +28,29 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER call a host-tested module tested while its engine glue allocates and frees on its own
+
+x9-audio-music-bake (#171) host-tested every line of the baked-music
+decoder and stream, 25 mutants deep, and shipped a leak in the 150-line
+glue that wraps it: `Stream_FreeXwav` freed the read-ahead and the
+`stream_t` but not the private state between them, about 400 bytes of
+`host.soundpool` on every track change, loop and A/B flip. Two reviews
+found it; no test could have, because none ran the glue. **When the pure
+core is tested and the glue is not, keep the glue to one allocation per
+object (carve the parts out of it) so its free cannot miss a piece, or
+give the glue's open/free pair a test of its own.**
+
+### ALWAYS make a negative test assert the failure it expects, not only a non-zero exit
+
+The same branch's harness for `xbox-xiso.sh`'s music validator reported
+seven of eight failure cases passing on its first run - because the
+function under test had not been extracted at all and every call failed
+with "command not found" (exit 127). A later fixture then failed a case
+for an unrelated reason (a CRLF manifest) and still counted as a pass.
+**Match each failure case's own message (or exit code) and check the
+function exists before the first case; a test that any breakage
+satisfies tests nothing.**
+
 ### NEVER census a studio model's texture flags without its T.mdl
 
 x9-perf-chrome-vp (#170) first counted the retail chrome meshes with a

@@ -496,6 +496,7 @@ the frame it happened in:
 |---|---|---|---|
 | `sound` | `S_LoadSound` loads a sound while `cls.state == ca_active` (the client-state test of upstream's `s_warn_late_precache` warning, `s_load.c:119` in the reference, without its cvar or its `*default` exclusion): a sentence's word, a name nobody precached. Map-load registrations happen before the client is active and are left out | the sound's name | decoded size |
 | `message` | one server message took the client 5 ms or more to parse (`CL_ParseServerMessage`, `engine/client/parse/cl_parse.c`, through `Xbox_FT_CL_CloseMessage` in `engine/platform/xbox/xbox_frametime_client.c`: the time from one message's start to the next, minus the renderer's waits; the current protocol only - the GoldSrc and legacy parsers are not timed) | its `svc_*` name, or the user message's name (`clgame.msg`) | its size in the packet |
+| `music` | (2026-10-10, divergence #171) a music track's open found a baked `media/<Track>.xwav`: `xbox_music_stream.c`, `Music_Open` | `xwav adpcm <file>` / `xwav pcm <file>` when the baked track plays; `mp3 (r3d_music_baked 0) <file>`, `mp3 (bad xwav) <file>` or `mp3 (stale xwav) <file>` when the mp3 plays instead. A track with no `.xwav` (any build before #171, or a track not baked) leaves no note | the `.xwav`'s size (0 when the mp3 plays) |
 | `menu` | the end of a map load ran the menu's font restore, or left the fonts released because less than 8 MiB was free (`Xbox_MenuFonts_MapLoaded`, `engine/platform/xbox/xbox_menu_fonts.c`, divergence #127; from 2026-10-06, x9-perf-menufonts) | `menu_restorefonts ran, <KiB> KiB free before` or `fonts left released, <KiB> KiB free` | what the restore took from free memory (`MmQueryStatistics`; atlases placed in ref/nv2a's preallocated arena do not show) |
 
 The time is in kilocycles and needs `host_frametime_spans` on (the
@@ -510,6 +511,19 @@ message note is many small messages when it is high, and work around the
 parser - netchan, fragment reassembly, resource requests - when it is
 low. The report lists each stall's notes next
 to its spans and loads, and the slowest twelve of the session.
+
+### The Black Mesa Inbound benchmark (X12, 2026-10-10)
+
+Every X12 audio step is measured on one fixed route: the tram ride c0a0 to
+c0a0e with the opening music, the announcement system, the ambient loops
+and the tram's own sounds, and on c0a0e the guard's greeting, the tram
+door and the security door. `tools/xemu-route-bmi.sh <label> <xbe> [<cfg
+line>]...` runs it in xemu with no input and fetches the session; its
+header has the end point (a `maps/c0a0e_load.cfg` run by upstream's
+`SV_SpawnServer`) and the console procedure (the same two files on the
+hard disk). Label the runs `bmi-<step>-<a|b>`. In xemu the audio callback
+does not run, so read the `music` notes and the sound spans' call counts
+before a sound time.
 
 ## Load stages (2026-10-08, x9-perf-loadtime)
 

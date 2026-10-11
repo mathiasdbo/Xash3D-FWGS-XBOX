@@ -254,6 +254,22 @@ xbox_save_stream() {
 }
 run_test xbox_save_stream xbox_save_stream
 
+# tools/host-tests/xbox_music_adpcm_host_test.c, header (divergence #171):
+# the baked-music decoder against xemu's APU decoder, the encoder round
+# trip, the .xwav parser and the stream's replay of upstream's
+# Stream_ReadMPG; then every mutant in xbox_music_adpcm_mutants.py must
+# make it fail.
+xbox_music_adpcm() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox -Itools/asset-studio/src/formats \
+		tools/host-tests/xbox_music_adpcm_host_test.c engine/platform/xbox/xbox_music_adpcm.c \
+		tools/asset-studio/src/formats/music_adpcm_encode.c -lm -o "$OUT/xbox_music_adpcm_test" && "$OUT/xbox_music_adpcm_test"
+}
+run_test xbox_music_adpcm xbox_music_adpcm
+xbox_music_adpcm_mutants() {
+	python tools/host-tests/xbox_music_adpcm_mutants.py "$OUT/music-mutants" $HOST_CFLAGS
+}
+run_test xbox_music_adpcm_mutants xbox_music_adpcm_mutants
+
 # tools/host-tests/s_mix_host_test.c, header (divergence #145): the real
 # engine/client/sound/s_mix.c built with XASH_XBOX 0 and 1 against a stub
 # engine (tools/host-tests/s_mix_stub), and the two builds' pitched mixer

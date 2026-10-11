@@ -9,6 +9,8 @@
 #include "formats/UiPacker.h"
 #include "formats/Nv2aMapFit.h"
 #include "formats/Nv2aWater.h" // R5: the water pieces in the engine's world bytes
+#include "formats/MusicBake.h" // #171: media/*.mp3 baked to .xwav
+#include <sstream>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -311,6 +313,12 @@ int main(int argc, char *argv[]) {
     // xashExtrasDir and allowed to be empty.
     std::string resourceDir;
 
+    // divergences.md #171: --music <out_dir> bakes <game-dir>/media/*.mp3
+    // to <out_dir>/media/<Track>.xwav plus <out_dir>/music_manifest.txt,
+    // an overlay tree for tools/xbox-xiso.sh --music-bake.
+    std::string musicOut;
+    formats::MusicBakeOptions music;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--game-dir" && i + 1 < argc) {
@@ -373,7 +381,59 @@ int main(int argc, char *argv[]) {
         } else if (arg == "--menu-art-dxt1") {
             // divergences.md #131: DXT1 .dds tiles for ref/nv2a instead of TGA
             menuArtDxt1 = true;
+        } else if (arg == "--music") {
+            if (i + 1 >= argc) {
+                std::cerr << "--music requires <out_dir>\n";
+                return 1;
+            }
+            musicOut = argv[++i];
+        } else if (arg == "--music-codec" && i + 1 < argc) {
+            const std::string codec = argv[++i];
+            if (codec != "adpcm" && codec != "pcm") {
+                std::cerr << "Invalid --music-codec: " << codec << ". Must be 'adpcm' or 'pcm'.\n";
+                return 1;
+            }
+            music.allPcm = codec == "pcm";
+        } else if (arg == "--music-pcm" && i + 1 < argc) {
+            // a comma-separated list of tracks to ship as 16-bit PCM
+            std::stringstream list(argv[++i]);
+            std::string name;
+            while (std::getline(list, name, ',')) {
+                if (!name.empty()) music.pcmTracks.insert(name);
+            }
+        } else if ((arg == "--music-floor-db" || arg == "--music-floor-seg-db") && i + 1 < argc) {
+            // a typo or "nan" would otherwise switch the quality gate off
+            char* end = nullptr;
+            const double v = std::strtod(argv[++i], &end);
+            if (!end || *end != '\0' || end == argv[i] || !(v >= 0.0 && v <= 100.0)) {
+                std::cerr << arg << ": not a number of dB in 0..100: " << argv[i] << "\n";
+                return 1;
+            }
+            (arg == "--music-floor-db" ? music.floor.overallDb : music.floor.segmentDb) = v;
+        } else if (arg == "--music-threads" && i + 1 < argc) {
+            char* end = nullptr;
+            const long v = std::strtol(argv[++i], &end, 10);
+            if (!end || *end != '\0' || v < 0 || v > 64) {
+                std::cerr << "--music-threads: not a count in 0..64: " << argv[i] << "\n";
+                return 1;
+            }
+            music.threads = static_cast<int>(v);
         }
+    }
+
+    if (!musicOut.empty()) {
+        if (gameDir == ".") {
+            std::cerr << "--music requires --game-dir <path to a gamedir, e.g. .../valve>\n";
+            return 1;
+        }
+        music.gameDir = gameDir;
+        music.outDir = musicOut;
+        std::vector<formats::MusicTrackResult> results;
+        const bool ok = formats::bakeMusic(music, results);
+        if (!ok) {
+            std::cerr << "--music: the bake FAILED - see the tracks marked FAILED above\n";
+        }
+        return ok ? 0 : 1;
     }
 
     if (bakeSkyDxt1) {

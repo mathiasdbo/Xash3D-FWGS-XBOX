@@ -5,6 +5,32 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: music plays from tracks baked offline
+
+The music was decoded from mp3 on the console as it played, which took
+about half a millisecond of every frame while a track was on - as much as
+all the other sound together. The baker (`tools/asset-studio --music`)
+now decodes each retail track ahead of time with the engine's own mp3
+decoder and stores it in the console's ADPCM format, as
+`media/<Track>.xwav` beside the mp3; the console plays that instead, with a
+table lookup per sample. It is the format the console's sound chip
+decodes in hardware, for a later step. The 27 tracks take 109 MB on the
+disc (the mp3s, 53 MB, stay as the fallback). In the emulator, decoding a
+second of music takes 4.6 ms of processor time instead of 29.5 - about
+0.08 ms of each frame instead of 0.49 - and the console's own decoders
+give exactly the samples the baker recorded, on all 27 tracks.
+
+The music behaves exactly as before: the same start, pause, volume,
+looping and end of each track (the last fraction of a second the mp3
+player never played is still not played), and saves keep the track and
+position, so a save from either build loads on the other. The baker
+checks every track against the real mp3 player request by request, and
+refuses a track whose sound would be noticeably noisier than the retail
+set; such a track can be shipped as plain 16-bit audio instead. A track
+without a baked file, or with one that does not match its mp3, plays from
+the mp3 as before. `r3d_music_baked 0` plays the mp3s on the same disc,
+and `r3d_music_ab` switches mid-track for comparison.
+
 ### Changed - Xbox: chrome surfaces on weapons and characters drawn on the graphics chip
 
 The shiny "chrome" parts of models - the gloved hands and metal of every

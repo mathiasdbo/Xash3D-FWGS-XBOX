@@ -19,6 +19,10 @@ add_library(AssetStudioFormats STATIC
     src/utils/rgbcx.cpp
     src/formats/Nv2aWater.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../ref/nv2a/nv2a_warp_util.c
+    src/formats/MusicBake.cpp
+    src/formats/music_adpcm_encode.c
+    src/formats/music_mp3_decode.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform/xbox/xbox_music_adpcm.c
 )
 # R5 (docs/r3d/divergences.md #147): the baker counts a map's water vertices
 # with the renderer's own subdivision and water-texture rule
@@ -35,6 +39,33 @@ set_source_files_properties(src/formats/Nv2aWater.cpp ${CMAKE_CURRENT_SOURCE_DIR
 # adds nothing to link; checked for name collisions against everything
 # already under src/, found none.
 target_include_directories(AssetStudioFormats PUBLIC src ${CMAKE_CURRENT_SOURCE_DIR}/../../filesystem)
+
+# divergences.md #171 (x12 music bake): the music tracks are decoded with
+# the engine's own libmpg, compiled here from the engine's tree with no
+# defines of its own - none of its files test any (an XASH_* or platform
+# macro reaches it only through xash3d_types.h's types; ACCURATE_ROUNDING
+# is set inside mpg123.h for both) - so the decode is the engine's code.
+# What differs from the console is the compiler and the C library: MSVC
+# x64's SSE2 against clang's i386 code (its float math in SSE, its double
+# expressions - the sin/cos/pow table setup in tabinit.c and layer3.c - on
+# the x87), and the libm under those tables. A last-bit difference in a
+# table entry can move sample LSBs; r3d_music_crc measures it on the
+# console against the CRC baked here. The engine's
+# baked-music decoder (engine/platform/xbox/xbox_music_adpcm.c) is
+# compiled in too: the encoder scores every code through it and the bake
+# reads its own output back through it. Include paths are scoped to the
+# files that need them, as for nv2a_warp_util.c above.
+set(R3D_LIBMPG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/client/soundlib/libmpg)
+file(GLOB R3D_LIBMPG_SOURCES CONFIGURE_DEPENDS ${R3D_LIBMPG_DIR}/*.c)
+add_library(AssetStudioLibmpg STATIC ${R3D_LIBMPG_SOURCES})
+set(R3D_LIBMPG_INCLUDES ${R3D_LIBMPG_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../../common ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/library_suffix/include)
+target_include_directories(AssetStudioLibmpg PRIVATE ${R3D_LIBMPG_INCLUDES})
+set_source_files_properties(src/formats/music_mp3_decode.c
+    PROPERTIES INCLUDE_DIRECTORIES "${R3D_LIBMPG_INCLUDES}")
+set_source_files_properties(src/formats/MusicBake.cpp src/formats/music_adpcm_encode.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform/xbox/xbox_music_adpcm.c
+    PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform/xbox;${CMAKE_CURRENT_SOURCE_DIR}/src/formats")
+target_link_libraries(AssetStudioFormats PUBLIC AssetStudioLibmpg)
 
 add_executable(AssetStudio src/main.cpp)
 target_link_libraries(AssetStudio PRIVATE AssetStudioFormats)
@@ -96,3 +127,13 @@ add_test(NAME sky_art_bake_test COMMAND sky_art_bake_test)
 add_executable(anim_texture_frames_test tests/anim_texture_frames_test.cpp)
 target_link_libraries(anim_texture_frames_test PRIVATE AssetStudioFormats)
 add_test(NAME anim_texture_frames_test COMMAND anim_texture_frames_test)
+
+
+# divergences.md #171: the music bake on a synthetic track (never retail
+# content): libmpg's decode against the stream model, the encoder and the
+# engine's reader on the baker's own output.
+add_executable(music_bake_test tests/music_bake_test.cpp)
+target_link_libraries(music_bake_test PRIVATE AssetStudioFormats)
+set_source_files_properties(tests/music_bake_test.cpp
+    PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform/xbox;${CMAKE_CURRENT_SOURCE_DIR}/src/formats")
+add_test(NAME music_bake_test COMMAND music_bake_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/music_synthetic.mp3)

@@ -77,6 +77,7 @@ and reads them.
 #include "xbox_frametime_svgame.h"
 #include "xbox_frametime_pmove.h"
 #include "xbox_frametime_clents.h"
+#include "xbox_music_stream.h" /* Xbox_Music_Init, #171 */
 #include "xbox_io_stats.h" /* compat/xbox: the file layer's kernel calls, for the load notes (#162) */
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
@@ -797,6 +798,9 @@ void Xbox_FrameTime_Init( void )
 	/* r3d_membench (#142) rides on this init rather than a call site of
 	   its own in host.c: the same platform, the same lifetime. */
 	Xbox_MemBench_Init();
+	/* r3d_music_baked and its commands (#171), likewise: registered
+	   before config.cfg and userconfig.d set them */
+	Xbox_Music_Init();
 }
 
 void Xbox_FrameTime_BeginFrame( void )
