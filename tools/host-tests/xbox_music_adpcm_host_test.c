@@ -17,6 +17,14 @@
      request that runs out returns 0 and so does everything after it),
      seeks to any frame including inside the last block and the last
      chunk, positions, rate conversion, a short read, and the PCM codec.
+   - The read-ahead's windows (#172): the same reads through a fake
+     asynchronous reader that lands each read a few requests after it was
+     issued, into a buffer poisoned until then; one read in flight at a
+     time, every read on a 4096-byte boundary in whole 4096-byte units;
+     a sequential play waits for the disk only on its first window; a seek
+     while a read ahead is landing; a read that cannot be issued, fails or
+     comes back short falls back to synchronous reads with the same
+     samples; Close waits for the read in flight.
 
    gcc -O2 -Wall -std=c99 -Iengine/platform/xbox -Itools/asset-studio/src/formats \
        tools/host-tests/xbox_music_adpcm_host_test.c engine/platform/xbox/xbox_music_adpcm.c \
@@ -396,6 +404,79 @@ static int MemSeek( void *ctx, uint32_t offset )
 	return 0;
 }
 
+/* The asynchronous face of the same file (#172). A read lands `lag`
+   requests (test_clock ticks) after it was issued; until it lands its
+   buffer holds 0xCD, so a stream that used it early decodes garbage. The
+   memfile is the first member: the stream's one ctx serves both faces. */
+typedef struct asyncfile_s
+{
+	memfile_t mf;
+	const uint8_t *ra;     /* the stream's read-ahead, for the alignment check */
+	int lag;               /* < 0: no asynchronous face (synchronous reads) */
+	int inflight;
+	uint32_t off, bytes, issued;
+	uint8_t *dst;
+	int fail_start_at;     /* the n-th start (1-based) is refused; 0 never */
+	int fail_finish_at;    /* the n-th read lands as an error */
+	int short_at;          /* the n-th read lands 100 bytes short */
+	int starts, landed, violations;
+} asyncfile_t;
+
+static uint32_t test_clock;
+
+static int AsyncStart( void *ctx, uint32_t offset, void *dst, uint32_t bytes )
+{
+	asyncfile_t *a = ctx;
+
+	a->starts++;
+	if( a->inflight )
+		a->violations++; /* one read at a time */
+	if( offset % 4096u || bytes % 4096u || !bytes || bytes > XBOX_MUSIC_WINDOW_BYTES
+		|| (const uint8_t *)dst < a->ra || ((const uint8_t *)dst - a->ra ) % 4096
+		|| (const uint8_t *)dst + bytes > a->ra + XBOX_MUSIC_READAHEAD_BYTES )
+		a->violations++; /* what an unbuffered read refuses, or outside the read-ahead */
+	if( a->starts == a->fail_start_at )
+		return -1;
+	memset( dst, 0xCD, bytes );
+	a->inflight = 1;
+	a->off = offset;
+	a->bytes = bytes;
+	a->dst = dst;
+	a->issued = test_clock;
+	return 0;
+}
+
+static int AsyncFinish( void *ctx, int wait )
+{
+	asyncfile_t *a = ctx;
+	uint32_t end;
+	int n = 0;
+
+	if( !a->inflight )
+	{
+		a->violations++; /* nothing to finish */
+		return -1;
+	}
+	if( !wait && test_clock - a->issued < (uint32_t)a->lag )
+		return XBOX_MUSIC_IO_PENDING;
+
+	a->inflight = 0;
+	a->landed++;
+	end = a->mf.short_from > 0 && (uint32_t)a->mf.short_from < a->mf.len ? (uint32_t)a->mf.short_from : a->mf.len;
+	if( a->off < end )
+	{
+		n = (int)( end - a->off );
+		if( n > (int)a->bytes )
+			n = (int)a->bytes;
+		memcpy( a->dst, a->mf.data + a->off, (size_t)n );
+	}
+	if( a->landed == a->fail_finish_at )
+		return -1;
+	if( a->landed == a->short_at )
+		return n > 100 ? n - 100 : 0;
+	return n;
+}
+
 static void Put16( uint8_t *p, uint32_t v ) { p[0] = (uint8_t)v; p[1] = (uint8_t)( v >> 8 ); }
 static void Put32( uint8_t *p, uint32_t v ) { Put16( p, v ); Put16( p + 2, v >> 16 ); }
 
@@ -587,22 +668,43 @@ static void FreeTrack( track_t *t )
 typedef struct opened_s
 {
 	xbox_music_stream_t s;
-	memfile_t mf;
+	asyncfile_t af;
 	uint8_t chunk[8192];
 	uint8_t ra[XBOX_MUSIC_READAHEAD_BYTES];
 } opened_t;
+
+/* The reader Open gives a stream: synchronous (< 0), or asynchronous
+   with reads landing this many requests late. */
+static int open_lag = -1;
 
 static void Open( opened_t *o, track_t *t )
 {
 	xbox_music_io_t io;
 
-	memset( &o->mf, 0, sizeof( o->mf ));
-	o->mf.data = t->file;
-	o->mf.len = t->len;
+	memset( &io, 0, sizeof( io ));
+	memset( &o->af, 0, sizeof( o->af ));
+	o->af.mf.data = t->file;
+	o->af.mf.len = t->len;
+	o->af.ra = o->ra;
+	o->af.lag = open_lag;
 	io.read = MemRead;
 	io.seek = MemSeek;
-	io.ctx = &o->mf;
+	io.ctx = &o->af;
+	if( open_lag >= 0 )
+	{
+		io.start = AsyncStart;
+		io.finish = AsyncFinish;
+	}
 	CHECK( Xbox_MusicStream_Init( &o->s, &t->info, &io, o->chunk, sizeof( o->chunk ), o->ra ));
+}
+
+/* Every check a stream's asynchronous reader can make on its own. */
+static void CheckReader( opened_t *o )
+{
+	CHECK( o->af.violations == 0 );
+	Xbox_MusicStream_Close( &o->s );
+	CHECK( !o->af.inflight ); /* Close waited for the read in flight */
+	CHECK( o->af.violations == 0 );
 }
 
 /* Reads with sizes from `sizes` (cycled) starting at frame `start`
@@ -642,7 +744,10 @@ static void CheckReads( track_t *t, uint32_t start_frame, const int *sizes, int 
 	for( k = 0; k < 200000 && !( refused && k > 4 ); k++ )
 	{
 		const int need = sizes[k % nsizes];
-		int r = Xbox_MusicStream_Read( &o->s, need, buf );
+		int r;
+
+		test_clock++;
+		r = Xbox_MusicStream_Read( &o->s, need, buf );
 
 		if( !refused && asked + (uint64_t)need <= servable )
 		{
@@ -666,6 +771,7 @@ static void CheckReads( track_t *t, uint32_t start_frame, const int *sizes, int 
 	}
 	CHECK( refused );
 	CHECK( o->s.bad_blocks == 0 );
+	CheckReader( o );
 	free( buf );
 	free( o );
 }
@@ -779,24 +885,31 @@ static void TestStream( void )
 		FreeTrack( &t );
 	}
 
-	/* the read-ahead: one read per 128 stereo blocks */
+	/* the read-ahead: one read per 16 KiB window of the file, the header's
+	   window included (the samples start at 512) */
+	if( open_lag < 0 )
 	{
 		opened_t *o = malloc( sizeof( *o ));
 		int16_t *all;
+		uint32_t windows;
 
 		MakeTrack( &t, XBOX_XWAV_TAG_ADPCM, 2, 128 * 64 * 3 + 10, 44100, 44100, 8192 );
+		windows = ( t.info.data_offset + t.info.data_bytes + XBOX_MUSIC_WINDOW_BYTES - 1 ) / XBOX_MUSIC_WINDOW_BYTES;
+		CHECK( windows == 2 );
 		all = malloc( t.info.frames * 4u );
 		Open( o, &t );
 		CHECK( Xbox_MusicStream_DecodeFrames( &o->s, 0, t.info.frames, all ) == t.info.frames );
 		CHECK( !memcmp( all, t.pcm, t.info.frames * 4u ));
-		CHECK( o->s.io_reads == 4 && o->mf.reads == 4 );
+		CHECK( o->s.io_reads == windows && o->af.mf.reads == windows && o->af.mf.seeks == windows );
+		CHECK( o->s.io_async == 0 && o->s.io_waits == 0 && o->s.io_fallbacks == 0 );
 		free( all );
 		free( o );
 		FreeTrack( &t );
 	}
 
 	/* a read that comes back short ends the track at the last whole block
-	   it delivered, as a failed libmpg read would */
+	   it delivered, as a failed libmpg read would (asynchronously too: the
+	   short read is read again synchronously, and comes back short there) */
 	{
 		opened_t *o = malloc( sizeof( *o ));
 		uint8_t *buf = malloc( 8192 );
@@ -804,7 +917,7 @@ static void TestStream( void )
 
 		MakeTrack( &t, XBOX_XWAV_TAG_ADPCM, 2, 2048 * 8, 44100, 44100, 8192 );
 		Open( o, &t );
-		o->mf.short_from = (int)( t.info.data_offset + 72 * 200 + 5 ); /* inside block 200 */
+		o->af.mf.short_from = (int)( t.info.data_offset + 72 * 200 + 5 ); /* inside block 200 */
 		while( Xbox_MusicStream_Read( &o->s, 8192, buf ) == 8192 )
 		{
 			CHECK( !memcmp( buf, (uint8_t *)t.pcm + served * 8192, 8192 ));
@@ -945,6 +1058,214 @@ static void TestDiscovery( void )
 	CHECK( Xbox_MusicXwav_CheckSource( &info, "media/T", 0, formats, 4, FakeProbe, &fs ) == XBOX_XWAV_SOURCE_OK );
 }
 
+/* ---- the read-ahead's windows, asynchronous reads (#172) ---- */
+
+/* Plays a whole track in engine-sized requests (one request a tick) and
+   returns the frames that matched the decode. */
+static uint32_t PlayAll( opened_t *o, track_t *t, int need )
+{
+	uint8_t *buf = malloc( (size_t)need );
+	uint64_t at = 0;
+	const uint32_t fb = 2u * t->info.channels;
+
+	while( 1 )
+	{
+		int r;
+
+		test_clock++;
+		r = Xbox_MusicStream_Read( &o->s, need, buf );
+		if( r != need )
+			break;
+		if( memcmp( buf, (const uint8_t *)t->pcm + at, (size_t)need ))
+		{
+			CHECK( !"played bytes differ from the decode" );
+			break;
+		}
+		at += (uint64_t)need;
+	}
+	free( buf );
+	return (uint32_t)( at / fb );
+}
+
+static void TestWindows( void )
+{
+	track_t t;
+	opened_t *o = malloc( sizeof( *o ));
+	uint32_t windows, played, whole;
+
+	/* ten windows of stereo ADPCM, two engine frames of it a request */
+	MakeTrack( &t, XBOX_XWAV_TAG_ADPCM, 2, 2048 * 70 + 333, 44100, 44100, 8192 );
+	windows = ( t.info.data_offset + t.info.data_bytes + XBOX_MUSIC_WINDOW_BYTES - 1 ) / XBOX_MUSIC_WINDOW_BYTES;
+	whole = ( t.info.frames / 2048 ) * 2048;
+	CHECK( windows == 10 );
+
+	/* a sequential play: every window read once, each read ahead while
+	   the one before plays, so the stream waits for the disk only on the
+	   first window it needs */
+	open_lag = 3;
+	Open( o, &t );
+	played = PlayAll( o, &t, 5880 );
+	CHECK( played * 4u >= whole * 4u - 5880u && played <= whole );
+	CHECK( o->s.io_reads == windows && o->s.io_async == windows );
+	CHECK( o->s.io_waits == 1 && o->s.io_fallbacks == 0 );
+	CheckReader( o );
+
+	/* a read that lands at once is not counted as one the disk ran on */
+	open_lag = 0;
+	Open( o, &t );
+	played = PlayAll( o, &t, 5880 );
+	CHECK( played * 4u >= whole * 4u - 5880u );
+	CHECK( o->s.io_reads == windows && o->s.io_async == 0 && o->s.io_waits == 0 );
+	CheckReader( o );
+
+	/* a seek while a read ahead is landing: it lands before its slot is
+	   reused (one read at a time), and the samples are right */
+	open_lag = 50;
+	Open( o, &t );
+	{
+		uint8_t buf[4096];
+		const uint32_t to = 2048 * 40 + 17;
+
+		test_clock++;
+		CHECK( Xbox_MusicStream_Read( &o->s, 4096, buf ) == 4096 && !memcmp( buf, t.pcm, 4096 ));
+		CHECK( o->af.inflight ); /* window 1 is on its way */
+		CHECK( Xbox_MusicStream_SetPos( &o->s, (int)to ) == 1 );
+		test_clock++;
+		CHECK( Xbox_MusicStream_Read( &o->s, 4096, buf ) == 4096 && !memcmp( buf, t.pcm + to * 2, 4096 ));
+		/* and back to the start, whose window is still in its slot or not */
+		CHECK( Xbox_MusicStream_SetPos( &o->s, 3 ) == 1 );
+		test_clock++;
+		CHECK( Xbox_MusicStream_Read( &o->s, 4096, buf ) == 4096 && !memcmp( buf, t.pcm + 6, 4096 ));
+	}
+	CheckReader( o );
+
+	/* after a seek into the middle of a block every chunk starts inside
+	   one, so the block a chunk boundary falls in is asked for twice; one
+	   that straddles two windows is served again from its copy, so a play
+	   from there still reads each window once and waits only for the
+	   two the first request needs (console-performance review) */
+	open_lag = 3;
+	Open( o, &t );
+	{
+		/* a straddling block that ends the first chunk: the chunk starts
+		   32 blocks (2048 frames) before it, 17 frames in */
+		uint32_t sb = 32, from, first_window;
+
+		while(( t.info.data_offset + sb * 72 ) / XBOX_MUSIC_WINDOW_BYTES == ( t.info.data_offset + sb * 72 + 71 ) / XBOX_MUSIC_WINDOW_BYTES )
+			sb++;
+		from = ( sb - 32 ) * 64 + 17;
+		first_window = ( t.info.data_offset + ( from / 64 ) * 72 ) / XBOX_MUSIC_WINDOW_BYTES;
+		uint8_t *buf = malloc( 5880 );
+		uint64_t at = (uint64_t)from * 4;
+		int r;
+
+		CHECK( sb < 300 );
+
+		CHECK( Xbox_MusicStream_SetPos( &o->s, (int)from ) == 1 );
+		for( ;; )
+		{
+			test_clock++;
+			r = Xbox_MusicStream_Read( &o->s, 5880, buf );
+			if( r != 5880 )
+				break;
+			if( memcmp( buf, (const uint8_t *)t.pcm + at, 5880 ))
+			{
+				CHECK( !"played bytes differ after a seek" );
+				break;
+			}
+			at += 5880;
+		}
+		CHECK( at / 4 + 2048 + 1470 > t.info.frames );
+		CHECK( o->s.io_reads == windows - first_window );
+		/* the seek's window, and the next one, which the first chunk
+		   already runs into (its read was issued in the same request) */
+		CHECK( o->s.io_waits == 2 );
+		free( buf );
+	}
+	CheckReader( o );
+
+	/* Close with a read in flight waits for it; twice is harmless */
+	open_lag = 1000;
+	Open( o, &t );
+	{
+		uint8_t buf[64];
+
+		CHECK( Xbox_MusicStream_Read( &o->s, 64, buf ) == 64 );
+		CHECK( o->af.inflight );
+		Xbox_MusicStream_Close( &o->s );
+		CHECK( !o->af.inflight && o->af.violations == 0 );
+		Xbox_MusicStream_Close( &o->s );
+		CHECK( o->af.violations == 0 );
+	}
+
+	/* a read the reader refuses, one that lands as an error and one that
+	   lands short: each is read again synchronously, the stream stays
+	   synchronous after it, and every sample is right */
+	{
+		int which;
+
+		for( which = 0; which < 3; which++ )
+		{
+			int n;
+
+			for( n = 1; n <= 4; n += 3 )
+			{
+				open_lag = 2;
+				Open( o, &t );
+				if( which == 0 ) o->af.fail_start_at = n;
+				if( which == 1 ) o->af.fail_finish_at = n;
+				if( which == 2 ) o->af.short_at = n;
+				played = PlayAll( o, &t, 5880 );
+				CHECK( played * 4u >= whole * 4u - 5880u );
+				CHECK( o->s.io_fallbacks == 1 && !o->s.io_failed );
+				CHECK( o->s.io.start == NULL );
+				CHECK( o->af.starts == n );
+				CHECK( o->s.io_reads == windows + 1 ); /* the window read again */
+				CheckReader( o );
+			}
+		}
+	}
+
+	/* a real short read under the asynchronous reader: the synchronous
+	   read again comes back short too, and the track ends there */
+	open_lag = 2;
+	Open( o, &t );
+	o->af.mf.short_from = (int)( t.info.data_offset + 72 * 700 + 5 ); /* inside block 700, window 3 */
+	played = PlayAll( o, &t, 8192 );
+	CHECK( played == 700 * 64 / 2048 * 2048 );
+	CHECK( o->s.io_failed == 1 && o->s.io_fallbacks == 1 );
+	CheckReader( o );
+
+	/* PCM through the asynchronous reader: 256-byte blocks, which the
+	   512-byte header puts exactly on the window boundaries */
+	FreeTrack( &t );
+	MakeTrack( &t, XBOX_XWAV_TAG_PCM, 2, 2048 * 20 + 77, 44100, 44100, 8192 );
+	open_lag = 1;
+	Open( o, &t );
+	played = PlayAll( o, &t, 2940 );
+	CHECK( played * 4u >= ( t.info.frames / 2048 ) * 2048 * 4u - 2940u );
+	CHECK( o->s.io_waits == 1 );
+	CheckReader( o );
+
+	/* Init: start without finish, or the reverse, is refused */
+	{
+		xbox_music_io_t io;
+
+		memset( &io, 0, sizeof( io ));
+		io.read = MemRead;
+		io.seek = MemSeek;
+		io.start = AsyncStart;
+		CHECK( !Xbox_MusicStream_Init( &o->s, &t.info, &io, o->chunk, sizeof( o->chunk ), o->ra ));
+		io.start = NULL;
+		io.finish = AsyncFinish;
+		CHECK( !Xbox_MusicStream_Init( &o->s, &t.info, &io, o->chunk, sizeof( o->chunk ), o->ra ));
+	}
+
+	open_lag = -1;
+	FreeTrack( &t );
+	free( o );
+}
+
 int main( void )
 {
 	TestTables();
@@ -952,6 +1273,14 @@ int main( void )
 	TestRoundTrip();
 	TestHeader();
 	TestStream();
+	for( open_lag = 0; open_lag <= 3; open_lag += 3 )
+	{
+		/* the same reads through the asynchronous reader: landing at once,
+		   and three requests late */
+		TestStream();
+	}
+	open_lag = -1;
+	TestWindows();
 	TestDiscovery();
 
 	if( failures )

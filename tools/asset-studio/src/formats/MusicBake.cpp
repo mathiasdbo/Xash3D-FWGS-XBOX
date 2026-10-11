@@ -196,10 +196,10 @@ std::vector<uint8_t> buildXwav(const XwavFields& f, const std::vector<uint8_t>& 
     }
 
     // A JUNK chunk (RIFF's own filler, which every reader skips) puts the
-    // samples at offset 512: the engine's read-ahead then refills on
-    // sector boundaries (XBOX_MUSIC_READAHEAD_BYTES is 18 sectors), and the
-    // data chunk's header ends exactly where the engine's 512-byte header
-    // read does.
+    // samples at offset 512, so the data chunk's header ends exactly where
+    // the engine's 512-byte header read does. (The engine's read-ahead
+    // reads whole 16 KiB windows of the file from offset 0 since #172, so
+    // the offset no longer decides its alignment.)
     const size_t junkTotal = XBOX_XWAV_HEADER_READ - v.size() - 8;
     if (v.size() + 8 + 8 > XBOX_XWAV_HEADER_READ) {
         throw std::logic_error("xwav header longer than the engine's header read");

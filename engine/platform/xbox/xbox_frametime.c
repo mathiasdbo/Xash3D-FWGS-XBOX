@@ -158,8 +158,8 @@ void Xbox_FT_ClEnts_CloseFrame( void )
 	}
 }
 
-/* 1024 frames x 704 bytes (32 + 168 work counters: 20 counts, span_calls,
-   73 spans and 74 later counts) = 704 KiB ring, plus the per-map
+/* 1024 frames x 788 bytes (32 + 189 work counters: 20 counts, span_calls,
+   73 spans and 95 later counts) = 788 KiB ring, plus the per-map
    histogram (4 KiB), an 88 KiB encode buffer, 4 KiB of notes and the
    server classname table (~30 KiB, xbox_frametime_svgame.c): ~830 KiB,
    allocated when recording starts and freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush

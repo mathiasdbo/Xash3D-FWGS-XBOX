@@ -3,7 +3,8 @@
 engine/platform/xbox/xbox_music_adpcm.c - a decode table bit, a clamp, the
 APU's 64-frame block, the stereo interleave, upstream's dropped tail, the
 mp3 position quirk, the seek, the parser, the rate conversion, the CRC,
-which file a request names -
+which file a request names, the read-ahead's windows and asynchronous
+reads (#172) -
 and the host test must fail on every one of them. A mutant the test
 passes is a gap in the test, reported and exit 1.
 
@@ -43,7 +44,18 @@ MUTANTS = [
     ("discovery: no extension takes the last format present, not the first", b"\t\t\tif( probe( ctx, path, &size ))\n\t\t\t{\n\t\t\t\tfound = i;\n\t\t\t\tbreak;", b"\t\t\tif( probe( ctx, path, &size ))\n\t\t\t{\n\t\t\t\tfound = i;\n\t\t\t\tcontinue;"),
     ("discovery: the size not checked", b"\tif( size != (int64_t)info->source_bytes )\n\t\treturn XBOX_XWAV_SOURCE_SIZE;", b""),
     ("discovery: the format not checked", b"\tif( !LowerEq( formats[found], info->source_ext ))\n\t\treturn XBOX_XWAV_SOURCE_FORMAT;", b""),
-    ("read-ahead: a short read kept", b"\tif( got < bytes )\n\t{", b"\tif( got < bytes / 2 )\n\t{"),
+    ("read-ahead: a short read kept", b"\tif( (uint32_t)got < want )\n\t\ts->io_failed = 1;", b"\tif( (uint32_t)got < want / 2 )\n\t\ts->io_failed = 1;"),
+    # the windows and the asynchronous reads (#172)
+    ("windows: nothing read ahead", b"\tWindowRead( s, other, next );\n", b""),
+    ("windows: a read length that is not whole 4096-byte units", b"( WindowWant( s, index ) + XBOX_MUSIC_IO_ALIGN - 1 ) & ~( XBOX_MUSIC_IO_ALIGN - 1 )", b"WindowWant( s, index )"),
+    ("windows: the read ahead used before it lands", b"\t\tif( !WindowCollect( s, i, 0 ))\n\t\t{\n\t\t\ts->io_waits++; /* the read ahead has not landed yet */\n\t\t\tWindowCollect( s, i, 1 );\n\t\t}", b"\t\tWindowCollect( s, i, 0 );"),
+    ("windows: a second read issued while one is in flight", b"\tfor( i = 0; i < XBOX_MUSIC_WINDOWS; i++ )\n\t{\n\t\tif( !WindowCollect( s, i, 0 ))\n\t\t{\n\t\t\ts->io_waits++;\n\t\t\tWindowCollect( s, i, 1 );\n\t\t}\n\t}\n", b""),
+    ("windows: a straddling block's second half from the first window", b"memcpy( s->straddle + ( XBOX_MUSIC_WINDOW_BYTES - at ), s->ra + (uint32_t)b * XBOX_MUSIC_WINDOW_BYTES,", b"memcpy( s->straddle + ( XBOX_MUSIC_WINDOW_BYTES - at ), s->ra + (uint32_t)a * XBOX_MUSIC_WINDOW_BYTES,"),
+    ("async: a short read trusted, not read again synchronously", b"\tif( async && (uint32_t)got < want )\n", b"\tif( async && got < 0 )\n"),
+    ("async: Close does not wait for the read in flight", b"\t\tif( s->win[i].state == XBOX_MUSIC_WIN_PENDING && s->io.finish )\n\t\t\ts->io.finish( s->io.ctx, 1 );\n", b""),
+    ("windows: a straddling block not kept (re-read after a seek)", b"\tif( w0 != w1 && block == s->straddle_block )\n", b"\tif( 0 )\n"),
+    ("windows: a kept straddling block served for another block", b"\tif( w0 != w1 && block == s->straddle_block )\n", b"\tif( w0 != w1 && s->straddle_block != UINT32_MAX )\n"),
+    ("async: the reads the disk ran on not counted", b"\t\t\ts->io_async++;\n", b""),
     ("parser: a short data chunk accepted", b"if( (uint64_t)out->data_bytes != (uint64_t)BlocksFor( out->frames ) * out->block_bytes )", b"if( (uint64_t)out->data_bytes < (uint64_t)BlocksFor( out->frames ) * out->block_bytes )"),
     ("parser: odd chunks not padded", b"off += 8 + (uint64_t)size + ( size & 1u );", b"off += 8 + (uint64_t)size;"),
     ("parser: samples per block not checked", b"rd16( f + 18 ) != XBOX_ADPCM_BLOCK_FRAMES", b"rd16( f + 18 ) == 0"),

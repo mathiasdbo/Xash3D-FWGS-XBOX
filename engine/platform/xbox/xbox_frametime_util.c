@@ -77,6 +77,7 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"beam_kc", "beam_noise_kc", "beam_geom_kc", "beam_ents", "beam_prims", "beam_pieces",
 	"tracers", "tracer_kc", "tracer_fails",
 	"chrome_meshes", "chrome_verts", "chrome_kc", "chrome_gpu",
+	"music_reads", "music_read_kb", "music_async", "music_waits", "music_io_kc", "music_read_kc",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,

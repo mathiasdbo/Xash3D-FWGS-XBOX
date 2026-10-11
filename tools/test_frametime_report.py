@@ -569,7 +569,7 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 183)
+        self.assertEqual(len(r["counters"]), 189)
         self.assertEqual(r["counters"][20], "span_calls")
         self.assertEqual(len(r["spans"]), 73)
         # Counts after the spans (2026-10-02, R5) are plain counters.
@@ -590,7 +590,9 @@ class Spans(unittest.TestCase):
                                                "ce_solid_skips", "tex_fast", "part_kc", "part_think_kc",
                                                "beam_kc", "beam_noise_kc", "beam_geom_kc", "beam_ents", "beam_prims",
                                                "beam_pieces", "tracers", "tracer_kc", "tracer_fails",
-                                               "chrome_meshes", "chrome_verts", "chrome_kc", "chrome_gpu"])
+                                               "chrome_meshes", "chrome_verts", "chrome_kc", "chrome_gpu",
+                                               "music_reads", "music_read_kb", "music_async", "music_waits",
+                                               "music_io_kc", "music_read_kc"])
         self.assertNotIn("ce_ents", fr.span_names(r))
         self.assertNotIn("pm_sv_cmds", fr.span_names(r))
         self.assertNotIn("snd_loads", fr.span_names(r))
@@ -874,7 +876,7 @@ class Sessions(unittest.TestCase):
         self.assertTrue(s["id"].startswith(s["short"]))
         self.assertEqual(fr.systime_date(s["systime"]).year, 2022)
         self.assertEqual(r["end"], {"tsc": r["end"]["tsc"], "lost": 1, "next": fr.SEG_SIZE})
-        self.assertEqual(len(r["counters"]), 183)            # every segment has its own COUNTERS ...
+        self.assertEqual(len(r["counters"]), 189)            # every segment has its own COUNTERS ...
         self.assertEqual(len(r["spans"]), 73)                # ... and SPANS
         self.assertEqual(self.seg[3]["session"]["reason"], fr.SEG_SIZE)
         self.assertEqual(self.seg[3]["end"]["next"], fr.SEG_SESSION)

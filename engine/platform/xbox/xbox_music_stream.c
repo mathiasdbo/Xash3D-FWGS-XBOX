@@ -39,6 +39,21 @@ r3d_music_baked 0 sends every track to the mp3 path on the same disc (the
 A/B); r3d_music_ab flips it and restarts the playing track at its
 position; r3d_music_crc checks a track's two decodes on the console
 against the baker's CRCs (music_crc.txt in the write directory).
+
+The file reads (#172). The stream refilled a 9 KiB read-ahead with a
+synchronous FS_Read every 11 frames, and on the console each refill cost
+0.5-1.0 ms of its frame: half of k_snd_music's 0.13 ms a frame (session
+8c7db857). The read-ahead is now two 16 KiB windows of the file
+(xbox_music_adpcm.h), and when the .xwav is a plain file on disk the
+windows are read through a handle of their own with overlapped,
+unbuffered reads (compat/xbox/xbox_async_read.h): entering one window
+queues the read of the next, the kernel transfers it while the game
+runs, and the frame that needs it finds it landed. A file inside a pack,
+a handle the kernel will not open that way, or a read it refuses or cuts
+short sends the stream back to FS_Read, synchronously, for good.
+Everything stays on the main thread: no worker, no lock, and nothing new
+for the loading screen or a map change to race with - a track that stops
+waits for its read in flight before its buffer is freed.
 */
 
 #include "common.h"
@@ -51,6 +66,7 @@ against the baker's CRCs (music_crc.txt in the write directory).
 #include "xbox_frametime.h"
 #include "xbox_music_adpcm.h"
 #include "xbox_music_stream.h"
+#include "xbox_async_read.h" /* compat/xbox: the overlapped reads, #172 */
 
 /* Not archived on purpose: an A/B session that ended on 0 would otherwise
    keep the mp3 path on through the HDD's config.cfg, which shadows the
@@ -61,28 +77,93 @@ static CVAR_DEFINE_AUTO( r3d_music_baked, "1", 0,
 /* One allocation per open track: the stream_t upstream's callers hold,
    the private state, and the read-ahead on a page boundary (the kernel
    reads about three times faster into one, docs/r3d/lessons.md, the
-   autosave entry). Freed whole by Stream_FreeXwav. */
+   autosave entry; an unbuffered read needs a sector boundary). Freed
+   whole by Stream_FreeXwav. */
 typedef struct music_state_s
 {
 	stream_t stream;   /* first: the pointer FS_FreeStream frees is the allocation */
 	xbox_music_stream_t s;
+	r3d_async_read_t async; /* the overlapped reads' handle (#172), when async_on */
+	qboolean async_on;
 } music_state_t;
 
-#define MUSIC_ALIGN 4096
+#define MUSIC_ALIGN XBOX_MUSIC_IO_ALIGN
+
+/* The file reads, each counted for the recorder (music_* counters,
+   xbox_frametime_util.h, #172). The synchronous pair reads the file_t
+   upstream's stream holds; the overlapped pair its own handle. */
+static void Music_CountRead( uint32_t bytes )
+{
+	xbox_ft_work.c[XBOX_FT_W_MUSIC_READS]++;
+	xbox_ft_work.c[XBOX_FT_W_MUSIC_READ_KB] += ( bytes + 1023u ) / 1024u;
+}
 
 static int Music_IoRead( void *ctx, void *dst, int bytes )
 {
-	return (int)FS_Read( (file_t *)ctx, dst, bytes );
+	music_state_t *st = ctx;
+	xbox_ft_span_t span;
+	int got;
+
+	xbox_ft_span_begin( &span );
+	got = (int)FS_Read( st->stream.file, dst, bytes );
+	xbox_ft_time_add( &span, XBOX_FT_W_MUSIC_IO_KC );
+	Music_CountRead( (uint32_t)bytes );
+	xbox_ft_work.c[XBOX_FT_W_MUSIC_WAITS]++; /* synchronous: the frame waits it out */
+	return got;
 }
 
 static int Music_IoSeek( void *ctx, uint32_t offset )
 {
-	return FS_Seek( (file_t *)ctx, (fs_offset_t)offset, SEEK_SET ) == -1 ? -1 : 0;
+	music_state_t *st = ctx;
+	xbox_ft_span_t span;
+	int r;
+
+	xbox_ft_span_begin( &span );
+	r = FS_Seek( st->stream.file, (fs_offset_t)offset, SEEK_SET ) == -1 ? -1 : 0;
+	xbox_ft_time_add( &span, XBOX_FT_W_MUSIC_IO_KC );
+	return r;
+}
+
+static int Music_AsyncStart( void *ctx, uint32_t offset, void *dst, uint32_t bytes )
+{
+	music_state_t *st = ctx;
+	xbox_ft_span_t span;
+	int r;
+
+	xbox_ft_span_begin( &span );
+	r = r3d_async_start( &st->async, offset, dst, bytes );
+	xbox_ft_time_add( &span, XBOX_FT_W_MUSIC_IO_KC );
+	if( r < 0 )
+		return -1;
+	Music_CountRead( bytes );
+	if( r > 0 )
+		xbox_ft_work.c[XBOX_FT_W_MUSIC_ASYNC]++;
+	return 0;
+}
+
+static int Music_AsyncFinish( void *ctx, int wait )
+{
+	music_state_t *st = ctx;
+	xbox_ft_span_t span;
+	int r, waited;
+
+	xbox_ft_span_begin( &span );
+	r = r3d_async_finish( &st->async, wait, &waited );
+	xbox_ft_time_add( &span, XBOX_FT_W_MUSIC_IO_KC );
+	if( waited )
+		xbox_ft_work.c[XBOX_FT_W_MUSIC_WAITS]++;
+	return r == R3D_ASYNC_PENDING ? XBOX_MUSIC_IO_PENDING : r;
 }
 
 static int Stream_ReadXwav( stream_t *stream, int bytes, void *buffer )
 {
-	return Xbox_MusicStream_Read( &((music_state_t *)stream->ptr)->s, bytes, buffer );
+	xbox_ft_span_t span;
+	int r;
+
+	xbox_ft_span_begin( &span );
+	r = Xbox_MusicStream_Read( &((music_state_t *)stream->ptr)->s, bytes, buffer );
+	xbox_ft_time_add( &span, XBOX_FT_W_MUSIC_READ_KC );
+	return r;
 }
 
 static int Stream_SetPosXwav( stream_t *stream, int newpos )
@@ -97,6 +178,17 @@ static int Stream_GetPosXwav( stream_t *stream )
 
 static void Stream_FreeXwav( stream_t *stream )
 {
+	music_state_t *st = stream->ptr;
+
+	/* a read still landing writes into the read-ahead, which goes with
+	   the allocation below: wait for it, then close its handle (#172) */
+	if( st )
+	{
+		Xbox_MusicStream_Close( &st->s );
+		if( st->async_on )
+			r3d_async_close( &st->async );
+	}
+
 	/* Stream_FreeMPG's order (snd_mp3.c:439-454 in the reference); the
 	   state and the read-ahead are in the same allocation as the stream */
 	stream->ptr = NULL;
@@ -194,14 +286,33 @@ static stream_t *Music_Open( const char *filename, qboolean force )
 
 	st = Mem_Calloc( host.soundpool, sizeof( *st ) + XBOX_MUSIC_READAHEAD_BYTES + MUSIC_ALIGN - 1 );
 	stream = &st->stream;
+	stream->file = file; /* the synchronous reads' (Music_IoRead) */
 	ra = (byte *)((( (uintptr_t)( st + 1 )) + MUSIC_ALIGN - 1 ) & ~(uintptr_t)( MUSIC_ALIGN - 1 ));
 
+	memset( &io, 0, sizeof( io ));
 	io.read = Music_IoRead;
 	io.seek = Music_IoSeek;
-	io.ctx = file;
+	io.ctx = st;
+
+	/* #172: the windows read with overlapped reads on a handle of their
+	   own, when the file FS_Open found is a plain file on disk (the same
+	   search, FS_GetFullDiskPath: NULL for one inside a pack) */
+	{
+		const char *disk = FS_GetDiskPath( path, false );
+
+		if( disk && r3d_async_open( &st->async, disk ) == 0 )
+		{
+			st->async_on = true;
+			io.start = Music_AsyncStart;
+			io.finish = Music_AsyncFinish;
+		}
+	}
+
 	if( !Xbox_MusicStream_Init( &st->s, &info, &io, (uint8_t *)stream->temp, sizeof( stream->temp ), ra ))
 	{
 		Con_Reportf( S_WARN "%s: %s.xwav: stream refused - playing the original\n", __func__, base );
+		if( st->async_on )
+			r3d_async_close( &st->async );
 		Mem_Free( st );
 		FS_Close( file );
 		Music_Note( "mp3 (bad xwav)", filename, 0, 0 );
@@ -220,8 +331,8 @@ static stream_t *Music_Open( const char *filename, qboolean force )
 	stream->type = WF_PCMDATA;
 	stream->format = &xwav_format;
 
-	Music_Note( info.tag == XBOX_XWAV_TAG_ADPCM ? "xwav adpcm" : "xwav pcm", filename,
-		xbox_ft_span_kc_since( &span ), (uint32_t)len );
+	Music_Note( info.tag == XBOX_XWAV_TAG_ADPCM ? ( st->async_on ? "xwav adpcm async" : "xwav adpcm sync" )
+		: ( st->async_on ? "xwav pcm async" : "xwav pcm sync" ), filename, xbox_ft_span_kc_since( &span ), (uint32_t)len );
 	return stream;
 }
 
@@ -363,13 +474,15 @@ static void Music_CrcTrack( const char *name, qboolean dump )
 	   microbenchmark, not k_snd_music (which also has the copy into the raw
 	   channel). At 733 MHz, a frame of 1/60 s costs 1/60 of it. */
 	Music_Print( "r3d_music_crc %s: mp3 %u frames crc %08x (bake %08x, %u) %s; xwav %u frames crc %08x (bake %08x) %s;"
-		" decode ms per second of music: mp3 %.2f, xwav %.2f (at 733 MHz)\n",
+		" decode ms per second of music: mp3 %.2f, xwav %.2f (at 733 MHz);"
+		" xwav reads %u (%s: queued %u, waited %u, fallbacks %u)\n",
 		base, frames, crc, s->info.crc_source, s->info.source_frames,
 		( frames == s->info.source_frames && crc == s->info.crc_source ) ? "SAME" : "DIFFERS",
 		bframes, bcrc, s->info.crc_decoded,
 		( bframes == s->info.frames && bcrc == s->info.crc_decoded && !s->bad_blocks ) ? "SAME" : "DIFFERS",
 		frames ? (double)mp3_ticks / 733333.0 / ( (double)frames / sc.rate ) : 0.0,
-		bframes ? (double)xwav_ticks / 733333.0 / ( (double)bframes / s->info.rate ) : 0.0 );
+		bframes ? (double)xwav_ticks / 733333.0 / ( (double)bframes / s->info.rate ) : 0.0,
+		s->io_reads, ((music_state_t *)baked->ptr)->async_on ? "async" : "sync", s->io_async, s->io_waits, s->io_fallbacks );
 
 	FS_FreeStream( baked );
 }

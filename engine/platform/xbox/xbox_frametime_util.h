@@ -473,6 +473,18 @@ enum
 	XBOX_FT_W_CHROME_VERTS,  /* their tricmd vertices */
 	XBOX_FT_W_CHROME_KC,     /* time: kilocycles of CPU studio work only those meshes caused (above) */
 	XBOX_FT_W_CHROME_GPU,    /* chrome meshes the vertex unit drew (vs_studio's chrome variant) */
+	/* The baked music's file reads (2026-10-10, x9-audio-music-refill,
+	   divergence #172), counted in engine/platform/xbox/
+	   xbox_music_stream.c: k_snd_music is music_read_kc (the stream's
+	   reads: decode, chunk copies and these file reads) plus upstream's
+	   copy into the raw channel (S_RawEntSamples); music_io_kc is the
+	   part spent in the file reads' calls, waits for the disk included. */
+	XBOX_FT_W_MUSIC_READS,   /* read-ahead windows read (asynchronous or not) */
+	XBOX_FT_W_MUSIC_READ_KB, /* KiB those reads asked for */
+	XBOX_FT_W_MUSIC_ASYNC,   /* ... of which the kernel queued and the frame went on without */
+	XBOX_FT_W_MUSIC_WAITS,   /* reads the frame blocked on: synchronous ones, and queued ones not landed when needed */
+	XBOX_FT_W_MUSIC_IO_KC,   /* time: the music's file-read calls, issue, completion and waits */
+	XBOX_FT_W_MUSIC_READ_KC, /* time: the music stream's reads (Stream_ReadXwav), the above included */
 	XBOX_FT_W_END
 };
 

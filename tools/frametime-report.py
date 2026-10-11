@@ -151,6 +151,9 @@ EFX_TIMES = ("beam_kc", "beam_noise_kc", "beam_geom_kc", "tracer_kc")
 # Chrome studio meshes (recorders from 2026-10-09, x9-perf-chrome-vp,
 # divergence #170): the CPU studio work the chrome meshes caused. A time.
 CHROME_TIMES = ("chrome_kc",)
+# The baked music's reads (recorders from 2026-10-10, x9-audio-music-refill,
+# divergence #172): the stream's reads, and of them the file-read calls.
+MUSIC_TIMES = ("music_io_kc", "music_read_kc")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -1260,7 +1263,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
     timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES) \
-        | set(PART_TIMES) | set(EFX_TIMES) | set(CHROME_TIMES)
+        | set(PART_TIMES) | set(EFX_TIMES) | set(CHROME_TIMES) | set(MUSIC_TIMES)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1517,6 +1520,7 @@ def summary_text(rec, rows, sess):
     lines.extend(particles_text(rec, rows))
     lines.extend(beams_text(rec, rows))
     lines.extend(chrome_text(rec, rows))
+    lines.extend(music_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -1877,6 +1881,35 @@ def chrome_text(rec, rows):
             r["map"][:18], "%s/%s" % (short(a.get("chrome_meshes", 0.0)), short(r["work_peak"].get("chrome_meshes", 0.0))),
             short(a.get("chrome_verts", 0.0)), short(a.get("chrome_gpu", 0.0)),
             r.get("span_ms", {}).get("k_studio_points", 0.0), a.get("chrome_kc", 0.0) * k))
+    return lines
+
+
+def music_text(rec, rows):
+    """The baked music's file reads per in-play frame (recorders from
+    2026-10-10, x9-audio-music-refill, divergence #172): read-ahead
+    windows read, how many of them the kernel queued (the frame went on
+    without them) and how many reads the frame blocked on, then k_snd_music
+    split into the stream's reads (decode, copies, file reads) and of that
+    the file-read calls; the rest of k_snd_music is upstream's copy into the
+    raw channel. In xemu the audio callback never runs, so the music
+    reads nothing in play there. Nothing for a session without music
+    reads."""
+    if "music_read_kc" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r
+            and (r["work_avg"].get("music_reads", 0.0) or r["work_avg"].get("music_read_kc", 0.0))]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "music per in-play frame: read-ahead reads (KiB), queued by the kernel, blocked on; ms: k_snd_music, "
+             "the stream's reads, of them the file-read calls (the rest of k_snd_music is the raw-channel copy)"]
+    lines.append("%-18s %9s %8s %8s %8s %8s %8s %8s" % ("map", "reads", "KiB", "queued", "blocked", "k_music", "reads", "io"))
+    for r in maps:
+        a = r["work_avg"]
+        lines.append("%-18s %9.3f %8.2f %8.3f %8.3f %8.3f %8.3f %8.3f" % (
+            r["map"][:18], a.get("music_reads", 0.0), a.get("music_read_kb", 0.0), a.get("music_async", 0.0),
+            a.get("music_waits", 0.0), r.get("span_ms", {}).get("k_snd_music", 0.0),
+            a.get("music_read_kc", 0.0) * k, a.get("music_io_kc", 0.0) * k))
     return lines
 
 

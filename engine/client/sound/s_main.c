@@ -2084,6 +2084,13 @@ void S_Shutdown( void )
 	if( clgame.soundFuncs.pfnS_Shutdown )
 		clgame.soundFuncs.pfnS_Shutdown();
 
+#if XASH_XBOX
+	// divergences.md #172: upstream leaves the music track open here and
+	// Sound_Shutdown then frees host.soundpool; a baked track may have an
+	// overlapped read in flight into a pool buffer, so close it first
+	// (Stream_FreeXwav waits for the read and closes its handle)
+	S_StopBackgroundTrack();
+#endif
 	S_StopAllSounds (false);
 	S_FreeRawChannels ();
 	S_FreeSounds ();

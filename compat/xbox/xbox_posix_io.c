@@ -31,6 +31,7 @@ anything else here changes.
 #include "xbox_io_stats.h" /* the kernel calls counted for the frame-time recorder, #162 */
 #include "xbox_missing_dirs.h" /* lookups under a missing directory answered without the kernel, #164 */
 #include "xbox_dir_cache.h" /* the disc's directory listings scanned once, #166 */
+#include "xbox_async_read.h" /* a read running while the caller works, #172 */
 
 /* #166: bumped by every call that could create, remove or rename
    anything; a listing is kept only if no such call came between its
@@ -1367,4 +1368,154 @@ long long _filelengthi64( int fd )
 	}
 
 	return ( long long )size.QuadPart;
+}
+
+
+/*
+====================
+r3d_async_open / _start / _finish / _close
+
+docs/r3d/divergences.md #172, compat/xbox/xbox_async_read.h: one read
+running while the caller works, on a handle of its own. The path goes
+through r3d_native_path like open()'s; the handle is not put in the
+descriptor table (no read() or lseek() ever sees it), so nothing here
+touches r3d_fds.
+====================
+*/
+int r3d_async_open( r3d_async_read_t *a, const char *path )
+{
+	char native[MAX_PATH];
+
+	memset( a, 0, sizeof( *a ));
+	a->handle = INVALID_HANDLE_VALUE;
+	a->state = R3D_ASYNC_IDLE;
+
+	if( !r3d_native_path( path, native, sizeof( native )))
+	{
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	a->event = R3D_IO_CALL( meta, CreateEventA( NULL, TRUE, FALSE, NULL ));
+	if( !a->event )
+	{
+		errno = r3d_errno_from_win32( GetLastError());
+		return -1;
+	}
+
+	a->handle = R3D_IO_CALL( opens, CreateFileA( native, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+		FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING, NULL ));
+	if( a->handle == INVALID_HANDLE_VALUE )
+	{
+		r3d_io_stats.open_fails++;
+		errno = r3d_errno_from_win32( GetLastError());
+		R3D_IO_CALL( closes, CloseHandle( a->event ));
+		a->event = NULL;
+		return -1;
+	}
+
+	return 0;
+}
+
+int r3d_async_start( r3d_async_read_t *a, uint32_t offset, void *dst, uint32_t bytes )
+{
+	LARGE_INTEGER at;
+	NTSTATUS status;
+
+	if( a->handle == INVALID_HANDLE_VALUE || a->state != R3D_ASYNC_IDLE )
+		return -1;
+
+	memset( &a->ov, 0, sizeof( a->ov ));
+	a->ov.Offset = offset;
+	a->ov.hEvent = a->event;
+	/* what the kernel overwrites when the read completes (nxdk's
+	   ReadFile presets it the same way, fileio.c:121-122) */
+	a->ov.Internal = ( ULONG_PTR )STATUS_PENDING;
+	a->asked = bytes;
+	at.QuadPart = offset;
+
+	/* The event is manual-reset and reused for every read: put it in the
+	   non-signalled state before this one is queued, so the wait in
+	   r3d_async_finish cannot return on the previous read's completion
+	   while this one still writes into `dst` (Codex review; whether
+	   NtReadFile clears it itself is unverified on the Xbox kernel). A
+	   failed clear refuses the read, and the caller reads synchronously. */
+	if( !NT_SUCCESS( R3D_IO_CALL( meta, NtClearEvent( a->event ))))
+		return -1;
+
+	/* NtReadFile itself rather than nxdk's overlapped ReadFile
+	   (fileio.c:115-141), so a queued read is told from a refused one by
+	   the status the kernel returned, not by GetLastError's translation of
+	   it (review): a queued read taken for a refused one would be left
+	   writing into a buffer nobody waits for. `ov` is the IO_STATUS_BLOCK,
+	   Internal/InternalHigh = Status/Information, as nxdk passes it. */
+	status = R3D_IO_CALL( reads, NtReadFile( a->handle, a->event, NULL, NULL, ( PIO_STATUS_BLOCK )&a->ov.Internal,
+		dst, ( ULONG )bytes, &at ));
+	if( status == STATUS_PENDING )
+	{
+		a->state = R3D_ASYNC_RUNNING;
+		return 1;
+	}
+	if( NT_SUCCESS( status ) || status == STATUS_END_OF_FILE )
+	{
+		const DWORD got = NT_SUCCESS( status ) ? ( DWORD )a->ov.InternalHigh : 0;
+
+		r3d_io_stats.read_bytes += got;
+		a->done_bytes = got <= bytes ? ( int )got : -1;
+		a->state = R3D_ASYNC_DONE;
+		return 0;
+	}
+	return -1;
+}
+
+int r3d_async_finish( r3d_async_read_t *a, int wait, int *waited )
+{
+	DWORD got = 0;
+	BOOL ok;
+
+	*waited = 0;
+	if( a->state == R3D_ASYNC_DONE )
+	{
+		a->state = R3D_ASYNC_IDLE;
+		return a->done_bytes;
+	}
+	if( a->state != R3D_ASYNC_RUNNING )
+		return -1;
+
+	/* the kernel writes the status into `ov` when the read completes
+	   (Internal stays STATUS_PENDING until then), so asking costs no
+	   call; read through volatile, since the kernel writes it */
+	if(( DWORD )*( volatile ULONG_PTR * )&a->ov.Internal == ( DWORD )STATUS_PENDING )
+	{
+		if( !wait )
+			return R3D_ASYNC_PENDING;
+		*waited = 1;
+	}
+
+	ok = R3D_IO_CALL( meta, GetOverlappedResult( a->handle, &a->ov, &got, TRUE ));
+	a->state = R3D_ASYNC_IDLE;
+	if( !ok || got > a->asked )
+		return -1;
+	r3d_io_stats.read_bytes += got;
+	return ( int )got;
+}
+
+void r3d_async_close( r3d_async_read_t *a )
+{
+	int waited;
+
+	if( a->state == R3D_ASYNC_RUNNING )
+		r3d_async_finish( a, 1, &waited ); /* the kernel still writes into the caller's buffer */
+	a->state = R3D_ASYNC_IDLE;
+
+	if( a->handle != INVALID_HANDLE_VALUE )
+	{
+		R3D_IO_CALL( closes, CloseHandle( a->handle ));
+		a->handle = INVALID_HANDLE_VALUE;
+	}
+	if( a->event )
+	{
+		R3D_IO_CALL( closes, CloseHandle( a->event ));
+		a->event = NULL;
+	}
 }

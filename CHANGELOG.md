@@ -5,6 +5,23 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: baked music reads ahead while the game runs
+
+On the console, the baked music still cost 0.13 ms of every frame, and
+half of that was waiting for the hard disk: every fifth of a second the
+player stopped for 0.5 to 1 ms while the next 9 KB of the track was read.
+The music now keeps two 16 KB pieces of the track in memory and asks the
+console to fetch the next one in the background as soon as it starts
+playing the current one, so the disk works while the game runs and the
+frame that needs the data finds it already there. The music sounds and
+behaves exactly as before - the same samples, start, end, looping, pause
+and saved position - and if a file cannot be read that way it is read as
+before. It uses about 24 KB more memory while a track plays. The
+frame-time recorder now counts the music's reads, which ones ran in the
+background and which ones the game had to wait for, and the time the
+music's decoding and reading take, so the next console recording can
+confirm the saving.
+
 ### Changed - Xbox: music plays from tracks baked offline
 
 The music was decoded from mp3 on the console as it played, which took

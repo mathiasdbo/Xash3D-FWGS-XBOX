@@ -52,6 +52,10 @@ KERNEL_CATEGORY = {
     "FindFirstFileA": "meta",
     "FindNextFileA": "meta",
     "FindClose": "meta",
+    "NtReadFile": "reads",           # r3d_async_start's overlapped read (#172)
+    "CreateEventA": "meta",          # r3d_async_open's completion event (#172)
+    "GetOverlappedResult": "meta",   # r3d_async_finish: an overlapped read's completion (#172)
+    "NtClearEvent": "meta",          # r3d_async_start: the reused event made non-signalled before each read (#172)
 }
 NOT_KERNEL = {"GetLastError"}
 CATEGORIES = {"opens", "reads", "writes", "seeks", "probes", "closes", "meta"}
@@ -93,6 +97,11 @@ EXPECTED = {
     "_rmdir": {"meta"},
     "_access": {"probes"},
     "_dup": {"meta", "closes"},
+    # the overlapped reads (#172): the event and the completion are meta
+    "r3d_async_open": {"meta", "opens", "closes"},   # the event closed again when the open fails
+    "r3d_async_start": {"reads", "meta"},
+    "r3d_async_finish": {"meta"},
+    "r3d_async_close": {"meta", "closes"},           # waits for a read in flight
 }
 
 CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")

@@ -456,6 +456,8 @@ uint32_t Xbox_MusicXwav_ToFileFrames( const xbox_xwav_info_t *info, uint32_t sou
 int Xbox_MusicStream_Init( xbox_music_stream_t *s, const xbox_xwav_info_t *info, const xbox_music_io_t *io,
 	uint8_t *chunk, uint32_t chunk_capacity, uint8_t *readahead )
 {
+	uint32_t i;
+
 	memset( s, 0, sizeof( *s ));
 	Xbox_MusicAdpcm_InitTables();
 
@@ -464,59 +466,270 @@ int Xbox_MusicStream_Init( xbox_music_stream_t *s, const xbox_xwav_info_t *info,
 	s->chunk = chunk;
 	s->ra = readahead;
 	s->frame_bytes = 2u * info->channels;
+	s->straddle_block = UINT32_MAX;
+	for( i = 0; i < XBOX_MUSIC_WINDOWS; i++ )
+		s->win[i].state = XBOX_MUSIC_WIN_EMPTY;
 
 	if( info->chunk_bytes == 0 || info->chunk_bytes > chunk_capacity || info->chunk_bytes % s->frame_bytes )
 		return 0;
-	if( info->block_bytes == 0 || info->block_bytes > XBOX_MUSIC_READAHEAD_BYTES )
+	if( info->block_bytes == 0 || info->block_bytes > XBOX_MUSIC_MAX_BLOCK_BYTES )
+		return 0;
+	if( !io->read || !io->seek || !io->start != !io->finish )
+		return 0;
+	if( (uint64_t)info->data_offset + info->data_bytes > 0xFFFFFFFFu - XBOX_MUSIC_WINDOW_BYTES )
 		return 0;
 
 	s->blocks = (uint32_t)(( (uint64_t)info->data_bytes + info->block_bytes - 1 ) / info->block_bytes );
-	s->ra_capacity = XBOX_MUSIC_READAHEAD_BYTES / info->block_bytes;
+	s->data_end = info->data_offset + info->data_bytes;
 	return 1;
 }
 
-/* The block's bytes, refilling the read-ahead from it when it is not
-   there; NULL when the file cannot supply it. */
-static const uint8_t *FetchBlock( xbox_music_stream_t *s, uint32_t block )
+/* The bytes of the file window `index` holds (the last one is short). */
+static uint32_t WindowWant( const xbox_music_stream_t *s, uint32_t index )
 {
-	uint32_t want, bytes, got, first_byte;
+	const uint32_t left = s->data_end - index * XBOX_MUSIC_WINDOW_BYTES;
 
-	if( block >= s->ra_first && block < s->ra_first + s->ra_count )
-		return s->ra + ( block - s->ra_first ) * s->info.block_bytes;
+	return left < XBOX_MUSIC_WINDOW_BYTES ? left : XBOX_MUSIC_WINDOW_BYTES;
+}
 
-	if( block >= s->blocks || s->io_failed )
-		return NULL;
+static void WindowRead( xbox_music_stream_t *s, uint32_t slot, uint32_t index );
 
-	want = s->blocks - block;
-	if( want > s->ra_capacity )
-		want = s->ra_capacity;
-	first_byte = block * s->info.block_bytes;
-	bytes = want * s->info.block_bytes;
-	if( bytes > s->info.data_bytes - first_byte )
-		bytes = s->info.data_bytes - first_byte; /* a PCM file's last block is short */
+/* Takes a finished read's result into its window. A synchronous read
+   that came back short or failed ends the track after the whole blocks
+   that did arrive, as before #172 (a failed libmpg read ends it too). An
+   asynchronous one that did not deliver the whole window is not trusted
+   to: the stream drops to synchronous reads for good and reads the window
+   again that way, so only `read` ever decides where a track ends. */
+static void WindowSettle( xbox_music_stream_t *s, uint32_t slot, int got, int async )
+{
+	xbox_music_window_t *w = &s->win[slot];
+	const uint32_t want = WindowWant( s, w->index );
 
-	s->ra_first = block;
-	s->ra_count = 0;
+	if( got < 0 || (uint32_t)got > w->asked )
+		got = 0;
+
+	if( async && (uint32_t)got < want )
+	{
+		s->io.start = NULL;
+		s->io.finish = NULL;
+		s->io_fallbacks++;
+		WindowRead( s, slot, w->index );
+		return;
+	}
+
+	if( (uint32_t)got < want )
+		s->io_failed = 1;
+	w->valid = (uint32_t)got < want ? (uint32_t)got : want;
+	w->state = XBOX_MUSIC_WIN_READY;
+}
+
+/* Collects slot `slot`'s read when it has finished, or (`wait`) when it
+   finishes. Returns 1 when the window is READY, 0 when its read is still
+   running (only without `wait`). */
+static int WindowCollect( xbox_music_stream_t *s, uint32_t slot, int wait )
+{
+	int got;
+
+	if( s->win[slot].state != XBOX_MUSIC_WIN_PENDING )
+		return 1;
+
+	got = s->io.finish( s->io.ctx, wait );
+	if( got == XBOX_MUSIC_IO_PENDING )
+	{
+		if( !wait )
+			return 0;
+		got = -1; /* finish broke its contract: an error */
+	}
+	WindowSettle( s, slot, got, 1 );
+	return 1;
+}
+
+/* Issues the read of window `index` into slot `slot`: asynchronously when
+   the caller gave `start` (the window stays PENDING while the kernel
+   works), else through seek and read, finished here. */
+static void WindowRead( xbox_music_stream_t *s, uint32_t slot, uint32_t index )
+{
+	xbox_music_window_t *w = &s->win[slot];
+	const uint32_t offset = index * XBOX_MUSIC_WINDOW_BYTES;
+	uint8_t *dst = s->ra + slot * XBOX_MUSIC_WINDOW_BYTES;
+	/* whole 4096-byte units from a 4096-byte boundary, as an unbuffered
+	   read must ask; past the end of the file it delivers what there is */
+	uint32_t asked = ( WindowWant( s, index ) + XBOX_MUSIC_IO_ALIGN - 1 ) & ~( XBOX_MUSIC_IO_ALIGN - 1 );
+
+	if( asked > XBOX_MUSIC_WINDOW_BYTES )
+		asked = XBOX_MUSIC_WINDOW_BYTES;
+
+	w->index = index;
+	w->valid = 0;
+	w->asked = asked;
+	w->state = XBOX_MUSIC_WIN_PENDING;
 	s->io_reads++;
 
-	if( s->io.seek( s->io.ctx, s->info.data_offset + first_byte ) != 0 )
+	if( s->io.start )
 	{
-		s->io_failed = 1;
+		if( s->io.start( s->io.ctx, offset, dst, asked ) != 0 )
+		{
+			WindowSettle( s, slot, -1, 1 );
+			return;
+		}
+		/* still running after `start` returned: the disk works while the
+		   caller does (a read the kernel finished on the spot is not) */
+		if( !WindowCollect( s, slot, 0 ))
+			s->io_async++;
+		return;
+	}
+
+	if( s->io.seek( s->io.ctx, offset ) != 0 )
+		WindowSettle( s, slot, -1, 0 );
+	else WindowSettle( s, slot, s->io.read( s->io.ctx, dst, (int)asked ), 0 );
+}
+
+/* The slot holding window `index`, READY, reading it if no slot has it
+   (never into slot `keep`, which holds the other half of a straddling
+   block); -1 when it cannot be had. */
+static int WindowEnsure( xbox_music_stream_t *s, uint32_t index, int keep )
+{
+	uint32_t i, victim = XBOX_MUSIC_WINDOWS;
+
+	for( i = 0; i < XBOX_MUSIC_WINDOWS; i++ )
+	{
+		if( s->win[i].state == XBOX_MUSIC_WIN_EMPTY || s->win[i].index != index )
+			continue;
+		if( !WindowCollect( s, i, 0 ))
+		{
+			s->io_waits++; /* the read ahead has not landed yet */
+			WindowCollect( s, i, 1 );
+		}
+		/* a fallback may have read it again: it is READY now either way */
+		return (int)i;
+	}
+
+	/* after a failed read nothing more is read, as before #172 */
+	if( s->io_failed )
+		return -1;
+
+	/* the slot to read into: an empty one, else one not holding the
+	   window after this one (it may be the read ahead), else any */
+	for( i = 0; i < XBOX_MUSIC_WINDOWS && victim == XBOX_MUSIC_WINDOWS; i++ )
+		if( (int)i != keep && s->win[i].state == XBOX_MUSIC_WIN_EMPTY )
+			victim = i;
+	for( i = 0; i < XBOX_MUSIC_WINDOWS && victim == XBOX_MUSIC_WINDOWS; i++ )
+		if( (int)i != keep && s->win[i].index != index + 1 )
+			victim = i;
+	for( i = 0; i < XBOX_MUSIC_WINDOWS && victim == XBOX_MUSIC_WINDOWS; i++ )
+		if( (int)i != keep )
+			victim = i;
+
+	/* one read in flight at a time: a read ahead still landing (one a
+	   seek made useless) lands first */
+	for( i = 0; i < XBOX_MUSIC_WINDOWS; i++ )
+	{
+		if( !WindowCollect( s, i, 0 ))
+		{
+			s->io_waits++;
+			WindowCollect( s, i, 1 );
+		}
+	}
+	if( s->io_failed )
+		return -1; /* that read was short */
+
+	WindowRead( s, victim, index );
+	if( !WindowCollect( s, victim, 0 ))
+	{
+		s->io_waits++; /* a block is needed now: wait for the disk */
+		WindowCollect( s, victim, 1 );
+	}
+	return s->io_failed && !s->win[victim].valid ? -1 : (int)victim;
+}
+
+/* With asynchronous reads, once the stream is in the window slot `cur`
+   holds, the next window is read into the other slot while this one
+   plays. */
+static void WindowReadAhead( xbox_music_stream_t *s, uint32_t cur )
+{
+	const uint32_t next = s->win[cur].index + 1;
+	uint32_t i, other = XBOX_MUSIC_WINDOWS;
+
+	if( !s->io.start || s->io_failed || (uint64_t)next * XBOX_MUSIC_WINDOW_BYTES >= s->data_end )
+		return;
+
+	for( i = 0; i < XBOX_MUSIC_WINDOWS; i++ )
+	{
+		if( i == cur )
+			continue;
+		if( s->win[i].state != XBOX_MUSIC_WIN_EMPTY && s->win[i].index == next )
+			return; /* already there, or on its way */
+		other = i;
+	}
+
+	/* one read in flight at a time: a stale one still landing there is
+	   left to land first */
+	if( other == XBOX_MUSIC_WINDOWS || !WindowCollect( s, other, 0 ))
+		return;
+
+	WindowRead( s, other, next );
+}
+
+void Xbox_MusicStream_Close( xbox_music_stream_t *s )
+{
+	uint32_t i;
+
+	for( i = 0; i < XBOX_MUSIC_WINDOWS; i++ )
+	{
+		if( s->win[i].state == XBOX_MUSIC_WIN_PENDING && s->io.finish )
+			s->io.finish( s->io.ctx, 1 );
+		s->win[i].state = XBOX_MUSIC_WIN_EMPTY;
+	}
+}
+
+/* The block's bytes, through the windows; NULL when the file cannot
+   supply them. */
+static const uint8_t *FetchBlock( xbox_music_stream_t *s, uint32_t block )
+{
+	uint32_t first, len, at, w0, w1;
+	int a, b;
+
+	if( block >= s->blocks )
 		return NULL;
-	}
 
-	got = (uint32_t)s->io.read( s->io.ctx, s->ra, (int)bytes );
-	if( got > bytes )
-		got = 0;
-	if( got < bytes )
+	first = s->info.data_offset + block * s->info.block_bytes;
+	len = s->data_end - first;
+	if( len > s->info.block_bytes )
+		len = s->info.block_bytes; /* a PCM file's last block is short */
+	w0 = first / XBOX_MUSIC_WINDOW_BYTES;
+	w1 = ( first + len - 1 ) / XBOX_MUSIC_WINDOW_BYTES;
+	at = first - w0 * XBOX_MUSIC_WINDOW_BYTES;
+
+	/* a block across two windows is kept in `straddle`: a chunk that
+	   starts inside it (after a seek every chunk does) asks for it again,
+	   by when the read ahead has taken the first window's slot
+	   (console-performance review) */
+	if( w0 != w1 && block == s->straddle_block )
+		return s->straddle;
+
+	if(( a = WindowEnsure( s, w0, -1 )) < 0 )
+		return NULL;
+
+	if( w0 == w1 )
 	{
-		/* keep the whole blocks that did arrive; the track ends after them */
-		s->io_failed = 1;
-		s->ra_count = got / s->info.block_bytes;
+		if( at + len > s->win[a].valid )
+			return NULL; /* past what a short read delivered */
+		WindowReadAhead( s, (uint32_t)a );
+		return s->ra + (uint32_t)a * XBOX_MUSIC_WINDOW_BYTES + at;
 	}
-	else s->ra_count = want;
 
-	return s->ra_count ? s->ra : NULL;
+	/* across two windows: both halves into `straddle` */
+	s->straddle_block = UINT32_MAX;
+	if( s->win[a].valid < XBOX_MUSIC_WINDOW_BYTES )
+		return NULL;
+	memcpy( s->straddle, s->ra + (uint32_t)a * XBOX_MUSIC_WINDOW_BYTES + at, XBOX_MUSIC_WINDOW_BYTES - at );
+	if(( b = WindowEnsure( s, w1, a )) < 0 || len - ( XBOX_MUSIC_WINDOW_BYTES - at ) > s->win[b].valid )
+		return NULL;
+	memcpy( s->straddle + ( XBOX_MUSIC_WINDOW_BYTES - at ), s->ra + (uint32_t)b * XBOX_MUSIC_WINDOW_BYTES,
+		len - ( XBOX_MUSIC_WINDOW_BYTES - at ));
+	s->straddle_block = block;
+	WindowReadAhead( s, (uint32_t)b );
+	return s->straddle;
 }
 
 uint32_t Xbox_MusicStream_DecodeFrames( xbox_music_stream_t *s, uint32_t first, uint32_t count, int16_t *out )

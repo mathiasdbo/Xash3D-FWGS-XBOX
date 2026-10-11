@@ -181,11 +181,55 @@ typedef struct xbox_music_io_s
 	/* Moves to absolute offset `offset`; returns 0 on success. */
 	int ( *seek )( void *ctx, uint32_t offset );
 	void *ctx;
+	/* Optional (#172), both or neither: a read that runs while the caller
+	   does other work. `start` issues a read of `bytes` at absolute
+	   `offset` into `dst` and returns 0, or -1 when it could not be
+	   issued; `finish` returns what that read delivered - the byte count,
+	   or -1 for an error - waiting for it when `wait` is set, and
+	   XBOX_MUSIC_IO_PENDING when `wait` is not set and the read has not
+	   completed. The stream keeps one read in flight at most and calls
+	   `finish` until it has the result. If `start` refuses a read, or a
+	   read fails or delivers less than asked (short of the end of the
+	   file), the stream reads that window again through `seek` and `read`
+	   and uses them only from then on. With `start` NULL it reads through
+	   `seek` and `read` when a block is needed, and never ahead. */
+	int ( *start )( void *ctx, uint32_t offset, void *dst, uint32_t bytes );
+	int ( *finish )( void *ctx, int wait );
 } xbox_music_io_t;
 
-/* The compressed read-ahead: 128 stereo ADPCM blocks, 186 ms at 44.1 kHz,
-   refilled with one read. */
-#define XBOX_MUSIC_READAHEAD_BYTES     9216u
+#define XBOX_MUSIC_IO_PENDING          ( -2 )
+
+/* The compressed read-ahead (#172): two windows of the file, each the
+   file's bytes [k * WINDOW, (k + 1) * WINDOW) for some k, so every read
+   starts on a 4096-byte boundary of the file (a whole number of the
+   hard disk's 512-byte and the DVD's 2048-byte sectors) and asks for a
+   multiple of 4096 bytes, as an unbuffered read must. A window is 16 KiB:
+   227.5 stereo ADPCM blocks, 330 ms at 44.1 kHz. With asynchronous reads
+   (`start`), entering window k issues the read of window k + 1, so the
+   disk works while k plays. A block that straddles two windows is copied
+   together into `straddle`. The caller's buffer is
+   XBOX_MUSIC_READAHEAD_BYTES long, and must start on an
+   XBOX_MUSIC_IO_ALIGN boundary for an unbuffered `start`. */
+#define XBOX_MUSIC_IO_ALIGN            4096u
+#define XBOX_MUSIC_WINDOW_BYTES        16384u
+#define XBOX_MUSIC_WINDOWS             2u
+#define XBOX_MUSIC_READAHEAD_BYTES     ( XBOX_MUSIC_WINDOWS * XBOX_MUSIC_WINDOW_BYTES )
+#define XBOX_MUSIC_MAX_BLOCK_BYTES     256u /* a stereo PCM block: 64 frames of 4 bytes */
+
+typedef enum
+{
+	XBOX_MUSIC_WIN_EMPTY = 0,
+	XBOX_MUSIC_WIN_PENDING,   /* its read is issued and not finished */
+	XBOX_MUSIC_WIN_READY      /* `valid` bytes of it are the file's */
+} xbox_music_win_state_t;
+
+typedef struct xbox_music_window_s
+{
+	uint32_t index;         /* the file's bytes [index * WINDOW, ...) */
+	uint32_t valid;         /* READY: bytes that arrived, from the window's start */
+	uint32_t asked;         /* PENDING: the bytes the read asked for */
+	int state;              /* xbox_music_win_state_t */
+} xbox_music_window_t;
 
 typedef struct xbox_music_stream_s
 {
@@ -204,26 +248,36 @@ typedef struct xbox_music_stream_s
 	int ended;              /* a chunk came back short: the decoder is at its end */
 	uint32_t frame_bytes;   /* 2 * channels */
 	uint32_t blocks;        /* blocks in `data` */
+	uint32_t data_end;      /* file offset just past `data` */
 
-	/* The read-ahead: blocks [ra_first, ra_first + ra_count). */
-	uint8_t *ra;            /* XBOX_MUSIC_READAHEAD_BYTES, the caller's */
-	uint32_t ra_first;
-	uint32_t ra_count;
-	uint32_t ra_capacity;   /* blocks that fit */
+	/* The read-ahead: XBOX_MUSIC_WINDOWS windows in `ra`, the caller's. */
+	uint8_t *ra;
+	xbox_music_window_t win[XBOX_MUSIC_WINDOWS];
+	uint8_t straddle[XBOX_MUSIC_MAX_BLOCK_BYTES];
+	uint32_t straddle_block; /* the block in `straddle`; UINT32_MAX for none */
 
 	int16_t carry[XBOX_ADPCM_BLOCK_FRAMES * 2];  /* one decoded block, for a chunk that starts or ends inside it */
 
-	uint32_t io_reads;      /* refills, for the recorder and the tests */
+	uint32_t io_reads;      /* window reads issued, for the recorder and the tests */
+	uint32_t io_async;      /* ... of which were still running when `start` returned */
+	uint32_t io_waits;      /* times the stream had to wait for a read still running */
+	uint32_t io_fallbacks;  /* asynchronous reads that failed or came back short: read again synchronously, and async off */
 	uint32_t bad_blocks;    /* blocks DecodeBlock refused */
-	int io_failed;          /* a read came back short: the track ends there */
+	int io_failed;          /* a read came back short or failed: the track ends there */
 } xbox_music_stream_t;
 
 /* Sets up a stream over a parsed file. `chunk` is chunk_bytes long (the
    engine passes stream->temp), `readahead` XBOX_MUSIC_READAHEAD_BYTES.
    Returns 0 when chunk_bytes is not a positive multiple of the frame
-   size, or exceeds `chunk_capacity`. */
+   size, or exceeds `chunk_capacity`, or `io` has one of start/finish
+   without the other. */
 int Xbox_MusicStream_Init( xbox_music_stream_t *s, const xbox_xwav_info_t *info, const xbox_music_io_t *io,
 	uint8_t *chunk, uint32_t chunk_capacity, uint8_t *readahead );
+
+/* Waits for a read still in flight (asynchronous `io`) and empties the
+   windows, so the caller can free the read-ahead and close the file.
+   Idempotent. */
+void Xbox_MusicStream_Close( xbox_music_stream_t *s );
 
 /* Stream_ReadMPG's contract: `need` bytes into `buffer`, or 0. */
 int Xbox_MusicStream_Read( xbox_music_stream_t *s, int need, void *buffer );
