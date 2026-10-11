@@ -28,6 +28,19 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER carry an "exact" or "free" property to a new operating point without re-reading the condition it was proved under
+
+X12 step 2 (x9-audio-mix48, #173) was planned on "#145's integer pitched
+mixer is exact for any step". It is exact only for positions and steps on
+the 2^-32 grid (`S_MixFixedStep`, `engine/platform/xbox/xbox_s_mix_pitch.h`),
+which every 11/22/44 kHz sound is at a 44.1 kHz mix and none is at 48 kHz
+(11025/48000 = 147/640): moving the mix rate would have sent every channel
+to the slower double loop, and lost the run path, without any test
+failing. **When a change moves a parameter an earlier optimisation or
+proof depended on (a rate, a size, an alignment), find that proof's
+precondition in the code and check it at the new value before relying on
+the property.**
+
 ### NEVER call a host-tested module tested while its engine glue allocates and frees on its own
 
 x9-audio-music-bake (#171) host-tested every line of the baked-music

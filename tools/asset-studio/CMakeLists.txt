@@ -20,6 +20,7 @@ add_library(AssetStudioFormats STATIC
     src/formats/Nv2aWater.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../ref/nv2a/nv2a_warp_util.c
     src/formats/MusicBake.cpp
+    src/formats/music_resample.cpp
     src/formats/music_adpcm_encode.c
     src/formats/music_mp3_decode.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform/xbox/xbox_music_adpcm.c
@@ -137,3 +138,9 @@ target_link_libraries(music_bake_test PRIVATE AssetStudioFormats)
 set_source_files_properties(tests/music_bake_test.cpp
     PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform/xbox;${CMAKE_CURRENT_SOURCE_DIR}/src/formats")
 add_test(NAME music_bake_test COMMAND music_bake_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/music_synthetic.mp3)
+
+# divergences.md #173: the offline resampler to the console's 48 kHz mix
+# rate - frequency response, images and aliases, alignment, DC, rounding.
+add_executable(music_resample_test tests/music_resample_test.cpp)
+target_link_libraries(music_resample_test PRIVATE AssetStudioFormats)
+add_test(NAME music_resample_test COMMAND music_resample_test)

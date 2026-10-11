@@ -45,7 +45,14 @@ typedef unsigned int uint;
 #define SetBits( iBitVector, bits ) (( iBitVector ) = ( iBitVector ) | ( bits ))
 #define FBitSet( iBitVector, bit ) (( iBitVector ) & ( bit ))
 
-/* engine/client/sound.h */
+/* engine/client/sound.h; on the Xbox the mix rate is a variable
+   (divergence #173), here the test's own, so it can run both rates */
+#define SOUND_11k 11025
+#define SOUND_22k 22050
+#define SOUND_44k 44100
+#define SOUND_48k 48000
+extern int s_mix_test_dma_speed;
+#define SOUND_DMA_SPEED s_mix_test_dma_speed
 #define PAINTBUFFER_SIZE 1024
 #define S_RAW_SOUND_BACKGROUNDTRACK -2
 #define CLIP16( x ) bound( SHRT_MIN + 8, x, SHRT_MAX - 8 )

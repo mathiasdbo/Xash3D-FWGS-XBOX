@@ -24,6 +24,13 @@ void S_MIX_TEST_ENTRY( portable_samplepair_t *pbuf, const int *pvol, const void 
 	S_MixAudio( pbuf, pvol, buf, channels, width, offset_frac, rate_scale, num_samples, false );
 }
 
+/* A whole channel through S_MixChannelToBuffer (divergence #173: a sound
+   plays for the same time and at the same pitch at either mix rate). */
+int S_MIX_TEST_CHANNEL( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, double pitch )
+{
+	return S_MixChannelToBuffer( pbuf, chan, num_samples, out_rate, pitch, 0, 0 );
+}
+
 #if XASH_XBOX
 /* Which of #145 (1)'s two loops a call takes: 1 the 32.32 fixed-point one. */
 int s_mix_test_fixed_step( double offset_frac, double rate_scale )

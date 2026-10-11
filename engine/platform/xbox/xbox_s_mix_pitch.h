@@ -61,8 +61,21 @@ static qboolean S_MixFixedStep( double offset_frac, double rate_scale, uint32_t 
 	const int64_t fi = (int64_t)f;
 	const int64_t ri = (int64_t)r;
 
-	if( (double)fi != f || (double)ri != r )
-		return false; // not on the 2^-32 grid: upstream's arithmetic may round
+	// not on the 2^-32 grid: upstream's arithmetic may round, so at
+	// upstream's 44.1 kHz the double loop below keeps its exact result.
+	// Mixing at 48 kHz (divergence #173) no sound is on the grid - 11025
+	// over 48000 is 147/640 - and every channel would take the double
+	// loop and none the runs; there the position and the step are rounded
+	// down to it instead (the casts above truncate non-negative values).
+	// Each output then reads the sample its exact position names, except
+	// where that position lies on an integer or less than the call's
+	// accumulated rounding (num_samples * 2^-32 of a sample at most) past
+	// one, where it reads the one before; it never reads past the last
+	// sample the exact positions reach, so S_MixChannelToBuffer's
+	// out_count stays a bound (tools/host-tests/s_mix_host_test.c counts
+	// the outputs that differ from upstream's double loop).
+	if(( (double)fi != f || (double)ri != r ) && SOUND_DMA_SPEED == SOUND_44k )
+		return false;
 
 	*frac = (uint32_t)fi;
 	*step_int = (uint32_t)( ri >> 32 );

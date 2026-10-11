@@ -21,6 +21,8 @@ GNU General Public License for more details.
 #include "platform/platform.h"
 #if XASH_XBOX
 #include "platform/xbox/xbox_frametime.h" // the mixer's CPU spans, docs/r3d/divergences.md #141
+#include "platform/xbox/xbox_audio_hal.h" // XAudioR3D_BeginClose, #173
+#include "platform/xbox/xbox_snd_clock.h" // S_GetSoundtime's rebasable state, #173
 #endif
 
 // structure used for fading in and out client sound volume.
@@ -1506,6 +1508,25 @@ update global soundtime
 (was part of platform code)
 ===============
 */
+#if XASH_XBOX
+// docs/r3d/divergences.md #173: the same arithmetic on state a device
+// reopened at run time can rebase (S_R3D_ApplyRate, xbox_snd_clock.h)
+static xbox_snd_clock_t s_r3d_clock;
+
+static int S_GetSoundtime( void )
+{
+	const int fullsamples = snd.samples / 2;
+	int chop;
+	const int t = Xbox_SndClock_Time( &s_r3d_clock, snd.samplepos, fullsamples, snd.paintedtime, &chop );
+
+	if( chop )
+	{
+		snd.paintedtime = fullsamples;
+		S_StopAllSounds( true );
+	}
+	return t;
+}
+#else
 static int S_GetSoundtime( void )
 {
 	static int buffers, oldsamplepos;
@@ -1534,6 +1555,7 @@ static int S_GetSoundtime( void )
 
 	return ( buffers * fullsamples + samplepos / 2 );
 }
+#endif
 
 //=============================================================================
 static void S_UpdateChannels( void )
@@ -1608,6 +1630,117 @@ void S_UpdateFrame( struct ref_viewpass_s *rvp )
 	snd.entnum = rvp->viewentity; // can be camera entity too
 }
 
+#if XASH_XBOX
+/*
+============
+S_R3D_ApplyRate
+
+docs/r3d/divergences.md #173. The Xbox's AC97 plays 48 kHz only, so at
+upstream's 44.1 kHz SDL's audio thread converts every buffer. The mixer
+runs at r3d_snd_rate instead (48000 by default; 44100 is upstream's rate,
+kept for the A/B). The cvar is read at S_Init, and a change (a config,
+the console, a bind) reopens the device at the new rate here: config.cfg
+and userconfig.d run after S_Init, so a reopen is the only way a cfg can
+choose the rate. The DMA clock is rebased, not restarted: the time
+played so far is read just before the old device closes, converted to
+the new rate (the same instant in seconds), and the new device is set to
+play from that time's place in its ring (xbox_snd_clock.h), so soundtime
+and paintedtime continue with no jump and no rounding to a ring boundary
+(upstream's S_GetSoundtime would read the new device's position 0 as one
+more wrap: up to 0.7 s ahead). The only absolute sample times in the
+mixer are the raw channels' ends; their queued samples are at the old
+rate, so they are emptied at the switch point (s_rawend = the new time:
+idle from now, not 10 s old). Channels keep their positions (they count
+source samples, VOX words and forced ends included), and the music restarts where its stream was (S_StreamGetCurrentState's
+position, in the track's own frames, so the bake for the new rate takes
+it over: xbox_music_stream.c), a skip of what it had buffered. The
+restart keeps a paused track paused, but like any S_StartBackgroundTrack
+it drops a game DLL's music fade and takes the current key destination
+as the track's source (s_stream.c). If the device opens at neither rate,
+sound stays off, and S_Shutdown, which returns early then, frees nothing
+at exit.
+============
+*/
+int r3d_snd_dma_speed = SOUND_48k;
+static CVAR_DEFINE_AUTO( r3d_snd_rate, "48000", 0, "mixer output rate on the Xbox: 48000 (the AC97's, passed through) or 44100 (upstream's, converted by SDL) (docs/r3d/divergences.md #173)" );
+
+static qboolean S_R3D_ValidRate( int rate )
+{
+	return rate == SOUND_44k || rate == SOUND_48k;
+}
+
+static void S_R3D_ApplyRate( void )
+{
+	const int want = (int)r3d_snd_rate.value;
+	const int old = SOUND_DMA_SPEED;
+	char current[MAX_QPATH], loop[MAX_QPATH];
+	int position = 0, played;
+	qboolean music, stream_paused;
+
+	if( want == old )
+		return;
+
+	if( !S_R3D_ValidRate( want ))
+	{
+		Con_Printf( S_WARN "r3d_snd_rate: %d is not 44100 or 48000, keeping %d\n", want, old );
+		Cvar_DirectSetValue( &r3d_snd_rate, old );
+		return;
+	}
+
+	music = S_StreamGetCurrentState( current, sizeof( current ), loop, sizeof( loop ), &position );
+	stream_paused = snd.stream_paused; // S_StopBackgroundTrack clears it
+	S_StopBackgroundTrack();
+	// the time played so far, at the old rate, read under the device lock
+	SNDDMA_BeginPainting();
+	played = S_GetSoundtime();
+	SNDDMA_Submit();
+	// SDL waits for its audio thread to exit; one blocked on a buffer the
+	// hardware never reports (xemu) is woken until the device is closed
+	XAudioR3D_BeginClose();
+	SNDDMA_Shutdown();
+
+	r3d_snd_dma_speed = want;
+	if( !SNDDMA_Init( ))
+	{
+		Con_Printf( S_ERROR "r3d_snd_rate: no audio device at %d Hz, back to %d\n", want, old );
+		r3d_snd_dma_speed = old;
+		Cvar_DirectSetValue( &r3d_snd_rate, old );
+		if( !SNDDMA_Init( ))
+		{
+			Con_Printf( S_ERROR "r3d_snd_rate: no audio device at %d Hz either, sound is off\n", old );
+			return;
+		}
+	}
+
+	// the new device's ring is silent: rebase the clock to the time played
+	// (at the new rate, if the device opened at it), and set the device to
+	// play from that time's place in the ring - under the lock, SDL's
+	// thread is running again. Nothing was mixed past it yet.
+	played = Xbox_SndClock_Scale( played, old, SOUND_DMA_SPEED );
+	SNDDMA_BeginPainting();
+	snd.samplepos = Xbox_SndClock_Rebase( &s_r3d_clock, played, snd.samples / 2 );
+	snd.soundtime = S_GetSoundtime();
+	SNDDMA_Submit();
+	snd.paintedtime = snd.soundtime;
+	for( int i = 0; i < snd.max_raw_channels; i++ )
+	{
+		// emptied at the switch point (their samples are the old rate's)
+		if( snd.raw_channels[i] )
+			snd.raw_channels[i]->s_rawend = snd.paintedtime;
+	}
+	S_ClearBuffers( PAINTBUFFER_SIZE );
+	SX_R3D_SetRate();
+
+	if( music )
+	{
+		S_StartBackgroundTrack( current, loop, position, false );
+		snd.stream_paused = stream_paused;
+	}
+
+	Con_Printf( "r3d_snd_rate: mixing at %d Hz\n", SOUND_DMA_SPEED );
+}
+#endif
+
 /*
 ============
 SND_UpdateSound
@@ -1618,6 +1751,11 @@ Called once each time through the main loop
 void SND_UpdateSound( void )
 {
 	if( !snd.initialized ) return;
+
+#if XASH_XBOX
+	S_R3D_ApplyRate(); // #173: a changed r3d_snd_rate reopens the device
+	if( !snd.initialized ) return;
+#endif
 
 	if( clgame.soundFuncs.pfnS_UpdateSound )
 		clgame.soundFuncs.pfnS_UpdateSound();
@@ -2036,6 +2174,11 @@ qboolean S_Init( void )
 
 	sndpool = Mem_AllocPool( "Sound Zone" );
 	snd.backend_name = "None";
+#if XASH_XBOX
+	// #173: the rate the device opens at; a later change reopens it
+	Cvar_RegisterVariable( &r3d_snd_rate );
+	r3d_snd_dma_speed = S_R3D_ValidRate( (int)r3d_snd_rate.value ) ? (int)r3d_snd_rate.value : SOUND_48k;
+#endif
 	if( !SNDDMA_Init( ))
 	{
 		Con_Printf( "Audio: sound system can't be initialized\n" );

@@ -20,6 +20,12 @@ GNU General Public License for more details.
 
 #include <SDL.h>
 #include <stdlib.h>
+#if XASH_XBOX
+// the audio thread's time and the device lock's, for the frame-time
+// recorder (docs/r3d/divergences.md #173)
+#include "platform/xbox/xbox_audio_hal.h"
+#include "platform/xbox/xbox_frametime.h"
+#endif
 
 #define SAMPLE_16BIT_SHIFT 1
 #define SECONDARY_BUFFER_SIZE 0x10000
@@ -39,6 +45,9 @@ static char sdl_backend_name[32];
 
 static void SDL_SoundCallback( void *userdata, Uint8 *stream, int len )
 {
+#if XASH_XBOX
+	XAudioR3D_ThreadMark(); // snd_thr_kc: from here to this buffer's submission (#173)
+#endif
 	const int size = snd.samples << 1;
 	int pos = snd.samplepos << 1;
 	if( pos >= size )
@@ -182,7 +191,15 @@ Makes sure snd.buffer is valid
 */
 void SNDDMA_BeginPainting( void )
 {
+#if XASH_XBOX
+	// snd_dma_kc (#173): the lock waits out an audio thread in its callback
+	xbox_ft_span_t span;
+	xbox_ft_span_begin( &span );
 	SDL_LockAudioDevice( sdl_dev );
+	xbox_ft_ticks_add( &span, &xbox_ft_snd_dma_ticks );
+#else
+	SDL_LockAudioDevice( sdl_dev );
+#endif
 }
 
 /*
@@ -195,7 +212,14 @@ Also unlocks the dsound buffer
 */
 void SNDDMA_Submit( void )
 {
+#if XASH_XBOX
+	xbox_ft_span_t span;
+	xbox_ft_span_begin( &span );
 	SDL_UnlockAudioDevice( sdl_dev );
+	xbox_ft_ticks_add( &span, &xbox_ft_snd_dma_ticks );
+#else
+	SDL_UnlockAudioDevice( sdl_dev );
+#endif
 }
 
 /*

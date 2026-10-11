@@ -51,6 +51,48 @@ int XAudioR3D_Progress( uint32_t *submitted, uint32_t *generation );
    XAudioInit. */
 void XAudioR3D_Kick( int level );
 
+/* The audio thread's own CPU time (docs/r3d/divergences.md #173), for the
+   frame-time recorder. SDL_SoundCallback (engine/platform/sdl2/s_sdl2.c)
+   calls XAudioR3D_ThreadMark first thing, on SDL's audio thread, after
+   SDL has taken its mixer lock (deps/nxdk/lib/sdl/SDL2/src/audio/
+   SDL_audio.c:743-747); the next XAudioProvideSamples on that thread
+   closes the interval. It holds the callback's copy out of the engine's
+   ring and, when the engine mixes at another rate than the device's
+   48 kHz, SDL's conversion: SDL_AudioStreamPut converts and resamples the
+   whole callback buffer, SDL_AudioStreamGet copies one device buffer out
+   (SDL_audio.c:751-769). Not in it: the lock wait before the callback,
+   the semaphore wait after PlayDevice, and the copy of a second device
+   buffer when one callback's conversion yields two (one callback in
+   about eleven at 44.1 kHz). An interrupt or DPC that lands inside the
+   interval is counted in it. */
+void XAudioR3D_ThreadMark( void );
+
+/* Cumulative since boot, wrapping at 2^32: TSC cycles of the closed
+   intervals above, how many closed, buffers handed to the hardware
+   (every XAudioProvideSamples, the first silent ones included), and
+   LVBCI interrupts from the PCM-out engine (it played out its last valid
+   buffer: an underrun). The reader subtracts two readings. */
+typedef struct xbox_audio_thread_stats_s
+{
+	uint32_t cycles;
+	uint32_t runs;
+	uint32_t buffers;
+	uint32_t underruns;
+} xbox_audio_thread_stats_t;
+
+void XAudioR3D_ThreadStats( xbox_audio_thread_stats_t *out );
+
+/* Before SDL_CloseAudioDevice (#173: r3d_snd_rate reopens the device at
+   run time): SDL waits for its audio thread to see the shutdown flag
+   (SDL_audio.c:1130-1138), and a thread blocked on a completion the
+   hardware never reports - xemu, or a stalled engine - would never see
+   it, with the watchdog stuck on the same main thread. This arms a 10 ms
+   periodic kernel timer whose DPC reports a free buffer to the callback,
+   so the thread wakes, sees the flag and exits. The next XAudioInit
+   (SDL's CloseDevice calls it) cancels the timer. No-op before
+   XAudioInit. */
+void XAudioR3D_BeginClose( void );
+
 /* The engine side (xbox_audio_watchdog.c), called once a frame from
    Xbox_FrameTime_EndFrame: logs and kicks when the driver has been handed
    no buffer for a second while SDL's device is open. */

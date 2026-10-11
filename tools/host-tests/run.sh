@@ -274,20 +274,47 @@ run_test xbox_music_adpcm_mutants xbox_music_adpcm_mutants
 # engine/client/sound/s_mix.c built with XASH_XBOX 0 and 1 against a stub
 # engine (tools/host-tests/s_mix_stub), and the two builds' pitched mixer
 # loops compared on the same calls; once with SSE2 doubles, once with x87
-# ones (-mfpmath=387, the Pentium III's arithmetic).
+# ones (-mfpmath=387, the Pentium III's arithmetic). Divergence #173 adds
+# the 48 kHz mix: every output's source index against the exact one, and
+# whole channels' duration and pitch at both rates.
 s_mix() {
 	local fp="$1" tag="$2"
 	local inc="-Itools/host-tests/s_mix_stub -Iengine/client/sound -Iengine"
 	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 -Wno-unused-function $inc -DXASH_XBOX=0 \
-		-DS_MIX_TEST_ENTRY=mix_upstream -DS_PaintChannels=S_PaintChannels_up -DS_ClearBuffers=S_ClearBuffers_up \
+		-DS_MIX_TEST_ENTRY=mix_upstream -DS_MIX_TEST_CHANNEL=mix_channel_upstream -DS_PaintChannels=S_PaintChannels_up -DS_ClearBuffers=S_ClearBuffers_up \
 		-c tools/host-tests/s_mix_host_test_tu.c -o "$OUT/s_mix_up_$tag.o" &&
-	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 -Wno-unused-function $inc -DXASH_XBOX=1 -DS_MIX_TEST_ENTRY=mix_xbox \
+	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 -Wno-unused-function $inc -DXASH_XBOX=1 -DS_MIX_TEST_ENTRY=mix_xbox -DS_MIX_TEST_CHANNEL=mix_channel_xbox \
 		-c tools/host-tests/s_mix_host_test_tu.c -o "$OUT/s_mix_xbox_$tag.o" &&
 	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 $inc tools/host-tests/s_mix_host_test.c \
 		"$OUT/s_mix_up_$tag.o" "$OUT/s_mix_xbox_$tag.o" -lm -o "$OUT/s_mix_test_$tag" && "$OUT/s_mix_test_$tag"
 }
 run_test s_mix_sse2 s_mix "" sse2
 run_test s_mix_x87 s_mix "-mfpmath=387" x87
+
+# tools/host-tests/s_dsp_host_test.c, header (divergence #173): the real
+# engine/client/sound/s_dsp.c against a stub engine
+# (tools/host-tests/s_dsp_stub): every room preset's delay lengths in
+# seconds at the 44.1 and 48 kHz mix rates, an impulse's echoes, a switch.
+s_dsp() {
+	gcc $HOST_CFLAGS -Wall -std=gnu99 -DXASH_XBOX=1 -Itools/host-tests/s_dsp_stub -Iengine/client/sound \
+		tools/host-tests/s_dsp_host_test.c -lm -o "$OUT/s_dsp_test" && "$OUT/s_dsp_test"
+}
+run_test s_dsp s_dsp
+# then every mutant in tools/host-tests/mix48_mutants.py (SX_R3D_SetRate and
+# the 48 kHz step rounding) must fail the test that covers it.
+mix48_mutants() {
+	python tools/host-tests/mix48_mutants.py "$OUT/mix48-mutants" $HOST_CFLAGS
+}
+run_test mix48_mutants mix48_mutants
+
+# tools/host-tests/xbox_snd_clock_host_test.c, header (divergence #173):
+# the DMA clock as upstream's S_GetSoundtime, and rebased across a device
+# reopened at run time - no jump, congruent with the device's ring.
+xbox_snd_clock() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_snd_clock_host_test.c -o "$OUT/xbox_snd_clock_test" && "$OUT/xbox_snd_clock_test"
+}
+run_test xbox_snd_clock xbox_snd_clock
 
 printf_test() {
 	gcc $HOST_CFLAGS -Wall -Wno-format -fstack-protector-all \

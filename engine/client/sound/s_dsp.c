@@ -250,6 +250,9 @@ void SX_Init( void )
 	Cmd_AddRestrictedCommand( "dsp_profile", SX_Profiling_f, "dsp stress-test, first argument is room_type" );
 
 	SX_ReloadRoomFX();
+#if XASH_XBOX
+	SX_R3D_SetRate(); // the mix rate's delay lengths, docs/r3d/divergences.md #173
+#endif
 }
 
 /*
@@ -867,6 +870,44 @@ void SX_RoomFX( portable_samplepair_t *paint, int num_samples )
 	DLY_DoDelay( paint, num_samples );
 	DLY_DoStereoDelay( paint, num_samples );
 }
+
+#if XASH_XBOX
+/*
+===========
+SX_R3D_SetRate
+
+docs/r3d/divergences.md #173. Upstream sizes every delay as seconds times
+idsp_dma_speed (SOUND_11k) shifted left by sxhires (room_hires, default
+2): 44100 samples a second, the mix rate, with the rate written into the
+constant. At another SOUND_DMA_SPEED the same seconds need that rate's
+samples: idsp_dma_speed becomes SOUND_11k * SOUND_DMA_SPEED / SOUND_44k,
+12000 at 48 kHz (11025 at 44.1 kHz, upstream's value). The amplitude
+modulation's periods (sxmod1/2, in samples, not shifted) scale the same
+way, multiplied before the division so 48 kHz gets 380 and 489 samples
+(upstream's integer division would keep 350 and 450). The delay lines
+are reallocated at their new length on the next SX_RoomFX. Not scaled:
+the per-sample filters (the 3- and 5-tap lowpasses, whose cutoffs in Hz
+rise with the rate) and the crossfades and ramps counted in samples
+(8% shorter at 48 kHz).
+===========
+*/
+void SX_R3D_SetRate( void )
+{
+	idsp_dma_speed = (int)(((int64_t)SOUND_11k * SOUND_DMA_SPEED ) / SOUND_44k );
+	sxmod1cur = sxmod1 = (int)(( 350 * (int64_t)idsp_dma_speed ) / SOUND_11k );
+	sxmod2cur = sxmod2 = (int)(( 450 * (int64_t)idsp_dma_speed ) / SOUND_11k );
+
+	DLY_Free( &monodly );
+	DLY_Free( &reverbdly[0] );
+	DLY_Free( &reverbdly[1] );
+	DLY_Free( &stereodly );
+
+	// SX_ReloadRoomFX's flags, and the reverb size's, which it leaves out:
+	// each delay is set up again from its cvar on the next SX_CheckPresets
+	SX_ReloadRoomFX();
+	SetBits( sxrvb_size.flags, FCVAR_CHANGED );
+}
+#endif
 
 /*
 ===========

@@ -485,6 +485,18 @@ enum
 	XBOX_FT_W_MUSIC_WAITS,   /* reads the frame blocked on: synchronous ones, and queued ones not landed when needed */
 	XBOX_FT_W_MUSIC_IO_KC,   /* time: the music's file-read calls, issue, completion and waits */
 	XBOX_FT_W_MUSIC_READ_KC, /* time: the music stream's reads (Stream_ReadXwav), the above included */
+	/* The audio output (2026-10-11, x9-audio-mix48, divergence #173),
+	   sampled at the frame's close from engine/platform/xbox/
+	   xbox_audio_hal.c (XAudioR3D_ThreadStats): what SDL's audio thread
+	   did over the frame's whole period. That thread runs at
+	   time-critical priority and its time lands in whichever span it
+	   interrupts. */
+	XBOX_FT_W_SND_THR_KC,    /* time: SDL's audio thread, from SDL_SoundCallback's entry to its buffer's XAudioProvideSamples - the callback's copy and, mixing at 44.1 kHz, SDL's conversion to 48 kHz */
+	XBOX_FT_W_SND_THR_RUNS,  /* callbacks whose buffer reached the hardware in the frame (snd_thr_kc's intervals) */
+	XBOX_FT_W_SND_BUFS,      /* 1024-frame buffers handed to the AC97 (21.3 ms each at 48 kHz) */
+	XBOX_FT_W_SND_UNDERRUNS, /* LVBCI interrupts from the PCM-out engine: it played its last valid buffer out */
+	XBOX_FT_W_SND_DMA_KC,    /* time: SNDDMA_BeginPainting + SNDDMA_Submit on the main thread - the SDL device lock (a wait for the audio thread's callback), inside k_snd/k_snd_extra */
+	XBOX_FT_W_SND_RATE,      /* the mixer's output rate this frame, Hz (r3d_snd_rate: 48000, or 44100 for upstream's) */
 	XBOX_FT_W_END
 };
 

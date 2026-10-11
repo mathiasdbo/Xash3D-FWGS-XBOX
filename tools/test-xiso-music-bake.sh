@@ -7,7 +7,9 @@
 #
 # Defaults: .sweep/music-bake (tools/asset-studio --music) and the staged
 # disc's .sweep-xiso/hl/valve, whose media/ must hold the retail mp3s the
-# bake was made from. Run in MSYS2 bash, the shell xbox-xiso.sh is
+# bake was made from. A 48 kHz bake (--music-rate 48000, #173: files
+# <Track>.48k.xwav named by its manifest's "# file" line) runs the same
+# cases, plus one with that line removed. Run in MSYS2 bash, the shell xbox-xiso.sh is
 # documented for (docs/r3d/lessons.md: a pass under another shell is not
 # a pass). Exit 0 iff every case did what it should.
 R="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,7 +19,7 @@ GD=${2:-$R/.sweep-xiso/hl/valve}
 [ -f "$BAKE/music_manifest.txt" ] || { echo "harness: no bake at $BAKE"; exit 1; }
 N=$(ls "$BAKE"/media/*.xwav | wc -l)
 rm -rf "$T"; mkdir -p "$T"
-awk '/^le32_at\(\) \{/{on=1} /^if \[ -n "\$MUSIC_BAKE" \]; then/{on=0} on' "$R/tools/xbox-xiso.sh" > "$T/vmb.sh"
+awk '/^le32_at\(\) \{/{on=1} /^MUSIC_STAGED=/{on=0} on' "$R/tools/xbox-xiso.sh" > "$T/vmb.sh"
 . "$T/vmb.sh"
 type validate_music_bake > /dev/null 2>&1 || { echo "harness: validate_music_bake not extracted - broken harness"; exit 1; }
 ok=0; bad=0
@@ -44,7 +46,8 @@ expect 1 "an unlisted .xwav" "does not list" validate_music_bake "$T/extra" "$GD
 cp -r "$BAKE" "$T/missing"; rm "$(ls "$T"/missing/media/*.xwav | tail -1)"
 expect 1 "a listed track missing" "does not exist" validate_music_bake "$T/missing" "$GD"
 
-mkdir -p "$T/gd/media"; cp "$GD"/media/*.mp3 "$T/gd/media/"; v=$(basename "$(ls "$BAKE"/media/*.xwav | head -1)" .xwav); printf 'x' >> "$T/gd/media/$v.mp3"
+SUFFIX=$(tr -d '\r' < "$BAKE/music_manifest.txt" | grep -E '^# file ' | tail -1 | awk '{ print $3 }'); [ -n "$SUFFIX" ] || SUFFIX=.xwav
+mkdir -p "$T/gd/media"; cp "$GD"/media/*.mp3 "$T/gd/media/"; v=$(basename "$(ls "$BAKE"/media/*.xwav | head -1)" "$SUFFIX"); printf 'x' >> "$T/gd/media/$v.mp3"
 expect 1 "a source mp3 of another size" "$v.mp3; the staged one" validate_music_bake "$BAKE" "$T/gd"
 rm "$T/gd/media/$v.mp3"
 expect 1 "a source mp3 missing" "$v.mp3; the staged one" validate_music_bake "$BAKE" "$T/gd"
@@ -61,6 +64,11 @@ expect 1 "an r3dm chunk size the engine refuses" "the engine plays only 8192" va
 
 mkdir -p "$T/nomanifest/media"
 expect 1 "no manifest" "has no music_manifest.txt" validate_music_bake "$T/nomanifest" "$GD"
+
+if [ "$SUFFIX" != .xwav ]; then
+	cp -r "$BAKE" "$T/nofile"; sed -i '/^# file /d' "$T/nofile/music_manifest.txt"
+	expect 1 "a $SUFFIX bake whose manifest lost its # file line" "does not exist" validate_music_bake "$T/nofile" "$GD"
+fi
 echo "harness: $ok passed, $bad failed"
 rm -rf "$T"
 [ $bad -eq 0 ]

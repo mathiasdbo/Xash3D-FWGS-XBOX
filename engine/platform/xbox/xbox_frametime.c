@@ -158,10 +158,44 @@ void Xbox_FT_ClEnts_CloseFrame( void )
 	}
 }
 
-/* 1024 frames x 788 bytes (32 + 189 work counters: 20 counts, span_calls,
-   73 spans and 95 later counts) = 788 KiB ring, plus the per-map
-   histogram (4 KiB), an 88 KiB encode buffer, 4 KiB of notes and the
-   server classname table (~30 KiB, xbox_frametime_svgame.c): ~830 KiB,
+/* The audio output's counters (#173): the SNDDMA lock's ticks, and the
+   audio thread's cumulative counters (xbox_audio_hal.c) as they stood at
+   the previous frame's close, so each frame gets what happened over its
+   whole period. snd_prev_valid is cleared when recording starts: the
+   first frame after it reads a baseline instead of everything since
+   boot. */
+#include "xbox_audio_hal.h"
+extern int r3d_snd_dma_speed; /* engine/client/sound/s_main.c, #173 */
+uint64_t xbox_ft_snd_dma_ticks;
+static xbox_audio_thread_stats_t snd_prev;
+static qboolean snd_prev_valid;
+
+void Xbox_FT_Sound_CloseFrame( void )
+{
+	xbox_audio_thread_stats_t now;
+
+	xbox_ft_work.c[XBOX_FT_W_SND_DMA_KC] = xbox_ft_span_kcyc( xbox_ft_snd_dma_ticks );
+	xbox_ft_snd_dma_ticks = 0;
+	xbox_ft_work.c[XBOX_FT_W_SND_RATE] = (uint32_t)r3d_snd_dma_speed;
+
+	XAudioR3D_ThreadStats( &now );
+	if( snd_prev_valid )
+	{
+		/* unsigned differences: right across a wrap of the totals */
+		xbox_ft_work.c[XBOX_FT_W_SND_THR_KC] = xbox_ft_span_kcyc( (uint64_t)(uint32_t)( now.cycles - snd_prev.cycles ));
+		xbox_ft_work.c[XBOX_FT_W_SND_THR_RUNS] = now.runs - snd_prev.runs;
+		xbox_ft_work.c[XBOX_FT_W_SND_BUFS] = now.buffers - snd_prev.buffers;
+		xbox_ft_work.c[XBOX_FT_W_SND_UNDERRUNS] = now.underruns - snd_prev.underruns;
+	}
+	snd_prev = now;
+	snd_prev_valid = true;
+}
+
+/* 1024 frames x 812 bytes (32 + 195 work counters: 20 counts, span_calls,
+   73 spans and 101 later counts) = 812 KiB ring, plus the per-map
+   histogram (4 KiB), a 101.5 KiB encode buffer (128 frames), 4 KiB of
+   notes and the server classname table (~30 KiB,
+   xbox_frametime_svgame.c): ~950 KiB,
    allocated when recording starts and freed when it stops. At 72 fps (fps_max) the ring holds 14 s; a flush
    every 5 s or at half full keeps it from overrunning unless a single
    flush stalls for 7 s. */
@@ -519,6 +553,8 @@ static qboolean FT_Start( int mode )
 
 	memset( &ft, 0, sizeof( ft ));
 	memset( ft_load_acc, 0, sizeof( ft_load_acc ));
+	snd_prev_valid = false; /* #173: the audio counters start from a baseline */
+	xbox_ft_snd_dma_ticks = 0;
 
 	ft.block = Z_Calloc( ring_bytes + sizeof( xbox_ft_stats_t ) + XBOX_FT_ENCODE_FRAMES * xbox_ft_frame_bytes( XBOX_FT_W_COUNT )
 		+ XBOX_FT_NOTES_MAX * sizeof( xbox_ft_note_t ));
@@ -646,6 +682,7 @@ static void FT_CloseFrame( uint64_t now )
 	Xbox_FT_SvGame_CloseFrame();
 	Xbox_FT_PMove_CloseFrame();
 	Xbox_FT_ClEnts_CloseFrame();
+	Xbox_FT_Sound_CloseFrame(); /* #173 */
 	memcpy( f->work, xbox_ft_work.c, sizeof( xbox_ft_work.c ));
 	f->work[XBOX_FT_W_SPAN_CALLS] = xbox_ft_spans.calls;
 	{

@@ -61,6 +61,9 @@ What changes:
 - XAudioR3D_Kick/XAudioR3D_Progress/XAudioR3D_GetStatus (xbox_audio_hal.h)
   for the engine's stall watchdog (xbox_audio_watchdog.c).
 - the ISR also queues the DPC on a FIFO error.
+- XAudioR3D_ThreadMark/XAudioR3D_ThreadStats (#173): the audio thread's
+  CPU time from SDL's callback to its buffer's submission, the buffers
+  submitted and the PCM engine's underruns, for the frame-time recorder.
 
 Unverified on the console (only the ICH specification and QEMU's model
 back it): that the MCPX halts at the last valid buffer rather than
@@ -129,6 +132,25 @@ static volatile long aci_force;
 
 static volatile uint32_t aci_stat_interrupts, aci_stat_dpcs, aci_stat_drains;
 static volatile uint32_t aci_stat_kicks, aci_stat_restarts;
+
+// The audio thread's time and the counters the recorder reads
+// (XAudioR3D_ThreadStats, #173). The mark is the audio thread's alone;
+// the totals are written by one context each and read whole (32-bit).
+static uint64_t aci_thr_mark;
+static bool aci_thr_pending;
+static volatile uint32_t aci_thr_cycles, aci_thr_runs;
+static volatile uint32_t aci_stat_buffers, aci_stat_drains_pcm;
+
+static inline uint64_t aci_rdtsc( void )
+{
+	return __builtin_ia32_rdtsc();
+}
+
+// XAudioR3D_BeginClose's timer (#173): wakes the audio thread while SDL
+// closes the device, until XAudioInit cancels it.
+static KTIMER aci_close_timer;
+static KDPC aci_close_dpc;
+static bool aci_close_armed;
 
 static inline volatile uint8_t *aci_regs( void )
 {
@@ -237,6 +259,8 @@ static BOOLEAN NTAPI aci_isr( PKINTERRUPT Interrupt, PVOID ServiceContext )
 		{
 			aci_last_done[i] = 1;
 			aci_stat_drains++;
+			if( i == 0 )
+				aci_stat_drains_pcm++; // the recorder's snd_underruns (#173)
 		}
 		// FIFO error too: the accounting is idempotent, so a run too many
 		// costs nothing
@@ -283,6 +307,14 @@ void XAudioInit( int sampleSizeInBits, int numChannels, XAudioCallback callback,
 	}
 	if( aci_initialized )
 		KeRemoveQueueDpc( &aci_dpc );
+	// a close's wake-up timer (XAudioR3D_BeginClose): SDL's thread has
+	// exited by now (CloseDevice runs after SDL_WaitThread)
+	if( aci_close_armed )
+	{
+		KeCancelTimer( &aci_close_timer );
+		KeRemoveQueueDpc( &aci_close_dpc );
+		aci_close_armed = false;
+	}
 
 	// Hack to prevent an assertion in MmGetPhysicalAddress by locking the
 	// memory (nxdk's comment: a future API should allocate it with
@@ -351,6 +383,9 @@ void XAudioInit( int sampleSizeInBits, int numChannels, XAudioCallback callback,
 	aci_last_done[0] = aci_last_done[1] = 0;
 	aci_force = 0;
 	aci_generation++;
+	// a callback whose buffer never reached the hardware (SDL closing the
+	// device plays into its work buffer): no interval to close (#173)
+	aci_thr_pending = false;
 
 	// register our ISR
 	vector = HalGetInterruptVector( AUDIO_IRQ, &irql );
@@ -389,6 +424,15 @@ void XAudioProvideSamples( unsigned char *buffer, unsigned short bufferLength, i
 	const unsigned int wordCount = bufferLength / 2;
 	unsigned int idx;
 	KIRQL old_irql;
+
+	// #173: closes the audio thread's interval opened by its callback
+	if( aci_thr_pending )
+	{
+		aci_thr_cycles += (uint32_t)( aci_rdtsc() - aci_thr_mark );
+		aci_thr_runs++;
+		aci_thr_pending = false;
+	}
+	aci_stat_buffers++;
 
 	if( isFinal )
 		bufferControl |= 0x4000;
@@ -437,6 +481,44 @@ int XAudioR3D_Progress( uint32_t *submitted, uint32_t *generation )
 	*submitted = aci_submitted;
 	*generation = aci_generation;
 	return aci_initialized && ac97Device.callback != NULL;
+}
+
+// Integer only, like aci_dpc_routine: reports one free buffer, which is
+// one semaphore post for SDL's thread.
+static void NTAPI aci_close_dpc_routine( PKDPC Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2 )
+{
+	(void)Dpc; (void)DeferredContext; (void)SystemArgument1; (void)SystemArgument2;
+
+	if( ac97Device.callback )
+		ac97Device.callback( (void *)&ac97Device, ac97Device.callbackData );
+}
+
+void XAudioR3D_BeginClose( void )
+{
+	LARGE_INTEGER due;
+
+	if( !aci_initialized || aci_close_armed )
+		return;
+
+	KeInitializeDpc( &aci_close_dpc, aci_close_dpc_routine, NULL );
+	KeInitializeTimerEx( &aci_close_timer, NotificationTimer );
+	due.QuadPart = -100000; // 10 ms from now, in 100 ns units; then every 10 ms
+	aci_close_armed = true;
+	KeSetTimerEx( &aci_close_timer, due, 10, &aci_close_dpc );
+}
+
+void XAudioR3D_ThreadMark( void )
+{
+	aci_thr_mark = aci_rdtsc();
+	aci_thr_pending = true;
+}
+
+void XAudioR3D_ThreadStats( xbox_audio_thread_stats_t *out )
+{
+	out->cycles = aci_thr_cycles;
+	out->runs = aci_thr_runs;
+	out->buffers = aci_stat_buffers;
+	out->underruns = aci_stat_drains_pcm;
 }
 
 void XAudioR3D_GetStatus( xbox_audio_hal_status_t *out )

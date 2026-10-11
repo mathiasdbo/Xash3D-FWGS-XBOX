@@ -21,7 +21,10 @@
 #       --out .sweep-xiso/hl.iso
 #
 # --music-bake <dir>: tools/asset-studio --music's output; its .xwav
-# tracks go in beside the retail mp3s (see validate_music_bake).
+# tracks go in beside the retail mp3s (see validate_music_bake). May be
+# given more than once (#173: the source-rate bake, <Track>.xwav, and the
+# 48 kHz one, <Track>.48k.xwav, side by side); no two may name the same
+# file.
 #
 # --overlay <dir>: copied over the finished stage, last, before packing -
 # paths relative to the disc root (so <gamedir>/video.cfg, <gamedir>/
@@ -157,7 +160,7 @@ XBE=""
 OUT=""
 MENU_BAKE=""
 SKY_BAKE=""
-MUSIC_BAKE=""
+MUSIC_BAKES=()
 DELTA_LST=""
 RESOURCE_DIR=""
 UI_LANGUAGE=""
@@ -169,7 +172,7 @@ while [ $# -gt 0 ]; do
 		--out) OUT="$2"; shift 2 ;;
 		--menu-bake) MENU_BAKE="$2"; shift 2 ;;
 		--sky-bake) SKY_BAKE="$2"; shift 2 ;;
-		--music-bake) MUSIC_BAKE="$2"; shift 2 ;;
+		--music-bake) MUSIC_BAKES+=("$2"); shift 2 ;;
 		--delta-lst) DELTA_LST="$2"; shift 2 ;;
 		--resource-dir) RESOURCE_DIR="$2"; shift 2 ;;
 		--ui-language) UI_LANGUAGE="$2"; shift 2 ;;
@@ -493,7 +496,11 @@ fi
 # file it would otherwise open is the one it was baked from - and the
 # r3dm chunk size the engine requires (libmpg's OUTBUF_SIZE, 8192). The
 # manifest must end in the baker's "# result ok <N>" line, which only a
-# run that succeeded as a whole writes, with N the number of tracks.
+# run that succeeded as a whole writes, with N the number of tracks. A
+# bake at the mix rate (#173, --music-rate 48000) names its files
+# <Track><suffix> in a "# file <suffix>" line (.48k.xwav); without the
+# line a track's file is <Track>.xwav. A row's status is its last field
+# (#173 added a column before it).
 # Checked before the copy, with cmp after it, and again after --overlay
 # (which could replace a track's mp3 or .xwav).
 le32_at() { # <path> <offset>: a little-endian u32, or fails
@@ -503,20 +510,23 @@ le32_at() { # <path> <offset>: a little-endian u32, or fails
 	printf '%s\n' "$v"
 }
 validate_music_bake() { # <bake dir> <staged gamedir>: echoes the track count
-	local dir="$1" gamedir="$2" manifest="$1/music_manifest.txt" name codec status count=0 result
+	local dir="$1" gamedir="$2" manifest="$1/music_manifest.txt" name codec rest status count=0 result suffix
 	local f size riff r3dm srcext srcbytes src chunk
 	if [ ! -f "$manifest" ]; then
 		echo "xbox-xiso: $dir has no music_manifest.txt - not a tools/asset-studio --music output." >&2
 		return 1
 	fi
-	while read -r name codec _ _ _ _ _ _ _ _ _ _ _ _ status; do
-		status=${status%$'\r'}
+	suffix=$(tr -d '\r' < "$manifest" | grep -E '^# file \.[A-Za-z0-9.]*\.xwav$' | tail -1 | awk '{ print $3 }')
+	[ -n "$suffix" ] || suffix=.xwav
+	while read -r name codec rest; do
+		rest=${rest%$'\r'}
+		status=${rest##* }
 		case "$name" in ""|\#*) continue ;; esac
 		if [ "$status" != "ok" ]; then
 			echo "xbox-xiso: $manifest marks $name $status - the bake failed; fix it before packing." >&2
 			return 1
 		fi
-		f="$dir/media/$name.xwav"
+		f="$dir/media/$name$suffix"
 		[ -f "$f" ] || { echo "xbox-xiso: $manifest lists $name but $f does not exist." >&2; return 1; }
 		[ "$(head -c 4 "$f")" = "RIFF" ] && [ "$(dd if="$f" bs=1 skip=8 count=4 2>/dev/null)" = "WAVE" ] \
 			|| { echo "xbox-xiso: $f is not RIFF/WAVE." >&2; return 1; }
@@ -551,7 +561,8 @@ validate_music_bake() { # <bake dir> <staged gamedir>: echoes the track count
 	fi
 	echo "$count"
 }
-if [ -n "$MUSIC_BAKE" ]; then
+MUSIC_STAGED=" "
+for MUSIC_BAKE in "${MUSIC_BAKES[@]}"; do
 	[ -d "$MUSIC_BAKE" ] || { echo "xbox-xiso: --music-bake path does not exist or is not a directory: $MUSIC_BAKE" >&2; exit 1; }
 	if ! MUSIC_TRACKS=$(validate_music_bake "$MUSIC_BAKE" "$STAGE/$GAMEDIR"); then
 		echo "xbox-xiso: --music-bake $MUSIC_BAKE failed validation - refusing to pack." >&2
@@ -560,13 +571,18 @@ if [ -n "$MUSIC_BAKE" ]; then
 	echo "xbox-xiso: overlaying $MUSIC_TRACKS baked music track(s) from $MUSIC_BAKE onto $GAMEDIR/media..." >&2
 	mkdir -p "$STAGE/$GAMEDIR/media" || exit 1
 	for f in "$MUSIC_BAKE"/media/*.xwav; do
+		case "$MUSIC_STAGED" in *" $(basename "$f") "*)
+			echo "xbox-xiso: $(basename "$f") is in two --music-bake directories - refusing to pick one." >&2
+			exit 1 ;;
+		esac
+		MUSIC_STAGED="$MUSIC_STAGED$(basename "$f") "
 		if ! cp "$f" "$STAGE/$GAMEDIR/media/" || ! cmp -s "$f" "$STAGE/$GAMEDIR/media/$(basename "$f")"; then
 			echo "xbox-xiso: copying $f into the stage failed or differs." >&2
 			exit 1
 		fi
 	done
 	echo "xbox-xiso: music bake overlay verified in the stage ($MUSIC_TRACKS track(s), mp3s kept)." >&2
-fi
+done
 
 # The menu font (XM.1 item 13 step 1). Unlike delta.lst above, this DOES
 # come from this repository, and the difference is provenance, not
@@ -1282,7 +1298,8 @@ if [ -n "$OVERLAY_DIR" ]; then
 	fi
 	echo "xbox-xiso: $overlay_count overlay file(s) staged and verified from $OVERLAY_DIR." >&2
 fi
-if [ -n "$MUSIC_BAKE" ] && [ -n "$OVERLAY_DIR" ]; then
+for MUSIC_BAKE in "${MUSIC_BAKES[@]}"; do
+	[ -n "$OVERLAY_DIR" ] || break
 	# an overlay may have replaced a track's mp3 or .xwav after the check above
 	if ! validate_music_bake "$MUSIC_BAKE" "$STAGE/$GAMEDIR" > /dev/null; then
 		echo "xbox-xiso: the music bake no longer validates after --overlay $OVERLAY_DIR - refusing to pack." >&2
@@ -1291,7 +1308,7 @@ if [ -n "$MUSIC_BAKE" ] && [ -n "$OVERLAY_DIR" ]; then
 	for f in "$MUSIC_BAKE"/media/*.xwav; do
 		cmp -s "$f" "$STAGE/$GAMEDIR/media/$(basename "$f")" || { echo "xbox-xiso: --overlay replaced $(basename "$f") - refusing to pack." >&2; exit 1; }
 	done
-fi
+done
 
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"

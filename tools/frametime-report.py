@@ -154,6 +154,12 @@ CHROME_TIMES = ("chrome_kc",)
 # The baked music's reads (recorders from 2026-10-10, x9-audio-music-refill,
 # divergence #172): the stream's reads, and of them the file-read calls.
 MUSIC_TIMES = ("music_io_kc", "music_read_kc")
+# The audio output (recorders from 2026-10-11, x9-audio-mix48, divergence
+# #173): SDL's audio thread (callback and, at 44.1 kHz, SDL's conversion)
+# and the main thread's waits on its device lock. Times; snd_rate is the
+# mixer's rate in Hz, a state, not a count.
+SND_TIMES = ("snd_thr_kc", "snd_dma_kc")
+SND_LABELS = ("snd_rate",)
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -1263,7 +1269,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
     timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES) \
-        | set(PART_TIMES) | set(EFX_TIMES) | set(CHROME_TIMES) | set(MUSIC_TIMES)
+        | set(PART_TIMES) | set(EFX_TIMES) | set(CHROME_TIMES) | set(MUSIC_TIMES) | set(SND_TIMES) | set(SND_LABELS)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1521,6 +1527,7 @@ def summary_text(rec, rows, sess):
     lines.extend(beams_text(rec, rows))
     lines.extend(chrome_text(rec, rows))
     lines.extend(music_text(rec, rows))
+    lines.extend(audio_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -1910,6 +1917,39 @@ def music_text(rec, rows):
             r["map"][:18], a.get("music_reads", 0.0), a.get("music_read_kb", 0.0), a.get("music_async", 0.0),
             a.get("music_waits", 0.0), r.get("span_ms", {}).get("k_snd_music", 0.0),
             a.get("music_read_kc", 0.0) * k, a.get("music_io_kc", 0.0) * k))
+    return lines
+
+
+def audio_text(rec, rows):
+    """The audio output per in-play frame (recorders from 2026-10-11,
+    x9-audio-mix48, divergence #173): the mixer's rate, SDL's audio
+    thread - its callbacks and the buffers handed to the AC97 (a 48 kHz
+    buffer is 21.3 ms, so about 0.78 a frame at 60 fps), the PCM engine's
+    underruns over the map, and its time (the callback's copy and, at
+    44.1 kHz, SDL's conversion to 48 kHz), which lands in whatever span
+    it interrupts - then the main thread's waits on the device lock and
+    the mixer's own spans. In xemu the audio thread does not run, so its
+    columns read 0 there. Nothing for a session without these counters."""
+    if "snd_thr_kc" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "audio output per in-play frame: mixer rate (Hz), audio-thread callbacks and buffers, "
+             "underruns over the map; ms: the audio thread, the device lock, k_snd, k_snd_extra, k_snd_mix, "
+             "k_snd_dsp, k_snd_out, k_snd_music"]
+    lines.append("%-18s %6s %6s %6s %5s %7s %7s %7s %7s %7s %7s %7s %7s" % (
+        "map", "rate", "calls", "bufs", "under", "thread", "lock", "k_snd", "extra", "mix", "dsp", "out", "music"))
+    for r in maps:
+        a = r["work_avg"]
+        sm = r.get("span_ms", {})
+        lines.append("%-18s %6.0f %6.3f %6.3f %5.0f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f" % (
+            r["map"][:18], a.get("snd_rate", 0.0), a.get("snd_thr_runs", 0.0), a.get("snd_bufs", 0.0),
+            a.get("snd_underruns", 0.0) * r["frames"], a.get("snd_thr_kc", 0.0) * k, a.get("snd_dma_kc", 0.0) * k,
+            sm.get("k_snd", 0.0), sm.get("k_snd_extra", 0.0), sm.get("k_snd_mix", 0.0) + sm.get("k_sndx_mix", 0.0),
+            sm.get("k_snd_dsp", 0.0) + sm.get("k_sndx_dsp", 0.0), sm.get("k_snd_out", 0.0) + sm.get("k_sndx_out", 0.0),
+            sm.get("k_snd_music", 0.0)))
     return lines
 
 

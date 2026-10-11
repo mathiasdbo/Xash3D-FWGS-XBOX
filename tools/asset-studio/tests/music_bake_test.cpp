@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "formats/MusicBake.h"
+#include "formats/music_resample.h"
 
 extern "C" {
 #include "xbox_music_adpcm.h"
@@ -194,6 +195,56 @@ int main(int argc, char** argv) {
     CHECK(!fs::exists(failPath));
     // ... and PCM is not held to it
     CHECK(formats::bakeMusicTrack(mp3, "synthetic", failPath, true, high, 2).ok);
+
+    // #173: bakes resampled to the console's 48 kHz mix rate. The file is
+    // <name>.48k.xwav, its frames the source's at 48 kHz, its positions in
+    // the source's frames; the PCM one is the resampled decode byte for
+    // byte; the replay, seek and read-back checks inside bakeMusicTrack
+    // run against the resampled reference.
+    {
+        CHECK(formats::musicXwavName("synthetic", 0) == "synthetic.xwav");
+        CHECK(formats::musicXwavName("synthetic", 48000) == "synthetic.48k.xwav");
+        const uint32_t frames48 = formats::musicResampledFrames(frames, 44100, 48000);
+        const std::string a48 = (tmp / "a48" / "media" / "synthetic.48k.xwav").string();
+        const auto r48 = formats::bakeMusicTrack(mp3, "synthetic", a48, false, floor, 3, 48000);
+        std::printf("adpcm 48 kHz: %s, SNR %.1f dB, worst 50 ms %.1f dB, %u frames, %u clipped\n",
+                    r48.ok ? "ok" : r48.error.c_str(), r48.snrDb, r48.worstSegmentDb, r48.frames, r48.clipped);
+        CHECK(r48.ok && r48.rate == 48000 && r48.sourceRate == 44100 && r48.frames == frames48);
+        CHECK(r48.crcSource == crcSource);
+        {
+            Baked b;
+            CHECK(b.open(a48));
+            CHECK(b.info.rate == 48000 && b.info.source_rate == 44100 && b.info.frames == frames48);
+            CHECK(b.info.source_frames == frames && b.info.resampler_id == formats::kMusicResamplerId);
+            CHECK(b.info.tell_last_chunk == 0 && b.info.crc_source == crcSource);
+            // positions in the source's frames: a seek reports its target
+            for (int p : {0, 1, 147, 1000, static_cast<int>(frames) / 2, static_cast<int>(frames) - 1}) {
+                CHECK(Xbox_MusicStream_SetPos(&b.s, p) == 1 && Xbox_MusicStream_GetPos(&b.s) == p);
+            }
+            // played from the start the stream ends within one chunk of
+            // the track's end, in time, as the mp3 path does at 44.1 kHz
+            CHECK(Xbox_MusicStream_SetPos(&b.s, 0) == 1);
+            std::vector<uint8_t> buf(2940);
+            int played = 0;
+            while (Xbox_MusicStream_Read(&b.s, 2940, buf.data()) == 2940) played += 2940 / 4;
+            const double endSec = static_cast<double>(frames) / 44100.0, playedSec = played / 48000.0;
+            CHECK(playedSec <= endSec && endSec - playedSec < (2048.0 + 2940.0 / 4) / 48000.0);
+        }
+        // PCM at 48 kHz: the resampled decode itself
+        const std::string p48 = (tmp / "p48" / "media" / "synthetic.48k.xwav").string();
+        const auto rp48 = formats::bakeMusicTrack(mp3, "synthetic", p48, true, floor, 3, 48000);
+        CHECK(rp48.ok && rp48.frames == frames48);
+        music_mp3_t m2;
+        char err2[256] = {};
+        CHECK(Music_Mp3Decode(mp3.c_str(), &m2, err2, sizeof(err2)) == 1);
+        const auto ref = formats::resampleMusic(m2.pcm, m2.frames, 2, 44100, 48000, 2, nullptr);
+        Music_Mp3Free(&m2);
+        CHECK(rp48.crcDecoded == Xbox_MusicCrc32(0, ref.data(), ref.size() * sizeof(int16_t)));
+        // a rate the resampler does not take fails the track, writes nothing
+        const std::string bad = (tmp / "bad" / "media" / "synthetic.22k.xwav").string();
+        const auto rb = formats::bakeMusicTrack(mp3, "synthetic", bad, false, floor, 3, 22050);
+        CHECK(!rb.ok && !fs::exists(bad));
+    }
 
     // the replay against the real thing
     compareReplay(mp3, pcmPath, true, -1);

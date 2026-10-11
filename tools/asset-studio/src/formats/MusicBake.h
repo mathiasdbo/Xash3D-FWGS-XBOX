@@ -18,6 +18,16 @@
 // - an ADPCM track must clear the quality floor (overall SNR and worst
 //   50 ms segment against libmpg's decode). A track under it fails the
 //   bake rather than shipping hiss: name it in pcmTracks to ship it as PCM.
+//
+// With `rate` set (--music-rate 48000, docs/r3d/divergences.md #173) each
+// track is resampled offline to the console's mix rate first
+// (music_resample.h) and written as media/<Track>.48k.xwav, which the
+// engine opens when it mixes at 48 kHz. The resampled libmpg decode is
+// then the reference: the quality floor and the CRC of the decode are
+// measured against it, and the replay check runs upstream's
+// Stream_ReadMPG loop over it (libmpg's chunks belong to the source's
+// rate, so the real libmpg cannot stand in). crc_source stays the CRC of
+// libmpg's own output, which the console's r3d_music_crc checks.
 
 #include <cstdint>
 #include <set>
@@ -52,12 +62,15 @@ struct MusicBakeOptions {
     std::set<std::string> pcmTracks; // --music-pcm, track names without extension, case-insensitive
     MusicQualityFloor floor;
     int threads = 0;           // 0: the machine's
+    uint32_t rate = 0;         // --music-rate: 0 bakes at the source's rate, 48000 resamples to it (#173)
 };
 
 struct MusicTrackResult {
     std::string name;          // e.g. Half-Life01
     std::string codec;         // adpcm or pcm
     uint32_t rate = 0, channels = 0, frames = 0, sourceFrames = 0;
+    uint32_t sourceRate = 0;   // the mp3's; `rate` is the file's
+    uint32_t clipped = 0;      // resampled samples clamped at full scale (#173)
     uint32_t crcSource = 0, crcDecoded = 0;
     uint64_t fileBytes = 0, sourceBytes = 0;
     double snrDb = 0.0, worstSegmentDb = 0.0;
@@ -88,10 +101,16 @@ struct XwavFields {
 };
 std::vector<uint8_t> buildXwav(const XwavFields& f, const std::vector<uint8_t>& data);
 
+// The file name a bake at `rate` writes for a track: <name>.xwav at the
+// source's rate (rate 0), <name>.48k.xwav at 48000 (#173) - the names
+// xbox_music_stream.c opens.
+std::string musicXwavName(const std::string& name, uint32_t rate);
+
 // Bakes one track. `name` is the file's base name. Writes the .xwav only
-// when every check above passes.
+// when every check above passes. `rate` 0 keeps the source's rate; any
+// other is resampled to (musicResampleSupported).
 MusicTrackResult bakeMusicTrack(const std::string& mp3Path, const std::string& name, const std::string& outPath,
-                                bool pcm, const MusicQualityFloor& floor, int threads);
+                                bool pcm, const MusicQualityFloor& floor, int threads, uint32_t rate = 0);
 
 // The whole media/ folder; writes <outDir>/music_manifest.txt. Returns
 // false when any track failed.

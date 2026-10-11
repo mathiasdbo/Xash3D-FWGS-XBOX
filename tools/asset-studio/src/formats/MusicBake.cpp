@@ -1,5 +1,6 @@
 // MusicBake - see MusicBake.h (docs/r3d/divergences.md #171).
 #include "MusicBake.h"
+#include "music_resample.h"
 
 #include <algorithm>
 #include <cctype>
@@ -87,7 +88,129 @@ std::string replayAgainstLibmpg(const std::string& mp3, xbox_music_stream_t* bak
     return where;
 }
 
+// A bake resampled to the mix rate (#173) has no libmpg to compare with:
+// libmpg's chunks are at the source's rate. Its reference is upstream's
+// Stream_ReadMPG loop (`snd_mp3.c:361-398` in the reference), written out
+// again here, over a decoder that hands out `pcm` - the bake passes the
+// file's own decode - in chunk_bytes chunks and reports failure on the
+// short last one, as read_mpeg_stream does; its position is the frames
+// handed out, converted to the source's frames here, not by the engine's
+// function (positions in a save are the mp3's). Same requests as
+// replayAgainstLibmpg; the bytes too when `sameBytes`.
+struct ModelStream {
+    const int16_t* pcm = nullptr;
+    uint32_t frames = 0, frameBytes = 0, chunkBytes = 0;
+    uint32_t next = 0;           // frames handed out of the decoder
+    std::vector<uint8_t> temp;   // stream->temp
+    int pos = 0, buffsize = 0;   // stream->pos, stream->buffsize
+    const xbox_xwav_info_t* info = nullptr;
+};
+
+bool modelPull(ModelStream& m, int* outsize) {
+    const uint32_t chunkFrames = m.chunkBytes / m.frameBytes;
+    const uint32_t got = std::min(chunkFrames, m.frames - std::min(m.next, m.frames));
+    std::memcpy(m.temp.data(), reinterpret_cast<const uint8_t*>(m.pcm) + static_cast<size_t>(m.next) * m.frameBytes,
+                static_cast<size_t>(got) * m.frameBytes);
+    m.next += got;
+    *outsize = static_cast<int>(got * m.frameBytes);
+    return got == chunkFrames;
+}
+
+int modelRead(ModelStream& m, int needBytes, uint8_t* buffer) {
+    int bytesWritten = 0;
+    while (true) {
+        if (!m.buffsize) {
+            if (!modelPull(m, &m.pos)) break;
+        }
+        const int outsize = bytesWritten + m.pos > needBytes ? needBytes - bytesWritten : m.pos;
+        std::memcpy(buffer + bytesWritten, m.temp.data() + m.buffsize, static_cast<size_t>(outsize));
+        bytesWritten += outsize;
+        m.pos -= outsize;
+        m.buffsize += outsize;
+        if (bytesWritten >= needBytes) return bytesWritten;
+        m.buffsize = 0;
+    }
+    return 0;
+}
+
+std::string replayAgainstModel(const int16_t* pcm, uint32_t frames, uint32_t channels, const xbox_xwav_info_t& info,
+                               xbox_music_stream_t* baked, bool sameBytes) {
+    static const int sizes[] = {16384, 16384, 16384, 16384, 2940, 2944, 2936, 2940, 16384, 4, 2940, 8192, 8196, 12, 2940, 3000};
+    ModelStream m;
+    m.pcm = pcm;
+    m.frames = frames;
+    m.frameBytes = 2u * channels;
+    m.chunkBytes = info.chunk_bytes;
+    m.temp.resize(info.chunk_bytes);
+    m.info = &info;
+    std::vector<uint8_t> a(16384), b(16384);
+    int zeros = 0;
+    for (uint64_t k = 0; zeros < 2; ++k) {
+        const int need = sizes[k % (sizeof(sizes) / sizeof(sizes[0]))];
+        const int ra = modelRead(m, need, a.data());
+        const int rb = Xbox_MusicStream_Read(baked, need, b.data());
+        // the position in the source's frames, computed here rather than
+        // through the engine's Xbox_MusicXwav_ToSourceFrames: the frames
+        // whose time is at or before the decoder's, floor(next * src / rate)
+        const int pa = static_cast<int>((static_cast<uint64_t>(m.next) * info.source_rate) / info.rate);
+        const int pb = Xbox_MusicStream_GetPos(baked);
+        if (ra != rb || pa != pb || (sameBytes && ra > 0 && std::memcmp(a.data(), b.data(), static_cast<size_t>(ra)))) {
+            std::ostringstream s;
+            s << "request " << k << " (" << need << " bytes): the model returned " << ra << " at " << pa << ", the bake " << rb
+              << " at " << pb;
+            return s.str();
+        }
+        if (ra == 0) ++zeros;
+    }
+    return std::string();
+}
+
+// The positions of a resampled bake (#173): a seek to any source position
+// p reports p back (Xbox_MusicXwav_ToFileFrames rounds up, ToSourceFrames
+// down) and the next read starts at the file frame p maps to, the first
+// whose time is not before p's. `decoded` is the file's decode.
+std::string checkResampledSeeks(xbox_music_stream_t* baked, const int16_t* decoded, uint32_t sourceFrames, uint32_t channels) {
+    const xbox_xwav_info_t& info = baked->info;
+    const uint32_t probes[] = {0u, 1u, 146u, 147u, 148u, 1151u, 1152u, 44099u, sourceFrames / 3, sourceFrames / 2 + 7,
+                               sourceFrames > 2048 ? sourceFrames - 2048 : 0u, sourceFrames - 1, sourceFrames, sourceFrames + 5};
+    std::vector<uint8_t> b(64);
+    for (uint32_t p : probes) {
+        if (Xbox_MusicStream_SetPos(baked, static_cast<int>(p)) != 1 || Xbox_MusicStream_GetPos(baked) != static_cast<int>(p)) {
+            return "a seek to source frame " + std::to_string(p) + " reports " + std::to_string(Xbox_MusicStream_GetPos(baked));
+        }
+        const uint32_t f = Xbox_MusicXwav_ToFileFrames(&info, p);
+        const uint64_t t0 = static_cast<uint64_t>(f) * info.source_rate, t1 = static_cast<uint64_t>(p) * info.rate;
+        if (t0 < t1 || (f > 0 && static_cast<uint64_t>(f - 1) * info.source_rate >= t1)) {
+            return "source frame " + std::to_string(p) + " maps to file frame " + std::to_string(f) + ", not the first at or after it";
+        }
+        const int need = static_cast<int>(2u * channels);
+        const int got = Xbox_MusicStream_Read(baked, need, b.data());
+        // the decoder hands out a whole chunk from file frame f, or reports
+        // the end on a short one, which the read then drops (upstream's tail)
+        const uint32_t chunkFrames = info.chunk_bytes / (2u * channels);
+        if (static_cast<uint64_t>(f) + chunkFrames <= info.frames) {
+            if (got != need || std::memcmp(b.data(), decoded + static_cast<size_t>(f) * channels, static_cast<size_t>(need))) {
+                return "after a seek to source frame " + std::to_string(p) + " the first frame is not file frame " + std::to_string(f);
+            }
+            // one chunk pulled from f: the position is its end, in source
+            // frames, computed here (floor(frames * src / rate))
+            const int expect = static_cast<int>((static_cast<uint64_t>(f + chunkFrames) * info.source_rate) / info.rate);
+            if (Xbox_MusicStream_GetPos(baked) != expect) {
+                return "after a seek to source frame " + std::to_string(p) + " and a read, the position is " +
+                       std::to_string(Xbox_MusicStream_GetPos(baked)) + ", not " + std::to_string(expect);
+            }
+        } else if (got != 0) {
+            return "a seek to source frame " + std::to_string(p) + " inside the short last chunk read " + std::to_string(got) + " bytes";
+        }
+    }
+    return std::string();
+}
+
 } // namespace
+
+std::string musicXwavName(const std::string& name, uint32_t rate) {
+    return rate ? name + "." + std::to_string(rate / 1000) + "k.xwav" : name + ".xwav";
+}
 
 void measureMusicQuality(const int16_t* source, const int16_t* decoded, uint32_t frames, uint32_t channels,
                          uint32_t rate, double gateDbfs, double& snrDb, double& worstSegmentDb, double& worstAtSec) {
@@ -219,7 +342,7 @@ std::vector<uint8_t> buildXwav(const XwavFields& f, const std::vector<uint8_t>& 
 }
 
 MusicTrackResult bakeMusicTrack(const std::string& mp3Path, const std::string& name, const std::string& outPath,
-                                bool pcm, const MusicQualityFloor& floor, int threads) {
+                                bool pcm, const MusicQualityFloor& floor, int threads, uint32_t rate) {
     MusicTrackResult r;
     r.name = name;
     r.codec = pcm ? "pcm" : "adpcm";
@@ -234,7 +357,7 @@ MusicTrackResult bakeMusicTrack(const std::string& mp3Path, const std::string& n
     }
     struct Guard { music_mp3_t& m; ~Guard() { Music_Mp3Free(&m); } } guard{m};
 
-    r.rate = static_cast<uint32_t>(m.rate);
+    r.rate = r.sourceRate = static_cast<uint32_t>(m.rate);
     r.channels = static_cast<uint32_t>(m.channels);
     r.frames = r.sourceFrames = m.frames;
     r.seekProbes = m.seek_probes;
@@ -266,16 +389,35 @@ MusicTrackResult bakeMusicTrack(const std::string& mp3Path, const std::string& n
         return r;
     }
 
-    const size_t pcmBytes = static_cast<size_t>(m.frames) * fb;
-    r.crcSource = Xbox_MusicCrc32(0, m.pcm, pcmBytes);
+    r.crcSource = Xbox_MusicCrc32(0, m.pcm, static_cast<size_t>(m.frames) * fb);
+
+    // The reference the file is encoded from, measured and replayed
+    // against: libmpg's decode, resampled offline to the mix rate when the
+    // bake asks for one (#173, music_resample.h).
+    const bool resample = rate != 0 && rate != r.sourceRate;
+    std::vector<int16_t> resampled;
+    const int16_t* ref = m.pcm;
+    if (resample) {
+        if (!musicResampleSupported(r.sourceRate, rate)) {
+            r.error = "cannot resample " + std::to_string(r.sourceRate) + " Hz to " + std::to_string(rate) + " Hz";
+            return r;
+        }
+        MusicResampleStats st;
+        resampled = resampleMusic(m.pcm, m.frames, r.channels, r.sourceRate, rate, threads, &st);
+        ref = resampled.data();
+        r.rate = rate;
+        r.frames = static_cast<uint32_t>(resampled.size() / r.channels);
+        r.clipped = st.clipped;
+    }
+    const size_t pcmBytes = static_cast<size_t>(r.frames) * fb;
 
     std::vector<uint8_t> data;
-    std::vector<int16_t> decoded(static_cast<size_t>(m.frames + XBOX_ADPCM_BLOCK_FRAMES) * r.channels);
+    std::vector<int16_t> decoded(static_cast<size_t>(r.frames + XBOX_ADPCM_BLOCK_FRAMES) * r.channels);
     if (pcm) {
-        data.assign(reinterpret_cast<const uint8_t*>(m.pcm), reinterpret_cast<const uint8_t*>(m.pcm) + pcmBytes);
-        std::memcpy(decoded.data(), m.pcm, pcmBytes);
+        data.assign(reinterpret_cast<const uint8_t*>(ref), reinterpret_cast<const uint8_t*>(ref) + pcmBytes);
+        std::memcpy(decoded.data(), ref, pcmBytes);
     } else {
-        data = encodeMusicAdpcm(m.pcm, m.frames, r.channels, threads);
+        data = encodeMusicAdpcm(ref, r.frames, r.channels, threads);
         const uint32_t blockBytes = XBOX_ADPCM_CHANNEL_BYTES * r.channels;
         for (size_t b = 0; b * blockBytes < data.size(); ++b) {
             if (!Xbox_MusicAdpcm_DecodeBlock(data.data() + b * blockBytes, static_cast<int>(r.channels),
@@ -286,15 +428,15 @@ MusicTrackResult bakeMusicTrack(const std::string& mp3Path, const std::string& n
         }
     }
     r.crcDecoded = Xbox_MusicCrc32(0, decoded.data(), pcmBytes);
-    measureMusicQuality(m.pcm, decoded.data(), m.frames, r.channels, r.rate, floor.gateDbfs, r.snrDb, r.worstSegmentDb,
+    measureMusicQuality(ref, decoded.data(), r.frames, r.channels, r.rate, floor.gateDbfs, r.snrDb, r.worstSegmentDb,
                         r.worstSegmentAtSec);
 
     XwavFields f;
     f.tag = pcm ? XBOX_XWAV_TAG_PCM : XBOX_XWAV_TAG_ADPCM;
     f.channels = r.channels;
     f.rate = r.rate;
-    f.frames = m.frames;
-    f.sourceRate = r.rate;
+    f.frames = r.frames;
+    f.sourceRate = r.sourceRate;
     f.sourceFrames = m.frames;
     f.crcSource = r.crcSource;
     f.crcDecoded = r.crcDecoded;
@@ -302,8 +444,10 @@ MusicTrackResult bakeMusicTrack(const std::string& mp3Path, const std::string& n
     f.sourceBytes = static_cast<uint32_t>(r.sourceBytes);
     f.sourceExt = lower(fs::path(mp3Path).extension().string().substr(1));
     f.encoderId = pcm ? 0 : MUSIC_ADPCM_ENCODER_ID;
-    f.resamplerId = 0; // none: the source rate
-    f.tellLastChunk = m.last_ok_tell_differs ? static_cast<uint32_t>(m.last_ok_tell) : 0;
+    f.resamplerId = resample ? kMusicResamplerId : 0; // 0: none, the source rate
+    // libmpg's position quirk after its last whole chunk belongs to the
+    // source's chunk grid; a resampled file has no such chunk (#173)
+    f.tellLastChunk = !resample && m.last_ok_tell_differs ? static_cast<uint32_t>(m.last_ok_tell) : 0;
     const std::vector<uint8_t> file = buildXwav(f, data);
 
     if (!pcm && (r.snrDb < floor.overallDb || r.worstSegmentDb < floor.segmentDb)) {
@@ -339,21 +483,35 @@ MusicTrackResult bakeMusicTrack(const std::string& mp3Path, const std::string& n
     const size_t headLen = std::fread(head.data(), 1, head.size(), in);
     xbox_xwav_info_t info;
     const xbox_xwav_err_t perr = Xbox_MusicXwav_ParseHeader(head.data(), headLen, static_cast<uint32_t>(file.size()), &info);
-    bool good = perr == XBOX_XWAV_OK && info.frames == m.frames && info.crc_decoded == r.crcDecoded &&
-                info.chunk_bytes == m.chunk_bytes;
+    bool good = perr == XBOX_XWAV_OK && info.frames == r.frames && info.crc_decoded == r.crcDecoded &&
+                info.chunk_bytes == m.chunk_bytes && info.rate == r.rate && info.source_frames == m.frames;
     if (good) {
         StdioCtx ctx{in};
         xbox_music_io_t io{stdioRead, stdioSeek, &ctx};
         std::vector<uint8_t> chunk(info.chunk_bytes), ra(XBOX_MUSIC_READAHEAD_BYTES);
         xbox_music_stream_t* s = new xbox_music_stream_t;
-        std::vector<int16_t> back(static_cast<size_t>(m.frames) * r.channels);
+        std::vector<int16_t> back(static_cast<size_t>(r.frames) * r.channels);
         good = Xbox_MusicStream_Init(s, &info, &io, chunk.data(), static_cast<uint32_t>(chunk.size()), ra.data()) &&
-               Xbox_MusicStream_DecodeFrames(s, 0, m.frames, back.data()) == m.frames && s->bad_blocks == 0 &&
+               Xbox_MusicStream_DecodeFrames(s, 0, r.frames, back.data()) == r.frames && s->bad_blocks == 0 &&
                Xbox_MusicCrc32(0, back.data(), pcmBytes) == r.crcDecoded;
+        // a resampled file's positions: every seek reports its target back
+        if (good && resample) {
+            const std::string bad = checkResampledSeeks(s, decoded.data(), m.frames, r.channels);
+            if (!bad.empty()) {
+                delete s;
+                std::fclose(in);
+                fs::remove(outPath, ec);
+                r.error = "the resampled stream's positions: " + bad;
+                return r;
+            }
+        }
         // and the replay of upstream's reader, from a fresh stream
         good = good && Xbox_MusicStream_Init(s, &info, &io, chunk.data(), static_cast<uint32_t>(chunk.size()), ra.data());
         if (good) {
-            const std::string parted = replayAgainstLibmpg(mp3Path, s, pcm);
+            // the model serves the file's own decode, so every byte of an
+            // ADPCM bake is compared too, not only the returns and positions
+            const std::string parted = resample ? replayAgainstModel(decoded.data(), r.frames, r.channels, info, s, true)
+                                                : replayAgainstLibmpg(mp3Path, s, pcm);
             if (!parted.empty()) {
                 delete s;
                 std::fclose(in);
@@ -440,12 +598,13 @@ bool bakeMusic(const MusicBakeOptions& opt, std::vector<MusicTrackResult>& resul
     for (const auto& t : tracks) {
         const std::string name = t.stem().string();
         const bool pcm = opt.allPcm || pcmLower.count(lower(name)) != 0;
-        const std::string out = (fs::path(opt.outDir) / "media" / (name + ".xwav")).string();
-        MusicTrackResult r = bakeMusicTrack(t.string(), name, out, pcm, opt.floor, opt.threads);
+        const std::string out = (fs::path(opt.outDir) / "media" / musicXwavName(name, opt.rate)).string();
+        MusicTrackResult r = bakeMusicTrack(t.string(), name, out, pcm, opt.floor, opt.threads, opt.rate);
         std::cout << std::fixed << std::setprecision(1) << "  " << std::left << std::setw(16) << name << " " << r.codec
                   << "  " << r.frames << " frames  SNR " << r.snrDb << " dB  worst 50 ms " << r.worstSegmentDb
                   << " dB @ " << r.worstSegmentAtSec << " s  " << r.fileBytes << " bytes  libmpg seek " << r.seekExact
-                  << "/" << r.seekProbes << (r.ok ? "" : "  FAILED: " + r.error) << "\n";
+                  << "/" << r.seekProbes << (opt.rate ? "  clipped " + std::to_string(r.clipped) : std::string())
+                  << (r.ok ? "" : "  FAILED: " + r.error) << "\n";
         ok = ok && r.ok;
         results.push_back(r);
     }
@@ -454,14 +613,22 @@ bool bakeMusic(const MusicBakeOptions& opt, std::vector<MusicTrackResult>& resul
     mf << "# Resonance3D baked music (docs/r3d/divergences.md #171), tools/asset-studio --music\n";
     mf << "# floor: overall >= " << opt.floor.overallDb << " dB, worst 50 ms >= " << opt.floor.segmentDb
        << " dB over windows louder than " << opt.floor.gateDbfs << " dBFS; encoder " << MUSIC_ADPCM_ENCODER_ID << "\n";
+    if (opt.rate) {
+        // #173: resampled to the mix rate; tools/xbox-xiso.sh reads the
+        // file names from the `# file` line (<name><suffix>)
+        mf << "# resampled to " << opt.rate << " Hz, resampler " << kMusicResamplerId
+           << " (Kaiser-windowed sinc, 192 taps, beta 12, cutoff 21025/44100 of the input rate);"
+              " snr and worst 50 ms against the resampled decode; crc_source is libmpg's own output\n";
+        mf << "# file " << musicXwavName("", opt.rate) << "\n";
+    }
     mf << "# name codec rate channels frames source_frames crc_source crc_decoded snr_db worst_50ms_db worst_at_s"
-          " xwav_bytes source_bytes libmpg_seek_exact status\n";
+          " xwav_bytes source_bytes libmpg_seek_exact clipped status\n";
     for (const auto& r : results) {
         mf << r.name << " " << r.codec << " " << r.rate << " " << r.channels << " " << r.frames << " " << r.sourceFrames
            << " " << std::hex << std::setw(8) << std::setfill('0') << r.crcSource << " " << std::setw(8) << r.crcDecoded
            << std::dec << std::setfill(' ') << " " << std::fixed << std::setprecision(2) << r.snrDb << " "
            << r.worstSegmentDb << " " << r.worstSegmentAtSec << " " << r.fileBytes << " " << r.sourceBytes << " "
-           << r.seekExact << "/" << r.seekProbes << " " << (r.ok ? "ok" : "FAILED") << "\n";
+           << r.seekExact << "/" << r.seekProbes << " " << r.clipped << " " << (r.ok ? "ok" : "FAILED") << "\n";
     }
     // tools/xbox-xiso.sh --music-bake packs a bake only with this line, and
     // only if its count is the number of .xwav files: a run that failed

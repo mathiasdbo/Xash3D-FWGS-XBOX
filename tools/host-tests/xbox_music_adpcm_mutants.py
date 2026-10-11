@@ -4,7 +4,7 @@ engine/platform/xbox/xbox_music_adpcm.c - a decode table bit, a clamp, the
 APU's 64-frame block, the stereo interleave, upstream's dropped tail, the
 mp3 position quirk, the seek, the parser, the rate conversion, the CRC,
 which file a request names, the read-ahead's windows and asynchronous
-reads (#172) -
+reads (#172), the resampled bake's header (#173) -
 and the host test must fail on every one of them. A mutant the test
 passes is a gap in the test, reported and exit 1.
 
@@ -39,7 +39,13 @@ MUTANTS = [
     ("stream: libmpg's last-chunk position never used", b"return (int)Xbox_MusicXwav_ToSourceFrames( &s->info, s->info.tell_last_chunk );", b"return (int)Xbox_MusicXwav_ToSourceFrames( &s->info, s->next_frame );"),
     ("seek: the chunk not flushed", b"\ts->next_frame = f;\n\ts->buffsize = 0;\n", b"\ts->next_frame = f;\n"),
     ("seek: past the end clamped", b"\ts->next_frame = f;\n\ts->buffsize = 0;", b"\ts->next_frame = f > s->info.frames ? s->info.frames : f;\n\ts->buffsize = 0;"),
-    ("parser: a bake at another rate accepted", b"if( out->rate != out->source_rate || out->source_frames != out->frames )", b"if( out->source_frames != out->frames && out->rate == out->source_rate )"),
+    # a bake at another rate than its source (#173): only a resampled one, upward, named, the exact length
+    ("parser: a source-rate bake of another length accepted", b"\t\tif( out->source_frames != out->frames )\n\t\t\treturn XBOX_XWAV_ERR_R3DM;", b"\t\tif( 0 )\n\t\t\treturn XBOX_XWAV_ERR_R3DM;"),
+    ("parser: a resampled bake at a lower rate accepted", b"else if( out->rate < out->source_rate || !out->resampler_id", b"else if( !out->resampler_id"),
+    ("parser: a resampled bake with no resampler accepted", b"out->rate < out->source_rate || !out->resampler_id || out->tell_last_chunk", b"out->rate < out->source_rate || out->tell_last_chunk"),
+    ("parser: a resampled bake with a last-chunk position accepted", b"!out->resampler_id || out->tell_last_chunk\n", b"!out->resampler_id\n"),
+    ("parser: a resampled bake's length not checked", b"\t\t|| out->frames != Xbox_MusicXwav_ToFileFrames( out, out->source_frames ))", b"\t\t|| 0 )"),
+    ("rate: source frames rounded up", b"return (uint32_t)(( (uint64_t)file_frames * info->source_rate ) / info->rate );", b"return (uint32_t)(( (uint64_t)file_frames * info->source_rate + info->rate - 1 ) / info->rate );"),
     ("discovery: the extension compared case-sensitively", b"\t\tif( LowerEq( dot + 1, formats[i] ))", b"\t\tif( !strcmp( dot + 1, formats[i] ))"),
     ("discovery: no extension takes the last format present, not the first", b"\t\t\tif( probe( ctx, path, &size ))\n\t\t\t{\n\t\t\t\tfound = i;\n\t\t\t\tbreak;", b"\t\t\tif( probe( ctx, path, &size ))\n\t\t\t{\n\t\t\t\tfound = i;\n\t\t\t\tcontinue;"),
     ("discovery: the size not checked", b"\tif( size != (int64_t)info->source_bytes )\n\t\treturn XBOX_XWAV_SOURCE_SIZE;", b""),

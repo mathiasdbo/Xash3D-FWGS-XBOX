@@ -510,9 +510,12 @@ static uint8_t *BuildXwav( int tag, int channels, uint32_t rate, uint32_t source
 	}
 	memcpy( p, "r3dm", 4 ); Put32( p + 4, XBOX_XWAV_R3DM_BYTES ); p += 8;
 	Put32( p, XBOX_XWAV_R3DM_VERSION ); Put32( p + 4, frames ); Put32( p + 8, source_rate );
+	/* a resampled bake (#173): `frames` is the source's length at `rate`,
+	   ceil(N * rate / source_rate), so N is its floor back, and the
+	   resampler is named */
 	Put32( p + 12, rate == source_rate ? frames : (uint32_t)(( (uint64_t)frames * source_rate ) / rate ));
 	Put32( p + 16, 0x11111111u ); Put32( p + 20, 0x22222222u ); Put32( p + 24, chunk_bytes ); Put32( p + 28, 123456 );
-	memcpy( p + 32, "mp3", 4 ); Put16( p + 40, MUSIC_ADPCM_ENCODER_ID ); Put16( p + 42, 0 );
+	memcpy( p + 32, "mp3", 4 ); Put16( p + 40, MUSIC_ADPCM_ENCODER_ID ); Put16( p + 42, rate == source_rate ? 0 : 1 );
 	p += XBOX_XWAV_R3DM_BYTES;
 	memcpy( p, "data", 4 ); Put32( p + 4, data_bytes ); p += 8;
 	memcpy( p, data, data_bytes );
@@ -833,20 +836,59 @@ static void TestStream( void )
 		CheckReads( &t, Rand() % t.info.frames, odd, 13, 1 );
 	FreeTrack( &t );
 
-	/* a file at another rate than its source (a 48 kHz rebake, X12 step 2)
-	   is refused for now - the replay of libmpg's chunks holds only at the
-	   source rate - but the position conversions it will need are here
-	   already: both ways, round down / up, monotonic */
+	/* a file at another rate than its source (#173: the 48 kHz bake for the
+	   console's mix rate). Accepted when it raises the rate, names its
+	   resampler, holds exactly ToFileFrames of the source's frames and has
+	   no last-chunk position; the conversions both ways, round down / up,
+	   monotonic, and source -> file -> source exact */
 	{
 		xbox_xwav_info_t r48;
-		uint8_t *f48;
+		uint8_t *f48, *r3dm48;
 		uint32_t len48;
-		uint8_t data48[( 48000 / 64 + 1 ) * 72];
+		uint8_t data48[( 48000 / 64 + 2 ) * 72];
 
 		memset( data48, 0, sizeof( data48 ));
 		f48 = BuildXwav( XBOX_XWAV_TAG_ADPCM, 2, 48000, 44100, 48000, 8192, data48, ( 48000 + 63 ) / 64 * 72, 0, &len48 );
+		CHECK( Xbox_MusicXwav_ParseHeader( f48, len48, len48, &r48 ) == XBOX_XWAV_OK );
+		CHECK( r48.rate == 48000 && r48.source_rate == 44100 && r48.source_frames == 44100 && r48.frames == 48000 );
+		CHECK( r48.resampler_id == 1 && r48.tell_last_chunk == 0 );
+		r3dm48 = f48 + 12 + 8 + 20 + 8;
+		CHECK( !memcmp( r3dm48 - 8, "r3dm", 4 ));
+		/* no resampler named */
+		Put16( r3dm48 + 42, 0 );
+		CHECK( Xbox_MusicXwav_ParseHeader( f48, len48, len48, &r48 ) == XBOX_XWAV_ERR_R3DM );
+		Put16( r3dm48 + 42, 1 );
+		/* a last-chunk position: libmpg's, the source's grid */
+		Put32( r3dm48 + 44, 4096 );
+		CHECK( Xbox_MusicXwav_ParseHeader( f48, len48, len48, &r48 ) == XBOX_XWAV_ERR_R3DM );
+		Put32( r3dm48 + 44, 0 );
+		/* a length that is not the source's at this rate, one frame either way */
+		Put32( r3dm48 + 12, 44101 );
+		CHECK( Xbox_MusicXwav_ParseHeader( f48, len48, len48, &r48 ) == XBOX_XWAV_ERR_R3DM );
+		Put32( r3dm48 + 12, 44099 );
+		CHECK( Xbox_MusicXwav_ParseHeader( f48, len48, len48, &r48 ) == XBOX_XWAV_ERR_R3DM );
+		Put32( r3dm48 + 12, 44100 );
+		CHECK( Xbox_MusicXwav_ParseHeader( f48, len48, len48, &r48 ) == XBOX_XWAV_OK );
+		free( f48 );
+		/* a rate below the source's (44.1 kHz from a 48 kHz source), every
+		   other field consistent */
+		f48 = BuildXwav( XBOX_XWAV_TAG_ADPCM, 2, 44100, 48000, 44100, 8192, data48, ( 44100 + 63 ) / 64 * 72, 0, &len48 );
 		CHECK( Xbox_MusicXwav_ParseHeader( f48, len48, len48, &r48 ) == XBOX_XWAV_ERR_R3DM );
 		free( f48 );
+
+		/* every source length up to two seconds: its file length is the
+		   first file frame at or after the source's end in time, and a
+		   bake of it parses */
+		memset( &r48, 0, sizeof( r48 ));
+		r48.rate = 48000;
+		r48.source_rate = 44100;
+		for( p = 0; p <= 88200; p++ )
+		{
+			const uint32_t f = Xbox_MusicXwav_ToFileFrames( &r48, p );
+
+			CHECK( (uint64_t)f * 44100 >= (uint64_t)p * 48000 && ( f == 0 || (uint64_t)( f - 1 ) * 44100 < (uint64_t)p * 48000 ));
+			CHECK( Xbox_MusicXwav_ToSourceFrames( &r48, f ) == p );
+		}
 
 		memset( &r48, 0, sizeof( r48 ));
 		r48.rate = 48000;
@@ -866,6 +908,26 @@ static void TestStream( void )
 			CHECK( Xbox_MusicXwav_ToSourceFrames( &r48, f ) == p ); /* source -> file -> source is exact */
 		}
 	}
+
+	/* a resampled track (#173) through the same reader: the same chunks of
+	   its own frames, positions in the source's (CheckReads converts) */
+	MakeTrack( &t, XBOX_XWAV_TAG_ADPCM, 2, 2048 * 6 + 1157, 48000, 44100, 8192 );
+	CHECK( t.info.rate == 48000 && t.info.source_rate == 44100 );
+	CheckReads( &t, 0, engine_like, 7, 0 );
+	CheckReads( &t, 0, odd, 13, 0 );
+	for( i = 0; i < 200; i++ )
+	{
+		p = Rand() % ( t.info.frames + 100 );
+		if( i < 5 )
+			p = (uint32_t[]){ 0, 1, 160, t.info.frames - 1, t.info.frames }[i];
+		CheckReads( &t, p, odd, 13, 1 );
+		CheckReads( &t, p, engine_like, 7, 1 );
+	}
+	FreeTrack( &t );
+	MakeTrack( &t, XBOX_XWAV_TAG_PCM, 1, 9999 * 160 / 147 + 1, 48000, 44100, 8192 );
+	for( i = 0; i < 100; i++ )
+		CheckReads( &t, Rand() % t.info.frames, odd, 13, 1 );
+	FreeTrack( &t );
 
 	/* SetPos: negative is the start; past the end, as libmpg's seek: the
 	   position is the target and the next read returns 0 */

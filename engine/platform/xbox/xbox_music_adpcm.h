@@ -120,10 +120,15 @@ typedef enum
 } xbox_xwav_err_t;
 
 /* Parses the first `len` bytes of a file `file_len` bytes long. Every
-   chunk the reader needs must start within `len`. A file whose rate is not
-   its source's is refused for now: the stream replays libmpg's chunking
-   only at the source rate, and no baker writes another (a 48 kHz rebake
-   arrives with X12 step 2, with the replay worked out for it). */
+   chunk the reader needs must start within `len`. A file at another rate
+   than its source's (#173: tools/asset-studio --music-rate 48000, for the
+   console's 48 kHz mix) must be at a higher rate, name its resampler
+   (r3dm resampler_id), hold exactly Xbox_MusicXwav_ToFileFrames of the
+   source's frames, and carry no tell_last_chunk. The stream replays
+   upstream's Stream_ReadMPG over it the same way, in the same
+   chunk_bytes chunks of its own frames: the tail it drops is under one
+   chunk at its rate, as at the source's, and its positions are converted
+   to the source's frames. */
 xbox_xwav_err_t Xbox_MusicXwav_ParseHeader( const uint8_t *buf, size_t len, uint32_t file_len, xbox_xwav_info_t *out );
 const char *Xbox_MusicXwav_ErrorString( xbox_xwav_err_t err );
 

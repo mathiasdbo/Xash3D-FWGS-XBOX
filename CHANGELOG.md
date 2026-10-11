@@ -5,6 +5,27 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: sound mixed at the console's own 48 kHz
+
+The console's sound chip only plays 48 kHz, while the engine mixed at
+44.1 kHz, so a background thread converted every block of sound before
+it could play - work the frame-time recorder could not see. The engine
+now mixes at 48 kHz on the console and the blocks go straight to the
+chip. Sounds keep their pitch and length, the room echoes keep their
+delays, and saved games keep their music position. The music is baked a
+second time at 48 kHz (`tools/asset-studio --music-rate 48000`,
+`media/<Track>.48k.xwav`) with a high-quality filter, so it is not
+roughly converted while it plays; the 44.1 kHz bake stays beside it.
+
+`r3d_snd_rate 44100` (in a cfg or at the console) switches back to the
+old mixing while the game runs, for comparison. The output is no longer
+identical to upstream's: Half-Life's 11 and 22 kHz sounds are stretched
+to 48 kHz unevenly, which adds faint extra tones to them, and a
+listening test on the console (`docs/r3d/x12-mix48-listening-test.md`)
+decides whether that is audible. The frame-time recorder now measures
+the sound thread's work, the buffers it hands over, any dropouts and the
+mixing rate of every frame, so the console recording can show the saving.
+
 ### Changed - Xbox: baked music reads ahead while the game runs
 
 On the console, the baked music still cost 0.13 ms of every frame, and

@@ -315,7 +315,9 @@ int main(int argc, char *argv[]) {
 
     // divergences.md #171: --music <out_dir> bakes <game-dir>/media/*.mp3
     // to <out_dir>/media/<Track>.xwav plus <out_dir>/music_manifest.txt,
-    // an overlay tree for tools/xbox-xiso.sh --music-bake.
+    // an overlay tree for tools/xbox-xiso.sh --music-bake. With
+    // --music-rate 48000 (#173) each track is resampled to the console's
+    // mix rate and written as <out_dir>/media/<Track>.48k.xwav.
     std::string musicOut;
     formats::MusicBakeOptions music;
 
@@ -418,6 +420,15 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             music.threads = static_cast<int>(v);
+        } else if (arg == "--music-rate" && i + 1 < argc) {
+            // divergences.md #173: the console mixes at 48 kHz; a track
+            // resampled to it offline is written as <Track>.48k.xwav
+            const std::string rate = argv[++i];
+            if (rate != "48000") {
+                std::cerr << "--music-rate: only 48000 (the console's mix rate) is supported, not " << rate << "\n";
+                return 1;
+            }
+            music.rate = 48000;
         }
     }
 

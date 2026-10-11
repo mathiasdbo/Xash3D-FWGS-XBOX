@@ -319,8 +319,19 @@ xbox_xwav_err_t Xbox_MusicXwav_ParseHeader( const uint8_t *buf, size_t len, uint
 
 	if( out->frames > 0x7FFFFFFFu / 4u )
 		return XBOX_XWAV_ERR_R3DM; /* frame * 2 * channels must fit an int */
-	if( out->rate != out->source_rate || out->source_frames != out->frames )
-		return XBOX_XWAV_ERR_R3DM; /* see the header: source-rate bakes only, for now */
+	if( out->rate == out->source_rate )
+	{
+		if( out->source_frames != out->frames )
+			return XBOX_XWAV_ERR_R3DM;
+	}
+	else if( out->rate < out->source_rate || !out->resampler_id || out->tell_last_chunk
+		|| out->frames != Xbox_MusicXwav_ToFileFrames( out, out->source_frames ))
+	{
+		/* a resampled bake (#173) only raises the rate, names its
+		   resampler, holds the source's length at its own rate, and has no
+		   libmpg last-chunk position (that belongs to the source's chunks) */
+		return XBOX_XWAV_ERR_R3DM;
+	}
 	if( out->chunk_bytes % ( 2u * out->channels ) || out->tell_last_chunk > out->frames )
 		return XBOX_XWAV_ERR_R3DM;
 

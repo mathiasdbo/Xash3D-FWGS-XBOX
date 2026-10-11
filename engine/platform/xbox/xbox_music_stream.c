@@ -29,6 +29,14 @@ gives it; volume, pause, looping and save/restore stay upstream's
 (s_stream.c, unchanged). tools/asset-studio checks the replay against
 the real libmpg on every track it bakes.
 
+The mix rate (#173). When the engine mixes at 48 kHz (r3d_snd_rate) a
+track baked at 48 kHz, media/<Track>.48k.xwav (tools/asset-studio
+--music-rate 48000), is opened first, so S_RawSamplesStereo copies it
+at a step of exactly 1; without one, the source-rate media/<Track>.xwav
+plays, point-resampled to 48 kHz by that copy. At 44.1 kHz only the
+source-rate file is looked for. Positions are in the source's frames
+either way, so a save, a seek or a change of rate carries over.
+
 A .xwav is used only when it is the bake of the file upstream would
 open: the source its r3dm chunk names (extension and size) must be the
 file FS_OpenStream's own search finds first. A stale bake, a mod's own
@@ -61,6 +69,7 @@ waits for its read in flight before its buffer is freed.
 #if XASH_XBOX && !XASH_DEDICATED
 
 #include "client.h"
+#include "sound.h" /* SOUND_DMA_SPEED: the mix rate picks the bake, #173 */
 #include "soundlib.h"
 #include "soundlib/libmpg/libmpg.h"
 #include "xbox_frametime.h"
@@ -222,13 +231,14 @@ static int Music_Probe( void *ctx, const char *path, int64_t *size )
 	return n >= 0;
 }
 
-/* Opens <name>.xwav. `force` ignores r3d_music_baked (r3d_music_crc). */
-static stream_t *Music_Open( const char *filename, qboolean force )
+/* Plays the .xwav `file` (FS_Open'd as `path`) for the request
+   `filename`, or closes it and returns NULL with the note's reason in
+   *why: the file does not parse, was baked for another libmpg chunk or
+   from another file than the one upstream would open, or the stream
+   refuses it. */
+static stream_t *Music_OpenXwav( file_t *file, const char *path, const char *filename, const char *base, int requested,
+	const char *const *formats, int nformats, const xbox_ft_span_t *span, const char **why )
 {
-	const char *formats[8];
-	int nformats = 0, requested;
-	const streamfmt_t *format;
-	char base[MAX_SYSPATH], path[MAX_SYSPATH];
 	byte head[XBOX_XWAV_HEADER_READ];
 	xbox_xwav_info_t info;
 	xbox_xwav_err_t err;
@@ -236,38 +246,18 @@ static stream_t *Music_Open( const char *filename, qboolean force )
 	xbox_music_io_t io;
 	music_state_t *st;
 	stream_t *stream;
-	file_t *file;
 	fs_offset_t len, got;
-	xbox_ft_span_t span;
 	byte *ra;
-
-	xbox_ft_span_begin( &span );
-
-	for( format = sound.streamformat; format && format->ext && nformats < (int)ARRAYSIZE( formats ); format++ )
-		formats[nformats++] = format->ext;
-	requested = Xbox_MusicXwav_SplitName( filename, formats, nformats, base, sizeof( base ));
-
-	Q_snprintf( path, sizeof( path ), "%s.xwav", base );
-	file = FS_Open( path, "rb", false );
-	if( !file )
-		return NULL; /* not baked: the normal case off the console, and upstream's own path */
-
-	if( !force && !r3d_music_baked.value )
-	{
-		FS_Close( file );
-		Music_Note( "mp3 (r3d_music_baked 0)", filename, 0, 0 );
-		return NULL;
-	}
 
 	len = FS_FileLength( file );
 	got = FS_Read( file, head, sizeof( head ));
 	err = got > 0 ? Xbox_MusicXwav_ParseHeader( head, (size_t)got, (uint32_t)len, &info ) : XBOX_XWAV_ERR_SHORT;
 	if( err != XBOX_XWAV_OK || info.chunk_bytes != OUTBUF_SIZE || len > 0x7FFFFFFF )
 	{
-		Con_Reportf( S_WARN "%s: %s: %s - playing the original\n", __func__, path,
+		Con_Reportf( S_WARN "%s: %s: %s\n", __func__, path,
 			err != XBOX_XWAV_OK ? Xbox_MusicXwav_ErrorString( err ) : "not baked against this engine's libmpg chunk" );
 		FS_Close( file );
-		Music_Note( "mp3 (bad xwav)", filename, 0, 0 );
+		*why = "mp3 (bad xwav)";
 		return NULL;
 	}
 
@@ -275,12 +265,12 @@ static stream_t *Music_Open( const char *filename, qboolean force )
 	source = Xbox_MusicXwav_CheckSource( &info, base, requested, formats, nformats, Music_Probe, NULL );
 	if( source != XBOX_XWAV_SOURCE_OK )
 	{
-		Con_Reportf( S_WARN "%s: %s.xwav: %s - playing the original\n", __func__, base,
+		Con_Reportf( S_WARN "%s: %s: %s\n", __func__, path,
 			source == XBOX_XWAV_SOURCE_NONE ? "no source file next to it" :
 			source == XBOX_XWAV_SOURCE_FORMAT ? "the request opens another format than it was baked from" :
 			"baked from another file than the one there now" );
 		FS_Close( file );
-		Music_Note( "mp3 (stale xwav)", filename, 0, 0 );
+		*why = "mp3 (stale xwav)";
 		return NULL;
 	}
 
@@ -310,12 +300,12 @@ static stream_t *Music_Open( const char *filename, qboolean force )
 
 	if( !Xbox_MusicStream_Init( &st->s, &info, &io, (uint8_t *)stream->temp, sizeof( stream->temp ), ra ))
 	{
-		Con_Reportf( S_WARN "%s: %s.xwav: stream refused - playing the original\n", __func__, base );
+		Con_Reportf( S_WARN "%s: %s: stream refused\n", __func__, path );
 		if( st->async_on )
 			r3d_async_close( &st->async );
 		Mem_Free( st );
 		FS_Close( file );
-		Music_Note( "mp3 (bad xwav)", filename, 0, 0 );
+		*why = "mp3 (bad xwav)";
 		return NULL;
 	}
 
@@ -331,14 +321,77 @@ static stream_t *Music_Open( const char *filename, qboolean force )
 	stream->type = WF_PCMDATA;
 	stream->format = &xwav_format;
 
-	Music_Note( info.tag == XBOX_XWAV_TAG_ADPCM ? ( st->async_on ? "xwav adpcm async" : "xwav adpcm sync" )
-		: ( st->async_on ? "xwav pcm async" : "xwav pcm sync" ), filename, xbox_ft_span_kc_since( &span ), (uint32_t)len );
+	{
+		/* the codec, the read path and (#173) the file's rate */
+		char what[48];
+
+		Q_snprintf( what, sizeof( what ), "xwav %s %s %u", info.tag == XBOX_XWAV_TAG_ADPCM ? "adpcm" : "pcm",
+			st->async_on ? "async" : "sync", (unsigned)info.rate );
+		Music_Note( what, filename, xbox_ft_span_kc_since( span ), (uint32_t)len );
+	}
 	return stream;
+}
+
+/* Opens the bake for the mix rate, <name>.48k.xwav at 48 kHz (#173), and
+   when there is none or it is refused, <name>.xwav; `xwav` names the one
+   file to try instead (r3d_music_crc checks every one on the disc).
+   `force` ignores r3d_music_baked (r3d_music_crc). NULL leaves the
+   request to upstream's formats. */
+static stream_t *Music_Open( const char *filename, qboolean force, const char *xwav )
+{
+	const char *formats[8];
+	int nformats = 0, requested, ncand = 0, i;
+	const streamfmt_t *format;
+	char base[MAX_SYSPATH], cand[2][MAX_SYSPATH];
+	const char *why = NULL;
+	xbox_ft_span_t span;
+
+	xbox_ft_span_begin( &span );
+
+	for( format = sound.streamformat; format && format->ext && nformats < (int)ARRAYSIZE( formats ); format++ )
+		formats[nformats++] = format->ext;
+	requested = Xbox_MusicXwav_SplitName( filename, formats, nformats, base, sizeof( base ));
+
+	if( xwav )
+		Q_strncpy( cand[ncand++], xwav, sizeof( cand[0] ));
+	else
+	{
+		if( SOUND_DMA_SPEED != SOUND_44k )
+			Q_snprintf( cand[ncand++], sizeof( cand[0] ), "%s.%dk.xwav", base, SOUND_DMA_SPEED / 1000 );
+		Q_snprintf( cand[ncand++], sizeof( cand[0] ), "%s.xwav", base );
+	}
+
+	for( i = 0; i < ncand; i++ )
+	{
+		file_t *file = FS_Open( cand[i], "rb", false );
+		stream_t *stream;
+
+		if( !file )
+			continue; /* not baked: the normal case off the console, and upstream's own path */
+
+		if( !force && !r3d_music_baked.value )
+		{
+			FS_Close( file );
+			Music_Note( "mp3 (r3d_music_baked 0)", filename, 0, 0 );
+			return NULL;
+		}
+
+		stream = Music_OpenXwav( file, cand[i], filename, base, requested, formats, nformats, &span, &why );
+		if( stream )
+			return stream;
+	}
+
+	if( why )
+	{
+		Con_Reportf( S_WARN "%s: no usable .xwav for %s - playing the original\n", __func__, filename );
+		Music_Note( why, filename, 0, 0 );
+	}
+	return NULL;
 }
 
 stream_t *Xbox_MusicStream_Open( const char *filename )
 {
-	return Music_Open( filename, false );
+	return Music_Open( filename, false, NULL );
 }
 
 /* ---- r3d_music_ab: flip r3d_music_baked and pick the track up where it was ---- */
@@ -383,9 +436,13 @@ static fs_offset_t Music_MpgSeek( void *file, fs_offset_t offset, int whence )
 	return FS_Seek( (file_t *)file, offset, whence ) == -1 ? -1 : FS_Tell( (file_t *)file );
 }
 
+/* `name` is a track (Half-Life01, media/Half-Life01.mp3: the bake the
+   mix rate picks) or a .xwav (media/Half-Life01.48k.xwav: that file). */
 static void Music_CrcTrack( const char *name, qboolean dump )
 {
-	char base[MAX_SYSPATH], path[MAX_SYSPATH];
+	char base[MAX_SYSPATH], path[MAX_SYSPATH], xwav[MAX_SYSPATH];
+	qboolean named_xwav;
+	size_t len;
 	byte *chunk;
 	stream_t *baked;
 	xbox_music_stream_t *s;
@@ -399,10 +456,16 @@ static void Music_CrcTrack( const char *name, qboolean dump )
 	if( Q_strnicmp( name, "media/", 6 ))
 		Q_snprintf( base, sizeof( base ), "media/%s", name );
 	else Q_strncpy( base, name, sizeof( base ));
+	named_xwav = !Q_stricmp( COM_FileExtension( base ), "xwav" );
+	Q_strncpy( xwav, base, sizeof( xwav ));
 	COM_StripExtension( base );
+	/* a rate-tagged bake, <Track>.48k.xwav (#173): its track is <Track> */
+	len = Q_strlen( base );
+	if( named_xwav && len > 4 && base[len - 1] == 'k' && isdigit( (byte)base[len - 2] ) && isdigit( (byte)base[len - 3] ) && base[len - 4] == '.' )
+		base[len - 4] = '\0';
 
 	Q_snprintf( path, sizeof( path ), "%s.mp3", base );
-	baked = Music_Open( path, true );
+	baked = Music_Open( path, true, named_xwav ? xwav : NULL );
 	if( !baked )
 	{
 		Music_Print( "r3d_music_crc %s: no usable .xwav\n", base );
@@ -473,12 +536,12 @@ static void Music_CrcTrack( const char *name, qboolean dump )
 	/* decode (with its file reads) per second of music: a decoder
 	   microbenchmark, not k_snd_music (which also has the copy into the raw
 	   channel). At 733 MHz, a frame of 1/60 s costs 1/60 of it. */
-	Music_Print( "r3d_music_crc %s: mp3 %u frames crc %08x (bake %08x, %u) %s; xwav %u frames crc %08x (bake %08x) %s;"
+	Music_Print( "r3d_music_crc %s: mp3 %u frames crc %08x (bake %08x, %u) %s; xwav %u Hz %u frames crc %08x (bake %08x) %s;"
 		" decode ms per second of music: mp3 %.2f, xwav %.2f (at 733 MHz);"
 		" xwav reads %u (%s: queued %u, waited %u, fallbacks %u)\n",
 		base, frames, crc, s->info.crc_source, s->info.source_frames,
 		( frames == s->info.source_frames && crc == s->info.crc_source ) ? "SAME" : "DIFFERS",
-		bframes, bcrc, s->info.crc_decoded,
+		(unsigned)s->info.rate, bframes, bcrc, s->info.crc_decoded,
 		( bframes == s->info.frames && bcrc == s->info.crc_decoded && !s->bad_blocks ) ? "SAME" : "DIFFERS",
 		frames ? (double)mp3_ticks / 733333.0 / ( (double)frames / sc.rate ) : 0.0,
 		bframes ? (double)xwav_ticks / 733333.0 / ( (double)bframes / s->info.rate ) : 0.0,

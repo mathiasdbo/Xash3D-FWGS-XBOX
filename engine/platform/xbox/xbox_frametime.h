@@ -167,6 +167,18 @@ static inline uint32_t xbox_ft_span_kc_since( const xbox_ft_span_t *s )
 	return (uint32_t)(( xbox_ft_span_ticks_since( s ) + 500u ) / 1000u );
 }
 
+/* SNDDMA_BeginPainting/SNDDMA_Submit's time, in ticks (divergence #173):
+   short calls, several a frame, so summed in ticks and rounded once, to
+   snd_dma_kc, at the frame's close (Xbox_FT_Sound_CloseFrame, which also
+   samples the audio thread's counters). */
+extern uint64_t xbox_ft_snd_dma_ticks;
+void Xbox_FT_Sound_CloseFrame( void );
+
+static inline void xbox_ft_ticks_add( const xbox_ft_span_t *s, uint64_t *acc )
+{
+	*acc += xbox_ft_span_ticks_since( s );
+}
+
 /* Adds an open span's time so far, in kilocycles, to time counter `id`
    (XBOX_FT_W_*_KC): a time measured like a span that is not one. */
 static inline void xbox_ft_time_add( const xbox_ft_span_t *s, int id )

@@ -26,7 +26,16 @@ extern poolhandle_t sndpool;
 #define SOUND_22k       22050 // 22khz sample rate
 #define SOUND_44k       44100 // 44khz sample rate
 
+#if XASH_XBOX
+// docs/r3d/divergences.md #173: the Xbox's AC97 only runs at 48 kHz, so
+// the mixer runs there too (r3d_snd_rate, s_main.c; 44100 restores
+// upstream's rate for an A/B) and SDL passes the buffer through
+#define SOUND_48k       48000
+extern int r3d_snd_dma_speed;
+#define SOUND_DMA_SPEED r3d_snd_dma_speed // hardware playback rate
+#else
 #define SOUND_DMA_SPEED SOUND_44k // hardware playback rate
+#endif
 
 #define PAINTBUFFER_SIZE 1024
 
@@ -97,6 +106,9 @@ void SX_Init( void );
 void SX_Free( void );
 void SX_RoomFX( portable_samplepair_t *paint, int num_samples );
 void SX_ClearState( void );
+#if XASH_XBOX
+void SX_R3D_SetRate( void ); // #173: the delays' lengths follow SOUND_DMA_SPEED
+#endif
 
 qboolean S_Init( void );
 qboolean S_InitSoundAPI( void );

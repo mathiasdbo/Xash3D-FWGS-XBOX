@@ -26,6 +26,24 @@ passes, and every buffer length up to PAINTBUFFER_SIZE + 1.
 
   run.sh builds it twice: once with SSE2 doubles, once with x87 ones
   (-mfpmath=387), the Pentium III's arithmetic.
+
+Divergence #173 mixes at 48 kHz on the Xbox, where no engine rate is on
+the 2^-32 grid (11025 / 48000 = 147 / 640) and #145's fixed-point loop
+takes the step and the position rounded down to it. The 48 kHz part runs
+both builds at SOUND_DMA_SPEED 48000 and checks:
+- every engine-like call takes the fixed-point loop;
+- every output's source index (a ramp source whose sample is its index)
+  against the exact floor( frac + i * rate ) of the double values passed,
+  computed in 128-bit integers: the Xbox loop never reads past it, is at
+  most one behind, and only where the exact position is within the
+  call's accumulated rounding of an integer; how often it and upstream's
+  double loop differ from the exact index is printed;
+- whole channels through S_MixChannelToBuffer at 44.1 and 48 kHz: an
+  11025 Hz sound of N samples lasts N / 11025 s at both (the output count
+  is N * rate / 11025 to within two samples), a 1 kHz tone in it comes out
+  at 1 kHz (and 1.5 kHz at pitch 150) by its zero crossings, and nothing
+  past the sound's last sample is ever mixed (a full-scale sentinel
+  follows it).
 */
 
 #include <stdio.h>
@@ -37,7 +55,13 @@ passes, and every buffer length up to PAINTBUFFER_SIZE + 1.
 
 void mix_upstream( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples );
 void mix_xbox( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples );
+int mix_channel_upstream( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, double pitch );
+int mix_channel_xbox( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, double pitch );
 int s_mix_test_fixed_step( double offset_frac, double rate_scale );
+
+/* the mix rate both builds read (s_mix_stub/common.h): upstream's unless a
+   test sets 48 kHz */
+int s_mix_test_dma_speed = SOUND_44k;
 
 /* What both s_mix.c builds link against; S_MixAudio reaches none of it. */
 snd_globals_t snd;
@@ -51,7 +75,21 @@ int xbox_ft_snd_extra;
 wavdata_t *S_LoadSound( sfx_t *sfx ) { return NULL; }
 void S_FreeChannel( channel_t *ch ) { }
 float S_GetMasterVolume( void ) { return 1.0f; }
-int S_RetrieveAudioSamples( const wavdata_t *source, const void **output_buffer, int start_position, int num_samples, qboolean enable_looping ) { return 0; }
+/* engine/client/sound/s_main.c's, without looping (the channel tests'
+   sounds do not loop) */
+int S_RetrieveAudioSamples( const wavdata_t *source, const void **output_buffer, int start_position, int num_samples, qboolean enable_looping )
+{
+	int available = source->samples - start_position;
+
+	if( available < 0 )
+		available = 0;
+	if( num_samples > available )
+		num_samples = available;
+	if( num_samples <= 0 )
+		return 0;
+	*output_buffer = source->buffer + start_position * source->width * source->channels;
+	return num_samples;
+}
 cl_entity_t *CL_GetEntityByIndex( int index ) { return NULL; }
 qboolean CL_IsInGame( void ) { return true; }
 qboolean CL_IsPlayerIndex( int idx ) { return false; }
@@ -109,10 +147,205 @@ static double channel_frac( double rate )
 	return sample - floor( sample );
 }
 
+/* ---- the 48 kHz mix (#173) ---- */
+
+/* floor( f + i * r ) for the doubles f and r taken as exact binary
+   fractions, in 128-bit integers at a scale of 2^-K, K the finer of
+   their last bits' (53 significant bits each). 0 when that needs K above
+   112 (an f below about 2^-60: skipped); i * r stays under 2^125. */
+typedef unsigned __int128 u128;
+static int exact_scale( double v )
+{
+	int e;
+
+	if( v == 0.0 )
+		return 0;
+	frexp( v, &e ); /* v = m * 2^e, 0.5 <= m < 1 */
+	return 53 - e;  /* v's last bit is 2^-( 53 - e ) */
+}
+static int exact_indices( double f, double r, int n, uint32_t *idx, uint32_t *frac_hi )
+{
+	int K = exact_scale( f ) > exact_scale( r ) ? exact_scale( f ) : exact_scale( r );
+	u128 F, R;
+	int i;
+
+	if( K < 32 )
+		K = 32;
+	if( K > 112 )
+		return 0;
+	F = (u128)ldexp( f, K ); /* integers below 2^113: exact */
+	R = (u128)ldexp( r, K );
+	for( i = 0; i < n; i++ )
+	{
+		const u128 sum = F + (u128)i * R;
+
+		idx[i] = (uint32_t)( sum >> K );
+		/* the fraction in units of 2^-32: how far past the integer it is */
+		frac_hi[i] = (uint32_t)(( sum & ((( (u128)1 ) << K ) - 1 )) >> ( K - 32 ));
+	}
+	return 1;
+}
+
+static int16_t ramp[4096];
+static portable_samplepair_t ra[PAINTBUFFER_SIZE + 2], rb[PAINTBUFFER_SIZE + 2]; /* one past the longest call, checked untouched */
+static uint32_t ex_idx[PAINTBUFFER_SIZE + 1], ex_frac[PAINTBUFFER_SIZE + 1];
+
+static void test_48k_indices( void )
+{
+	static const int vol[2] = { 256, 256 }; /* ( s * 256 ) >> 8 == s: the output is the index */
+	static const int engine_rates[] = { 11025, 22050, 44100 };
+	static const float timescales[] = { 1.0f, 0.9f, 1.3f };
+	unsigned calls = 0, outs = 0, xbox_diff = 0, up_diff = 0, skipped = 0, fixed = 0, i;
+	int j;
+
+	for( j = 0; j < 4096; j++ )
+		ramp[j] = (int16_t)j;
+	s_mix_test_dma_speed = SOUND_48k;
+
+	for( i = 0; i < 60000; i++ )
+	{
+		const int base = ( i % 4 ) == 0 ? 100 : ( i % 4 ) == 1 ? 95 + 10 * (int)( rnd() & 1 ) : ( i % 4 ) == 2 ? 94 + (int)( rnd() % 16 ) : 50 + (int)( rnd() % 206 );
+		const float ts = timescales[rnd() % 3];
+		const float pitch_mult = ( ts + 1 ) / 2;
+		const float vox = (float)( base * 0.01 );
+		volatile float pitch_f = vox * pitch_mult;
+		const double pitch = pitch_f;
+		/* S_MixChannelToBuffer's rate at 48 kHz */
+		const double rate = pitch * engine_rates[rnd() % 3] / (double)SOUND_48k;
+		const double frac = ( i & 7 ) == 0 ? 0.0 : channel_frac( rate );
+		const int n = 1 + (int)( rnd() % ( PAINTBUFFER_SIZE + 1 ));
+		int k;
+
+		if( Q_equal( rate, 1.0 ) && Q_equal( frac, 0.0 ))
+			continue;
+		if( !exact_indices( frac, rate, n, ex_idx, ex_frac ))
+		{
+			skipped++;
+			continue;
+		}
+		calls++;
+		if( s_mix_test_fixed_step( frac, rate ))
+			fixed++;
+		memset( ra, 0, sizeof( ra ));
+		memset( rb, 0, sizeof( rb ));
+		mix_upstream( ra, vol, ramp, 1, 2, frac, rate, n );
+		mix_xbox( rb, vol, ramp, 1, 2, frac, rate, n );
+		for( k = 0; k < n; k++ )
+		{
+			const uint32_t x = (uint32_t)rb[k].left, u = (uint32_t)ra[k].left;
+
+			outs++;
+			if( u != ex_idx[k] )
+				up_diff++;
+			if( x != ex_idx[k] )
+			{
+				xbox_diff++;
+				/* one behind, at an exact position within the call's
+				   rounding (k + 1 steps of 2^-32, plus the start's) of
+				   the integer below it */
+				CHECK( x + 1 == ex_idx[k] && ex_frac[k] <= (uint32_t)k + 2 );
+			}
+			CHECK( x <= ex_idx[k] ); /* never past the exact index */
+		}
+		CHECK( rb[n].left == 0 ); /* nothing past the call's outputs */
+	}
+	CHECK( calls > 50000 && fixed == calls && skipped < calls / 100 );
+	/* measured: 668 of 30.8 million with SSE2 doubles, 53 with x87 ones
+	   (the calls differ: channel_frac's sums round differently), every one
+	   a position whose exact value is on or just past an integer */
+	CHECK( xbox_diff * 10000.0 < outs ); /* rarer than one in 10,000 */
+	printf( "s_mix 48 kHz: %u engine-like calls (%u skipped), %u outputs; index differs from the exact one: xbox %u, upstream %u\n",
+		calls, skipped, outs, xbox_diff, up_diff );
+	s_mix_test_dma_speed = SOUND_44k;
+}
+
+/* One 11025 Hz mono 16-bit sound of `n` samples (a 1 kHz tone, then a
+   full-scale sentinel) through a whole channel at `out_rate`. Returns the
+   outputs mixed before the channel finished; *crossings counts the
+   tone's rising zero crossings and *peak the largest |output|. */
+static int16_t tone[11025 * 3 + 4096];
+static portable_samplepair_t chan_out[PAINTBUFFER_SIZE + 1];
+
+static int run_channel( int xbox, int out_rate, double pitch, int n, int *crossings, int *peak )
+{
+	wavdata_t wav;
+	sfx_t sfx;
+	channel_t ch;
+	int total = 0, guard, prev = 0, k;
+
+	memset( &wav, 0, sizeof( wav ));
+	wav.rate = 11025;
+	wav.width = 2;
+	wav.channels = 1;
+	wav.samples = n;
+	wav.buffer = (uint8_t *)tone;
+	sfx.cache = &wav;
+	memset( &ch, 0, sizeof( ch ));
+	ch.sfx = &sfx;
+	ch.leftvol = ch.rightvol = 255;
+	*crossings = 0;
+	*peak = 0;
+	s_mix_test_dma_speed = out_rate;
+	for( guard = 0; guard < 100000 && !FBitSet( ch.flags, FL_CHAN_FINISHED ); guard++ )
+	{
+		int got;
+
+		memset( chan_out, 0, sizeof( chan_out ));
+		got = xbox ? mix_channel_xbox( chan_out, &ch, PAINTBUFFER_SIZE, out_rate, pitch )
+			: mix_channel_upstream( chan_out, &ch, PAINTBUFFER_SIZE, out_rate, pitch );
+		for( k = 0; k < got; k++ )
+		{
+			const int v = chan_out[k].left;
+
+			if( prev < 0 && v >= 0 )
+				( *crossings )++;
+			prev = v;
+			if( abs( v ) > *peak )
+				*peak = abs( v );
+		}
+		total += got;
+	}
+	s_mix_test_dma_speed = SOUND_44k;
+	return total;
+}
+
+static void test_48k_channels( void )
+{
+	static const int rates[] = { SOUND_44k, SOUND_48k };
+	static const double pitches[] = { 1.0, 1.5, 0.95 };
+	const int n = 11025 * 3;
+	int k, r, pi, b;
+
+	for( k = 0; k < n; k++ )
+		tone[k] = (int16_t)lrint( 10000.0 * sin( 2.0 * 3.14159265358979323846 * 1000.0 * ( k + 0.5 ) / 11025.0 ));
+	for( ; k < (int)( sizeof( tone ) / sizeof( tone[0] )); k++ )
+		tone[k] = 32767; /* past the sound: must never be mixed */
+
+	for( r = 0; r < 2; r++ )
+		for( pi = 0; pi < 3; pi++ )
+			for( b = 0; b < 2; b++ )
+			{
+				int crossings, peak;
+				const int total = run_channel( b, rates[r], pitches[pi], n, &crossings, &peak );
+				const double expect = (double)n * rates[r] / ( 11025.0 * pitches[pi] );
+				const double seconds = (double)total / rates[r];
+				const double hz = crossings / seconds;
+
+				CHECK( fabs( total - expect ) <= 2.0 );
+				CHECK( fabs( hz - 1000.0 * pitches[pi] ) < 1000.0 * pitches[pi] * 0.002 );
+				CHECK( peak <= 9961 ); /* -10000 * 255 >> 8: the sentinel (32639) never mixed */
+				if( r == 1 && b == 1 )
+					printf( "s_mix 48 kHz channel, pitch %.2f: %d outputs for %d samples (%.6f s, expected %.6f), tone %.2f Hz\n",
+						pitches[pi], total, n, seconds, (double)n / ( 11025.0 * pitches[pi] ), hz );
+			}
+}
+
 int main( void )
 {
 	static const int src_rates[] = { 11025, 22050, 44100, 8000, 16000, 32000, 48000, 96000 };
 	unsigned fixed = 0, flt = 0, engine_calls = 0, engine_fixed = 0, i;
+
+	setvbuf( stdout, NULL, _IONBF, 0 ); /* a trap (an undefined-behaviour check) loses nothing printed before it */
 
 	for( i = 0; i < sizeof( source ) / sizeof( source[0] ); i++ )
 		source[i] = (int16_t)rnd();
@@ -222,6 +455,13 @@ int main( void )
 			for( k = 0; k < 4; k++ )
 				CHECK( same_mix( 1 + ( k >> 1 ), 1 + ( k & 1 ), 0.1, huge[h], 1, 200, 100 ));
 	}
+
+	/* the 48 kHz mix (#173); then the 44.1 kHz calls above again, to show
+	   the rate's switch left them bit-exact */
+	test_48k_indices();
+	test_48k_channels();
+	CHECK( s_mix_test_dma_speed == SOUND_44k );
+	CHECK( !s_mix_test_fixed_step( 0.0, 0.95 * 22050 / 44100.0 ));
 
 	printf( "s_mix: %d checks, %d failures (engine-like calls %u, fixed-point %u; stress set fixed-point %u, float %u)\n", checks, failures, engine_calls, engine_fixed, fixed, flt );
 	return failures != 0;
