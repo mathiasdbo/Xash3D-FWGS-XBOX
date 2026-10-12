@@ -24,6 +24,12 @@ void S_MIX_TEST_ENTRY( portable_samplepair_t *pbuf, const int *pvol, const void 
 	S_MixAudio( pbuf, pvol, buf, channels, width, offset_frac, rate_scale, num_samples, false );
 }
 
+/* The same with s_lerping's interpolation (divergence #174). */
+void S_MIX_TEST_ENTRY_LERP( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples )
+{
+	S_MixAudio( pbuf, pvol, buf, channels, width, offset_frac, rate_scale, num_samples, true );
+}
+
 /* A whole channel through S_MixChannelToBuffer (divergence #173: a sound
    plays for the same time and at the same pitch at either mix rate). */
 int S_MIX_TEST_CHANNEL( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, double pitch )

@@ -266,4 +266,7 @@ void Xbox_FrameTime_Shutdown( void );      /* Host_ShutdownWithReason */
    Xbox_FrameTime_Init. */
 void Xbox_MemBench_Init( void );
 
+/* xbox_s_mix_bench.c (#174): registers `r3d_mixbench`; likewise. */
+void Xbox_MixBench_Init( void );
+
 #endif /* XBOX_FRAMETIME_H */

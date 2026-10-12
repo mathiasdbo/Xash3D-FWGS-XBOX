@@ -835,6 +835,7 @@ void Xbox_FrameTime_Init( void )
 	/* r3d_membench (#142) rides on this init rather than a call site of
 	   its own in host.c: the same platform, the same lifetime. */
 	Xbox_MemBench_Init();
+	Xbox_MixBench_Init(); /* r3d_mixbench (#174), the same way */
 	/* r3d_music_baked and its commands (#171), likewise: registered
 	   before config.cfg and userconfig.d set them */
 	Xbox_Music_Init();

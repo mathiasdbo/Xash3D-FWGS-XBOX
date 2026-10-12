@@ -2,6 +2,7 @@
 is one plausible mistake in engine/client/sound/s_dsp.c's SX_R3D_SetRate or
 in engine/platform/xbox/xbox_s_mix_pitch.h's rounding of an off-grid step,
 or in engine/platform/xbox/xbox_snd_clock.h's rebase (xbox_snd_clock_host_test.c),
+or in the same header's s_lerping loops (divergence #174),
 and the host test that covers it (tools/host-tests/s_dsp_host_test.c, or
 s_mix_host_test.c through its two s_mix.c builds) must fail on every one.
 A mutant the test passes is a gap in the test, reported and exit 1.
@@ -58,6 +59,19 @@ MUTANTS = [
     (PITCH, "mix: the position rounded up",
      b"\tconst int64_t fi = (int64_t)f;",
      b"\tconst int64_t fi = (int64_t)f + ( (double)(int64_t)f != f && f < 4294967295.0 );"),
+    # s_lerping on the fixed-point counter (divergence #174)
+    (PITCH, "lerp: the next sample not read (point sampling again)",
+     b"const int s = S_LERP ## x( data[sample_idx], data[sample_idx + 1], frac );",
+     b"const int s = S_LERP ## x( data[sample_idx], data[sample_idx], frac );"),
+    (PITCH, "lerp: the weight complemented (interpolating backwards)",
+     b"#define S_LERP_WEIGHT16( frac ) ((int)(( frac ) >> 17 ))",
+     b"#define S_LERP_WEIGHT16( frac ) ((int)(( ~( frac )) >> 17 ))"),
+    (PITCH, "lerp: 8-bit mixed at upstream's unshifted scale",
+     b"#define S_LERP8( a, b, frac )  ((( a ) * 256 ) + ((( (b) - (a) ) * S_LERP_WEIGHT8( frac )) >> 8 ))",
+     b"#define S_LERP8( a, b, frac )  (( a ) + ((( (b) - (a) ) * S_LERP_WEIGHT8( frac )) >> 16 ))"),
+    (PITCH, "lerp: the stereo right channel read from the left",
+     b"const int sr = S_LERP ## x( data[sample_idx + 1], data[sample_idx + 3], frac );",
+     b"const int sr = S_LERP ## x( data[sample_idx + 0], data[sample_idx + 2], frac );"),
 ]
 
 
@@ -79,9 +93,11 @@ def build_and_run(out, flags, i, kind):
         xb = os.path.join(out, f"mix48_xbox_{i}.o")
         steps = [
             ["gcc", *flags, "-w", "-std=gnu99", *inc, "-DXASH_XBOX=0", "-DS_MIX_TEST_ENTRY=mix_upstream",
+             "-DS_MIX_TEST_ENTRY_LERP=mix_lerp_upstream",
              "-DS_MIX_TEST_CHANNEL=mix_channel_upstream", "-DS_PaintChannels=S_PaintChannels_up",
              "-DS_ClearBuffers=S_ClearBuffers_up", "-c", "tools/host-tests/s_mix_host_test_tu.c", "-o", up],
             ["gcc", *flags, "-w", "-std=gnu99", *inc, "-DXASH_XBOX=1", "-DS_MIX_TEST_ENTRY=mix_xbox",
+             "-DS_MIX_TEST_ENTRY_LERP=mix_lerp_xbox",
              "-DS_MIX_TEST_CHANNEL=mix_channel_xbox", "-c", "tools/host-tests/s_mix_host_test_tu.c", "-o", xb],
             ["gcc", *flags, "-w", "-std=gnu99", *inc, "tools/host-tests/s_mix_host_test.c", up, xb, "-lm", "-o", exe],
         ]

@@ -55,6 +55,8 @@ both builds at SOUND_DMA_SPEED 48000 and checks:
 
 void mix_upstream( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples );
 void mix_xbox( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples );
+void mix_lerp_upstream( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples );
+void mix_lerp_xbox( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples );
 int mix_channel_upstream( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, double pitch );
 int mix_channel_xbox( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, double pitch );
 int s_mix_test_fixed_step( double offset_frac, double rate_scale );
@@ -106,7 +108,9 @@ void SNDDMA_Submit( void ) { }
 
 static int failures, checks;
 
-#define CHECK( cond ) do { checks++; if( !( cond )) { failures++; printf( "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond ); } } while( 0 )
+/* the first 50 failures are printed: a mutant (mix48_mutants.py) can fail
+   millions of checks, and printing them all takes minutes */
+#define CHECK( cond ) do { checks++; if( !( cond )) { if( failures++ < 50 ) printf( "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond ); } } while( 0 )
 
 /* Source samples, int16 and int8 views of the same bytes: a sound's data
    as S_RetrieveAudioSamples hands it to S_MixAudio. Large enough for
@@ -309,6 +313,299 @@ static int run_channel( int xbox, int out_rate, double pitch, int n, int *crossi
 	return total;
 }
 
+/* ---- s_lerping's interpolation on the fixed-point counter (#174) ---- */
+
+/* The Xbox loop against upstream's on one call over the same buffer. The
+   interpolated value may differ from upstream's truncated double: 16-bit,
+   by the 15-bit weight's error times the step between the two samples
+   (at most 65535 / 32768, under 2) plus one for the rounding; 8-bit, by
+   one (upstream drops the fraction, the Xbox keeps 8 bits of it). An
+   output differs by that times the volume, plus the shift's rounding.
+   Returns the largest difference seen. */
+static int lerp_close( int channels, int width, double frac, double rate, int n, int lvol, int rvol )
+{
+	const int vol[2] = { lvol, rvol };
+	const int bound_l = ( width == 1 ? lvol : (( 3 * lvol ) >> 8 )) + 2;
+	const int bound_r = ( width == 1 ? rvol : (( 3 * rvol ) >> 8 )) + 2;
+	int i, worst = 0;
+
+	memset( pa, 0, sizeof( pa ));
+	memset( pb, 0, sizeof( pb ));
+	mix_lerp_upstream( pa, vol, source, channels, width, frac, rate, n );
+	mix_lerp_xbox( pb, vol, source, channels, width, frac, rate, n );
+	for( i = 0; i < n; i++ )
+	{
+		const int dl = abs( pa[i].left - pb[i].left ), dr = abs( pa[i].right - pb[i].right );
+
+		CHECK( dl <= bound_l && dr <= bound_r );
+		if(( dl > bound_l || dr > bound_r ) && getenv( "S_MIX_DEBUG" ))
+			printf( "  ch %d w %d frac %.17g rate %.17g n %d i %d vol %d/%d: up %d/%d xbox %d/%d\n", channels, width, frac, rate, n, i, lvol, rvol,
+				pa[i].left, pa[i].right, pb[i].left, pb[i].right );
+		if( dl > worst ) worst = dl;
+		if( dr > worst ) worst = dr;
+	}
+	if( n < PAINTBUFFER_SIZE + 1 )
+		CHECK( pb[n].left == 0 && pb[n].right == 0 ); /* nothing past the call's outputs */
+	return worst;
+}
+
+static void test_lerp_calls( void )
+{
+	static const int engine_rates[] = { 11025, 22050, 44100 };
+	static const float timescales[] = { 1.0f, 0.9f, 1.3f };
+	static const int mix_rates[] = { SOUND_44k, SOUND_48k };
+	unsigned calls = 0, i;
+	int worst16 = 0, worst8 = 0, m;
+
+	for( m = 0; m < 2; m++ )
+	{
+		s_mix_test_dma_speed = mix_rates[m];
+		for( i = 0; i < 40000; i++ )
+		{
+			const int base = ( i % 4 ) == 0 ? 100 : ( i % 4 ) == 1 ? 95 + 10 * (int)( rnd() & 1 ) : 50 + (int)( rnd() % 206 );
+			const float ts = timescales[rnd() % 3];
+			const float pitch_mult = ( ts + 1 ) / 2;
+			volatile float pitch_f = (float)( base * 0.01 ) * pitch_mult;
+			const double rate = (double)pitch_f * engine_rates[rnd() % 3] / (double)mix_rates[m];
+			const double frac = channel_frac( rate );
+			const int n = 1 + (int)( rnd() % ( PAINTBUFFER_SIZE + 1 ));
+			const int k = (int)( rnd() % 4 );
+			int w;
+
+			if( Q_equal( rate, 1.0 ) && Q_equal( frac, 0.0 ))
+				continue;
+			calls++;
+			w = lerp_close( 1 + ( k >> 1 ), 1 + ( k & 1 ), frac, rate, n, (int)( rnd() % 256 ), (int)( rnd() % 256 ));
+			if(( k & 1 ) && w > worst16 ) worst16 = w;
+			if( !( k & 1 ) && w > worst8 ) worst8 = w;
+		}
+	}
+	s_mix_test_dma_speed = SOUND_44k;
+	/* the off-grid double fallback, and a carry on the first step */
+	lerp_close( 1, 2, 0.1, 0.95 * 22050 / 44100.0, PAINTBUFFER_SIZE, 255, 200 );
+	lerp_close( 2, 1, 0.999999, 0.5, PAINTBUFFER_SIZE, 255, 200 );
+	CHECK( calls > 70000 );
+	printf( "s_mix lerp: %u engine-like calls at 44.1 and 48 kHz; largest output difference from upstream's lerp: 16-bit %d, 8-bit %d (volume 255 = one 8-bit step)\n",
+		calls, worst16, worst8 );
+}
+
+/* A whole channel with s_lerping on: the lookahead sample is inside the
+   sound (a full-scale sentinel follows it and must never reach the
+   output), and the sound lasts as long and keeps its pitch. */
+static void test_lerp_channels( void )
+{
+	static const int rates[] = { SOUND_44k, SOUND_48k };
+	static const double pitches[] = { 1.0, 1.5, 0.95 };
+	const int n = 11025 * 3;
+	int k, r, pi, b;
+
+	for( k = 0; k < n; k++ )
+		tone[k] = (int16_t)lrint( 10000.0 * sin( 2.0 * 3.14159265358979323846 * 1000.0 * ( k + 0.5 ) / 11025.0 ));
+	for( ; k < (int)( sizeof( tone ) / sizeof( tone[0] )); k++ )
+		tone[k] = 32767;
+
+	s_lerping.value = 1.0f;
+	for( r = 0; r < 2; r++ )
+		for( pi = 0; pi < 3; pi++ )
+			for( b = 0; b < 2; b++ )
+			{
+				int crossings, peak;
+				const int total = run_channel( b, rates[r], pitches[pi], n, &crossings, &peak );
+				const double expect = (double)n * rates[r] / ( 11025.0 * pitches[pi] );
+				const double hz = crossings / ((double)total / rates[r] );
+
+				/* the lerp stops one source sample short of the point
+				   loop (S_MixChannelToBuffer's lookahead cap) */
+				CHECK( fabs( total - expect ) <= 2.0 + rates[r] / ( 11025.0 * pitches[pi] ));
+				CHECK( fabs( hz - 1000.0 * pitches[pi] ) < 1000.0 * pitches[pi] * 0.002 );
+				CHECK( peak <= 9961 );
+			}
+	s_lerping.value = 0.0f;
+}
+
+/* The aliases a point-sampled 11 or 22 kHz sound gets at the mix rate, and
+   what the interpolation leaves of them: a sine in a sound at `src_rate`
+   through a whole channel, a Blackman-Harris window, a power spectrum.
+   Images are the source rate's own (k * src_rate +- f, which a 44.1 kHz
+   mix of an 11/22 kHz sound already has, at integer ratios); everything
+   else that stands out is inharmonic. */
+#define SPEC_N 32768
+static double spec_re[SPEC_N], spec_im[SPEC_N], spec_pow[SPEC_N / 2];
+static int8_t tone8[1 << 16];
+static int16_t tone16[1 << 16];
+static portable_samplepair_t spec_out[SPEC_N + 2048];
+
+static void fft( double *re, double *im, int n )
+{
+	int i, j, len;
+
+	for( i = 1, j = 0; i < n; i++ )
+	{
+		int bit = n >> 1;
+
+		for( ; j & bit; bit >>= 1 )
+			j ^= bit;
+		j ^= bit;
+		if( i < j )
+		{
+			double t = re[i]; re[i] = re[j]; re[j] = t;
+			t = im[i]; im[i] = im[j]; im[j] = t;
+		}
+	}
+	for( len = 2; len <= n; len <<= 1 )
+	{
+		const double ang = -2.0 * 3.14159265358979323846 / len;
+
+		for( i = 0; i < n; i += len )
+			for( j = 0; j < len / 2; j++ )
+			{
+				const double wr = cos( ang * j ), wi = sin( ang * j );
+				const double ur = re[i + j], ui = im[i + j];
+				const double vr = re[i + j + len / 2] * wr - im[i + j + len / 2] * wi;
+				const double vi = re[i + j + len / 2] * wi + im[i + j + len / 2] * wr;
+
+				re[i + j] = ur + vr; im[i + j] = ui + vi;
+				re[i + j + len / 2] = ur - vr; im[i + j + len / 2] = ui - vi;
+			}
+	}
+}
+
+typedef struct { double image_db, inharm_db, inharm_hz, noise_db; } spurs_t;
+
+static spurs_t measure_spurs( int xbox, int out_rate, int lerp, int src_rate, int width, double hz )
+{
+	const int skip = 1024, len = (int)( sizeof( tone16 ) / sizeof( tone16[0] )) - 4;
+	wavdata_t wav;
+	sfx_t sfx;
+	channel_t ch;
+	spurs_t sp;
+	int got = 0, i, k, tone_bin = (int)( hz * SPEC_N / out_rate + 0.5 );
+	double tone_p = 0.0, total = 0.0;
+
+	for( i = 0; i < len + 4; i++ )
+	{
+		const double v = sin( 2.0 * 3.14159265358979323846 * hz * i / src_rate );
+
+		tone16[i] = (int16_t)lrint( 16000.0 * v );
+		tone8[i] = (int8_t)lrint( 100.0 * v );
+	}
+	memset( &wav, 0, sizeof( wav ));
+	wav.rate = src_rate;
+	wav.width = width;
+	wav.channels = 1;
+	wav.samples = len;
+	wav.buffer = width == 1 ? (uint8_t *)tone8 : (uint8_t *)tone16;
+	sfx.cache = &wav;
+	memset( &ch, 0, sizeof( ch ));
+	ch.sfx = &sfx;
+	ch.leftvol = ch.rightvol = 255;
+	s_mix_test_dma_speed = out_rate;
+	s_lerping.value = lerp ? 1.0f : 0.0f;
+	memset( spec_out, 0, sizeof( spec_out ));
+	while( got < SPEC_N + skip && !FBitSet( ch.flags, FL_CHAN_FINISHED ))
+	{
+		const int want = SPEC_N + skip - got < PAINTBUFFER_SIZE ? SPEC_N + skip - got : PAINTBUFFER_SIZE;
+
+		got += xbox ? mix_channel_xbox( spec_out + got, &ch, want, out_rate, 1.0 )
+			: mix_channel_upstream( spec_out + got, &ch, want, out_rate, 1.0 );
+	}
+	s_lerping.value = 0.0f;
+	s_mix_test_dma_speed = SOUND_44k;
+	CHECK( got == SPEC_N + skip );
+
+	for( i = 0; i < SPEC_N; i++ )
+	{
+		const double x = 2.0 * 3.14159265358979323846 * i / ( SPEC_N - 1 );
+		const double w = 0.35875 - 0.48829 * cos( x ) + 0.14128 * cos( 2 * x ) - 0.01168 * cos( 3 * x );
+
+		spec_re[i] = spec_out[skip + i].left * w;
+		spec_im[i] = 0.0;
+	}
+	fft( spec_re, spec_im, SPEC_N );
+	for( i = 0; i < SPEC_N / 2; i++ )
+		spec_pow[i] = spec_re[i] * spec_re[i] + spec_im[i] * spec_im[i];
+	for( i = tone_bin - 6; i <= tone_bin + 6; i++ )
+		if( spec_pow[i] > tone_p ) tone_p = spec_pow[i];
+
+	sp.image_db = sp.inharm_db = sp.noise_db = -200.0;
+	sp.inharm_hz = 0.0;
+	for( i = (int)( 50.0 * SPEC_N / out_rate ); i < SPEC_N / 2 && i * (double)out_rate / SPEC_N <= 20000.0; i++ )
+	{
+		const double f = i * (double)out_rate / SPEC_N;
+		const double db = 10.0 * log10( spec_pow[i] / tone_p + 1e-30 );
+		int image = 0;
+
+		if( abs( i - tone_bin ) <= 8 )
+			continue;
+		total += spec_pow[i];
+		for( k = 1; k <= 8 && !image; k++ )
+			image = fabs( f - ( k * src_rate - hz )) * SPEC_N / out_rate <= 8.0 || fabs( f - ( k * src_rate + hz )) * SPEC_N / out_rate <= 8.0;
+		if( image && db > sp.image_db )
+			sp.image_db = db;
+		if( !image && db > sp.inharm_db )
+		{
+			sp.inharm_db = db;
+			sp.inharm_hz = f;
+		}
+	}
+	/* everything but the tone, against the tone (the window's noise
+	   bandwidth is the same for both, so it cancels) */
+	{
+		double tone_sum = 0.0;
+
+		for( i = tone_bin - 6; i <= tone_bin + 6; i++ )
+			tone_sum += spec_pow[i];
+		sp.noise_db = 10.0 * log10( total / tone_sum + 1e-30 );
+	}
+	return sp;
+}
+
+static void test_lerp_spectra( void )
+{
+	static const struct { int src_rate, width; double hz; } cases[] =
+	{
+		{ 11025, 2, 500.0 }, { 11025, 2, 1000.0 }, { 11025, 2, 2000.0 }, { 11025, 2, 4000.0 },
+		{ 22050, 2, 1000.0 }, { 22050, 2, 4000.0 }, { 22050, 2, 8000.0 },
+		{ 11025, 1, 1000.0 }, { 22050, 1, 4000.0 },
+	};
+	unsigned c;
+
+	printf( "s_mix spectra (dB re the tone; image = k*src+-f, inharmonic = anything else; all = every non-tone bin to 20 kHz summed)\n" );
+	printf( "  source        tone    | 44.1k point (upstream) | 48k point (xbox)              | 48k lerp (xbox)               | 48k lerp (upstream)\n" );
+	for( c = 0; c < sizeof( cases ) / sizeof( cases[0] ); c++ )
+	{
+		const spurs_t u44 = measure_spurs( 0, SOUND_44k, 0, cases[c].src_rate, cases[c].width, cases[c].hz );
+		const spurs_t p48 = measure_spurs( 1, SOUND_48k, 0, cases[c].src_rate, cases[c].width, cases[c].hz );
+		const spurs_t l48 = measure_spurs( 1, SOUND_48k, 1, cases[c].src_rate, cases[c].width, cases[c].hz );
+		const spurs_t lu48 = measure_spurs( 0, SOUND_48k, 1, cases[c].src_rate, cases[c].width, cases[c].hz );
+
+		printf( "  %5d Hz %2d-bit %5.0f Hz | img %6.1f inh %6.1f   | img %6.1f inh %6.1f all %6.1f | img %6.1f inh %6.1f all %6.1f | img %6.1f inh %6.1f\n",
+			cases[c].src_rate, cases[c].width * 8, cases[c].hz, u44.image_db, u44.inharm_db,
+			p48.image_db, p48.inharm_db, p48.noise_db, l48.image_db, l48.inharm_db, l48.noise_db, lu48.image_db, lu48.inharm_db );
+
+		/* measured (16-bit, the Xbox loop at 48 kHz): the interpolation
+		   takes the inharmonic aliases down 17-36 dB in an 11 kHz sound
+		   (4 kHz to 500 Hz) and 11.5-33 dB in a 22 kHz one (8 to
+		   1 kHz), the source's own images 25-27 dB at
+		   500 Hz-1 kHz and 5 dB at 4 kHz in an 11 kHz sound (linear
+		   interpolation's sinc^2 response is weak near the source's
+		   Nyquist). Checked with margin: 10 dB and 4 dB. The Xbox loop
+		   does what upstream's does to within 1.5 dB. */
+		if( cases[c].width == 2 )
+		{
+			const double worst_p = p48.image_db > p48.inharm_db ? p48.image_db : p48.inharm_db;
+			const double worst_l = l48.image_db > l48.inharm_db ? l48.image_db : l48.inharm_db;
+
+			CHECK( l48.inharm_db < p48.inharm_db - 10.0 );
+			CHECK( worst_l < worst_p - 4.0 );
+			CHECK( fabs( l48.noise_db - lu48.noise_db ) < 1.5 );
+			CHECK( fabs( l48.inharm_db - lu48.inharm_db ) < 1.5 );
+		}
+		CHECK( l48.noise_db < p48.noise_db - 4.0 );
+		CHECK( u44.inharm_db < -55.0 ); /* nothing inharmonic at upstream's integer ratios */
+	}
+}
+
 static void test_48k_channels( void )
 {
 	static const int rates[] = { SOUND_44k, SOUND_48k };
@@ -460,6 +757,10 @@ int main( void )
 	   the rate's switch left them bit-exact */
 	test_48k_indices();
 	test_48k_channels();
+	/* s_lerping on the fixed-point counter (#174) */
+	test_lerp_calls();
+	test_lerp_channels();
+	test_lerp_spectra();
 	CHECK( s_mix_test_dma_speed == SOUND_44k );
 	CHECK( !s_mix_test_fixed_step( 0.0, 0.95 * 22050 / 44100.0 ));
 

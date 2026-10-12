@@ -120,13 +120,14 @@ S_MakeMixMonoPitch( 8 )
 S_MakeMixMonoPitch( 16 )
 S_MakeMixStereoPitch( 8 )
 S_MakeMixStereoPitch( 16 )
-#else
-#include "platform/xbox/xbox_s_mix_pitch.h" // the same four without x87 truncation, docs/r3d/divergences.md #145 (1)
-#endif
 S_MakeMixMonoLerp( 8 )
 S_MakeMixMonoLerp( 16 )
 S_MakeMixStereoLerp( 8 )
 S_MakeMixStereoLerp( 16 )
+#else
+// the same eight without x87 truncation: docs/r3d/divergences.md #145 (1), the Lerp ones #174
+#include "platform/xbox/xbox_s_mix_pitch.h"
+#endif
 
 static void S_MixAudio( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples, qboolean lerp )
 {

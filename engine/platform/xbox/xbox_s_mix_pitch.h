@@ -230,3 +230,114 @@ S_MakeMixMonoPitchXbox( 8 )
 S_MakeMixMonoPitchXbox( 16 )
 S_MakeMixStereoPitchXbox( 8 )
 S_MakeMixStereoPitchXbox( 16 )
+
+/*
+Divergence #174: upstream's linear-interpolation loops (S_MakeMixMonoLerp /
+S_MakeMixStereoLerp in s_mix.c, taken when s_lerping is set) on the same
+32.32 counter as the pitched loops above, so they read the same source
+indices: `(int)( a * ( 1.0 - f ) + b * f )` in doubles is two x87
+conversions an output on the Pentium III, and the weight here is the
+counter's top fraction bits instead.
+
+- 16-bit: a + ( ( b - a ) * ( frac >> 17 )) >> 15. |b - a| <= 65535 and
+  the weight is below 2^15, so the product fits an int.
+- 8-bit: interpolated with 8 more bits, a * 256 + ( ( b - a ) * ( frac
+  >> 16 )) >> 8, and mixed with `>> 8` where upstream mixes the 8-bit value
+  unshifted: the same scale, without truncating the interpolated sample
+  back to 8 bits first.
+
+Both round toward minus infinity where upstream's cast truncates toward
+zero; the interpolated sample differs from upstream's by at most 3
+(16-bit: the 15-bit weight's error plus the rounding) or one 8-bit step
+(tools/host-tests/s_mix_host_test.c). Off the fixed
+point grid (only at upstream's 44.1 kHz, or a step of 2^20 samples or
+more: S_MixFixedStep) these run upstream's double loop unchanged.
+*/
+#define S_LERP_WEIGHT16( frac ) ((int)(( frac ) >> 17 ))
+#define S_LERP_WEIGHT8( frac )  ((int)(( frac ) >> 16 ))
+#define S_LERP16( a, b, frac ) (( a ) + ((( (b) - (a) ) * S_LERP_WEIGHT16( frac )) >> 15 ))
+#define S_LERP8( a, b, frac )  ((( a ) * 256 ) + ((( (b) - (a) ) * S_LERP_WEIGHT8( frac )) >> 8 ))
+
+#define S_MakeMixMonoLerpXbox( x ) \
+	static void S_MixMonoLerp ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	{ \
+		const int##x##_t *data = buf; \
+		const int lvol = volume[0], rvol = volume[1]; \
+		uint sample_idx = 0; \
+		uint32_t frac, step_int, step_frac; \
+		if( S_MixFixedStep( offset_frac, rate_scale, &frac, &step_int, &step_frac )) \
+		{ \
+			for( int i = 0; i < num_samples; i++ ) \
+			{ \
+				const int s = S_LERP ## x( data[sample_idx], data[sample_idx + 1], frac ); \
+				pbuf[i].left  += ( s * lvol ) >> 8; \
+				pbuf[i].right += ( s * rvol ) >> 8; \
+				frac += step_frac; \
+				sample_idx += step_int + ( frac < step_frac ); \
+			} \
+			return; \
+		} \
+		for( int i = 0; i < num_samples; i++ ) \
+		{ \
+			int s = (int)( data[sample_idx] * ( 1.0 - offset_frac ) + data[sample_idx + 1] * offset_frac ); \
+			pbuf[i].left  += ( s * lvol ) >> ( x - 8 ); \
+			pbuf[i].right += ( s * rvol ) >> ( x - 8 ); \
+			offset_frac += rate_scale; \
+			sample_idx += (uint)offset_frac; \
+			offset_frac -= (uint)offset_frac; \
+		} \
+	} \
+
+#define S_MakeMixStereoLerpXbox( x ) \
+	static void S_MixStereoLerp ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	{ \
+		const int##x##_t *data = buf; \
+		const int lvol = volume[0], rvol = volume[1]; \
+		uint sample_idx = 0; \
+		uint32_t frac, step_int, step_frac; \
+		if( S_MixFixedStep( offset_frac, rate_scale, &frac, &step_int, &step_frac )) \
+		{ \
+			for( int i = 0; i < num_samples; i++ ) \
+			{ \
+				const int sl = S_LERP ## x( data[sample_idx + 0], data[sample_idx + 2], frac ); \
+				const int sr = S_LERP ## x( data[sample_idx + 1], data[sample_idx + 3], frac ); \
+				pbuf[i].left  += ( sl * lvol ) >> 8; \
+				pbuf[i].right += ( sr * rvol ) >> 8; \
+				frac += step_frac; \
+				sample_idx += ( step_int + ( frac < step_frac )) << 1; \
+			} \
+			return; \
+		} \
+		for( int i = 0; i < num_samples; i++ ) \
+		{ \
+			int sl = (int)( data[sample_idx + 0] * ( 1.0 - offset_frac ) + data[sample_idx + 2] * offset_frac ); \
+			int sr = (int)( data[sample_idx + 1] * ( 1.0 - offset_frac ) + data[sample_idx + 3] * offset_frac ); \
+			pbuf[i].left  += ( sl * lvol ) >> ( x - 8 ); \
+			pbuf[i].right += ( sr * rvol ) >> ( x - 8 ); \
+			offset_frac += rate_scale; \
+			sample_idx += (uint)offset_frac << 1; \
+			offset_frac -= (uint)offset_frac; \
+		} \
+	} \
+
+S_MakeMixMonoLerpXbox( 8 )
+S_MakeMixMonoLerpXbox( 16 )
+S_MakeMixStereoLerpXbox( 8 )
+S_MakeMixStereoLerpXbox( 16 )
+
+/* r3d_mixbench (engine/platform/xbox/xbox_s_mix_bench.c, #174) times the
+   loops above as the XBE compiled them: mono 8, mono 16, stereo 8,
+   stereo 16. */
+typedef void ( *s_r3d_mix_loop_t )( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples );
+void S_R3D_MixLoops( s_r3d_mix_loop_t pitch[4], s_r3d_mix_loop_t lerp[4] );
+void S_R3D_MixLoops( s_r3d_mix_loop_t pitch[4], s_r3d_mix_loop_t lerp[4] )
+{
+	pitch[0] = S_MixMonoPitch8;
+	pitch[1] = S_MixMonoPitch16;
+	pitch[2] = S_MixStereoPitch8;
+	pitch[3] = S_MixStereoPitch16;
+	lerp[0] = S_MixMonoLerp8;
+	lerp[1] = S_MixMonoLerp16;
+	lerp[2] = S_MixStereoLerp8;
+	lerp[3] = S_MixStereoLerp16;
+}

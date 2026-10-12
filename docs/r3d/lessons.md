@@ -28,6 +28,16 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### ALWAYS run a proposed new data format through the loader's conversion path before costing it
+
+X12 step 3's survey (x9-audio-sfx) costed effects baked to 48 kHz by
+reading `S_LoadSound` only for what it does to today's 11/22 kHz files
+(nothing) and multiplying sizes. The memory review found that the same
+function resamples anything above 22.05 kHz that is not 44.1 kHz down to
+44.1 kHz at load (`s_load.c`, "some bad sounds"): a 48 kHz bake would
+never reach the mixer at 48 kHz. **When a proposal changes a file's
+format, rate or size, trace one file in the new format through every
+load-time branch before reporting what it costs or buys.**
 ### NEVER carry an "exact" or "free" property to a new operating point without re-reading the condition it was proved under
 
 X12 step 2 (x9-audio-mix48, #173) was planned on "#145's integer pitched

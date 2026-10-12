@@ -281,9 +281,9 @@ s_mix() {
 	local fp="$1" tag="$2"
 	local inc="-Itools/host-tests/s_mix_stub -Iengine/client/sound -Iengine"
 	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 -Wno-unused-function $inc -DXASH_XBOX=0 \
-		-DS_MIX_TEST_ENTRY=mix_upstream -DS_MIX_TEST_CHANNEL=mix_channel_upstream -DS_PaintChannels=S_PaintChannels_up -DS_ClearBuffers=S_ClearBuffers_up \
+		-DS_MIX_TEST_ENTRY=mix_upstream -DS_MIX_TEST_ENTRY_LERP=mix_lerp_upstream -DS_MIX_TEST_CHANNEL=mix_channel_upstream -DS_PaintChannels=S_PaintChannels_up -DS_ClearBuffers=S_ClearBuffers_up \
 		-c tools/host-tests/s_mix_host_test_tu.c -o "$OUT/s_mix_up_$tag.o" &&
-	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 -Wno-unused-function $inc -DXASH_XBOX=1 -DS_MIX_TEST_ENTRY=mix_xbox -DS_MIX_TEST_CHANNEL=mix_channel_xbox \
+	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 -Wno-unused-function $inc -DXASH_XBOX=1 -DS_MIX_TEST_ENTRY=mix_xbox -DS_MIX_TEST_ENTRY_LERP=mix_lerp_xbox -DS_MIX_TEST_CHANNEL=mix_channel_xbox \
 		-c tools/host-tests/s_mix_host_test_tu.c -o "$OUT/s_mix_xbox_$tag.o" &&
 	gcc $HOST_CFLAGS $fp -Wall -std=gnu99 $inc tools/host-tests/s_mix_host_test.c \
 		"$OUT/s_mix_up_$tag.o" "$OUT/s_mix_xbox_$tag.o" -lm -o "$OUT/s_mix_test_$tag" && "$OUT/s_mix_test_$tag"
