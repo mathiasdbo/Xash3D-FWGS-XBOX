@@ -28,27 +28,34 @@ console with headphones and the TV, never during a recording session.
 - **Room effects** (echoes in tunnels, halls, vents): the same delays in
   milliseconds. Their smoothing filters are counted in samples, so at 48
   kHz they let through slightly higher frequencies (8.8%).
-- Pressing the switch reopens the audio device: a short gap and the music
-  jumping a fraction of a second at each press are expected.
+
+## Verdict
+
+The owner's first session on the console (2026-10-11, the live-switch build, before its sound died - see below): **48 kHz sounds better than 44.1 kHz.** 48 kHz is the default and stays so; 44.1 kHz is a debug A/B only. Normal play and map changes at 48 kHz never reopen the device.
 
 ## The disc
 
 The step-2 build (`mix48.xbe`) as `default.xbe`, with both music sets in
 `valve/media`: the 27 `<Track>.xwav` files already on the console from
-#171 and the 27 `<Track>.48k.xwav` files of the new bake. Copy this file
-to `E:\UDATA\<title id>\valve\valve\userconfig.d\95-mix48-ab.cfg` (or into
-the disc tree's `valve/userconfig.d/` before packing). Delete it
-afterwards: it loads a map at every boot.
+#171 and the 27 `<Track>.48k.xwav` files of the new bake.
+
+**The rate is chosen at boot, so the A/B takes two boots.** A first
+version switched the rate live with the D-pad; on the console one live
+switch left the sound dead for the rest of the session (recorder session
+`ebbee2dd`). `r3d_snd_rate` now applies only before the first map loads
+- from a cfg at boot - and a later change only prints that it applies at
+the next boot.
+
+Copy this file to `E:\UDATA\<title id>\valve\valve\userconfig.d\95-mix48-ab.cfg`
+(or into the disc tree's `valve/userconfig.d/` before packing). Delete
+it afterwards: it loads a map at every boot.
 
 ```
 // X12 step 2 listening test (docs/r3d/x12-mix48-listening-test.md). Remove after the test.
-// D-pad: UP = A/B the mix rate (48 kHz <-> 44.1 kHz; the console prints "r3d_snd_rate: mixing at ..."),
-//        RIGHT = next map, LEFT = previous map, DOWN = this map again from its start.
-r3d_snd_rate 48000
-alias ab48 "r3d_snd_rate 48000; alias rate_ab ab44"
-alias ab44 "r3d_snd_rate 44100; alias rate_ab ab48"
-alias rate_ab ab44
-bind DPAD_UP "rate_ab"
+// The mix rate is set at boot: this line as it is for 44.1 kHz; comment it out
+// ("// r3d_snd_rate 44100") for 48 kHz, then reboot. The console prints "r3d_snd_rate: mixing at ...".
+r3d_snd_rate 44100
+// D-pad: RIGHT = next map, LEFT = previous map, DOWN = this map again from its start.
 alias lt1 "map c0a0; alias lt_next lt2; alias lt_prev lt3; alias lt_again lt1; echo listening 1/3 c0a0 - the announcer, the opening music, the tram"
 alias lt2 "map c1a1; alias lt_next lt3; alias lt_prev lt1; alias lt_again lt2; echo listening 2/3 c1a1 - voices, sparks, alarms, rooms"
 alias lt3 "map t0a0; alias lt_next lt1; alias lt_prev lt2; alias lt_again lt3; echo listening 3/3 t0a0 - the training voice, footsteps, echoes"
@@ -61,8 +68,12 @@ bind DPAD_DOWN "lt_again"
 lt1
 ```
 
-The rate stays as it was set when the map changes, so each map can be
-compared both ways. Without the cfg the console mixes at 48 kHz.
+The engine reads the rate from the userconfig.d files before it opens the device, so the line may sit in any cfg there, even one that runs after another file's `map` and `wait`s; before that fix (x9-audio-rate-latch) a `96-rate44.cfg` behind a `00-c1a0.cfg` that loads a map came too late and the console stayed at 48 kHz. Keep the line a plain command: one inside an alias or a bind is only seen when it runs.
+
+Go through the three maps at one rate, change the cfg's first command
+line, reboot, and go through them at the other; then back if a
+difference needs a second listen. Without the cfg the console mixes at
+48 kHz.
 
 ## What to check
 

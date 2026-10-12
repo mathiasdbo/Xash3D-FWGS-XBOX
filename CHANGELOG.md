@@ -36,8 +36,12 @@ second time at 48 kHz (`tools/asset-studio --music-rate 48000`,
 `media/<Track>.48k.xwav`) with a high-quality filter, so it is not
 roughly converted while it plays; the 44.1 kHz bake stays beside it.
 
-`r3d_snd_rate 44100` (in a cfg or at the console) switches back to the
-old mixing while the game runs, for comparison. The output is no longer
+`r3d_snd_rate 44100` in a userconfig.d cfg switches back to the old
+mixing for comparison; it is chosen at boot (a change once a map has
+loaded applies at the next boot, because switching in play could leave
+the console without sound). The engine reads that line from the cfg
+files before it opens the sound device, so it takes effect even when
+another cfg loads a map first. The output is no longer
 identical to upstream's: Half-Life's 11 and 22 kHz sounds are stretched
 to 48 kHz unevenly, which adds faint extra tones to them, and a
 listening test on the console (`docs/r3d/x12-mix48-listening-test.md`)

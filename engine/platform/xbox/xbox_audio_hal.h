@@ -31,6 +31,7 @@ typedef struct xbox_audio_hal_status_s
 	uint32_t drains;      /* LVBCI raised: an engine played out its last valid buffer (underruns) */
 	uint32_t kicks;       /* watchdog recoveries requested */
 	uint32_t restarts;    /* register writes a recovery made to restart an engine */
+	uint32_t reset_stuck; /* re-initialisations that found an engine that would not halt, left un-reset (#173) */
 	uint8_t  civ[2], lvi[2], cr[2];
 	uint16_t sr[2], picb[2];
 } xbox_audio_hal_status_t;
@@ -92,6 +93,11 @@ void XAudioR3D_ThreadStats( xbox_audio_thread_stats_t *out );
    (SDL's CloseDevice calls it) cancels the timer. No-op before
    XAudioInit. */
 void XAudioR3D_BeginClose( void );
+
+/* Nonzero when the last XAudioInit found a bus master that would not halt
+   (#173): it left the hardware alone, and the device must not be used -
+   SNDDMA_Init fails the open on it. */
+int XAudioR3D_InitFailed( void );
 
 /* The engine side (xbox_audio_watchdog.c), called once a frame from
    Xbox_FrameTime_EndFrame: logs and kicks when the driver has been handed

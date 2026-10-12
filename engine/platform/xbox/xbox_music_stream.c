@@ -237,7 +237,7 @@ static int Music_Probe( void *ctx, const char *path, int64_t *size )
    from another file than the one upstream would open, or the stream
    refuses it. */
 static stream_t *Music_OpenXwav( file_t *file, const char *path, const char *filename, const char *base, int requested,
-	const char *const *formats, int nformats, const xbox_ft_span_t *span, const char **why )
+	const char *const *formats, int nformats, uint32_t want_rate, const xbox_ft_span_t *span, const char **why )
 {
 	byte head[XBOX_XWAV_HEADER_READ];
 	xbox_xwav_info_t info;
@@ -256,6 +256,16 @@ static stream_t *Music_OpenXwav( file_t *file, const char *path, const char *fil
 	{
 		Con_Reportf( S_WARN "%s: %s: %s\n", __func__, path,
 			err != XBOX_XWAV_OK ? Xbox_MusicXwav_ErrorString( err ) : "not baked against this engine's libmpg chunk" );
+		FS_Close( file );
+		*why = "mp3 (bad xwav)";
+		return NULL;
+	}
+
+	/* a rate-tagged name (<Track>.48k.xwav) must hold that rate (#173): a
+	   file renamed from another bake would play point-resampled */
+	if( want_rate && info.rate != want_rate )
+	{
+		Con_Reportf( S_WARN "%s: %s: %u Hz, not the %u Hz its name says - skipped\n", __func__, path, (unsigned)info.rate, (unsigned)want_rate );
 		FS_Close( file );
 		*why = "mp3 (bad xwav)";
 		return NULL;
@@ -341,6 +351,7 @@ static stream_t *Music_Open( const char *filename, qboolean force, const char *x
 {
 	const char *formats[8];
 	int nformats = 0, requested, ncand = 0, i;
+	uint32_t cand_rate[2] = { 0, 0 }; /* the rate a candidate's name says it holds; 0: any */
 	const streamfmt_t *format;
 	char base[MAX_SYSPATH], cand[2][MAX_SYSPATH];
 	const char *why = NULL;
@@ -357,7 +368,10 @@ static stream_t *Music_Open( const char *filename, qboolean force, const char *x
 	else
 	{
 		if( SOUND_DMA_SPEED != SOUND_44k )
+		{
+			cand_rate[ncand] = (uint32_t)SOUND_DMA_SPEED;
 			Q_snprintf( cand[ncand++], sizeof( cand[0] ), "%s.%dk.xwav", base, SOUND_DMA_SPEED / 1000 );
+		}
 		Q_snprintf( cand[ncand++], sizeof( cand[0] ), "%s.xwav", base );
 	}
 
@@ -376,7 +390,7 @@ static stream_t *Music_Open( const char *filename, qboolean force, const char *x
 			return NULL;
 		}
 
-		stream = Music_OpenXwav( file, cand[i], filename, base, requested, formats, nformats, &span, &why );
+		stream = Music_OpenXwav( file, cand[i], filename, base, requested, formats, nformats, cand_rate[i], &span, &why );
 		if( stream )
 			return stream;
 	}

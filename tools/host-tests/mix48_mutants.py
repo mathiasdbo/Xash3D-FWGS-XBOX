@@ -22,6 +22,7 @@ import sys
 DSP = "engine/client/sound/s_dsp.c"
 PITCH = "engine/platform/xbox/xbox_s_mix_pitch.h"
 CLOCK = "engine/platform/xbox/xbox_snd_clock.h"
+HALU = "engine/platform/xbox/xbox_audio_hal_util.c"
 
 MUTANTS = [
     (DSP, "dsp: the base rate left at 11025",
@@ -56,6 +57,15 @@ MUTANTS = [
      b"\treturn (int)(( (int64_t)t * new_rate ) / old_rate );", b"\treturn t;"),
     (CLOCK, "clock: the chop not reported",
      b"\t\t\t*chop = 1;\n", b""),
+    (HALU, "hal: the rings cleared before the engines halt (nxdk's order)",
+     b"\tconst unsigned stuck = xbox_aci_reset_engines( io, timeout_us, poll_us );\n\n\tif( stuck )\n\t\treturn stuck; // an engine may still be fetching: leave its ring alone\n\n\tclear_rings( ring_ctx );",
+     b"\tunsigned stuck;\n\n\tclear_rings( ring_ctx );\n\tstuck = xbox_aci_reset_engines( io, timeout_us, poll_us );\n\n\tif( stuck )\n\t\treturn stuck;"),
+    (HALU, "hal: the rings cleared although an engine would not halt",
+     b"\tif( stuck )\n\t\treturn stuck; // an engine may still be fetching: leave its ring alone\n",
+     b""),
+    (HALU, "hal: RR written without waiting for the halt",
+     b"\t\tif( !aci_wait( io, box[i] + XBOX_ACI_REG_SR, XBOX_ACI_SR_DCH, XBOX_ACI_SR_DCH, timeout_us, poll_us ))\n",
+     b"\t\tif( 0 )\n"),
     (PITCH, "mix: the position rounded up",
      b"\tconst int64_t fi = (int64_t)f;",
      b"\tconst int64_t fi = (int64_t)f + ( (double)(int64_t)f != f && f < 4294967295.0 );"),
@@ -77,7 +87,12 @@ MUTANTS = [
 
 def build_and_run(out, flags, i, kind):
     exe = os.path.join(out, f"mix48_mutant_{i}.exe")
-    if kind == CLOCK:
+    if kind == HALU:
+        cc = ["gcc", *flags, "-w", "-std=c99", "-Iengine/platform/xbox",
+              "tools/host-tests/xbox_audio_hal_util_host_test.c", os.path.join(out, "xbox_audio_hal_util.c"), "-o", exe]
+        if subprocess.run(cc, capture_output=True).returncode != 0:
+            return None
+    elif kind == CLOCK:
         cc = ["gcc", *flags, "-w", "-std=c99", f"-I{out}/platform/xbox", "-Iengine/platform/xbox",
               "tools/host-tests/xbox_snd_clock_host_test.c", "-o", exe]
         if subprocess.run(cc, capture_output=True).returncode != 0:
@@ -125,7 +140,8 @@ def main():
             gaps += 1
             continue
         # the mutated file where the include path finds it first
-        rel = {PITCH: "platform/xbox/xbox_s_mix_pitch.h", CLOCK: "platform/xbox/xbox_snd_clock.h"}.get(path, "s_dsp.c")
+        rel = {PITCH: "platform/xbox/xbox_s_mix_pitch.h", CLOCK: "platform/xbox/xbox_snd_clock.h",
+               HALU: "xbox_audio_hal_util.c"}.get(path, "s_dsp.c")
         target = os.path.join(mdir, rel)
         os.makedirs(os.path.dirname(target), exist_ok=True)
         open(target, "wb").write(original.replace(old, new))

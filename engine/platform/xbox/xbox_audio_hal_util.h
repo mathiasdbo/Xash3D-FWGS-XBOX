@@ -108,4 +108,57 @@ typedef struct xbox_aci_watchdog_s
 
 uint32_t xbox_aci_watchdog_step( xbox_aci_watchdog_t *wd, double now, uint32_t count, int active, double timeout );
 
+/*
+Resetting the two bus masters (#173: r3d_snd_rate reopens the device, so
+XAudioInit runs again on engines that were playing). The AC97/ICH bus
+master's Reset Registers bit (CR bit 1, RR) may only be set while the
+engine is halted: software clears Run/Pause (RPBM) first and waits for
+DCH (SR bit 0). nxdk's XAudioInit sets RR straight away, which is right
+at boot, when nothing has run, and undefined on an engine that is still
+playing - what SDL's close leaves when its last buffer is still in flight.
+On the console one live switch in six left the PCM-out DMA dead for the
+rest of the session (recorder session ebbee2dd: no completion, no
+underrun, through every later reopen).
+
+Per box (PCM out at 0x110, S/PDIF at 0x170): write CR = 0 (pause,
+interrupts off), poll SR.DCH every `poll_us` for up to `timeout_us`, then
+write RR with the interrupt enables (nxdk's value, 0x1E) and poll until
+the hardware clears RR (bounded the same way). Returns the boxes that did
+not halt in time (bit 0 PCM out, bit 1 S/PDIF); RR is then not written to
+that box at all, and the caller reports it.
+*/
+#define XBOX_ACI_BOX_PCM_OUT 0x110u
+#define XBOX_ACI_BOX_SPDIF   0x170u
+#define XBOX_ACI_REG_SR      0x06u
+#define XBOX_ACI_REG_CR      0x0Bu
+#define XBOX_ACI_SR_DCH      0x01u
+#define XBOX_ACI_CR_RR       0x02u
+#define XBOX_ACI_CR_RESET    0x1Eu /* RR plus the three interrupt enables, nxdk's XAudioInit value */
+
+typedef struct xbox_aci_mmio_s
+{
+	uint8_t ( *read8 )( void *ctx, unsigned offset );
+	void ( *write8 )( void *ctx, unsigned offset, uint8_t value );
+	void ( *stall_us )( void *ctx, unsigned us );
+	void *ctx;
+} xbox_aci_mmio_t;
+
+unsigned xbox_aci_reset_engines( const xbox_aci_mmio_t *io, unsigned timeout_us, unsigned poll_us );
+
+/*
+XAudioInit's hardware part up to the descriptor rings (#173, Codex
+review): the rings and the status registers belong to the bus masters
+until both have halted, so they are touched only after
+xbox_aci_reset_engines succeeded on both. Then `clear_rings(ctx)` zeroes
+the descriptor lists and both boxes' SR is cleared (0xFF, nxdk's value).
+Returns xbox_aci_reset_engines' stuck mask: non-zero means nothing past
+the reset was written, and the caller must not touch the rings or start
+the engines either (XAudioInit records the failure; SNDDMA_Init then
+fails the open).
+*/
+#define XBOX_ACI_REG_SR_CLEAR 0xFFu
+
+unsigned xbox_aci_prepare( const xbox_aci_mmio_t *io, void ( *clear_rings )( void *ctx ), void *ring_ctx,
+	unsigned timeout_us, unsigned poll_us );
+
 #endif /* XBOX_AUDIO_HAL_UTIL_H */

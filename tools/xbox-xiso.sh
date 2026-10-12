@@ -511,14 +511,14 @@ le32_at() { # <path> <offset>: a little-endian u32, or fails
 }
 validate_music_bake() { # <bake dir> <staged gamedir>: echoes the track count
 	local dir="$1" gamedir="$2" manifest="$1/music_manifest.txt" name codec rest status count=0 result suffix
-	local f size riff r3dm srcext srcbytes src chunk
+	local f size riff r3dm srcext srcbytes src chunk fmt rate srcrate want mrate
 	if [ ! -f "$manifest" ]; then
 		echo "xbox-xiso: $dir has no music_manifest.txt - not a tools/asset-studio --music output." >&2
 		return 1
 	fi
 	suffix=$(tr -d '\r' < "$manifest" | grep -E '^# file \.[A-Za-z0-9.]*\.xwav$' | tail -1 | awk '{ print $3 }')
 	[ -n "$suffix" ] || suffix=.xwav
-	while read -r name codec rest; do
+	while read -r name codec mrate rest; do
 		rest=${rest%$'\r'}
 		status=${rest##* }
 		case "$name" in ""|\#*) continue ;; esac
@@ -537,6 +537,22 @@ validate_music_bake() { # <bake dir> <staged gamedir>: echoes the track count
 		[ -n "$r3dm" ] || { echo "xbox-xiso: $f has no r3dm chunk in its first 512 bytes." >&2; return 1; }
 		chunk=$(le32_at "$f" $((r3dm + 8 + 24))) || return 1
 		[ "$chunk" -eq 8192 ] || { echo "xbox-xiso: $f: r3dm chunk_bytes $chunk, the engine plays only 8192 (libmpg's OUTBUF_SIZE)." >&2; return 1; }
+		# the file's sample rate (fmt) must be the one its name promises:
+		# <Track>.NNk.xwav plays at NN kHz (the engine opens it first when it
+		# mixes at that rate, #173), <Track>.xwav at its source's rate (r3dm)
+		fmt=$(head -c 512 "$f" | grep -obUa 'fmt ' | head -1 | cut -d: -f1)
+		[ -n "$fmt" ] || { echo "xbox-xiso: $f has no fmt chunk in its first 512 bytes." >&2; return 1; }
+		rate=$(le32_at "$f" $((fmt + 8 + 4))) || return 1
+		srcrate=$(le32_at "$f" $((r3dm + 8 + 8))) || return 1
+		case "$suffix" in
+		.xwav) want=$srcrate ;;
+		.[0-9]*k.xwav) want=${suffix#.}; want=$(( ${want%k.xwav} * 1000 )) ;;
+		*) echo "xbox-xiso: $manifest names files $suffix - not a rate this checker knows." >&2; return 1 ;;
+		esac
+		if [ "$rate" -ne "$want" ] || [ "$mrate" != "$rate" ]; then
+			echo "xbox-xiso: $f: sample rate $rate Hz (manifest ${mrate:-?}), but a $suffix file must be $want Hz - a file from another bake renamed? rebake." >&2
+			return 1
+		fi
 		srcbytes=$(le32_at "$f" $((r3dm + 8 + 28))) || return 1
 		srcext=$(dd if="$f" bs=1 skip=$((r3dm + 8 + 32)) count=8 2>/dev/null | tr -d '\0')
 		src="$gamedir/media/$name.$srcext"

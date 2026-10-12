@@ -495,12 +495,248 @@ static void test_pipeline( void )
 	}
 }
 
+
+/* ---- the bus masters' reset across open/close cycles (#173) ------------ */
+
+/* A model of one AC97 bus master's CR and SR: writing CR = 0 pauses it and
+   DCH comes up `halt_after` polls later (never, for -1); writing RR to an
+   engine that has not halted wedges it for good (what a live reopen did to
+   the console's PCM DMA); RR on a halted engine resets it, and the
+   hardware clears RR `rr_after` polls later (never, for -1). An engine
+   that was reset plays again on CR = RUN. */
+typedef struct
+{
+	int running, dch, rr, halt_after, rr_after, wedged, resets, polls_to_halt, polls_to_rr;
+	unsigned order; /* CR writes seen: 1 pause, then 2 reset */
+} model_box_t;
+
+typedef struct
+{
+	model_box_t box[2];
+	unsigned stalled_us;
+} model_t;
+
+static model_box_t *model_box( model_t *m, unsigned offset, unsigned *reg )
+{
+	const int i = offset >= XBOX_ACI_BOX_SPDIF ? 1 : 0;
+
+	*reg = offset - ( i ? XBOX_ACI_BOX_SPDIF : XBOX_ACI_BOX_PCM_OUT );
+	return &m->box[i];
+}
+
+static uint8_t model_read8( void *ctx, unsigned offset )
+{
+	model_t *m = ctx;
+	unsigned reg;
+	model_box_t *b = model_box( m, offset, &reg );
+
+	if( reg == XBOX_ACI_REG_SR )
+	{
+		if( !b->running && !b->dch && b->polls_to_halt >= 0 && b->polls_to_halt-- == 0 )
+			b->dch = 1;
+		return (uint8_t)( b->dch ? XBOX_ACI_SR_DCH : 0 );
+	}
+	if( reg == XBOX_ACI_REG_CR )
+	{
+		if( b->rr && b->polls_to_rr >= 0 && b->polls_to_rr-- == 0 )
+			b->rr = 0;
+		return (uint8_t)(( b->rr ? XBOX_ACI_CR_RR : 0 ) | ( b->running ? 1 : 0 ));
+	}
+	return 0;
+}
+
+static void model_write8( void *ctx, unsigned offset, uint8_t v )
+{
+	model_t *m = ctx;
+	unsigned reg;
+	model_box_t *b = model_box( m, offset, &reg );
+
+	if( reg != XBOX_ACI_REG_CR )
+		return;
+	if( v & XBOX_ACI_CR_RR )
+	{
+		if( !b->dch || b->running )
+			b->wedged = 1;
+		b->rr = 1;
+		b->polls_to_rr = b->rr_after;
+		b->resets++;
+		b->order = b->order * 10 + 2;
+		return;
+	}
+	if( v & 1 )
+	{
+		b->running = 1;
+		b->dch = 0;
+		return;
+	}
+	b->running = 0;
+	b->polls_to_halt = b->halt_after;
+	b->order = b->order * 10 + 1;
+}
+
+static void model_stall( void *ctx, unsigned us )
+{
+	( (model_t *)ctx )->stalled_us += us;
+}
+
+static void model_init( model_t *m, int running, int halt_after, int rr_after )
+{
+	int i;
+
+	memset( m, 0, sizeof( *m ));
+	for( i = 0; i < 2; i++ )
+	{
+		m->box[i].running = running;
+		m->box[i].dch = !running;
+		m->box[i].halt_after = halt_after;
+		m->box[i].rr_after = rr_after;
+	}
+}
+
+/* nxdk's XAudioInit: RR straight away, then wait for it to clear */
+static void nxdk_reset( model_t *m )
+{
+	model_write8( m, XBOX_ACI_BOX_PCM_OUT + XBOX_ACI_REG_CR, XBOX_ACI_CR_RESET );
+	model_write8( m, XBOX_ACI_BOX_SPDIF + XBOX_ACI_REG_CR, XBOX_ACI_CR_RESET );
+}
+
+static void test_reset_engines( void )
+{
+	const xbox_aci_mmio_t io0 = { model_read8, model_write8, model_stall, NULL };
+	xbox_aci_mmio_t io = io0;
+	model_t m;
+	int cycle, i;
+
+	io.ctx = &m;
+
+	/* the model sees the bug: nxdk's sequence on a playing engine wedges it */
+	model_init( &m, 1, 3, 2 );
+	nxdk_reset( &m );
+	CHECK( m.box[0].wedged && m.box[1].wedged );
+
+	/* boot: nothing has run, both halted - reset straight away */
+	model_init( &m, 0, 0, 2 );
+	CHECK( xbox_aci_reset_engines( &io, 50000, 10 ) == 0 );
+	CHECK( !m.box[0].wedged && !m.box[1].wedged && m.box[0].resets == 1 && m.box[1].resets == 1 );
+
+	/* 50 open/close cycles, each closing on engines still playing, with
+	   halt and RR-clear delays from none to longer than a poll */
+	for( cycle = 0; cycle < 50; cycle++ )
+	{
+		model_init( &m, 1, cycle % 7, cycle % 5 );
+		CHECK( xbox_aci_reset_engines( &io, 50000, 10 ) == 0 );
+		for( i = 0; i < 2; i++ )
+		{
+			CHECK( !m.box[i].wedged );
+			CHECK( m.box[i].resets == 1 && m.box[i].order == 12 ); /* paused, then reset */
+			CHECK( !m.box[i].rr );
+		}
+		/* the next open plays: CR = RUN */
+		model_write8( &m, XBOX_ACI_BOX_PCM_OUT + XBOX_ACI_REG_CR, 0x1d );
+		CHECK( m.box[0].running && !m.box[0].wedged );
+	}
+
+	/* PCM out never halts: it is left un-reset (reported), S/PDIF is
+	   reset, and the wait is bounded */
+	model_init( &m, 1, -1, 1 );
+	m.box[1].halt_after = 2;
+	CHECK( xbox_aci_reset_engines( &io, 50000, 10 ) == 1u );
+	CHECK( !m.box[0].wedged && m.box[0].resets == 0 && m.box[1].resets == 1 && !m.box[1].wedged );
+	CHECK( m.stalled_us <= 50000 + 10 + 100 );
+
+	/* RR never clears on S/PDIF: reported, bounded */
+	model_init( &m, 1, 1, -1 );
+	m.box[0].rr_after = 0;
+	CHECK( xbox_aci_reset_engines( &io, 50000, 10 ) == 2u );
+	CHECK( m.stalled_us <= 2 * ( 50000 + 10 ) + 100 );
+
+	/* a zero poll interval is taken as 1 us: still bounded */
+	model_init( &m, 1, -1, -1 );
+	CHECK( xbox_aci_reset_engines( &io, 100, 0 ) == 3u );
+	CHECK( m.stalled_us <= 2 * 101 );
+}
+
+/* The rings (#173, Codex review): XAudioInit may zero the descriptor
+   lists and clear SR only once both engines have halted - a running
+   engine fetches its ring. clear_rings records whether it ran while an
+   engine could still fetch. */
+typedef struct
+{
+	model_t *m;
+	int calls, unsafe;
+} rings_t;
+
+static void model_clear_rings( void *ctx )
+{
+	rings_t *r = ctx;
+	int i;
+
+	r->calls++;
+	for( i = 0; i < 2; i++ )
+		if( r->m->box[i].running || !r->m->box[i].dch || r->m->box[i].wedged )
+			r->unsafe++;
+}
+
+/* nxdk's XAudioInit order: the rings first, then the reset */
+static void nxdk_prepare( model_t *m, rings_t *r )
+{
+	model_clear_rings( r );
+	nxdk_reset( m );
+	(void)m;
+}
+
+static void test_prepare( void )
+{
+	const xbox_aci_mmio_t io0 = { model_read8, model_write8, model_stall, NULL };
+	xbox_aci_mmio_t io = io0;
+	model_t m;
+	rings_t r;
+	int cycle;
+
+	io.ctx = &m;
+
+	/* the old order on a playing engine writes the rings under it */
+	model_init( &m, 1, 3, 2 );
+	memset( &r, 0, sizeof( r ));
+	r.m = &m;
+	nxdk_prepare( &m, &r );
+	CHECK( r.unsafe > 0 );
+
+	/* 50 reopens on playing engines: the rings are written once, after
+	   both halted and were reset */
+	for( cycle = 0; cycle < 50; cycle++ )
+	{
+		model_init( &m, 1, cycle % 7, cycle % 5 );
+		memset( &r, 0, sizeof( r ));
+		r.m = &m;
+		CHECK( xbox_aci_prepare( &io, model_clear_rings, &r, 50000, 10 ) == 0 );
+		CHECK( r.calls == 1 && r.unsafe == 0 );
+		CHECK( !m.box[0].wedged && !m.box[1].wedged );
+	}
+
+	/* an engine that never halts: the rings are not touched at all, and
+	   the failure is returned */
+	model_init( &m, 1, -1, 1 );
+	m.box[1].halt_after = 1;
+	memset( &r, 0, sizeof( r ));
+	r.m = &m;
+	CHECK( xbox_aci_prepare( &io, model_clear_rings, &r, 50000, 10 ) == 1u );
+	CHECK( r.calls == 0 );
+	model_init( &m, 1, 1, -1 ); /* RR never clears */
+	memset( &r, 0, sizeof( r ));
+	r.m = &m;
+	CHECK( xbox_aci_prepare( &io, model_clear_rings, &r, 50000, 10 ) != 0 );
+	CHECK( r.calls == 0 );
+}
+
 int main( void )
 {
 	test_finished();
 	test_account();
 	test_watchdog();
 	test_pipeline();
+	test_reset_engines();
+	test_prepare();
 
 	if( failures )
 	{

@@ -316,6 +316,24 @@ xbox_snd_clock() {
 }
 run_test xbox_snd_clock xbox_snd_clock
 
+# tools/host-tests/xbox_snd_rate_cfg_host_test.c, header (divergence #173):
+# r3d_snd_rate read from userconfig.d at S_Init, against a model of the
+# real config-exec order (exec at the front, waits, the map's load).
+xbox_snd_rate_cfg() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_snd_rate_cfg_host_test.c -o "$OUT/xbox_snd_rate_cfg_test" && "$OUT/xbox_snd_rate_cfg_test"
+}
+run_test xbox_snd_rate_cfg xbox_snd_rate_cfg
+
+# tools/host-tests/xbox_snd_device_host_test.c, header (divergence #173):
+# the sound subsystem torn down exactly once when a rate switch loses the
+# device, and sound calls afterwards no-ops.
+xbox_snd_device() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_snd_device_host_test.c -o "$OUT/xbox_snd_device_test" && "$OUT/xbox_snd_device_test"
+}
+run_test xbox_snd_device xbox_snd_device
+
 printf_test() {
 	gcc $HOST_CFLAGS -Wall -Wno-format -fstack-protector-all \
 		-Dvsnprintf=xb_vsnprintf -Dsnprintf=xb_snprintf -Dvsprintf=xb_vsprintf \

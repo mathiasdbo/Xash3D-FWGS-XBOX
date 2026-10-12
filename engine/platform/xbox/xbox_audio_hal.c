@@ -152,10 +152,55 @@ static KTIMER aci_close_timer;
 static KDPC aci_close_dpc;
 static bool aci_close_armed;
 
+// #173: the codec's cold reset has been done (only the first XAudioInit
+// does one); and re-initialisations that found an engine that would not
+// halt (it is then left un-reset)
+static bool aci_codec_up;
+// #173: the last XAudioInit found an engine that would not halt; the
+// hardware is left alone until the next one
+static volatile bool aci_failed;
+
+// zeroes both descriptor lists (no samples), for xbox_aci_prepare
+static void aci_clear_rings( void *ctx )
+{
+	AC97_DEVICE *dev = ctx;
+	unsigned int i;
+
+	for( i = 0; i < 32; i++ )
+	{
+		dev->pcmSpdifDescriptor[i].bufferStartAddress = 0;
+		dev->pcmSpdifDescriptor[i].bufferLengthInSamples = 0;
+		dev->pcmSpdifDescriptor[i].bufferControl = 0;
+		dev->pcmOutDescriptor[i].bufferStartAddress = 0;
+		dev->pcmOutDescriptor[i].bufferLengthInSamples = 0;
+		dev->pcmOutDescriptor[i].bufferControl = 0;
+	}
+}
+static volatile uint32_t aci_stat_reset_stuck;
+
 static inline volatile uint8_t *aci_regs( void )
 {
 	return (volatile uint8_t *)ac97Device.mmio;
 }
+
+static uint8_t aci_mmio_read8( void *ctx, unsigned offset )
+{
+	(void)ctx;
+	return aci_regs()[offset];
+}
+
+static void aci_mmio_write8( void *ctx, unsigned offset, uint8_t value )
+{
+	(void)ctx;
+	aci_regs()[offset] = value;
+}
+
+static void aci_mmio_stall( void *ctx, unsigned us )
+{
+	(void)ctx;
+	KeStallExecutionProcessor( us );
+}
+
 
 // The accounting. Integer only: a DPC must not touch the FPU without
 // saving its state.
@@ -169,6 +214,9 @@ static void NTAPI aci_dpc_routine( PKDPC Dpc, PVOID DeferredContext, PVOID Syste
 	int i;
 
 	(void)Dpc; (void)DeferredContext; (void)SystemArgument1; (void)SystemArgument2;
+
+	if( aci_failed )
+		return; // #173: no accounting or restarts on engines left alone
 
 	aci_stat_dpcs++;
 
@@ -296,7 +344,6 @@ void XAudioInit( int sampleSizeInBits, int numChannels, XAudioCallback callback,
 	volatile unsigned char *pb;
 	KIRQL irql;
 	ULONG vector;
-	unsigned int i;
 
 	// a re-initialisation: no interrupt or DPC of the previous one may run
 	// against the state reset below
@@ -330,51 +377,33 @@ void XAudioInit( int sampleSizeInBits, int numChannels, XAudioCallback callback,
 
 	pb = (unsigned char *)pac97device->mmio;
 
-	// initialise descriptors to all zero (no samples)
-	for( i = 0; i < 32; i++ )
+	// perform cold reset - once (#173): a re-initialisation leaves the
+	// codec link, already up, alone and only resets the bus masters
+	if( !aci_codec_up )
 	{
-		pac97device->pcmSpdifDescriptor[i].bufferStartAddress = 0;
-		pac97device->pcmSpdifDescriptor[i].bufferLengthInSamples = 0;
-		pac97device->pcmSpdifDescriptor[i].bufferControl = 0;
-		pac97device->pcmOutDescriptor[i].bufferStartAddress = 0;
-		pac97device->pcmOutDescriptor[i].bufferLengthInSamples = 0;
-		pac97device->pcmOutDescriptor[i].bufferControl = 0;
+		pac97device->mmio[0x12C >> 2] &= ~2;
+		{
+			LARGE_INTEGER interval;
+			interval.QuadPart = -10;
+			KeDelayExecutionThread( KernelMode, FALSE, &interval );
+		}
+		pac97device->mmio[0x12C >> 2] |= 2;
+
+		// wait until the chip is finished resetting...
+		while( !( pac97device->mmio[0x130 >> 2] & 0x100 ))
+			;
+		aci_codec_up = true;
 	}
 
-	// perform cold reset
-	pac97device->mmio[0x12C >> 2] &= ~2;
+	// halt and reset both bus masters, and only then zero their
+	// descriptor lists and clear their status (#173, xbox_aci_prepare):
+	// on a reopen an engine can still be playing, and it reads its ring.
+	// nxdk zeroed the rings and wrote RR straight away.
 	{
-		LARGE_INTEGER interval;
-		interval.QuadPart = -10;
-		KeDelayExecutionThread( KernelMode, FALSE, &interval );
+		const xbox_aci_mmio_t io = { aci_mmio_read8, aci_mmio_write8, aci_mmio_stall, NULL };
+
+		aci_failed = xbox_aci_prepare( &io, aci_clear_rings, pac97device, 50000, 10 ) != 0;
 	}
-	pac97device->mmio[0x12C >> 2] |= 2;
-
-	// wait until the chip is finished resetting...
-	while( !( pac97device->mmio[0x130 >> 2] & 0x100 ))
-		;
-
-	// reset bus master registers for analog output
-	pb[0x11B] = ( 1 << 4 ) | ( 1 << 3 ) | ( 1 << 2 ) | ( 1 << 1 );
-	while( pb[0x11B] & ( 1 << 1 ))
-		;
-
-	// reset bus master registers for digital output
-	pb[0x17B] = ( 1 << 4 ) | ( 1 << 3 ) | ( 1 << 2 ) | ( 1 << 1 );
-	while( pb[0x17B] & ( 1 << 1 ))
-		;
-
-	// clear all interrupts
-	pb[0x116] = 0xFF;
-	pb[0x176] = 0xFF;
-
-	// tell the audio chip where it should look for the descriptors
-	pac97device->mmio[0x100 >> 2] = 0; // no PCM input
-	pac97device->mmio[0x110 >> 2] = MmGetPhysicalAddress( (void *)&pac97device->pcmOutDescriptor[0] );
-	pac97device->mmio[0x170 >> 2] = MmGetPhysicalAddress( (void *)&pac97device->pcmSpdifDescriptor[0] );
-
-	// default to being silent...
-	XAudioPause();
 
 	// reset buffer status
 	aci_submitted = 0;
@@ -387,20 +416,46 @@ void XAudioInit( int sampleSizeInBits, int numChannels, XAudioCallback callback,
 	// device plays into its work buffer): no interval to close (#173)
 	aci_thr_pending = false;
 
-	// register our ISR
-	vector = HalGetInterruptVector( AUDIO_IRQ, &irql );
-
+	// the DPC object (the close timer and the watchdog's kicks queue it)
 	KeInitializeDpc( &aci_dpc, aci_dpc_routine, NULL );
-	KeInitializeInterrupt( &aci_interrupt, aci_isr, NULL, vector, irql, LevelSensitive, FALSE );
 	aci_initialized = true;
 
+	if( aci_failed )
+	{
+		// an engine would not halt: its ring and registers are left alone,
+		// nothing is started and no interrupt connected; XAudioProvideSamples,
+		// XAudioPlay/Pause and the DPC do nothing, and SNDDMA_Init fails
+		// the open (XAudioR3D_InitFailed). The callback stays registered
+		// so XAudioR3D_BeginClose can wake SDL's thread for its close.
+		aci_stat_reset_stuck++;
+		return;
+	}
+
+	// tell the audio chip where it should look for the descriptors
+	pac97device->mmio[0x100 >> 2] = 0; // no PCM input
+	pac97device->mmio[0x110 >> 2] = MmGetPhysicalAddress( (void *)&pac97device->pcmOutDescriptor[0] );
+	pac97device->mmio[0x170 >> 2] = MmGetPhysicalAddress( (void *)&pac97device->pcmSpdifDescriptor[0] );
+
+	// default to being silent...
+	XAudioPause();
+
+	// register our ISR
+	vector = HalGetInterruptVector( AUDIO_IRQ, &irql );
+	KeInitializeInterrupt( &aci_interrupt, aci_isr, NULL, vector, irql, LevelSensitive, FALSE );
 	aci_connected = KeConnectInterrupt( &aci_interrupt ) ? true : false;
+}
+
+int XAudioR3D_InitFailed( void )
+{
+	return aci_failed;
 }
 
 // tell the chip it is OK to play...
 void XAudioPlay( void )
 {
 	volatile unsigned char *pb = aci_regs();
+	if( aci_failed )
+		return; // #173: an engine that would not halt is not started
 	pb[0x11B] = ACI_CR_RUN; // PCM out - run, allow interrupts
 	pb[0x17B] = ACI_CR_RUN; // S/PDIF - run, allow interrupts
 }
@@ -409,6 +464,8 @@ void XAudioPlay( void )
 void XAudioPause( void )
 {
 	volatile unsigned char *pb = aci_regs();
+	if( aci_failed )
+		return;
 	pb[0x11B] = ACI_CR_STOP; // PCM out - pause, allow interrupts
 	pb[0x17B] = ACI_CR_STOP; // S/PDIF - pause, allow interrupts
 }
@@ -424,6 +481,10 @@ void XAudioProvideSamples( unsigned char *buffer, unsigned short bufferLength, i
 	const unsigned int wordCount = bufferLength / 2;
 	unsigned int idx;
 	KIRQL old_irql;
+
+	// #173: an init that could not halt an engine leaves its ring alone
+	if( aci_failed )
+		return;
 
 	// #173: closes the audio thread's interval opened by its callback
 	if( aci_thr_pending )
@@ -537,6 +598,7 @@ void XAudioR3D_GetStatus( xbox_audio_hal_status_t *out )
 	out->drains = aci_stat_drains;
 	out->kicks = aci_stat_kicks;
 	out->restarts = aci_stat_restarts;
+	out->reset_stuck = aci_stat_reset_stuck;
 
 	for( i = 0; i < 2; i++ )
 	{

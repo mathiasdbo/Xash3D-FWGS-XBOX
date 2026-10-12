@@ -143,6 +143,18 @@ qboolean SNDDMA_Init( void )
 		return false;
 	}
 
+#if XASH_XBOX
+	// #173: the AC97 driver found a bus master that would not halt and
+	// left the hardware alone; SDL's thread waits on a buffer that will
+	// never complete, so wake it for the close and fail the open
+	if( XAudioR3D_InitFailed( ))
+	{
+		Con_Printf( S_ERROR "Audio: an AC97 DMA engine would not halt for its reset\n" );
+		XAudioR3D_BeginClose();
+		goto fail;
+	}
+#endif
+
 	if( obtained.format != AUDIO_S16SYS )
 	{
 		Con_Printf( "SDL audio format %d unsupported.\n", obtained.format );

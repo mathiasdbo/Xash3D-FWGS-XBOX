@@ -23,6 +23,8 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_frametime.h" // the mixer's CPU spans, docs/r3d/divergences.md #141
 #include "platform/xbox/xbox_audio_hal.h" // XAudioR3D_BeginClose, #173
 #include "platform/xbox/xbox_snd_clock.h" // S_GetSoundtime's rebasable state, #173
+#include "platform/xbox/xbox_snd_device.h" // the teardown after a lost device, #173
+#include "platform/xbox/xbox_snd_rate_cfg.h" // r3d_snd_rate read from the boot configs, #173
 #endif
 
 // structure used for fading in and out client sound volume.
@@ -1641,7 +1643,14 @@ runs at r3d_snd_rate instead (48000 by default; 44100 is upstream's rate,
 kept for the A/B). The cvar is read at S_Init, and a change (a config,
 the console, a bind) reopens the device at the new rate here: config.cfg
 and userconfig.d run after S_Init, so a reopen is the only way a cfg can
-choose the rate. The DMA clock is rebased, not restarted: the time
+choose the rate. The switch is latched once the game first reaches a map
+(cls.state ca_active): until then - the boot's configs - it reopens the
+device; afterwards a change only says it applies at the next boot. A
+live switch in play left the console's PCM DMA dead for the rest of the
+session (recorder session ebbee2dd; the HAL now halts the bus masters
+before resetting them, xbox_aci_reset_engines, but one failure mode of a
+live reopen in a game is enough), and an A/B by two boots measures the
+same thing. The DMA clock is rebased, not restarted: the time
 played so far is read just before the old device closes, converted to
 the new rate (the same instant in seconds), and the new device is set to
 play from that time's place in its ring (xbox_snd_clock.h), so soundtime
@@ -1662,12 +1671,52 @@ at exit.
 ============
 */
 int r3d_snd_dma_speed = SOUND_48k;
-static CVAR_DEFINE_AUTO( r3d_snd_rate, "48000", 0, "mixer output rate on the Xbox: 48000 (the AC97's, passed through) or 44100 (upstream's, converted by SDL) (docs/r3d/divergences.md #173)" );
+static CVAR_DEFINE_AUTO( r3d_snd_rate, "48000", 0, "mixer output rate on the Xbox, set at boot (applies until the first map is reached): 48000 (the AC97's, passed through) or 44100 (upstream's, converted by SDL) (docs/r3d/divergences.md #173)" );
 
 static qboolean S_R3D_ValidRate( int rate )
 {
 	return rate == SOUND_44k || rate == SOUND_48k;
 }
+
+/* The boot configs' r3d_snd_rate, read before the device opens: they run
+   only after S_Init, and a userconfig.d file can run long after the first
+   map (xbox_snd_rate_cfg.h). The same files in the same order as
+   Cmd_Userconfigd_f (engine/common/cmd.c:1376-1382), the last setting
+   winning. */
+static void S_R3D_ReadBootRate( void )
+{
+	search_t *t = FS_Search( "userconfig.d/*.cfg", true, false );
+	int i, rate = 0, found = 0;
+
+	if( !t )
+		return;
+	for( i = 0; i < t->numfilenames; i++ )
+	{
+		fs_offset_t len = 0;
+		byte *data = FS_LoadFile( t->filenames[i], &len, false );
+		char *text;
+
+		if( !data )
+			continue;
+		text = Mem_Malloc( host.mempool, (size_t)len + 1 );
+		memcpy( text, data, (size_t)len );
+		text[len] = 0;
+		Mem_Free( data );
+		if( Xbox_SndRateCfg_Parse( text, &rate ))
+		{
+			found = 1;
+			Con_Printf( "r3d_snd_rate: %d at boot, from %s\n", rate, t->filenames[i] );
+		}
+		Mem_Free( text );
+	}
+	if( found )
+		Cvar_DirectSetValue( &r3d_snd_rate, (float)rate );
+	Mem_Free( t );
+}
+
+static qboolean s_r3d_device_lost;  // a reopen lost the device: S_Shutdown unwinds the rest
+static qboolean s_r3d_rate_latched; // a map was reached: no more reopens
+static int s_r3d_rate_refused;       // the value last refused, said once
 
 static void S_R3D_ApplyRate( void )
 {
@@ -1676,9 +1725,23 @@ static void S_R3D_ApplyRate( void )
 	char current[MAX_QPATH], loop[MAX_QPATH];
 	int position = 0, played;
 	qboolean music, stream_paused;
+	xbox_audio_hal_status_t hal;
+
+	if( cls.state == ca_active )
+		s_r3d_rate_latched = true;
 
 	if( want == old )
 		return;
+
+	if( s_r3d_rate_latched )
+	{
+		if( want != s_r3d_rate_refused )
+		{
+			Con_Printf( "r3d_snd_rate: %d applies at the next boot (set it in a userconfig.d cfg); mixing at %d Hz\n", want, old );
+			s_r3d_rate_refused = want;
+		}
+		return;
+	}
 
 	if( !S_R3D_ValidRate( want ))
 	{
@@ -1707,7 +1770,17 @@ static void S_R3D_ApplyRate( void )
 		Cvar_DirectSetValue( &r3d_snd_rate, old );
 		if( !SNDDMA_Init( ))
 		{
+			// no device at all: unwind the whole subsystem now, as
+			// S_Shutdown would, and leave the state a failed S_Init
+			// leaves (xbox_snd_device.h)
 			Con_Printf( S_ERROR "r3d_snd_rate: no audio device at %d Hz either, sound is off\n", old );
+			// S_Shutdown's steps guard on snd.initialized (S_FreeSounds,
+			// S_StopAllSounds): they run as for a live subsystem, the
+			// device's calls on the closed device id being no-ops
+			// (SDL_LockAudioDevice ignores an id it does not know)
+			s_r3d_device_lost = true;
+			snd.initialized = true;
+			S_Shutdown();
 			return;
 		}
 	}
@@ -1737,7 +1810,9 @@ static void S_R3D_ApplyRate( void )
 		snd.stream_paused = stream_paused;
 	}
 
-	Con_Printf( "r3d_snd_rate: mixing at %d Hz\n", SOUND_DMA_SPEED );
+	XAudioR3D_GetStatus( &hal );
+	Con_Printf( "r3d_snd_rate: mixing at %d Hz%s\n", SOUND_DMA_SPEED,
+		hal.reset_stuck ? " - WARNING: an AC97 engine would not halt for its reset" : "" );
 }
 #endif
 
@@ -2177,6 +2252,7 @@ qboolean S_Init( void )
 #if XASH_XBOX
 	// #173: the rate the device opens at; a later change reopens it
 	Cvar_RegisterVariable( &r3d_snd_rate );
+	S_R3D_ReadBootRate();
 	r3d_snd_dma_speed = S_R3D_ValidRate( (int)r3d_snd_rate.value ) ? (int)r3d_snd_rate.value : SOUND_48k;
 #endif
 	if( !SNDDMA_Init( ))
@@ -2208,7 +2284,12 @@ S_Shutdown
 */
 void S_Shutdown( void )
 {
+#if XASH_XBOX
+	// #173: a reopen that lost its device unwinds through here too
+	if( !Xbox_SndShutdown_Runs( snd.initialized, s_r3d_device_lost )) return;
+#else
 	if( !snd.initialized ) return;
+#endif
 
 	Cmd_RemoveCommand( "play" );
 	Cmd_RemoveCommand( "playvol" );
@@ -2240,6 +2321,18 @@ void S_Shutdown( void )
 	VOX_Shutdown ();
 	SX_Free ();
 
+#if XASH_XBOX
+	if( Xbox_SndShutdown_ClosesDevice( s_r3d_device_lost ))
+#endif
 	SNDDMA_Shutdown ();
 	Mem_FreePool( &sndpool );
+#if XASH_XBOX
+	if( s_r3d_device_lost )
+	{
+		// SNDDMA_Shutdown, skipped, would have cleared it: a later
+		// S_Shutdown returns at once and nothing is freed twice
+		snd.initialized = false;
+		s_r3d_device_lost = false;
+	}
+#endif
 }

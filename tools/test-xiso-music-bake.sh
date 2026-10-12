@@ -9,7 +9,9 @@
 # disc's .sweep-xiso/hl/valve, whose media/ must hold the retail mp3s the
 # bake was made from. A 48 kHz bake (--music-rate 48000, #173: files
 # <Track>.48k.xwav named by its manifest's "# file" line) runs the same
-# cases, plus one with that line removed. Run in MSYS2 bash, the shell xbox-xiso.sh is
+# cases, plus one with that line removed; with SOURCE_RATE_BAKE=<dir of
+# the 44.1 kHz bake> also one with that bake's real file under the 48 kHz
+# name. Run in MSYS2 bash, the shell xbox-xiso.sh is
 # documented for (docs/r3d/lessons.md: a pass under another shell is not
 # a pass). Exit 0 iff every case did what it should.
 R="$(cd "$(dirname "$0")/.." && pwd)"
@@ -64,6 +66,19 @@ expect 1 "an r3dm chunk size the engine refuses" "the engine plays only 8192" va
 
 mkdir -p "$T/nomanifest/media"
 expect 1 "no manifest" "has no music_manifest.txt" validate_music_bake "$T/nomanifest" "$GD"
+
+# a file whose sample rate is not the one its name promises (#173): a
+# source-rate (44.1 kHz) track renamed to the 48 kHz name, or the reverse
+cp -r "$BAKE" "$T/rate"; f=$(ls "$T"/rate/media/*.xwav | head -1); o=$(head -c 512 "$f" | grep -obUa 'fmt ' | head -1 | cut -d: -f1)
+if [ "$SUFFIX" = .xwav ]; then printf '\x80\xbb\x00\x00' > "$T/rate.bin"; else printf '\x44\xac\x00\x00' > "$T/rate.bin"; fi
+dd if="$T/rate.bin" of="$f" bs=1 seek=$((o + 8 + 4)) conv=notrunc 2>/dev/null
+expect 1 "a file whose fmt rate is not its name's" "sample rate" validate_music_bake "$T/rate" "$GD"
+if [ -n "${SOURCE_RATE_BAKE:-}" ] && [ "$SUFFIX" != .xwav ]; then
+	# the case as it would happen: the source-rate bake's real file under the 48 kHz name
+	cp -r "$BAKE" "$T/renamed"; f=$(ls "$T"/renamed/media/*"$SUFFIX" | head -1); n=$(basename "$f" "$SUFFIX")
+	cp "$SOURCE_RATE_BAKE/media/$n.xwav" "$f"
+	expect 1 "a source-rate $n.xwav renamed to $n$SUFFIX" "sample rate 44100 Hz" validate_music_bake "$T/renamed" "$GD"
+fi
 
 if [ "$SUFFIX" != .xwav ]; then
 	cp -r "$BAKE" "$T/nofile"; sed -i '/^# file /d' "$T/nofile/music_manifest.txt"
