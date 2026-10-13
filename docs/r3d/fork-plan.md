@@ -10307,19 +10307,48 @@ Console figures come from the #193 route recording (`route-pr193`). Sound work w
      - lip sync, read from the stream window: the window holds exactly the samples being mixed, so `SND_MoveMouth8/16` stay exact.
    - **Optional follow-up:** once speech no longer sits in RAM, option (d) of the survey (voices at 48 kHz 16-bit) costs only disc (about +195 MiB) and read rate (about 96 KiB/s per voice). It still needs `S_LoadSound`'s 44.1 kHz clamp lifted.
    - **Disc builds** seek slower than the HDD, so tune the read-ahead size there.
-5. **SDL against OpenAL on the MCPX APU** (owner direction 2026-10-10: keep both, selectable on one build, measured against each other on Black Mesa Inbound). Through the owner's nxdk fork, `nxdk-ex`, whose OpenAL drives the real VP, the GP and the AC97, verified on a retail console. Its streaming landed 2026-10-10; it already has queued buffers, live pitch and gain, direct left/right gains, WAV cue loops, offsets and 64 voices. It runs unchanged on our AC97 HAL.
-   - **Step 5a, OpenAL replaces only the output:** Xash still mixes, and the mixed buffer streams through one source; selected at startup with `-sndbackend sdl|al`. About 300-400 engine lines and nothing new in nxdk-ex. It measures the output path, with the new audio-thread counters (#173) on both backends.
-   - **Step 5b, channels on APU voices:** a hybrid at `S_PaintChannels` (upstream's `pfnS_PaintChannels` seam). Sentences, raw and music streams, and channels beyond 64 stay in the CPU mix and leave through 5a's source. More than 1000 lines, and it saves the mix itself (`k_snd_mix`).
-     - **Room effects:** run Xash's own `s_dsp.c` over the APU's mix in nxdk-ex's output (pump) thread, before the AC97. That needs an output hook in nxdk-ex. It is exact to the reference and costs only `k_snd_dsp`. Porting it to the GP DSP (DSP56300 assembly) only if that cost matters; a generic EFX or I3DL2 reverb is not Half-Life's sound.
-     - **Lip sync:** the CPU no longer sees the samples, so a per-file loudness envelope (about 1 byte per 10 ms, built at bake time or when the file opens) replaces reading the mixed samples. That is a small divergence, since upstream's own result depends on frame timing.
-     - **Requests for nxdk-ex:**
-       - pump-thread cycle statistics;
-       - releasing a loop on a playing voice;
-       - `alBufferDataStatic`;
-       - a lower pitch floor;
-       - the output hook;
-       - an updated `lib/openal/README.md`.
-   - **Estimated saving:** 0.35-0.5 ms a frame for 5b, before #171-#173. Hardware HRTF and 5.1 come later.
+5. **SDL against OpenAL on the MCPX APU** (owner direction 2026-10-10: keep both, selectable on one build, measured against each other on Black Mesa Inbound). This goes through the owner's nxdk fork, `nxdk-ex`, whose OpenAL drives the real VP, the GP and the AC97, verified on a retail console. It runs unchanged on our AC97 HAL.
+   - **nxdk-ex now provides** (as of 2026-10-13, nxdk-ex #33-#41; every request from this port is delivered):
+     - streaming and queued buffers;
+     - live pitch and gain, direct left/right gains, WAV cue loops, offsets;
+     - 120 hardware voices, `AL_LOOPING` changed on a playing voice;
+     - HRTF on a console (64 voices);
+     - the GP room reverb `AL_XBOX_reverb` (#37), with its DSP56300 assembler and DMA scratch delay lines;
+     - `alXboxGetStats`: output-thread, voice-tick and AC97 cycles and underruns (#38);
+     - `alXboxOutputCallback`: the final 48 kHz s16 stereo mix, editable in place before the codec (#38);
+     - `alBufferDataStatic`: plays the engine's own memory with no copy, any page layout, 8-bit unsigned included (#39);
+     - word sub-ranges as static ranges, an immediate `AL_STOPPED`, and gapless queued sentences (#39);
+     - Xbox ADPCM decoded by the APU, 64 samples a block, measured (#40);
+     - pitch from 1/256 to 3.82x (#40);
+     - ADPCM streaming queues, so music of any length plays from disk with no CPU decode (#41).
+   - **Order of work** (owner-approved 2026-10-13):
+     1. **Step 5a, OpenAL replaces only the output.** Xash still mixes, and the mixed buffer streams through one source; selected at startup with `-sndbackend sdl|al`. About 300-400 engine lines, nothing new in nxdk-ex. It measures the output path with the #173 audio-thread counters on SDL and `alXboxGetStats` on OpenAL.
+     2. **Step 5b, sounds on APU voices.** A hybrid at `S_PaintChannels` (upstream's `pfnS_PaintChannels` seam):
+        - **effects** from static 8-bit buffers;
+        - **sentences** as queued word ranges;
+        - **music** from the `.xwav` files through an ADPCM streaming queue;
+        - channels beyond the voice budget stay in the CPU mix and leave through 5a's source.
+
+        It saves the mix (`k_snd_mix`) and the music decode (`k_snd_music`).
+        - **Room effects, through the output callback:** Xash's own `s_dsp.c` runs on the CPU over the final mix in nxdk-ex's output thread. That is exact to the reference by definition, and costs about what the room effects cost today (`k_snd_dsp`/`sndx_dsp`, about 0.1 ms a frame on c1a0c). A generic EFX or I3DL2 reverb (including `AL_XBOX_reverb`'s Freeverb) is not Half-Life's sound.
+        - **Lip sync:** the CPU no longer sees the samples, so a per-file loudness envelope (about 1 byte per 10 ms, built at bake time or when the file opens) replaces reading the mixed samples. That is a small divergence, since upstream's own result depends on frame timing.
+        - **Engine side:** delete AL buffers before the sound pool frees their memory, and add a recorder note per voice-budget overflow.
+        - **RAM (owner question 2026-10-13):**
+          - **What it adds:** `alBufferDataStatic` copies each buffer's last partial page plus the silent tail the APU reads past the end, about 4 KiB per sound (4,192 bytes held for a 96 KB buffer in nxdk-ex's console test). That is about 0.7-1 MiB per map for the 180-270 resident sounds, plus nxdk-ex's own voice tables and rings, measured with `alXboxGetHardwareStatus`.
+          - **Why streaming alone does not remove it:** the cost is per resident sound, and most resident sounds are short effects that must stay in RAM (instant start, many at once).
+          - **What offsets it:** dialogue streaming (item 4) frees 0.4-1.2 MiB of resident speech per map, and the 2x transient of each word load. Net is about even.
+          - **Request for nxdk-ex, a caller-provided tail:** a static-buffer option where the application guarantees that the bytes after the data (padding up to the page end, plus the tail) are already silent and readable. The library then maps the pages as they are and copies nothing.
+          - **The engine side of that:** allocate each resident sound with that padding and tail in the sound pool (`S_LoadSound`, Xbox only). The per-sound overhead then drops to near zero, and streaming plus OpenAL is a net RAM gain.
+     3. **Only then, if the about 0.1 ms is worth it: `s_dsp.c` on the GP DSP.** The code is split between the two repositories:
+        - **In nxdk-ex, a general "custom GP program" extension with nothing Half-Life-specific** (a request for nxdk-ex, generalising #37's infrastructure):
+          - load a program;
+          - allocate GP scratch (delay-line) memory;
+          - write parameters into GP X/Y memory at a frame boundary;
+          - a generic per-source effect send (the reverb send generalised).
+        - **In this engine, the Half-Life program itself:** for example `engine/platform/xbox/apu/gp_hldsp.asm` (`s_dsp.c`'s delays, filters and modulation per room type, in DSP56300 assembly) and `gp_hldsp.c` (the `room_type` parameters, uploaded each frame through the extension). It is assembled at build time with nxdk-ex's `dsp56asm.py` and linked in as data.
+        - **Why the split:** `s_dsp.c` comes from Xash3D-FWGS (GPL), so its port stays in our GPL tree, and nxdk-ex should not know Half-Life's room types. The reference to test against is here.
+        - **Exactness:** `s_dsp.c` is 16-bit integer arithmetic and the GP is 24-bit fixed point. A host test runs the program's arithmetic (as #37 did against xemu's interpreter) beside `s_dsp.c` and shows whether the port is bit-exact or only close.
+   - **Estimated saving:** 0.35-0.5 ms a frame for 5b, measured before #171-#173 (music and the 48 kHz path have since taken part of it); the GP port about 0.1 ms more. Hardware HRTF and 5.1 come later.
 
 ## Out of scope
 
