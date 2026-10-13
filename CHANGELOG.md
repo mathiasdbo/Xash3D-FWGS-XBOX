@@ -5,7 +5,7 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
-### Added - Xbox: smoother sound effects as an option (`s_lerping 1`)
+### Added - Xbox: smoother sound effects, on by default (`s_lerping`)
 
 Half-Life's sound effects and voices are recorded at 11 or 22 kHz, and
 since the console mixes at 48 kHz each one is stretched by repeating its
@@ -14,9 +14,9 @@ blend neighbouring samples instead (`s_lerping`) now runs on the console
 without the slow floating-point conversions it would cost there: the
 extra tones drop by 17 to 36 dB on a test tone in an 11 kHz sound (12 to
 33 dB in a 22 kHz one) and the sound's own "staircase" by 5 to 27 dB,
-with no extra memory. It is off by default, as
-upstream has it; a listening test (`docs/r3d/x12-sfx-listening-test.md`)
-and a console recording decide whether the console should turn it on.
+with no extra memory. The console's listening test preferred it, and the
+tram ride measured it at 0.015 to 0.045 ms a frame, so the Xbox turns it
+on by default (upstream keeps it off; `s_lerping 0` restores that).
 `r3d_mixbench` times the mixer on the console.
 
 A survey of every map's sounds showed why the alternative, storing the
