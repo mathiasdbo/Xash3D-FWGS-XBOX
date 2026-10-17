@@ -569,7 +569,7 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 195)
+        self.assertEqual(len(r["counters"]), 196)
         self.assertEqual(r["counters"][20], "span_calls")
         self.assertEqual(len(r["spans"]), 73)
         # Counts after the spans (2026-10-02, R5) are plain counters.
@@ -594,7 +594,7 @@ class Spans(unittest.TestCase):
                                                "music_reads", "music_read_kb", "music_async", "music_waits",
                                                "music_io_kc", "music_read_kc",
                                                "snd_thr_kc", "snd_thr_runs", "snd_bufs", "snd_underruns",
-                                               "snd_dma_kc", "snd_rate"])
+                                               "snd_dma_kc", "snd_rate", "snd_backend"])
         self.assertNotIn("ce_ents", fr.span_names(r))
         self.assertNotIn("pm_sv_cmds", fr.span_names(r))
         self.assertNotIn("snd_loads", fr.span_names(r))
@@ -777,7 +777,7 @@ class Spans(unittest.TestCase):
         # The audio output (#173): 48 kHz, a callback and a buffer a
         # frame, no underrun, the audio thread 0.5 ms a frame.
         self.assertIn("audio output per in-play frame", text)
-        self.assertRegex(text, r"\nc1a0c +48000 +1\.000 +1\.000 +0 +0\.500 +0\.000 ")
+        self.assertRegex(text, r"\nc1a0c +48000 +sdl +1\.000 +1\.000 +0 +0\.500 +0\.000 ")
         page = fr.render_html(self.rec, self.rows, s, ["spans.bin"], source="xemu")
         self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
         self.assertIn('id="spans"', page)
@@ -882,7 +882,7 @@ class Sessions(unittest.TestCase):
         self.assertTrue(s["id"].startswith(s["short"]))
         self.assertEqual(fr.systime_date(s["systime"]).year, 2022)
         self.assertEqual(r["end"], {"tsc": r["end"]["tsc"], "lost": 1, "next": fr.SEG_SIZE})
-        self.assertEqual(len(r["counters"]), 195)            # every segment has its own COUNTERS ...
+        self.assertEqual(len(r["counters"]), 196)            # every segment has its own COUNTERS ...
         self.assertEqual(len(r["spans"]), 73)                # ... and SPANS
         self.assertEqual(self.seg[3]["session"]["reason"], fr.SEG_SIZE)
         self.assertEqual(self.seg[3]["end"]["next"], fr.SEG_SESSION)

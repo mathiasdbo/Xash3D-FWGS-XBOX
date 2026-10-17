@@ -325,6 +325,16 @@ xbox_snd_rate_cfg() {
 }
 run_test xbox_snd_rate_cfg xbox_snd_rate_cfg
 
+# tools/host-tests/xbox_snd_al_queue_host_test.c, header (divergence #178):
+# the OpenAL output's ring bookkeeping against a model of the mixer and a
+# streaming source - every painted frame played once, in order, through
+# ring wraps and starving stalls.
+xbox_snd_al_queue() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_snd_al_queue_host_test.c -o "$OUT/xbox_snd_al_queue_test" && "$OUT/xbox_snd_al_queue_test"
+}
+run_test xbox_snd_al_queue xbox_snd_al_queue
+
 # tools/host-tests/xbox_snd_device_host_test.c, header (divergence #173):
 # the sound subsystem torn down exactly once when a rate switch loses the
 # device, and sound calls afterwards no-ops.

@@ -165,6 +165,7 @@ void Xbox_FT_ClEnts_CloseFrame( void )
    first frame after it reads a baseline instead of everything since
    boot. */
 #include "xbox_audio_hal.h"
+#include "xbox_snd_al.h" /* the output's counters, SDL's or OpenAL's (#178) */
 extern int r3d_snd_dma_speed; /* engine/client/sound/s_main.c, #173 */
 uint64_t xbox_ft_snd_dma_ticks;
 static xbox_audio_thread_stats_t snd_prev;
@@ -177,8 +178,9 @@ void Xbox_FT_Sound_CloseFrame( void )
 	xbox_ft_work.c[XBOX_FT_W_SND_DMA_KC] = xbox_ft_span_kcyc( xbox_ft_snd_dma_ticks );
 	xbox_ft_snd_dma_ticks = 0;
 	xbox_ft_work.c[XBOX_FT_W_SND_RATE] = (uint32_t)r3d_snd_dma_speed;
+	xbox_ft_work.c[XBOX_FT_W_SND_BACKEND] = Xbox_SndAL_Active() ? 1u : 0u;
 
-	XAudioR3D_ThreadStats( &now );
+	Xbox_Snd_ThreadStats( &now );
 	if( snd_prev_valid )
 	{
 		/* unsigned differences: right across a wrap of the totals */
@@ -191,8 +193,8 @@ void Xbox_FT_Sound_CloseFrame( void )
 	snd_prev_valid = true;
 }
 
-/* 1024 frames x 812 bytes (32 + 195 work counters: 20 counts, span_calls,
-   73 spans and 101 later counts) = 812 KiB ring, plus the per-map
+/* 1024 frames x 816 bytes (32 + 196 work counters: 20 counts, span_calls,
+   73 spans and 102 later counts) = 816 KiB ring, plus the per-map
    histogram (4 KiB), a 101.5 KiB encode buffer (128 frames), 4 KiB of
    notes and the server classname table (~30 KiB,
    xbox_frametime_svgame.c): ~950 KiB,

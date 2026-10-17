@@ -25,6 +25,7 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_snd_clock.h" // S_GetSoundtime's rebasable state, #173
 #include "platform/xbox/xbox_snd_device.h" // the teardown after a lost device, #173
 #include "platform/xbox/xbox_snd_rate_cfg.h" // r3d_snd_rate read from the boot configs, #173
+#include "platform/xbox/xbox_snd_al.h" // the output, SDL or OpenAL, chosen at boot, #178
 #endif
 
 // structure used for fading in and out client sound volume.
@@ -1454,6 +1455,9 @@ static void S_ClearBuffer( void )
 
 	if( snd.buffer )
 		memset( snd.buffer, 0, snd.samples * 2 );
+#if XASH_XBOX
+	Xbox_SndAL_Clear(); // #178: OpenAL plays copies of the ring, dropped too
+#endif
 
 	SNDDMA_Submit ();
 
@@ -1685,15 +1689,20 @@ static qboolean S_R3D_ValidRate( int rate )
 	return rate == SOUND_44k || rate == SOUND_48k;
 }
 
-/* The boot configs' r3d_snd_rate, read before the device opens: they run
-   only after S_Init, and a userconfig.d file can run long after the first
-   map (xbox_snd_rate_cfg.h). The same files in the same order as
-   Cmd_Userconfigd_f (engine/common/cmd.c:1376-1382), the last setting
-   winning. */
+/* #178: the output the device opens on, read at boot like r3d_snd_rate;
+   -sndbackend on the command line wins over the configs */
+static CVAR_DEFINE_AUTO( r3d_snd_backend, "sdl", 0, "sound output on the Xbox, set at boot (applies at the next boot): sdl (SDL's audio thread on the AC97) or al (OpenAL on the MCPX APU) (docs/r3d/divergences.md #178)" );
+
+/* The boot configs' r3d_snd_rate and r3d_snd_backend, read before the
+   device opens: they run only after S_Init, and a userconfig.d file can run
+   long after the first map (xbox_snd_rate_cfg.h). The same files in the
+   same order as Cmd_Userconfigd_f (engine/common/cmd.c:1376-1382), the last
+   setting winning. */
 static void S_R3D_ReadBootRate( void )
 {
 	search_t *t = FS_Search( "userconfig.d/*.cfg", true, false );
 	int i, rate = 0, found = 0;
+	char backend[16] = "";
 
 	if( !t )
 		return;
@@ -1714,10 +1723,14 @@ static void S_R3D_ReadBootRate( void )
 			found = 1;
 			Con_Printf( "r3d_snd_rate: %d at boot, from %s\n", rate, t->filenames[i] );
 		}
+		if( Xbox_SndCfg_Parse( text, "r3d_snd_backend", backend, sizeof( backend )))
+			Con_Printf( "r3d_snd_backend: %s at boot, from %s\n", backend, t->filenames[i] );
 		Mem_Free( text );
 	}
 	if( found )
 		Cvar_DirectSetValue( &r3d_snd_rate, (float)rate );
+	if( backend[0] )
+		Cvar_DirectSet( &r3d_snd_backend, backend );
 	Mem_Free( t );
 }
 
@@ -1740,7 +1753,9 @@ static void S_R3D_ApplyRate( void )
 	if( want == old )
 		return;
 
-	if( s_r3d_rate_latched )
+	// #178: OpenAL opens the APU once per boot (a reopen is unverified on
+	// a console), so its rate is the one the boot configs chose
+	if( s_r3d_rate_latched || Xbox_SndAL_Active( ))
 	{
 		if( want != s_r3d_rate_refused )
 		{
@@ -2259,8 +2274,16 @@ qboolean S_Init( void )
 #if XASH_XBOX
 	// #173: the rate the device opens at; a later change reopens it
 	Cvar_RegisterVariable( &r3d_snd_rate );
+	Cvar_RegisterVariable( &r3d_snd_backend ); // #178
 	S_R3D_ReadBootRate();
 	r3d_snd_dma_speed = S_R3D_ValidRate( (int)r3d_snd_rate.value ) ? (int)r3d_snd_rate.value : SOUND_48k;
+	{
+		string backend;
+
+		if( Sys_GetParmFromCmdLine( "-sndbackend", backend ))
+			Cvar_DirectSet( &r3d_snd_backend, backend );
+		xbox_snd_want_al = !Q_stricmp( r3d_snd_backend.string, "al" );
+	}
 #endif
 	if( !SNDDMA_Init( ))
 	{

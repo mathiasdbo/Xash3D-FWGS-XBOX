@@ -263,6 +263,7 @@ OUR_INCLUDES=(
 	-I "$REPO/3rdparty/opusfile/opusfile/include"    # snd_ogg_opus.c
 	-I "$REPO/3rdparty/vorbis/vorbis-src/include"    # snd_ogg_vorbis.c
 	-I "$REPO/3rdparty/libogg/libogg/include"        # both ogg decoders
+	-I "$REPO/3rdparty/nxdk-ex/lib/openal/include"   # <AL/al.h>: xbox_snd_al.c and the library (#178)
 	-I "$NXDK_DIR/lib/sdl/SDL2/include"   # XASH_SDL=2 means <SDL.h> must resolve
 	-I "$NXDK_DIR/lib/net/lwip/src/include"  # <lwip/sockets.h> etc. -
 	                                          # deps/nxdk/lib/net/Makefile:22

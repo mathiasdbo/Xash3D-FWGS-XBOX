@@ -157,9 +157,12 @@ MUSIC_TIMES = ("music_io_kc", "music_read_kc")
 # The audio output (recorders from 2026-10-11, x9-audio-mix48, divergence
 # #173): SDL's audio thread (callback and, at 44.1 kHz, SDL's conversion)
 # and the main thread's waits on its device lock. Times; snd_rate is the
-# mixer's rate in Hz, a state, not a count.
+# mixer's rate in Hz, a state, not a count. snd_backend (recorders from
+# 2026-10-15, x9-audio-al-output, divergence #178) is the output, also a
+# state: 0 SDL, 1 OpenAL on the APU, whose output thread the snd_thr_*
+# counters then are.
 SND_TIMES = ("snd_thr_kc", "snd_dma_kc")
-SND_LABELS = ("snd_rate",)
+SND_LABELS = ("snd_rate", "snd_backend")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -1936,16 +1939,22 @@ def audio_text(rec, rows):
     if not maps:
         return []
     k = 1e6 / rec["tsc_hz"]
-    lines = ["", "audio output per in-play frame: mixer rate (Hz), audio-thread callbacks and buffers, "
+    lines = ["", "audio output per in-play frame: mixer rate (Hz), the output (sdl, al: OpenAL on the APU, mixed: "
+             "both in one map, -: not recorded), audio-thread callbacks (OpenAL: output passes) and buffers, "
              "underruns over the map; ms: the audio thread, the device lock, k_snd, k_snd_extra, k_snd_mix, "
              "k_snd_dsp, k_snd_out, k_snd_music"]
-    lines.append("%-18s %6s %6s %6s %5s %7s %7s %7s %7s %7s %7s %7s %7s" % (
-        "map", "rate", "calls", "bufs", "under", "thread", "lock", "k_snd", "extra", "mix", "dsp", "out", "music"))
+    lines.append("%-18s %6s %6s %6s %6s %5s %7s %7s %7s %7s %7s %7s %7s %7s" % (
+        "map", "rate", "output", "calls", "bufs", "under", "thread", "lock", "k_snd", "extra", "mix", "dsp", "out", "music"))
     for r in maps:
         a = r["work_avg"]
         sm = r.get("span_ms", {})
-        lines.append("%-18s %6.0f %6.3f %6.3f %5.0f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f" % (
-            r["map"][:18], a.get("snd_rate", 0.0), a.get("snd_thr_runs", 0.0), a.get("snd_bufs", 0.0),
+        if "snd_backend" not in rec["counters"]:
+            out = "-"
+        else:
+            b = a.get("snd_backend", 0.0)
+            out = "sdl" if b == 0 else "al" if b == 1 else "mixed"
+        lines.append("%-18s %6.0f %6s %6.3f %6.3f %5.0f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f" % (
+            r["map"][:18], a.get("snd_rate", 0.0), out, a.get("snd_thr_runs", 0.0), a.get("snd_bufs", 0.0),
             a.get("snd_underruns", 0.0) * r["frames"], a.get("snd_thr_kc", 0.0) * k, a.get("snd_dma_kc", 0.0) * k,
             sm.get("k_snd", 0.0), sm.get("k_snd_extra", 0.0), sm.get("k_snd_mix", 0.0) + sm.get("k_sndx_mix", 0.0),
             sm.get("k_snd_dsp", 0.0) + sm.get("k_sndx_dsp", 0.0), sm.get("k_snd_out", 0.0) + sm.get("k_sndx_out", 0.0),

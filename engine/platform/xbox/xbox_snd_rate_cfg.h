@@ -100,28 +100,29 @@ static inline int Xbox_SndRateCfg_Is( const char *tok, const char *word )
 	return tok[i] == 0;
 }
 
-/* One command [s, end): sets *rate when it is r3d_snd_rate's */
-static inline int Xbox_SndRateCfg_Command( const char *s, const char *end, int *rate )
+/* One command [s, end): copies the value into val when it sets the cvar
+   `name` (lower case) */
+static inline int Xbox_SndCfg_Command( const char *s, const char *end, const char *name, char *val, int size )
 {
-	char tok[64], val[64];
+	char tok[64];
 
 	if( !Xbox_SndRateCfg_Token( &s, end, tok, sizeof( tok )))
 		return 0;
 	if(( Xbox_SndRateCfg_Is( tok, "set" ) || Xbox_SndRateCfg_Is( tok, "seta" ))
 		&& !Xbox_SndRateCfg_Token( &s, end, tok, sizeof( tok )))
 		return 0;
-	if( !Xbox_SndRateCfg_Is( tok, "r3d_snd_rate" ) || !Xbox_SndRateCfg_Token( &s, end, val, sizeof( val )))
+	if( !Xbox_SndRateCfg_Is( tok, name ) || !Xbox_SndRateCfg_Token( &s, end, val, size ))
 		return 0;
-	*rate = atoi( val );
 	return 1;
 }
 
 /* A config file's text (NUL-terminated): returns 1 and the last value it
-   sets r3d_snd_rate to in *rate, or 0 when it does not set it. Commands
-   end at a newline or a ';' outside quotes, as the command buffer splits
-   them (cmd.c, Cbuf_ExecuteCommandsFromBuffer); `//` outside quotes starts
-   a comment to the end of the line. */
-static inline int Xbox_SndRateCfg_Parse( const char *text, int *rate )
+   sets the cvar `name` (lower case) to in val, or 0 when it does not set
+   it. Commands end at a newline or a ';' outside quotes, as the command
+   buffer splits them (cmd.c, Cbuf_ExecuteCommandsFromBuffer); `//` outside
+   quotes starts a comment to the end of the line. r3d_snd_backend
+   (#178) is read the same way as r3d_snd_rate. */
+static inline int Xbox_SndCfg_Parse( const char *text, const char *name, char *val, int size )
 {
 	const char *s = text, *start = text;
 	int quoted = 0, found = 0;
@@ -134,7 +135,7 @@ static inline int Xbox_SndRateCfg_Parse( const char *text, int *rate )
 			quoted = !quoted;
 		if( !c || c == '\n' || ( !quoted && c == ';' ) || ( !quoted && c == '/' && s[1] == '/' ))
 		{
-			found |= Xbox_SndRateCfg_Command( start, s, rate );
+			found |= Xbox_SndCfg_Command( start, s, name, val, size );
 			if( !quoted && c == '/' )
 			{
 				while( *s && *s != '\n' )
@@ -152,6 +153,17 @@ static inline int Xbox_SndRateCfg_Parse( const char *text, int *rate )
 		s++;
 	}
 	return found;
+}
+
+/* r3d_snd_rate's last value in a config file's text, as above */
+static inline int Xbox_SndRateCfg_Parse( const char *text, int *rate )
+{
+	char val[64];
+
+	if( !Xbox_SndCfg_Parse( text, "r3d_snd_rate", val, sizeof( val )))
+		return 0;
+	*rate = atoi( val );
+	return 1;
 }
 
 #endif /* XBOX_SND_RATE_CFG_H */

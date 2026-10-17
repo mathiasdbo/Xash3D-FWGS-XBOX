@@ -497,6 +497,11 @@ enum
 	XBOX_FT_W_SND_UNDERRUNS, /* LVBCI interrupts from the PCM-out engine: it played its last valid buffer out */
 	XBOX_FT_W_SND_DMA_KC,    /* time: SNDDMA_BeginPainting + SNDDMA_Submit on the main thread - the SDL device lock (a wait for the audio thread's callback), inside k_snd/k_snd_extra */
 	XBOX_FT_W_SND_RATE,      /* the mixer's output rate this frame, Hz (r3d_snd_rate: 48000, or 44100 for upstream's) */
+	/* The output that played the frame (2026-10-15, x9-audio-al-output,
+	   divergence #178): with r3d_snd_backend al the counters above are
+	   OpenAL's output thread (Xbox_Snd_ThreadStats), so a session says
+	   which side of an A/B it is, whatever its label claims. */
+	XBOX_FT_W_SND_BACKEND,   /* 0: SDL's audio thread, 1: OpenAL on the APU (r3d_snd_backend; 0 too when OpenAL did not open) */
 	XBOX_FT_W_END
 };
 

@@ -65,3 +65,6 @@
 [submodule "3rdparty/freevgui"]
 	path = 3rdparty/freevgui
 	url = https://github.com/FWGS/freevgui.git
+[submodule "3rdparty/nxdk-ex"]
+	path = 3rdparty/nxdk-ex
+	url = https://github.com/mathiasdbo/nxdk-ex.git

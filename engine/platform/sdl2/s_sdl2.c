@@ -25,6 +25,14 @@ GNU General Public License for more details.
 // recorder (docs/r3d/divergences.md #173)
 #include "platform/xbox/xbox_audio_hal.h"
 #include "platform/xbox/xbox_frametime.h"
+// SDL is one of two outputs chosen at boot (docs/r3d/divergences.md #178):
+// these are its SNDDMA_*, called by xbox_snd_al.c's
+#include "platform/xbox/xbox_snd_al.h"
+#define SNDDMA_Init          SDLash_SNDDMA_Init
+#define SNDDMA_Shutdown      SDLash_SNDDMA_Shutdown
+#define SNDDMA_BeginPainting SDLash_SNDDMA_BeginPainting
+#define SNDDMA_Submit        SDLash_SNDDMA_Submit
+#define SNDDMA_Activate      SDLash_SNDDMA_Activate
 #endif
 
 #define SAMPLE_16BIT_SHIFT 1

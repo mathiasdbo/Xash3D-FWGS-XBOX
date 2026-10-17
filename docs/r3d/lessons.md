@@ -28,6 +28,19 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER count a review round whose reviewer could not read the diff
+
+Round 1 on x9-audio-al-output (2026-10-15), on a freshly installed
+Windows: Codex's sandbox was off (no `[windows] sandbox` in
+`~/.codex/config.toml`; its log said "Windows sandbox selection:
+disabled"), so every read-only git and file command was refused. Codex
+still returned `verdict: approve`, 0 findings, with a summary saying the
+reads were blocked, and `tools/codex-review.sh` printed "clean" and exited
+0. With `sandbox = "unelevated"` the same diff got a high, 0.99-confidence
+finding (a failed `alBufferData` committed as queued). **Read the
+summary of every review round for evidence it inspected the diff; a
+reviewer that could not read the code has failed, not approved.**
+
 ### ALWAYS run a proposed new data format through the loader's conversion path before costing it
 
 X12 step 3's survey (x9-audio-sfx) costed effects baked to 48 kHz by

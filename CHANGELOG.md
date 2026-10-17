@@ -5,6 +5,17 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - Xbox: sound output through OpenAL on the console's audio chip (`r3d_snd_backend`)
+
+The console can now send the engine's sound to the speakers two ways,
+chosen at boot: through SDL's audio thread as before (`r3d_snd_backend sdl`,
+the default), or through OpenAL running on the Xbox's own audio processor
+(`r3d_snd_backend al`, set in a `userconfig.d` cfg, or `-sndbackend al`).
+The sound itself is the same mix either way; this is the first half of
+X12 item 5, built so the two paths can be timed against each other on the
+Black Mesa Inbound route. If OpenAL cannot start, the console falls back to
+SDL. The frame-time recorder's audio counters mean the same on both.
+
 ### Added - Xbox: smoother sound effects, on by default (`s_lerping`)
 
 Half-Life's sound effects and voices are recorded at 11 or 22 kHz, and
