@@ -81,7 +81,9 @@ int Xbox_SndAL_Active( void )
    call by call, one line per window of updates and one at each clear (a
    map change). The console A/B (2026-10-16) found that work at 0.24 ms a
    frame against SDL's 0.006; this splits it. Cycles from rdtsc, always on
-   under OpenAL (a few reads per update), written over FTP-readable FS. */
+   under OpenAL (a few reads per update). A window's line goes to memory;
+   the file is written only at a clear (a map change, inside the load) and at
+   shutdown, so play never waits on the disk. */
 enum
 {
 	ALP_RETIRE,  /* AL_BUFFERS_PROCESSED and the unqueues */
@@ -103,8 +105,13 @@ static struct
 	uint64_t update_total;      /* BeginPainting's retire plus Submit, per update */
 	uint32_t update_max;
 	uint32_t frames;            /* sample frames uploaded */
-	uint32_t window;            /* windows written since the open */
+	uint32_t window;            /* windows closed since the open */
 } s_alp;
+static char s_alp_text[8192]; /* closed windows' lines not yet in the file */
+static size_t s_alp_len;
+static uint32_t s_alp_dropped;  /* windows lost to a full s_alp_text */
+static uint32_t s_alp_failed;   /* writes that could not open the file */
+static qboolean s_alp_started;  /* the file has been created since the open */
 static uint64_t s_alp_begin; /* this update's BeginPainting, for update_total */
 static ALXBOXSTATS s_alp_st0; /* the library's counters at the window's start */
 static uint64_t s_al_last_tick; /* rdtsc of the last alXboxUpdateVoices */
@@ -120,33 +127,70 @@ static void XboxAL_ProfAdd( int phase, uint64_t t0 )
 		s_alp.max[phase] = d > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)d;
 }
 
+/* Appends to the window's line in t (size sz), keeping it terminated */
+static void XboxAL_ProfCat( char *t, size_t sz, size_t *len, const char *fmt, ... ) FORMAT_CHECK( 4 );
+static void XboxAL_ProfCat( char *t, size_t sz, size_t *len, const char *fmt, ... )
+{
+	va_list args;
+	int n;
+
+	if( *len >= sz - 1 )
+		return;
+	va_start( args, fmt );
+	n = Q_vsnprintf( t + *len, sz - *len, fmt, args );
+	va_end( args );
+	*len = ( n < 0 || *len + (size_t)n > sz - 1 ) ? sz - 1 : *len + (size_t)n;
+}
+
+/* The kept lines to sndalprof.txt; on a failed open they stay for the next
+   write, and the file says how many writes failed or windows were lost */
+static void XboxAL_ProfFlush( void )
+{
+	file_t *f;
+
+	if( !s_alp_len && !s_alp_dropped )
+		return;
+	f = FS_Open( "sndalprof.txt", s_alp_started ? "a" : "w", true );
+	if( !f )
+	{
+		s_alp_failed++;
+		return;
+	}
+	if( !s_alp_started )
+		FS_Printf( f, "# us per update (mean), calls per update, longest call us; total = BeginPainting + Submit per update\n" );
+	if( s_alp_failed || s_alp_dropped )
+		FS_Printf( f, "# %u write(s) failed before this one; %u window(s) lost to a full buffer\n", s_alp_failed, s_alp_dropped );
+	FS_Write( f, s_alp_text, s_alp_len );
+	FS_Close( f );
+	s_alp_started = true;
+	s_alp_len = 0;
+	s_alp_failed = s_alp_dropped = 0;
+}
+
 /* One line per window: per update, the mean us of each call kind (733.33
-   MHz), the calls per update, and the longest single call */
-static void XboxAL_ProfWrite( const char *why )
+   MHz), the calls per update, and the longest single call. Every window
+   moves the baselines on, written or not, so each line covers its own. */
+static void XboxAL_ProfWrite( const char *why, qboolean flush )
 {
 	const double us = 1.0 / 733.333;
 	ALXBOXSTATS st;
-	file_t *f;
+	char t[1024];
+	size_t len = 0;
 	int i;
 
-	if( !s_alp.updates )
-		return;
-	f = FS_Open( "sndalprof.txt", s_alp.window ? "a" : "w", true );
-	if( f )
+	if( s_alp.updates )
 	{
-		if( !s_alp.window )
-			FS_Printf( f, "# us per update (mean), calls per update, longest call us; total = BeginPainting + Submit per update\n" );
-		FS_Printf( f, "%s window %u: %u updates, %.0f frames/upload, total %.1f us (max %.1f)",
+		XboxAL_ProfCat( t, sizeof( t ), &len, "%s window %u: %u updates, %.0f frames/upload, total %.1f us (max %.1f)",
 			why, s_alp.window, s_alp.updates,
 			s_alp.calls[ALP_UPLOAD] ? (double)s_alp.frames / s_alp.calls[ALP_UPLOAD] : 0.0,
 			s_alp.update_total * us / s_alp.updates, s_alp.update_max * us );
 		for( i = 0; i < ALP_COUNT; i++ )
-			FS_Printf( f, "; %s %.1f x%.2f max %.1f", s_alp_name[i], s_alp.cycles[i] * us / s_alp.updates,
+			XboxAL_ProfCat( t, sizeof( t ), &len, "; %s %.1f x%.2f max %.1f", s_alp_name[i], s_alp.cycles[i] * us / s_alp.updates,
 				(double)s_alp.calls[i] / s_alp.updates, s_alp.max[i] * us );
 		memset( &st, 0, sizeof( st ));
 		st.size = sizeof( st );
 		alXboxGetStats( &st );
-		FS_Printf( f, "; library update_calls %u update_max %.1f", st.update_calls, st.update_max_cycles * us );
+		XboxAL_ProfCat( t, sizeof( t ), &len, "; library update_calls %u update_max %.1f", st.update_calls, st.update_max_cycles * us );
 		if( st.update_calls > s_alp_st0.update_calls )
 		{
 			// the voice tick per call: the streams brought up to date, the
@@ -154,12 +198,12 @@ static void XboxAL_ProfWrite( const char *why )
 			// voice start or stop, so its share can exceed the tick's)
 			const double n = st.update_calls - s_alp_st0.update_calls;
 
-			FS_Printf( f, " (per call: streams %.1f, voices %.1f, of it the APU service %.1f)",
+			XboxAL_ProfCat( t, sizeof( t ), &len, " (per call: streams %.1f, voices %.1f, of it the APU service %.1f)",
 				( st.update_stream_cycles - s_alp_st0.update_stream_cycles ) * us / n,
 				( st.update_voice_cycles - s_alp_st0.update_voice_cycles ) * us / n,
 				( st.update_service_cycles - s_alp_st0.update_service_cycles ) * us / n );
 		}
-		FS_Printf( f, "\n" );
+		XboxAL_ProfCat( t, sizeof( t ), &len, "\n" );
 		if( st.output_passes > s_alp_st0.output_passes )
 		{
 			// the output thread, per pass: the APU's mix read, its copy to
@@ -171,18 +215,26 @@ static void XboxAL_ProfWrite( const char *why )
 			const double scrub = ( st.output_scrub_cycles - s_alp_st0.output_scrub_cycles ) * us / n;
 			const double total = ( st.output_cycles - s_alp_st0.output_cycles ) * us / n;
 
-			FS_Printf( f, "  thread: %.2f passes/update, per pass %.1f us: fifo %.1f, queue %.1f, scrub %.1f, rest %.1f\n",
+			XboxAL_ProfCat( t, sizeof( t ), &len, "  thread: %.2f passes/update, per pass %.1f us: fifo %.1f, queue %.1f, scrub %.1f, rest %.1f\n",
 				n / s_alp.updates, total, fifo, queue, scrub, total - fifo - queue - scrub );
 		}
 		s_alp_st0 = st;
-		FS_Close( f );
+		if( s_alp_len + len <= sizeof( s_alp_text ))
+		{
+			memcpy( s_alp_text + s_alp_len, t, len );
+			s_alp_len += len;
+		}
+		else s_alp_dropped++;
+
+		memset( s_alp.cycles, 0, sizeof( s_alp.cycles ));
+		memset( s_alp.max, 0, sizeof( s_alp.max ));
+		memset( s_alp.calls, 0, sizeof( s_alp.calls ));
+		s_alp.updates = s_alp.update_max = s_alp.frames = 0;
+		s_alp.update_total = 0;
+		s_alp.window++;
 	}
-	memset( s_alp.cycles, 0, sizeof( s_alp.cycles ));
-	memset( s_alp.max, 0, sizeof( s_alp.max ));
-	memset( s_alp.calls, 0, sizeof( s_alp.calls ));
-	s_alp.updates = s_alp.update_max = s_alp.frames = 0;
-	s_alp.update_total = 0;
-	s_alp.window++;
+	if( flush )
+		XboxAL_ProfFlush();
 }
 
 /* Buffers the source has played: back to the free list, and the clock
@@ -258,7 +310,7 @@ void Xbox_SndAL_Clear( void )
 
 	if( !s_al_active || !s_al_source )
 		return;
-	XboxAL_ProfWrite( "clear" );
+	XboxAL_ProfWrite( "clear", true );
 	alSourceStop( s_al_source );
 	alSourcei( s_al_source, AL_BUFFER, 0 ); // detaches every queued buffer
 	alGetError();
@@ -382,6 +434,9 @@ static qboolean XboxAL_Init( void )
 
 	Xbox_SndALQ_Init( &s_al_queue, snd.samples / 2, 0 );
 	memset( &s_alp, 0, sizeof( s_alp ));
+	s_alp_len = 0;
+	s_alp_dropped = s_alp_failed = 0;
+	s_alp_started = false;
 	memset( &s_alp_st0, 0, sizeof( s_alp_st0 )); // the library's counters start at the open
 	s_al_last_tick = 0;
 	s_alp_begin = 0;
@@ -464,7 +519,7 @@ static void XboxAL_Submit( void )
 	if( d > s_alp.update_max )
 		s_alp.update_max = d > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)d;
 	if( ++s_alp.updates >= XBOX_SND_AL_PROF_WINDOW )
-		XboxAL_ProfWrite( "play" );
+		XboxAL_ProfWrite( "play", false ); // to memory: play does not touch the disk
 }
 
 static void XboxAL_Activate( qboolean active )
@@ -549,7 +604,7 @@ void SNDDMA_Shutdown( void )
 		return;
 	}
 	Con_Printf( "Shutting down audio (OpenAL, the source ran dry %d times).\n", s_al_starved );
-	XboxAL_ProfWrite( "shutdown" );
+	XboxAL_ProfWrite( "shutdown", true );
 	snd.initialized = false;
 	XboxAL_Shutdown();
 	s_al_active = false;
