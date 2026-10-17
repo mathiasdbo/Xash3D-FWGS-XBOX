@@ -28,6 +28,30 @@ Follow these or the file degrades into notes nobody reads.
 ---
 
 ## Rules
+### NEVER take a host bit-exactness test as proof for the console - run the same check on the target's own libm and FPU
+
+x9-audio-vox-stream (#177) proved the dialogue stream bit-identical to
+upstream over every retail sentence on the host (108M checks), and the
+same check run on the XBE in xemu (`r3d_vox_crc all`) found 7 words whose
+trimmed end was one sample off. The cause was a prefetch hint calling
+nxdk's `round()` (frndint, round-half-to-even, inline asm writing a 16-bit
+slot 32 bits wide: `deps/nxdk/lib/pdclib/platform/xbox/functions/math/round.c`)
+just before upstream's own `round( e * 0.01f * samples )` on a value at
+exactly .5; the host's libm has neither property. **When a change claims
+"bit-identical to upstream", give it a check that runs inside the target
+binary too, and keep float library calls out of code that runs next to
+the arithmetic it must not disturb.**
+
+### NEVER let an output-equivalence test stand in for a cost test
+
+The same branch's first window slid only when a request needed a fourth
+unit, so the next unit could never be queued ahead and a synchronous read
+landed every two units - and the output stayed bit-identical, so 108M
+equality checks passed. Designing a mutant for "slides late" exposed it.
+**For anything whose point is cost (I/O, waits, allocations), assert the
+cost in the test - here, synchronous reads per open in straight play -
+alongside the equality, or a regression only the console can see passes.**
+
 ### NEVER count a review round whose reviewer could not read the diff
 
 Round 1 on x9-audio-al-output (2026-10-15), on a freshly installed

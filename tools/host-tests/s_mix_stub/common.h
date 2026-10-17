@@ -44,6 +44,7 @@ typedef unsigned int uint;
 /* common/xash3d_types.h */
 #define SetBits( iBitVector, bits ) (( iBitVector ) = ( iBitVector ) | ( bits ))
 #define FBitSet( iBitVector, bit ) (( iBitVector ) & ( bit ))
+#define BIT( n ) ( 1U << ( n ))
 
 /* engine/client/sound.h; on the Xbox the mix rate is a variable
    (divergence #173), here the test's own, so it can run both rates */
@@ -91,6 +92,8 @@ typedef struct channel_s
 	double sample, forced_end;
 	float inauduble_free_time;
 	voxword_t *words;
+	wavdata_t *data;              /* divergence #177: a streamed sound's window, when engine_reserved[0] is set */
+	uintptr_t engine_reserved[8];
 } channel_t;
 
 typedef struct

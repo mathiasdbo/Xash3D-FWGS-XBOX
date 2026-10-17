@@ -569,7 +569,7 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 196)
+        self.assertEqual(len(r["counters"]), 213)
         self.assertEqual(r["counters"][20], "span_calls")
         self.assertEqual(len(r["spans"]), 73)
         # Counts after the spans (2026-10-02, R5) are plain counters.
@@ -594,7 +594,11 @@ class Spans(unittest.TestCase):
                                                "music_reads", "music_read_kb", "music_async", "music_waits",
                                                "music_io_kc", "music_read_kc",
                                                "snd_thr_kc", "snd_thr_runs", "snd_bufs", "snd_underruns",
-                                               "snd_dma_kc", "snd_rate", "snd_backend"])
+                                               "snd_dma_kc", "snd_rate", "snd_backend",
+                                               "vox_starts", "vox_slots", "vox_opens", "vox_open_kc", "vox_reads",
+                                               "vox_read_kb", "vox_async", "vox_sync", "vox_waits", "vox_wait_kc",
+                                               "vox_seeks", "vox_io_kc", "vox_first_kc", "vox_pf_hits", "vox_small",
+                                               "vox_fallbacks", "vox_window_kb"])
         self.assertNotIn("ce_ents", fr.span_names(r))
         self.assertNotIn("pm_sv_cmds", fr.span_names(r))
         self.assertNotIn("snd_loads", fr.span_names(r))
@@ -778,6 +782,19 @@ class Spans(unittest.TestCase):
         # frame, no underrun, the audio thread 0.5 ms a frame.
         self.assertIn("audio output per in-play frame", text)
         self.assertRegex(text, r"\nc1a0c +48000 +sdl +1\.000 +1\.000 +0 +0\.500 +0\.000 ")
+        # The dialogue streams (#177), totals over the frames the map's
+        # statistics cover (seq 30-49, after the warm-up): 2 starts, both
+        # on a prefetch, 1 fallback, 2 opens, 40 reads of 160 KiB (20
+        # queued, 20 at once), no wait, no jump; 4 ms of starts, 2 of opens,
+        # 20 of file calls; 3 slots at most, 64 KiB.
+        self.assertIn("dialogue per map", text)
+        self.assertRegex(text, r"\nc1a0c +2 +2 +0 +1 +2 +40 +160 +20 +20 +0 +0 +4\.0 +2\.0 +0\.0 +20\.0 +3 +64\n")
+        self.assertIn("sounds S_LoadSound loaded in play, by caller", text)
+        self.assertRegex(text, r"\nc1a0c +1/4\.0/1 +1/2\.0/1 +- +- +- +- +-(\n|$)")
+        self.assertEqual(fr.parse_sound_name("vox/hello w:1500,1,3,0,2"),
+                         {"sound": "vox/hello", "tag": "w", "io": 1500, "opens": 1, "reads": 3, "seeks": 0, "probes": 2})
+        self.assertEqual(fr.parse_sound_name("fvox/flatline.wav"), {"sound": "fvox/flatline.wav", "tag": None})
+        self.assertEqual(fr.NOTE_KINDS[6], "vox")
         page = fr.render_html(self.rec, self.rows, s, ["spans.bin"], source="xemu")
         self.assertEqual(re.findall(r"__[A-Z]+__", page), [])
         self.assertIn('id="spans"', page)
@@ -882,7 +899,7 @@ class Sessions(unittest.TestCase):
         self.assertTrue(s["id"].startswith(s["short"]))
         self.assertEqual(fr.systime_date(s["systime"]).year, 2022)
         self.assertEqual(r["end"], {"tsc": r["end"]["tsc"], "lost": 1, "next": fr.SEG_SIZE})
-        self.assertEqual(len(r["counters"]), 196)            # every segment has its own COUNTERS ...
+        self.assertEqual(len(r["counters"]), 213)            # every segment has its own COUNTERS ...
         self.assertEqual(len(r["spans"]), 73)                # ... and SPANS
         self.assertEqual(self.seg[3]["session"]["reason"], fr.SEG_SIZE)
         self.assertEqual(self.seg[3]["end"]["next"], fr.SEG_SESSION)
@@ -1031,6 +1048,95 @@ class Sessions(unittest.TestCase):
             self.assertEqual(re.findall(r"__[A-Z]+__", html_page), [])
             self.assertIn("pr190-clents", html_page)
             run_page_script(html_page)
+
+
+class RouteCheck(unittest.TestCase):
+    """`check` (tools/xemu-route-*.sh): a recording that does not show the
+    route ran must fail, whatever else is in it. Synthetic records with
+    only the fields route_problems reads."""
+
+    COUNTERS = ["draws", "vox_starts"]
+
+    def rec(self, maps, starts=None, end=True, truncated=False, counters=None):
+        """`maps` [(name, frames, flags)]; starts {map: vox_starts per frame}."""
+        starts = starts or {}
+        frames, mlist = [], []
+        for name, n, flags in maps:
+            mlist.append({"name": name, "frame": len(frames), "flags": flags})
+            for _ in range(n):
+                frames.append((len(frames), 0, 0, 0, 0, 0, 0, 0, [1, starts.get(name, 0)]))
+        return {"maps": mlist, "frames": frames, "counters": list(counters or self.COUNTERS),
+                "end": {} if end else None, "truncated": truncated}
+
+    def good(self):
+        return self.rec([("c1a0", 10, 0), ("c1a0e", 10, 0), ("c1a0e", 5, 0), ("c1a1", 10, 0)],
+                        starts={"c1a0": 1, "c1a0e": 1})
+
+    MAPS = ["c1a0", "c1a0e", "c1a1"]
+
+    def test_route_that_ran(self):
+        r = self.good()
+        self.assertEqual(fr.map_sequence(r), self.MAPS)
+        self.assertEqual(fr.counter_totals(r, "vox_starts"), {"c1a0": 10, "c1a0e": 15, "c1a1": 0})
+        mins = [fr.parse_min("c1a0:vox_starts:1"), fr.parse_min("c1a0e:vox_starts:15")]
+        # the end marker: a session with no map of its own (the map was
+        # already loaded when it started)
+        marker = {"maps": [], "frames": [(0, 0, 0, 0, 0, 0, 0, 0, [1, 0])] * 30, "counters": list(self.COUNTERS),
+                  "end": {}, "truncated": False}
+        self.assertEqual(fr.route_problems(r, self.MAPS, mins, end_rec=marker), [])
+
+    def test_stalled_route(self):
+        r = self.rec([("c1a0", 10, 0)], starts={"c1a0": 1})
+        p = fr.route_problems(r, self.MAPS)
+        self.assertEqual(len(p), 1)
+        self.assertIn("maps played c1a0, expected c1a0 -> c1a0e -> c1a1", p[0])
+
+    def test_wrong_order_and_extra_map(self):
+        r = self.rec([("c1a0", 1, 0), ("c1a1", 1, 0), ("c1a0e", 1, 0)])
+        self.assertTrue(fr.route_problems(r, self.MAPS))
+        r = self.rec([("c1a0", 1, 0), ("c1a0e", 1, 0), ("c1a1", 1, 0), ("c2a1", 1, 0)])
+        self.assertTrue(fr.route_problems(r, self.MAPS))
+
+    def test_cut_short_and_truncated(self):
+        r = self.rec([("c1a0", 1, 0), ("c1a0e", 1, 0), ("c1a1", 1, 0)], end=False)
+        self.assertIn("no END chunk", fr.route_problems(r, self.MAPS)[0])
+        r = self.rec([("c1a0", 1, 0), ("c1a0e", 1, 0), ("c1a1", 1, 0)], truncated=True)
+        self.assertIn("truncated", fr.route_problems(r, self.MAPS)[0])
+
+    def test_counter_minimum(self):
+        r = self.good()
+        p = fr.route_problems(r, self.MAPS, [fr.parse_min("c1a1:vox_starts:1")])
+        self.assertEqual(p, ["vox_starts on c1a1: 0, expected at least 1"])
+        p = fr.route_problems(r, self.MAPS, [fr.parse_min("c3a1:vox_starts:1")])
+        self.assertEqual(p, ["vox_starts on c3a1: 0, expected at least 1"])
+
+    def test_missing_counter(self):
+        r = self.rec([("c1a0", 1, 0), ("c1a0e", 1, 0), ("c1a1", 1, 0)], counters=["draws"])
+        p = fr.route_problems(r, self.MAPS, [fr.parse_min("c1a0:vox_starts:1")])
+        self.assertIn("no vox_starts counter", p[0])
+        # optional: only from a build that has it
+        self.assertEqual(fr.route_problems(r, self.MAPS, [fr.parse_min("c1a0:vox_starts:1?")]), [])
+        r = self.good()
+        self.assertTrue(fr.route_problems(r, self.MAPS, [fr.parse_min("c1a1:vox_starts:1?")]))
+
+    def test_end_marker(self):
+        r = self.good()
+        self.assertIn("no end-marker", fr.route_problems(r, self.MAPS, end_rec=False)[0])
+        empty = {"maps": [], "frames": [], "counters": [], "end": {}, "truncated": False}
+        self.assertIn("end-marker recording is empty", fr.route_problems(r, self.MAPS, end_rec=empty)[0])
+        cut = self.rec([("c1a1", 3, 0)], end=False)
+        self.assertIn("end-marker recording is empty or cut short", fr.route_problems(r, self.MAPS, end_rec=cut)[0])
+
+    def test_continued_map_is_not_a_step(self):
+        r = self.rec([("c1a0", 2, 0), ("c1a0", 2, fr.MAP_F_CONTINUED), ("c1a0e", 1, 0), ("c1a1", 1, 0)])
+        self.assertEqual(fr.map_sequence(r), self.MAPS)
+
+    def test_parse_min(self):
+        self.assertEqual(fr.parse_min("c1a0:vox_starts:3"), ("c1a0", "vox_starts", 3, False))
+        self.assertEqual(fr.parse_min("c1a0:vox_starts:3?"), ("c1a0", "vox_starts", 3, True))
+        for bad in ("c1a0:vox_starts", ":vox_starts:1", "c1a0::1", "c1a0:vox_starts:x"):
+            with self.assertRaises(ValueError):
+                fr.parse_min(bad)
 
 
 if __name__ == "__main__":

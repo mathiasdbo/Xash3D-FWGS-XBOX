@@ -1519,3 +1519,14 @@ void r3d_async_close( r3d_async_read_t *a )
 		a->event = NULL;
 	}
 }
+
+long long r3d_async_size( r3d_async_read_t *a )
+{
+	LARGE_INTEGER size;
+
+	if( a->handle == INVALID_HANDLE_VALUE )
+		return -1;
+	if( !R3D_IO_CALL( meta, GetFileSizeEx( a->handle, &size )))
+		return -1;
+	return ( long long )size.QuadPart;
+}

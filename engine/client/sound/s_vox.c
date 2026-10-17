@@ -17,6 +17,9 @@ GNU General Public License for more details.
 #include "sound.h"
 #include "const.h"
 #include <ctype.h>
+#if XASH_XBOX
+#include "platform/xbox/xbox_vox_stream.h" // dialogue streamed, docs/r3d/divergences.md #177
+#endif
 
 #define TRIM_SCAN_MAX 255
 #define TRIM_SAMPLES_BELOW_8 2
@@ -59,7 +62,12 @@ static int S_TrimStart( const wavdata_t *wav, int start )
 
 	if( width == 1 )
 	{
+#if XASH_XBOX
+		// #177: a streamed word's samples here come from its window
+		const int8_t *data = FBitSet( wav->flags, SOUND_R3D_WINDOW ) ? S_R3D_VoxTrimData( wav, start, 1 ) : (const int8_t *)&wav->buffer[channels * width * start];
+#else
 		const int8_t *data = (const int8_t *)&wav->buffer[channels * width * start];
+#endif
 
 		for( size_t i = 0; i < TRIM_SCAN_MAX && start < wav->samples; i++ )
 		{
@@ -96,7 +104,12 @@ static int S_TrimEnd( const wavdata_t *wav, int end )
 
 	if( width == 1 )
 	{
+#if XASH_XBOX
+		// #177: a streamed word's samples here come from its window
+		const int8_t *data = FBitSet( wav->flags, SOUND_R3D_WINDOW ) ? S_R3D_VoxTrimData( wav, end - 1, -1 ) : (const int8_t *)&wav->buffer[channels * width * ( end - 1 )];
+#else
 		const int8_t *data = (const int8_t *)&wav->buffer[channels * width * ( end - 1 )];
+#endif
 
 		for( size_t i = 0; i < TRIM_SCAN_MAX && end > 0; i++ )
 		{
@@ -150,7 +163,13 @@ void VOX_LoadWord( channel_t *ch )
 	if( !word->sfx )
 		return;
 
+#if XASH_XBOX
+	// docs/r3d/divergences.md #177: the word's window (its head and tail read
+	// for the trims below), or S_LoadSound's whole cache
+	wavdata_t *data = S_R3D_VoxLoadWord( ch, word );
+#else
 	wavdata_t *data = S_LoadSound( word->sfx );
+#endif
 
 	if( !data )
 		return;
@@ -172,6 +191,9 @@ void VOX_FreeWord( channel_t *ch )
 	// TODO: don't set random fields to zero lol, was memset before
 	ch->sample = ch->forced_end = 0.0;
 	ClearBits( ch->flags, FL_CHAN_FINISHED );
+#if XASH_XBOX
+	S_R3D_VoxRelease( ch, false ); // #177: the word's window (a read in flight lands later)
+#endif
 	ch->data = NULL;
 
 	if( ch->word_index < 0 || ch->word_index >= CVOXWORDMAX )
@@ -182,6 +204,11 @@ void VOX_FreeWord( channel_t *ch )
 	if( !word->sfx || FBitSet( word->flags, FL_VOXWORD_IN_CACHE ))
 		return;
 
+#if XASH_XBOX
+	if( S_R3D_VoxIsHeader( word->sfx->cache ))
+		S_R3D_VoxDetach( word->sfx ); // #177: a placeholder holds no samples to free
+	else
+#endif
 	FS_FreeSound( word->sfx->cache );
 	word->sfx->cache = NULL;
 	word->sfx = NULL;
@@ -591,6 +618,15 @@ void VOX_Shutdown( void )
 
 	cszrawsentences = 0;
 }
+
+#if XASH_XBOX
+// docs/r3d/divergences.md #177: `r3d_vox_crc all` walks every sentence by
+// index, and must tell a sentence it could not compare from the list's end
+int VOX_R3D_SentenceCount( void )
+{
+	return cszrawsentences;
+}
+#endif
 
 #if XASH_ENGINE_TESTS
 #include "tests.h"

@@ -179,6 +179,12 @@ void Xbox_FT_Sound_CloseFrame( void )
 	xbox_ft_snd_dma_ticks = 0;
 	xbox_ft_work.c[XBOX_FT_W_SND_RATE] = (uint32_t)r3d_snd_dma_speed;
 	xbox_ft_work.c[XBOX_FT_W_SND_BACKEND] = Xbox_SndAL_Active() ? 1u : 0u;
+	{
+		/* the dialogue streams' memory (#177), every frame, loads included */
+		extern uint32_t s_r3d_vox_bytes;
+
+		xbox_ft_work.c[XBOX_FT_W_VOX_WINDOW_KB] = ( s_r3d_vox_bytes + 1023u ) / 1024u;
+	}
 
 	Xbox_Snd_ThreadStats( &now );
 	if( snd_prev_valid )
@@ -808,6 +814,18 @@ void Xbox_FT_LoadAccum( const xbox_ft_load_t *l, int acc )
 	a->writes += r3d_io_stats.writes - l->writes;
 	a->meta += r3d_io_stats.meta - l->meta;
 	a->count++;
+}
+
+void Xbox_FT_SoundNote( const xbox_ft_load_t *l, const char *sound, int tag, uint32_t kcyc, uint32_t bytes )
+{
+	char name[XBOX_FT_NOTE_NAME_BYTES];
+	const int timed = l->t0 && xbox_ft_waits.active;
+
+	xbox_ft_sound_note_name( name, sizeof( name ), sound, (char)tag,
+		timed ? FT_Kc( r3d_io_stats.ticks - l->io_ticks ) : 0, timed ? r3d_io_stats.opens - l->opens : 0,
+		timed ? r3d_io_stats.reads - l->reads : 0, timed ? r3d_io_stats.seeks - l->seeks : 0,
+		timed ? r3d_io_stats.probes - l->probes : 0 );
+	Xbox_FT_Note( XBOX_FT_NOTE_SOUND, name, kcyc, bytes );
 }
 
 static void FT_WriteLoadAccums( void )

@@ -20,8 +20,12 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_frametime.h" // docs/r3d/divergences.md #141
 // S_PaintChannels' spans: one set under k_snd, one under k_snd_extra
 #define S_MIX_SPAN( id, id_extra, stmt ) XBOX_FT_SPAN( xbox_ft_snd_extra ? ( id_extra ) : ( id ), stmt )
+#include "platform/xbox/xbox_vox_stream.h"
+// docs/r3d/divergences.md #177: a streamed sound mixes from its channel's window
+#define S_MIX_SOURCE( ch ) S_R3D_ChannelSource( ch )
 #else
 #define S_MIX_SPAN( id, id_extra, stmt ) stmt
+#define S_MIX_SOURCE( ch ) (( ch )->sfx->cache )
 #endif
 
 static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAINTBUFFER_SIZE+1)];
@@ -214,7 +218,7 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 		bound( 0, chan->leftvol, 255 ),
 		bound( 0, chan->rightvol, 255 ),
 	};
-	double rate = pitch * chan->sfx->cache->rate / (double)out_rate;
+	double rate = pitch * S_MIX_SOURCE( chan )->rate / (double)out_rate;
 
 	// timecompress at 100% is skipping the entire sfx, so mark as finished and exit
 	if( timecompress >= 100 )
@@ -242,7 +246,7 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 
 		// get sample pointer and also amount of samples available
 		const void *audio = NULL;
-		int available = S_RetrieveAudioSamples( chan->sfx->cache, &audio, chan->sample, request_num_samples, FBitSet( chan->flags, FL_CHAN_USE_LOOP ));
+		int available = S_RetrieveAudioSamples( S_MIX_SOURCE( chan ), &audio, chan->sample, request_num_samples, FBitSet( chan->flags, FL_CHAN_USE_LOOP ));
 
 		// no samples available, exit
 		if( !available )
@@ -275,7 +279,7 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 			out_count = 1;
 		}
 
-		const wavdata_t *wav = chan->sfx->cache;
+		const wavdata_t *wav = S_MIX_SOURCE( chan );
 		S_MixAudio( pbuf + offset, pvol, audio, wav->channels, wav->width, sample_frac, rate, out_count, lerp );
 
 		chan->sample += out_count * rate * timecompress_rate;
@@ -363,7 +367,11 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 			}
 		}
 
+#if XASH_XBOX
+		wavdata_t *sc = S_R3D_VoxMixSource( ch ); // #177: the channel's window, or S_LoadSound
+#else
 		wavdata_t *sc = S_LoadSound( ch->sfx );
+#endif
 
 		if( !sc )
 		{

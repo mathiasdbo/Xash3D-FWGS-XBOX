@@ -88,4 +88,9 @@ int r3d_async_finish( r3d_async_read_t *a, int wait, int *waited );
 /* Waits for a read in flight, then closes. Idempotent. */
 void r3d_async_close( r3d_async_read_t *a );
 
+/* The open file's size in bytes (GetFileSizeEx on the handle, a metadata
+   call), or -1. Divergence #177: a dialogue stream sizes its last unit
+   and finds its tail without another path search. */
+long long r3d_async_size( r3d_async_read_t *a );
+
 #endif /* XBOX_ASYNC_READ_H */

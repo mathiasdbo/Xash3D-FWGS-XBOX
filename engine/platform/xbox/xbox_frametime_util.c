@@ -80,6 +80,9 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"music_reads", "music_read_kb", "music_async", "music_waits", "music_io_kc", "music_read_kc",
 	"snd_thr_kc", "snd_thr_runs", "snd_bufs", "snd_underruns", "snd_dma_kc", "snd_rate",
 	"snd_backend",
+	"vox_starts", "vox_slots", "vox_opens", "vox_open_kc", "vox_reads", "vox_read_kb",
+	"vox_async", "vox_sync", "vox_waits", "vox_wait_kc", "vox_seeks", "vox_io_kc",
+	"vox_first_kc", "vox_pf_hits", "vox_small", "vox_fallbacks", "vox_window_kb",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,
@@ -613,6 +616,32 @@ size_t xbox_ft_load_note_name( char *out, size_t size, const char *stage, uint32
 	memcpy( out + stage_len, tail, tail_len );
 	out[stage_len + tail_len] = 0;
 	return stage_len + tail_len;
+}
+
+size_t xbox_ft_sound_note_name( char *out, size_t size, const char *sound, char tag, uint32_t io_kc, uint32_t opens,
+	uint32_t reads, uint32_t seeks, uint32_t probes )
+{
+	char tail[64];
+	size_t tail_len, name_len;
+	int n;
+
+	if( !size )
+		return 0;
+	n = snprintf( tail, sizeof( tail ), " %c:%u,%u,%u,%u,%u", tag ? tag : 'o', (unsigned)io_kc, (unsigned)opens,
+		(unsigned)reads, (unsigned)seeks, (unsigned)probes );
+	tail_len = n > 0 ? (size_t)n : 0;
+	if( tail_len >= sizeof( tail ))
+		tail_len = sizeof( tail ) - 1;
+	if( tail_len > size - 1 )
+		tail_len = size - 1;
+	name_len = sound ? strlen( sound ) : 0;
+	if( name_len > size - 1 - tail_len )
+		name_len = size - 1 - tail_len;
+	if( name_len )
+		memcpy( out, sound, name_len );
+	memcpy( out + name_len, tail, tail_len );
+	out[name_len + tail_len] = 0;
+	return name_len + tail_len;
 }
 
 /* Sessions and segments (version 3, 2026-10-07): the layout and the name

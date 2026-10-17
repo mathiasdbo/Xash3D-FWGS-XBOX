@@ -5,6 +5,35 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: dialogue streams from the disk instead of loading whole
+
+Every line a character speaks used to be read from the disk whole, in the
+middle of a frame, the moment it started: 5 to 16 ms for a long scientist
+or guard line, and every word of an announcement loaded again whenever
+another sound needed a channel. Spoken lines now stream: the console reads
+a small piece of the file ahead of what is playing, in the background, and
+the next word of a sentence is opened while the current one plays; long
+precached speech (over 64 KB) streams the same way. A line
+starts after a short read instead of a whole one, and long speech no
+longer sits in memory for the whole map (about 36 KB per line playing,
+and as much for the next word being opened). What you hear is unchanged, sample for sample, including the
+mouth movements and where a sentence resumes after loading a save; a host
+test checks that against the original loading over every sentence in the
+game. Short words, unusual formats and anything the stream cannot serve
+still load the original way. `r3d_vox_stream 0` switches back to the old
+loading for comparison, `r3d_vox_ab` flips it, and `r3d_vox_crc all`
+checks every sentence on the console. The frame-time recorder counts the
+streams' reads and waits and says why any sound was still loaded in play.
+
+A second step, a speech pack laid out in the order the game speaks it, is
+planned next.
+
+The scripted xemu routes (`tools/xemu-route-vox.sh`, `tools/xemu-route-bmi.sh`)
+now fail when the route did not run to its end: they check the recording
+itself (`frametime-report.py check`: the maps in order, a clean end, the
+dialogue counters, and an end marker the route records last) instead of
+reporting success after a fixed wait.
+
 ### Added - Xbox: sound output through OpenAL on the console's audio chip (`r3d_snd_backend`)
 
 The console can now send the engine's sound to the speakers two ways,

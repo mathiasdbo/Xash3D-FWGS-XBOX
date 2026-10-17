@@ -105,6 +105,10 @@ void VOX_LoadWord( channel_t *ch ) { }
 void SX_RoomFX( portable_samplepair_t *paint, int num_samples ) { }
 void SNDDMA_BeginPainting( void ) { }
 void SNDDMA_Submit( void ) { }
+/* divergence #177's mixer hook: no channel here streams (engine_reserved[0]
+   is 0, so S_R3D_ChannelSource reads sfx->cache); the stream itself is
+   tested by xbox_vox_stream_host_test.c */
+wavdata_t *S_R3D_VoxMixSource( channel_t *ch ) { return S_LoadSound( ch->sfx ); }
 
 static int failures, checks;
 

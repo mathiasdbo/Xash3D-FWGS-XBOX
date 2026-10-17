@@ -103,7 +103,15 @@ CHUNK_SPANS = 6             # span name -> parent span name (recorders from 2026
 CHUNK_CLASSES = 7           # per-classname server game frame totals (recorders from 2026-10-05)
 CHUNK_NOTES = 8             # named one-off events: sounds loaded in play, slow server messages (2026-10-06)
 NOTE_BYTES = 64
-NOTE_KINDS = {1: "sound", 2: "message", 3: "menu", 4: "load", 5: "music"}  # music: divergences.md #171
+NOTE_KINDS = {1: "sound", 2: "message", 3: "menu", 4: "load", 5: "music", 6: "vox"}  # music #171, vox #177
+NOTE_SOUND = 1
+# A sound note's name from x9-audio-vox-stream (divergence #177): "<sound>
+# <tag>:<io kc>,<opens>,<reads>,<seeks>,<probes>" (xbox_ft_sound_note_name),
+# the tag saying why S_LoadSound ran (w a word starting, t
+# SND_GetChannelTimeLeft, s a sound started, m the mixer's reload, r a
+# registration, o anything else); earlier recordings hold the sound alone.
+SOUND_NAME_RE = re.compile(r"^(?P<sound>.*) (?P<tag>[a-z]):(?P<io>\d+),(?P<opens>\d+),(?P<reads>\d+),(?P<seeks>\d+),(?P<probes>\d+)$")
+SOUND_TAGS = [("w", "word"), ("t", "timeleft"), ("s", "start"), ("m", "mixer"), ("r", "register"), ("o", "other")]
 NOTE_LOAD = 4               # a level-load stage (recorders from 2026-10-08, divergences.md #162)
 # A load note's name: "<stage> <io kc>,<opens>,<reads>,<seeks>,<probes>,
 # <writes>,<meta>[,<count>]" (xbox_ft_load_note_name, xbox_frametime_util.h);
@@ -163,6 +171,11 @@ MUSIC_TIMES = ("music_io_kc", "music_read_kc")
 # counters then are.
 SND_TIMES = ("snd_thr_kc", "snd_dma_kc")
 SND_LABELS = ("snd_rate", "snd_backend")
+# The dialogue streams (recorders from 2026-10-13, x9-audio-vox-stream,
+# divergence #177): times, and two states (the most slots at once, the
+# stream memory).
+VOX_TIMES = ("vox_open_kc", "vox_wait_kc", "vox_io_kc", "vox_first_kc")
+VOX_LABELS = ("vox_slots", "vox_window_kb")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -1272,7 +1285,8 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
     # The spans are times, not counts: their own table; so are the g_*_kc
     # counters, and the g_worst_cls/ent are labels.
     timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES) \
-        | set(PART_TIMES) | set(EFX_TIMES) | set(CHROME_TIMES) | set(MUSIC_TIMES) | set(SND_TIMES) | set(SND_LABELS)
+        | set(PART_TIMES) | set(EFX_TIMES) | set(CHROME_TIMES) | set(MUSIC_TIMES) | set(SND_TIMES) | set(SND_LABELS) \
+        | set(VOX_TIMES) | set(VOX_LABELS)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1531,6 +1545,7 @@ def summary_text(rec, rows, sess):
     lines.extend(chrome_text(rec, rows))
     lines.extend(music_text(rec, rows))
     lines.extend(audio_text(rec, rows))
+    lines.extend(dialogue_text(rec, rows))
     return "\n".join(lines)
 
 
@@ -1959,6 +1974,85 @@ def audio_text(rec, rows):
             sm.get("k_snd", 0.0), sm.get("k_snd_extra", 0.0), sm.get("k_snd_mix", 0.0) + sm.get("k_sndx_mix", 0.0),
             sm.get("k_snd_dsp", 0.0) + sm.get("k_sndx_dsp", 0.0), sm.get("k_snd_out", 0.0) + sm.get("k_sndx_out", 0.0),
             sm.get("k_snd_music", 0.0)))
+    return lines
+
+
+def parse_sound_name(name):
+    """A sound note's name split into the sound, the caller's tag and the
+    load's file calls (divergence #177), or the name alone (tag None) for
+    an earlier recording's note, or one cut by the 48-byte field."""
+    m = SOUND_NAME_RE.match(name)
+    if not m:
+        return {"sound": name, "tag": None}
+    out = {"sound": m.group("sound"), "tag": m.group("tag")}
+    for key in ("io", "opens", "reads", "seeks", "probes"):
+        out[key] = int(m.group(key))
+    return out
+
+
+def dialogue_text(rec, rows):
+    """The dialogue streams per map (recorders from 2026-10-13,
+    x9-audio-vox-stream, divergence #177), totals over the frames the map's
+    statistics cover (in play, after its warm-up, as every per-map table):
+    streams started (and how many found the next word's prefetch
+    landed), candidates left to upstream's whole load for their size or
+    another reason (the `vox` notes name those), files opened, reads (KiB),
+    of them queued by the kernel and read at once, waits for a queued read
+    and window jumps; ms in the starts, the opens, the waits and every file
+    call; the most slots at once and the stream memory. Then the sounds
+    S_LoadSound still loaded in play, by caller (the sound notes' tag: a word
+    starting, SND_GetChannelTimeLeft, a sound started, the mixer, a
+    registration), with their time and opens. Nothing for a session without
+    these counters."""
+    if "vox_starts" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "dialogue per map, totals over the frames in play: streams started (prefetch hits), left whole for size / "
+             "other reasons; files opened, reads (KiB), queued, read at once, waits, jumps; ms: starts, opens, waits, file "
+             "calls; the most slots at once, stream KiB"]
+    lines.append("%-18s %7s %5s %5s %5s %6s %6s %7s %6s %6s %5s %5s %8s %7s %7s %7s %5s %6s" % (
+        "map", "starts", "pf", "small", "other", "opens", "reads", "KiB", "queued", "sync", "waits", "jumps",
+        "start ms", "open", "wait", "io", "slots", "KiB"))
+    for r in maps:
+        a, pk, n = r["work_avg"], r["work_peak"], r["frames"]
+
+        def tot(c):
+            return a.get(c, 0.0) * n
+        lines.append("%-18s %7.0f %5.0f %5.0f %5.0f %6.0f %6.0f %7.0f %6.0f %6.0f %5.0f %5.0f %8.1f %7.1f %7.1f %7.1f %5.0f %6.0f" % (
+            r["map"][:18], tot("vox_starts"), tot("vox_pf_hits"), tot("vox_small"), tot("vox_fallbacks"), tot("vox_opens"),
+            tot("vox_reads"), tot("vox_read_kb"), tot("vox_async"), tot("vox_sync"), tot("vox_waits"), tot("vox_seeks"),
+            tot("vox_first_kc") * k, tot("vox_open_kc") * k, tot("vox_wait_kc") * k, tot("vox_io_kc") * k,
+            pk.get("vox_slots", 0.0), pk.get("vox_window_kb", 0.0)))
+    # the sound notes by caller, per map
+    seg_of = {}
+    for seg in segments(rec):
+        for i in range(seg["start"], seg["end"]):
+            seg_of[rec["frames"][i][0]] = seg["name"]
+    per = {}
+    for nt in rec.get("notes", []):
+        if nt["kind"] != NOTE_SOUND:
+            continue
+        p = parse_sound_name(nt["name"])
+        key = (seg_of.get(nt["seq"], "?"), p["tag"] or "?")
+        c = per.setdefault(key, [0, 0.0, 0])
+        c[0] += 1
+        c[1] += nt["kc"] * k
+        c[2] += p.get("opens", 0)
+    if per:
+        tags = SOUND_TAGS + [("?", "untagged")]
+        lines.append("")
+        lines.append("sounds S_LoadSound loaded in play, by caller (the sound notes): count / ms / opens")
+        lines.append("%-18s " % "map" + " ".join("%17s" % h for _, h in tags))
+        for name in sorted({m for m, _ in per}, key=lambda m: min(i for i, r in enumerate(rows) if r["map"] == m)
+                           if any(r["map"] == m for r in rows) else 1 << 30):
+            cells = []
+            for t, _ in tags:
+                c = per.get((name, t))
+                cells.append("%17s" % ("%d/%.1f/%d" % (c[0], c[1], c[2]) if c else "-"))
+            lines.append("%-18s " % name[:18] + " ".join(cells))
     return lines
 
 
@@ -2447,6 +2541,85 @@ def resolve(paths, label=None, session=None):
 
 
 # --------------------------------------------------------------------------
+# Route checks (tools/xemu-route-*.sh)
+# --------------------------------------------------------------------------
+
+def map_sequence(rec):
+    """The maps of a recording in the order they were played, each run of
+    the same map once (a save loaded on the map it was made on, or a
+    segment continued from an earlier file, is not a new step)."""
+    seq = []
+    for seg in segments(rec):
+        if seg["map"] is None:
+            continue
+        name = seg["map"]["name"]
+        if not seq or seq[-1] != name:
+            seq.append(name)
+    return seq
+
+
+def counter_totals(rec, name):
+    """{map: the counter's total over every frame recorded on that map}, or
+    None when the recording has no such counter. Every frame counts (loads
+    and warm-up too): a route check asks whether something happened, not
+    how fast."""
+    if name not in rec["counters"]:
+        return None
+    i = rec["counters"].index(name)
+    out = {}
+    for seg in segments(rec):
+        if seg["map"] is None:
+            continue
+        tot = sum(frame_work(rec, rec["frames"][f])[i] for f in range(seg["start"], seg["end"]))
+        out[seg["map"]["name"]] = out.get(seg["map"]["name"], 0) + tot
+    return out
+
+
+def parse_min(spec):
+    """'map:counter:n' (or 'map:counter:n?', required only when the
+    recording has the counter) -> (map, counter, n, optional)."""
+    optional = spec.endswith("?")
+    parts = (spec[:-1] if optional else spec).split(":")
+    if len(parts) != 3 or not parts[0] or not parts[1]:
+        raise ValueError("--min wants map:counter:n[?], not %r" % spec)
+    return parts[0], parts[1], int(parts[2]), optional
+
+
+def route_problems(rec, maps, mins=(), end_rec=None):
+    """What a route's recording lacks, as a list of sentences (empty: the
+    route ran). `maps` is the map sequence the route plays, in order, the
+    last one where it ends; `mins` are parse_min() tuples, each a total
+    the named map must reach; `end_rec`, when given, is the recording the
+    route's end point starts after stopping this one (its marker that the
+    end cfg ran to its last line), or False when that marker is missing.
+    A fixed sleep and a fetched file prove nothing by themselves: a route
+    stalled on its first map or cut by a crash still leaves a recording."""
+    out = []
+    if rec["end"] is None:
+        out.append("no END chunk: the recording was cut short (a crash, a reboot, or xemu closed before the "
+                   "route stopped the recorder)")
+    if rec.get("truncated"):
+        out.append("the recording is truncated")
+    seq = map_sequence(rec)
+    if seq != list(maps):
+        out.append("maps played %s, expected %s" % (" -> ".join(seq) or "none", " -> ".join(maps)))
+    for m, counter, n, optional in mins:
+        tot = counter_totals(rec, counter)
+        if tot is None:
+            if not optional:
+                out.append("no %s counter in this recording (a build without it?)" % counter)
+            continue
+        got = tot.get(m, 0)
+        if got < n:
+            out.append("%s on %s: %d, expected at least %d" % (counter, m, got, n))
+    if end_rec is False:
+        out.append("no end-marker recording: the route's end cfg did not run to its last line")
+    elif end_rec is not None and (end_rec["end"] is None or not end_rec["frames"]):
+        out.append("the end-marker recording is empty or cut short")
+    return out
+
+
+# --------------------------------------------------------------------------
 # Fetching
 # --------------------------------------------------------------------------
 
@@ -2588,6 +2761,13 @@ def main(argv=None):
                    help="keep the frames that wrote the file in the statistics (left out by default)")
     p.add_argument("--include-level-change", action="store_true",
                    help="keep the frames whose time is a level load in the statistics (left out by default)")
+    p = sub.add_parser("check", help="exit nonzero unless a route's session played the given maps and counters")
+    p.add_argument("paths", nargs="+", metavar="path", help="folders/files to pick the session from")
+    filters(p, ": stitched into one recording")
+    p.add_argument("--maps", required=True, help="the maps the route plays, in order, comma separated")
+    p.add_argument("--min", action="append", default=[], metavar="MAP:COUNTER:N[?]",
+                   help="a counter's total on a map must reach N (trailing ?: only when the build has the counter)")
+    p.add_argument("--end-label", help="the label of the short session the route's end cfg records as its marker")
     p = sub.add_parser("report", help="write the HTML report")
     p.add_argument("paths", nargs="+", metavar="path",
                    help="a recording or segment file, or folders/files to pick a session from")
@@ -2630,6 +2810,27 @@ def main(argv=None):
             return 1
         (na, _, rows_a, sess_a), (nb, _, rows_b, sess_b) = side
         print(compare_text(na, sess_a, rows_a, nb, sess_b, rows_b))
+    elif a.cmd == "check":
+        try:
+            mins = [parse_min(s) for s in a.min]
+            rec, _ = resolve(a.paths, a.label, a.session)
+            end_rec = None
+            if a.end_label:
+                try:
+                    end_rec, _ = resolve(a.paths, a.end_label)
+                except FormatError:
+                    end_rec = False
+        except (FormatError, OSError, ValueError) as e:
+            print("frametime-report: check: %s" % e, file=sys.stderr)
+            return 1
+        maps = [m for m in a.maps.split(",") if m]
+        problems = route_problems(rec, maps, mins, end_rec)
+        for p in problems:
+            print("frametime-report: check: %s" % p, file=sys.stderr)
+        if problems:
+            return 1
+        print("check: %s, %s" % (" -> ".join(maps), ", ".join(
+            "%s on %s %d" % (c, m, (counter_totals(rec, c) or {}).get(m, 0)) for m, c, _, _ in mins) or "no counters asked"))
     else:
         try:
             rec, files = resolve(a.paths, a.label, a.session)

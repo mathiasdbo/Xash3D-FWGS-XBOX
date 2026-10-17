@@ -525,7 +525,15 @@ door and the security door. `tools/xemu-route-bmi.sh <label> <xbe> [<cfg
 line>]...` runs it in xemu with no input and fetches the session; its
 header has the end point (a `maps/c0a0e_load.cfg` run by upstream's
 `SV_SpawnServer`) and the console procedure (the same two files on the
-hard disk). Label the runs `bmi-<step>-<a|b>`. In xemu the audio callback
+hard disk). Label the runs `bmi-<step>-<a|b>`. The script decides from the
+recording whether the route ran, and exits nonzero if not:
+`frametime-report.py check <folder> --label <label> --maps
+c0a0,...,c0a0e [--min <map>:<counter>:<n>[?]]... [--end-label <label>-end]`
+requires an END chunk, the maps in that order (a save loaded on the same
+map is not a new step), each counter's total on its map (`?`: only when
+the build has the counter), and the end marker - a short session the end
+cfg records after stopping the main one, so a route stalled half way, or
+closed before its end cfg finished, fails. In xemu the audio callback
 does not run, so read the `music` notes and the sound spans' call counts
 before a sound time.
 

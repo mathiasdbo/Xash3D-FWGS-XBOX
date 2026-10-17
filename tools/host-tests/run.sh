@@ -307,6 +307,34 @@ mix48_mutants() {
 }
 run_test mix48_mutants mix48_mutants
 
+# tools/host-tests/xbox_vox_stream_host_test.c, header (divergence #177):
+# the engine's real sound code built twice - upstream's and the Xbox
+# build's dialogue stream - over every retail sentence (the staged disc
+# tree's sound/), the mix, the channels, the lip sync and the saves compared
+# bit for bit; then every mutant in xbox_vox_stream_mutants.py must fail it.
+xbox_vox_stream() {
+	HOST_CFLAGS="$HOST_CFLAGS" "$BASH" tools/host-tests/xbox_vox_stream.sh "$OUT/vox"
+}
+run_test xbox_vox_stream xbox_vox_stream
+xbox_vox_stream_mutants() {
+	HOST_CFLAGS="$HOST_CFLAGS" VOX_BASH="$BASH" python tools/host-tests/xbox_vox_stream_mutants.py "$OUT/vox-mutants"
+}
+run_test xbox_vox_stream_mutants xbox_vox_stream_mutants
+# #177 keeps its slot tokens in channel_t.engine_reserved[0..1], which
+# upstream reserves for engine use and does not touch today: a use of it
+# anywhere else would collide silently, with no merge conflict to show it.
+vox_engine_reserved() {
+	local hits
+	hits=$(grep -rn "engine_reserved" engine common public ref filesystem --include='*.c' --include='*.h' \
+		| grep -v "^engine/platform/xbox/" | grep -v "^common/sound_api.h:")
+	if [ -n "$hits" ]; then
+		echo "$hits"
+		echo "host-tests: engine_reserved is used outside the dialogue stream - its tokens would collide (divergences.md #177)" >&2
+		return 1
+	fi
+}
+run_test vox_engine_reserved vox_engine_reserved
+
 # tools/host-tests/xbox_snd_clock_host_test.c, header (divergence #173):
 # the DMA clock as upstream's S_GetSoundtime, and rebased across a device
 # reopened at run time - no jump, congruent with the device's ring.

@@ -26,6 +26,7 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_snd_device.h" // the teardown after a lost device, #173
 #include "platform/xbox/xbox_snd_rate_cfg.h" // r3d_snd_rate read from the boot configs, #173
 #include "platform/xbox/xbox_snd_al.h" // the output, SDL or OpenAL, chosen at boot, #178
+#include "platform/xbox/xbox_vox_stream.h" // dialogue streamed, #177
 #endif
 
 // structure used for fading in and out client sound volume.
@@ -118,6 +119,12 @@ int S_RetrieveAudioSamples( const wavdata_t *source, const void **output_buffer,
 	// convert sample position to byte offset
 	start_position *= frame_size;
 
+#if XASH_XBOX
+	// docs/r3d/divergences.md #177: a streamed sound's window holds these
+	// bytes (read or waited for now); a placeholder holds none
+	if( FBitSet( source->flags, SOUND_R3D_WINDOW | SOUND_R3D_HEADER ))
+		return S_R3D_VoxSamples( source, output_buffer, start_position, num_samples );
+#endif
 	*output_buffer = source->buffer + start_position;
 
 	return num_samples;
@@ -204,6 +211,9 @@ void S_FreeChannel( channel_t *ch )
 	// free the currently loaded word's audio cache before nuking the channel
 	if( ch->words )
 		VOX_FreeWord( ch );
+#if XASH_XBOX
+	S_R3D_VoxRelease( ch, true ); // #177: the window and the next word's prefetch, before ch->words goes
+#endif
 
 	ch->sfx = NULL;
 	ch->name[0] = '\0';
@@ -323,7 +333,13 @@ static int SND_GetChannelTimeLeft( const channel_t *ch )
 			if( !ch->words[i].sfx )
 				break;
 
+#if XASH_XBOX
+			// docs/r3d/divergences.md #177: the length from the word's header,
+			// not a whole load of every word left in the sentence
+			if( !( sc = S_R3D_VoxWordInfo( ch->words[i].sfx )))
+#else
 			if( !( sc = S_LoadSound( ch->words[i].sfx )))
+#endif
 				break;
 
 			end = ch->words[i].end;
@@ -714,7 +730,11 @@ void S_StartSound( const vec3_t pos, int ent, int chan, sound_t handle, float fv
 	else
 	{
 		// regular or streamed sound fx
+#if XASH_XBOX
+		pSource = S_R3D_VoxStartSfx( target_chan, sfx ); // #177: precached speech streams on its channel
+#else
 		pSource = S_LoadSound( sfx );
+#endif
 		target_chan->name[0] = '\0';
 	}
 
@@ -855,7 +875,11 @@ void S_RestoreSound( const vec3_t pos, int ent, int chan, sound_t handle, float 
 	else
 	{
 		// regular or streamed sound fx
+#if XASH_XBOX
+		pSource = S_R3D_VoxStartSfx( target_chan, sfx ); // #177: precached speech streams on its channel
+#else
 		pSource = S_LoadSound( sfx );
+#endif
 		target_chan->name[0] = '\0';
 	}
 
@@ -873,6 +897,9 @@ void S_RestoreSound( const vec3_t pos, int ent, int chan, sound_t handle, float 
 	// apply the sample offests
 	target_chan->sample = sample;
 	target_chan->forced_end = end;
+#if XASH_XBOX
+	S_R3D_VoxSeek( target_chan ); // #177: the window moves to the saved position (a load: it may read now)
+#endif
 
 	S_NotifyChannelUpdate( target_chan - snd.channels, target_chan, handle );
 
@@ -940,7 +967,11 @@ void S_AmbientSound( const vec3_t pos, int ent, sound_t handle, float fvol, floa
 	else
 	{
 		// load regular or stream sound
+#if XASH_XBOX
+		pSource = S_R3D_VoxStartSfx( ch, sfx ); // #177: precached speech streams on its channel
+#else
 		pSource = S_LoadSound( sfx );
+#endif
 		ch->sfx = sfx;
 		ch->name[0] = '\0';
 	}
@@ -1499,6 +1530,9 @@ void S_StopAllSounds( qboolean ambient )
 	}
 
 	SX_ClearState();
+#if XASH_XBOX
+	S_R3D_VoxCloseAll(); // #177: every stream closed (a read in flight is waited for), its memory freed
+#endif
 
 	// clear all the channels
 	memset( snd.channels, 0, sizeof( snd.channels[0] ) * snd.max_channels );
@@ -1599,6 +1633,9 @@ static void S_UpdateChannels( void )
 		endtime -= ( endtime - snd.paintedtime ) & 0x3;
 	}
 
+#if XASH_XBOX
+	S_R3D_VoxFrame(); // #177: the streams' reads landed and queued, reused channels' slots released
+#endif
 	if( clgame.soundFuncs.pfnS_PaintChannels )
 		clgame.soundFuncs.pfnS_PaintChannels( endtime );
 	else
@@ -2272,6 +2309,7 @@ qboolean S_Init( void )
 	sndpool = Mem_AllocPool( "Sound Zone" );
 	snd.backend_name = "None";
 #if XASH_XBOX
+	S_R3D_VoxInit(); // #177: r3d_vox_stream, r3d_vox_ab, r3d_vox_crc
 	// #173: the rate the device opens at; a later change reopens it
 	Cvar_RegisterVariable( &r3d_snd_rate );
 	Cvar_RegisterVariable( &r3d_snd_backend ); // #178

@@ -225,6 +225,10 @@ typedef struct xbox_ft_load_s
 void Xbox_FT_LoadBegin( xbox_ft_load_t *l );
 void Xbox_FT_LoadEnd( const xbox_ft_load_t *l, const char *stage );
 void Xbox_FT_LoadAccum( const xbox_ft_load_t *l, int acc );
+/* A sound S_LoadSound loaded in play (XBOX_FT_NOTE_SOUND): its name with
+   the caller's tag and the file calls since `l` began
+   (xbox_ft_sound_note_name, divergence #177). */
+void Xbox_FT_SoundNote( const xbox_ft_load_t *l, const char *sound, int tag, uint32_t kcyc, uint32_t bytes );
 
 /* Two inserted lines around a region of upstream code, like
    XBOX_FT_SPAN_BEGIN/END; files that use them define all three as nothing

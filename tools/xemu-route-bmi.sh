@@ -28,7 +28,21 @@
 #      with -dvd_path, lets it run, closes xemu gracefully (never a kill:
 #      docs/r3d/lessons.md, qcow2 clusters), fetches the session with
 #      tools/frametime-report.py fetch-xemu --label <label>;
-#   4. removes the two route files from the stage again.
+#   4. removes the two route files from the stage again;
+#   5. decides from the recording itself whether the route ran, with
+#      `frametime-report.py check`, and exits nonzero when it did not:
+#      the session must end with an END chunk, play c0a0 -> c0a0a ->
+#      c0a0b -> c0a0c -> c0a0d -> c0a0e in that order, start the guard's
+#      line as a dialogue stream on c0a0e (`vox_starts`, required only
+#      from a build that has the counter; ROUTE_BMI_MIN replaces it), and
+#      be followed by the end marker: c0a0e's cfg, after stopping the
+#      recorder, records a short second session labelled <label>-end, so
+#      its presence says the end cfg ran to its last line. A fixed sleep
+#      and a fetched file say nothing alone - a tram stalled on c0a0b
+#      still leaves a recording. The label must be new on the xemu disk
+#      (an old session of the same label would be checked instead of this
+#      run's) and at most 18 characters (the recorder keeps 22, and "-end"
+#      is added).
 #
 # The end point. Barney's scene on c0a0e is scripted from the map's start
 # (trigger_auto -> barnwalkmm -> barnwalk +2 s -> barnspeakmm: the
@@ -60,6 +74,8 @@ LABEL=${1:?usage: xemu-route-bmi.sh <label> <xbe> [<cfg line>]...}
 XBE=${2:?usage: xemu-route-bmi.sh <label> <xbe> [<cfg line>]...}
 shift 2
 RUN_SECS=${ROUTE_BMI_SECONDS:-540}
+MAPS="c0a0,c0a0a,c0a0b,c0a0c,c0a0d,c0a0e"
+MINS=${ROUTE_BMI_MIN:-"c0a0e:vox_starts:1?"}
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE="$REPO/.sweep-xiso/hl"
 ISO="$REPO/.sweep-xiso/route-bmi.iso"
@@ -72,6 +88,10 @@ winpath() { cygpath -w "$1" 2>/dev/null || echo "$1"; }
 xemu_pids() { powershell -NoProfile -Command "(Get-Process xemu -ErrorAction SilentlyContinue | ForEach-Object { \$_.Id }) -join ' '" | tr -d '\r'; }
 cleanup() { rm -f "$CFG" "$ENDCFG"; }
 
+case "$LABEL" in
+*[!A-Za-z0-9_-]*|[-_]*) die "label '$LABEL': letters, digits, '-' and '_' only, not starting with '-' or '_'" ;;
+esac
+[ ${#LABEL} -le 18 ] || die "label '$LABEL' is over 18 characters (the recorder keeps 22, and '-end' is added)"
 [ -f "$XBE" ] || die "no xbe $XBE"
 [ -d "$STAGE/valve" ] || die "no staged disc tree at $STAGE (run tools/xbox-xiso.sh first)"
 [ -z "$(xemu_pids)" ] || die "an xemu is already running ($(xemu_pids)) - not mine, leaving it alone"
@@ -84,6 +104,13 @@ for f in "$STAGE"/valve/userconfig.d/*.cfg; do
 done
 [ -e "$ENDCFG" ] && die "$ENDCFG is already in the stage"
 mkdir -p "$OUT" || die "no $OUT"
+ls "$OUT"/ft_*.bin > /dev/null 2>&1 && die "$OUT already has recordings - pick a new label or folder"
+# The label must be new on the disk: check would otherwise read an old run.
+for l in "$LABEL" "$LABEL-end"; do
+	python "$REPO/tools/frametime-report.py" fetch-xemu --out "$OUT/.precheck" --label "$l" > /dev/null 2>&1 \
+		&& { rm -rf "$OUT/.precheck"; die "the xemu disk already has sessions labelled $l - pick a new label"; }
+done
+rm -rf "$OUT/.precheck"
 trap cleanup EXIT
 
 cp "$XBE" "$STAGE/default.xbe" && cmp -s "$XBE" "$STAGE/default.xbe" || die "copying the xbe failed"
@@ -101,6 +128,12 @@ mkdir -p "$STAGE/valve/maps"
 	echo "wait 2700"
 	echo "ent_fire barnwalk3 use"
 	echo "wait 1200"
+	echo "host_frametime_analysis 0"
+	echo "wait 10"
+	echo "// the end marker: a short session of its own, checked after the run"
+	echo "host_frametime_label \"$LABEL-end\""
+	echo "host_frametime_analysis 1"
+	echo "wait 30"
 	echo "host_frametime_analysis 0"
 	echo "echo route-bmi: done"
 } > "$ENDCFG" || die "end cfg"
@@ -122,5 +155,15 @@ powershell -NoProfile -Command "Get-Process -Id $(echo $PIDS | tr ' ' ',') | For
 
 cd "$REPO" || exit 1
 python tools/frametime-report.py fetch-xemu --out "$OUT" --label "$LABEL" || die "fetch-xemu found nothing for $LABEL"
-python tools/frametime-report.py summary "$OUT" --label "$LABEL" > "$OUT/summary.txt" 2>&1
+python tools/frametime-report.py fetch-xemu --out "$OUT" --label "$LABEL-end" \
+	|| echo "xemu-route-bmi: no end-marker session $LABEL-end on the disk (check reports it)" >&2
+python tools/frametime-report.py summary "$OUT" --label "$LABEL" > "$OUT/summary.txt" 2>&1 \
+	|| die "summary failed (see $OUT/summary.txt)"
+set -f
+# shellcheck disable=SC2086 # MINS is a list of words
+MIN_ARGS=$(for m in $MINS; do printf ' --min %s' "$m"; done)
+python tools/frametime-report.py check "$OUT" --label "$LABEL" --end-label "$LABEL-end" --maps "$MAPS" $MIN_ARGS \
+	> "$OUT/check.txt" 2>&1 || { cat "$OUT/check.txt" >&2; die "the route did not run (see $OUT/check.txt, $OUT/summary.txt)"; }
+set +f
+cat "$OUT/check.txt"
 echo "xemu-route-bmi: done, $OUT"

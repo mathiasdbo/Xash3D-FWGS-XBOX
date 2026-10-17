@@ -18,6 +18,7 @@ GNU General Public License for more details.
 #include "sound.h"
 #if XASH_XBOX
 #include "platform/xbox/xbox_frametime.h" // first-use load counters, docs/r3d/divergences.md #141
+#include "platform/xbox/xbox_vox_stream.h" // placeholders of streamed sounds, #177
 #endif
 
 // during registration it is possible to have more sounds
@@ -110,6 +111,9 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 
 	// see if still in memory
 	if( sfx->cache )
+#if XASH_XBOX
+		if( !S_R3D_VoxIsHeader( sfx->cache )) // #177: a streamed sound's placeholder loads whole below
+#endif
 		return sfx->cache;
 
 	if( COM_StringEmptyOrNULL( sfx->name ))
@@ -132,8 +136,14 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 
 		if( sfx->name[0] == '*' )
 			sc = FS_LoadSound( sfx->name + 1, NULL, 0 );
+#if XASH_XBOX
+		// #177: a small file a stream's open already read is decoded from those bytes
+		else if( !( sc = S_R3D_VoxPreloaded( sfx )))
+			sc = FS_LoadSound( sfx->name, NULL, 0 );
+#else
 		else
 			sc = FS_LoadSound( sfx->name, NULL, 0 );
+#endif
 	}
 
 	if( !sc ) sc = S_CreateDefaultSound();
@@ -145,6 +155,9 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 	else if( sc->rate > SOUND_22k && sc->rate != SOUND_44k ) // some bad sounds
 		Sound_Process( &sc, SOUND_44k, sc->width, sc->channels, SOUND_RESAMPLE );
 
+#if XASH_XBOX
+	S_R3D_VoxDetach( sfx ); // #177: the placeholder this load replaces
+#endif
 	sfx->cache = sc;
 
 #if XASH_XBOX
@@ -155,9 +168,10 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		// cls.state test of the s_warn_late_precache warning above (without
 		// its cvar or its "*default" exclusion)
 		if( cls.state == ca_active )
-			Xbox_FT_Note( XBOX_FT_NOTE_SOUND, sfx->name, kc, (uint32_t)sc->size );
+			Xbox_FT_SoundNote( &ft_stage, sfx->name, s_r3d_load_tag, kc, (uint32_t)sc->size ); // #177: why, and its file calls
 		else
 			Xbox_FT_LoadAccum( &ft_stage, XBOX_FT_LACC_SOUND );
+		s_r3d_load_tag = R3D_VOX_TAG_OTHER;
 	}
 #endif
 
@@ -253,6 +267,9 @@ void S_FreeSound( sfx_t *sfx )
 		prev = &hashSfx->hashNext;
 	}
 
+#if XASH_XBOX
+	S_R3D_VoxForget( sfx ); // #177: a placeholder (sfx->cache goes NULL) and the facts kept for sfx
+#endif
 	if( clgame.soundFuncs.pfnS_FreeSound )
 	{
 		clgame.soundFuncs.pfnS_FreeSound( sfx, sfx - s_knownSfx );
@@ -317,7 +334,11 @@ void S_EndRegistration( void )
 	{
 		if( !sfx->name[0] )
 			continue;
+#if XASH_XBOX
+		S_R3D_VoxRegister( sfx ); // #177: precached speech as a placeholder, the rest S_LoadSound
+#else
 		S_LoadSound( sfx );
+#endif
 	}
 	s_registering = false;
 }
@@ -349,7 +370,11 @@ sound_t S_RegisterSound( const char *name )
 	if( !sfx ) return -1;
 
 	sfx->servercount = cl.servercount;
+#if XASH_XBOX
+	if( !s_registering ) S_R3D_VoxRegister( sfx ); // #177
+#else
 	if( !s_registering ) S_LoadSound( sfx );
+#endif
 
 	return sfx - s_knownSfx;
 }

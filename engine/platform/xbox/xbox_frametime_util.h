@@ -502,6 +502,28 @@ enum
 	   OpenAL's output thread (Xbox_Snd_ThreadStats), so a session says
 	   which side of an A/B it is, whatever its label claims. */
 	XBOX_FT_W_SND_BACKEND,   /* 0: SDL's audio thread, 1: OpenAL on the APU (r3d_snd_backend; 0 too when OpenAL did not open) */
+	/* The dialogue streams (2026-10-13, x9-audio-vox-stream, divergence
+	   #177), counted in engine/platform/xbox/xbox_vox_stream.c. A start is
+	   a sentence word or a precached speech sound that streamed; one the
+	   stream left to upstream's whole load is a `small` (by size only) or
+	   a fallback (named in a `vox` note). */
+	XBOX_FT_W_VOX_STARTS,    /* sounds that started streaming */
+	XBOX_FT_W_VOX_SLOTS,     /* the most stream slots in use at once in the frame (a state, not a count) */
+	XBOX_FT_W_VOX_OPENS,     /* files the streams opened (each a path search and an overlapped open) */
+	XBOX_FT_W_VOX_OPEN_KC,   /* time: those opens, the path search included */
+	XBOX_FT_W_VOX_READS,     /* reads issued (unit, tail or loop blocks) */
+	XBOX_FT_W_VOX_READ_KB,   /* KiB they asked for */
+	XBOX_FT_W_VOX_ASYNC,     /* ... of which the kernel queued and the frame went on without */
+	XBOX_FT_W_VOX_SYNC,      /* ... of which were read at once: a first word's head and tail, a jump, a missing unit */
+	XBOX_FT_W_VOX_WAITS,     /* queued reads the frame had to block on (not landed when needed) */
+	XBOX_FT_W_VOX_WAIT_KC,   /* time: those waits */
+	XBOX_FT_W_VOX_SEEKS,     /* windows moved by a jump (a restore, a loop without its units) */
+	XBOX_FT_W_VOX_IO_KC,     /* time: every file call of the streams (opens, reads, waits, closes) */
+	XBOX_FT_W_VOX_FIRST_KC,  /* time: the starts that streamed, whole - the first word's wait */
+	XBOX_FT_W_VOX_PF_HITS,   /* word starts that found their prefetch landed (no wait, no read) */
+	XBOX_FT_W_VOX_SMALL,     /* candidates left to S_LoadSound for their size (U bytes of data or less) */
+	XBOX_FT_W_VOX_FALLBACKS, /* candidates left to upstream for another reason, and windows that fell back to a whole load */
+	XBOX_FT_W_VOX_WINDOW_KB, /* KiB the streams hold at the frame's close - slots, loop units, header entries, whole fallbacks (a state) */
 	XBOX_FT_W_END
 };
 
@@ -709,6 +731,18 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
                          was there but the mp3 plays; kilocycles = the
                          open, bytes = the .xwav's size. A track with no
                          .xwav (main, or not baked) leaves no note.
+     XBOX_FT_NOTE_VOX    (2026-10-13, x9-audio-vox-stream, divergences.md
+                         #177) a dialogue sound the stream left to
+                         upstream's whole load, or a window that fell
+                         back to one: name = "<reason> <sound>" (nofile:
+                         not a plain file on disk; open, io: the kernel
+                         refused; slot: none free; format: outside the
+                         class; chunks: a chunk header past what the
+                         stream reads; big: a request wider than the
+                         window); kilocycles = the decision.
+   From the same build a sound note's name is xbox_ft_sound_note_name's
+   below (the load's caller and its file calls); earlier ones hold the
+   sound's name alone.
    The recorder keeps up to XBOX_FT_NOTES_MAX between flushes and counts
    the rest as dropped. */
 #define XBOX_FT_CHUNK_NOTES      8u
@@ -717,6 +751,7 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
 #define XBOX_FT_NOTE_MENU        3u
 #define XBOX_FT_NOTE_LOAD        4u
 #define XBOX_FT_NOTE_MUSIC       5u
+#define XBOX_FT_NOTE_VOX         6u
 #define XBOX_FT_NOTE_NAME_BYTES  48u
 #define XBOX_FT_NOTE_BYTES       ( 16u + XBOX_FT_NOTE_NAME_BYTES )
 #define XBOX_FT_NOTES_MAX        64u
@@ -754,6 +789,18 @@ size_t xbox_ft_encode_notes( uint8_t *out, const xbox_ft_note_t *notes, uint32_t
    (size >= 1) and returns its length. */
 size_t xbox_ft_load_note_name( char *out, size_t size, const char *stage, uint32_t io_kc, uint32_t opens,
 	uint32_t reads, uint32_t seeks, uint32_t probes, uint32_t writes, uint32_t meta, uint32_t count );
+
+/* A sound note's name (XBOX_FT_NOTE_SOUND, divergence #177):
+     "<sound> <tag>:<io>,<opens>,<reads>,<seeks>,<probes>"
+   tag = why S_LoadSound ran (engine/platform/xbox/xbox_vox_stream.h,
+   R3D_VOX_TAG_*: w a word starting, t SND_GetChannelTimeLeft, s a sound
+   started, m the mixer's reload, r a registration, o anything else); the
+   rest as a load note's, so the load's open and path search (Stage A's
+   floor) is told from its transfer. The numbers are kept whole: the sound's
+   name is cut first. Writes out[] NUL-terminated (size >= 1) and returns
+   its length. */
+size_t xbox_ft_sound_note_name( char *out, size_t size, const char *sound, char tag, uint32_t io_kc, uint32_t opens,
+	uint32_t reads, uint32_t seeks, uint32_t probes );
 
 /* The accumulated load stages: every load of one kind between two map
    starts, summed into one note at the second (XBOX_FT_NOTE_LOAD,

@@ -186,11 +186,15 @@ static void test_encoders( void )
 	CHECK( XBOX_FT_W_MUSIC_READS == 183 && XBOX_FT_W_MUSIC_READ_KC == 188 );
 	/* The audio output (x9-audio-mix48, #173) after them. */
 	CHECK( XBOX_FT_W_SND_THR_KC == 189 && XBOX_FT_W_SND_RATE == 194 );
-	CHECK( XBOX_FT_W_COUNT == 196 );
-	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 816 && xbox_ft_frame_bytes( 0 ) == 32 );
+	/* The output backend (x9-audio-al-output, #178), then the dialogue
+	   streams (x9-audio-vox-stream, #177) after it. */
+	CHECK( XBOX_FT_W_SND_BACKEND == 195 );
+	CHECK( XBOX_FT_W_VOX_STARTS == 196 && XBOX_FT_W_VOX_WINDOW_KB == 212 );
+	CHECK( XBOX_FT_W_COUNT == 213 );
+	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 884 && xbox_ft_frame_bytes( 0 ) == 32 );
 	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_SPAN_CALLS ) == 112 );
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", XBOX_FT_W_COUNT ) == XBOX_FT_HEADER_BYTES );
-	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 816 );
+	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 884 );
 	/* Version 1 is the same header without counters. */
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", 0 ) == XBOX_FT_HEADER_BYTES );
 	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 );
@@ -216,15 +220,15 @@ static void test_encoders( void )
 	CHECK( xbox_ft_encode_frame( buf, &f, 0 ) == XBOX_FT_FRAME_BYTES );
 	CHECK( rd32( buf ) == 7 && buf[4] == 0xDD && buf[7] == 0xAA && rd32( buf + 24 ) == 6 );
 	CHECK( buf[28] == 0x01 && buf[29] == 0x80 && buf[30] == 0 && buf[31] == 0 );
-	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 816 );
+	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 884 );
 	CHECK( rd32( buf ) == 7 && buf[28] == 0x01 && buf[29] == 0x80 );
 	CHECK( rd32( buf + 32 ) == 0x01000000u && rd32( buf + 32 + 4 * XBOX_FT_W_LM_TEXELS ) == 0x01000000u + XBOX_FT_W_LM_TEXELS );
-	CHECK( rd32( buf + 812 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
+	CHECK( rd32( buf + 880 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
 
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, 0 ) == 16 );
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_FRAMES && rd32( buf + 4 ) == 8 + 3 * 32 && rd32( buf + 8 ) == 10 && rd32( buf + 12 ) == 3 );
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, XBOX_FT_W_COUNT ) == 16 );
-	CHECK( rd32( buf + 4 ) == 8 + 3 * 816 );
+	CHECK( rd32( buf + 4 ) == 8 + 3 * 884 );
 
 	/* The COUNTERS chunk: every name, NUL-padded to 16 bytes. */
 	CHECK( xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ) == 8 + 4 + XBOX_FT_W_COUNT * 16 );
@@ -309,8 +313,13 @@ static void test_encoders( void )
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SND_RATE, "snd_rate" ) == 0 );
 	CHECK( XBOX_FT_W_MUSIC_READ_KC + 6 == XBOX_FT_W_SND_RATE );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SND_BACKEND, "snd_backend" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_VOX_STARTS, "vox_starts" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_VOX_FIRST_KC, "vox_first_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_VOX_PF_HITS, "vox_pf_hits" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_VOX_WINDOW_KB, "vox_window_kb" ) == 0 );
 	CHECK( XBOX_FT_W_SND_RATE + 1 == XBOX_FT_W_SND_BACKEND );
-	CHECK( XBOX_FT_W_SND_BACKEND == XBOX_FT_W_COUNT - 1 );
+	CHECK( XBOX_FT_W_SND_BACKEND + 1 == XBOX_FT_W_VOX_STARTS );
+	CHECK( XBOX_FT_W_VOX_WINDOW_KB == XBOX_FT_W_COUNT - 1 );
 	for( i = 0; i < XBOX_FT_W_COUNT; i++ )
 		CHECK( xbox_ft_work_names[i] && strlen( xbox_ft_work_names[i] ) < XBOX_FT_COUNTER_NAME_BYTES && buf[12 + 16 * i + 15] == 0 );
 
@@ -514,6 +523,18 @@ static void test_load_note_name( void )
 	CHECK( n == sizeof( out ) - 1 && strlen( out ) == n );
 	CHECK( strcmp( xbox_ft_load_acc_names[XBOX_FT_LACC_STUDIO], "acc_studio" ) == 0
 		&& strcmp( xbox_ft_load_acc_names[XBOX_FT_LACC_BSPDECAL], "acc_bspdecal" ) == 0 );
+
+	/* A sound note's name (#177): the sound, its caller's tag, the file
+	   calls; the name is cut first, the numbers kept whole. */
+	n = xbox_ft_sound_note_name( out, sizeof( out ), "scientist/c1a0_sci_dis1a", 'w', 1234, 1, 2, 0, 3 );
+	CHECK( strcmp( out, "scientist/c1a0_sci_dis1a w:1234,1,2,0,3" ) == 0 && n == strlen( out ));
+	n = xbox_ft_sound_note_name( out, sizeof( out ), "barney/a_name_much_longer_than_the_note_field_allows", 't', 9999999, 9, 99, 9, 99 );
+	CHECK( n == sizeof( out ) - 1 && strlen( out ) == n );
+	CHECK( strcmp( out + n - strlen( " t:9999999,9,99,9,99" ), " t:9999999,9,99,9,99" ) == 0 && strncmp( out, "barney/a_name", 13 ) == 0 );
+	n = xbox_ft_sound_note_name( out, sizeof( out ), NULL, 0, 1, 2, 3, 4, 5 );
+	CHECK( strcmp( out, " o:1,2,3,4,5" ) == 0 && n == strlen( out ));
+	n = xbox_ft_sound_note_name( small, sizeof( small ), "x", 's', 1, 2, 3, 4, 5 );
+	CHECK( n == sizeof( small ) - 1 && strlen( small ) == n && strncmp( small, " s:1,2,", 7 ) == 0 );
 }
 
 /* Sessions and segments (v3, 2026-10-07): the label's sanitising, the
@@ -587,7 +608,7 @@ static void test_segments( void )
 	seg.tsc_open = 0x1122334455667788ull;
 	memset( buf, 0xCC, sizeof( buf ));
 	CHECK( xbox_ft_encode_header_v3( buf, 1024, 733000000u, 3375000u, 77, 42, 2, "build y", XBOX_FT_W_COUNT, &seg ) == XBOX_FT_HEADER_V3_BYTES );
-	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 && rd32( buf + 8 ) == 3 && rd32( buf + 12 ) == 256 && rd32( buf + 16 ) == 816 );
+	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 && rd32( buf + 8 ) == 3 && rd32( buf + 12 ) == 256 && rd32( buf + 16 ) == 884 );
 	CHECK( rd64( buf + 40 ) == 77 && rd64( buf + 48 ) == 42 && rd32( buf + 56 ) == 2 && strcmp( (const char *)buf + 64, "build y" ) == 0 );
 	CHECK( memcmp( buf + 128, id, 16 ) == 0 );
 	CHECK( rd32( buf + 144 ) == 4 && rd32( buf + 148 ) == XBOX_FT_SEG_SIZE && rd32( buf + 152 ) == 12345 && rd32( buf + 156 ) == 0 );
@@ -983,6 +1004,27 @@ static int write_fixture_spans( const char *path )
 		f.work[XBOX_FT_W_SND_THR_RUNS] = 1;
 		f.work[XBOX_FT_W_SND_BUFS] = 1;
 		f.work[XBOX_FT_W_SND_RATE] = 48000;
+		/* the dialogue streams (#177): a start every 10 frames (open 1 ms,
+		   start 2 ms), half of them on a landed prefetch; two reads a frame
+		   (8 KiB), one queued and one at once, 1 ms of file calls; one wait
+		   (3 ms) and the peak of 5 slots at seq 20; two small words and one
+		   fallback; 64 KiB of stream memory */
+		f.work[XBOX_FT_W_VOX_STARTS] = ( i % 10 == 0 );
+		f.work[XBOX_FT_W_VOX_OPENS] = ( i % 10 == 0 );
+		f.work[XBOX_FT_W_VOX_OPEN_KC] = ( i % 10 == 0 );
+		f.work[XBOX_FT_W_VOX_FIRST_KC] = ( i % 10 == 0 ) ? 2 : 0;
+		f.work[XBOX_FT_W_VOX_PF_HITS] = ( i % 10 == 5 );
+		f.work[XBOX_FT_W_VOX_READS] = 2;
+		f.work[XBOX_FT_W_VOX_READ_KB] = 8;
+		f.work[XBOX_FT_W_VOX_ASYNC] = 1;
+		f.work[XBOX_FT_W_VOX_SYNC] = 1;
+		f.work[XBOX_FT_W_VOX_IO_KC] = 1;
+		f.work[XBOX_FT_W_VOX_WAITS] = ( i == 20 );
+		f.work[XBOX_FT_W_VOX_WAIT_KC] = ( i == 20 ) ? 3 : 0;
+		f.work[XBOX_FT_W_VOX_SMALL] = ( i % 25 == 0 );
+		f.work[XBOX_FT_W_VOX_FALLBACKS] = ( i == 30 );
+		f.work[XBOX_FT_W_VOX_SLOTS] = ( i == 20 ) ? 5 : 3;
+		f.work[XBOX_FT_W_VOX_WINDOW_KB] = 64;
 		if( i == 40 )
 		{
 			k[XBOX_FT_S_SV_GAME] = 10;
@@ -1015,6 +1057,28 @@ static int write_fixture_spans( const char *path )
 		c[1].phys = 106000; c[1].think = 90000; c[1].worst = 8000;
 		strcpy( c[2].name, "info_target" );
 		fwrite( buf, 1, xbox_ft_encode_classes( buf, c, 3 ), fp );
+	}
+	{
+		/* NOTES (#177): two words loaded whole in play, tagged by their
+		   caller, and a dialogue fallback */
+		xbox_ft_note_t n[3];
+
+		memset( n, 0, sizeof( n ));
+		n[0].seq = 10;
+		n[0].kind = XBOX_FT_NOTE_SOUND;
+		n[0].kcyc = 4;
+		n[0].bytes = 6000;
+		xbox_ft_sound_note_name( n[0].name, sizeof( n[0].name ), "vox/hello", 'w', 1500, 1, 3, 0, 2 );
+		n[1].seq = 12;
+		n[1].kind = XBOX_FT_NOTE_SOUND;
+		n[1].kcyc = 2;
+		n[1].bytes = 3000;
+		xbox_ft_sound_note_name( n[1].name, sizeof( n[1].name ), "vox/one", 't', 900, 1, 2, 0, 2 );
+		n[2].seq = 30;
+		n[2].kind = XBOX_FT_NOTE_VOX;
+		n[2].kcyc = 1;
+		strcpy( n[2].name, "slot scientist/c1a0_sci_dis1a" );
+		fwrite( buf, 1, xbox_ft_encode_notes( buf, n, 3, 0 ), fp );
 	}
 	fwrite( buf, 1, xbox_ft_encode_end( buf, 9000000u, 0 ), fp );
 	return fclose( fp ) != 0;
