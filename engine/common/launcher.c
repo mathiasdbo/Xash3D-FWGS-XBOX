@@ -21,6 +21,10 @@ GNU General Public License for more details.
 #include <SDL.h>
 #endif
 
+#if XASH_XBOX
+#include <hal/xbox.h>
+#endif
+
 #ifndef XASH_GAMEDIR
 #define XASH_GAMEDIR "valve" // !!! Replace with your default (base) game directory !!!
 #endif
@@ -45,6 +49,15 @@ int main( int argc, char **argv )
 	szArgc = argc;
 	szArgv = argv;
 #endif // XASH_PSVITA
+#if XASH_XBOX
+	// The engine has shut down (quit, the menu, the in-game reset, an error):
+	// back to the dashboard. Returning would end in nxdk's exit(), a quick
+	// reboot with no launch data. Divergence #179.
+	Host_Main( szArgc, szArgv, XASH_GAMEDIR, 0, Sys_ChangeGame );
+	XLaunchXBE( NULL );
+	return 0; // XLaunchXBE returns only if it failed
+#else
 	return Host_Main( szArgc, szArgv, XASH_GAMEDIR, 0, Sys_ChangeGame );
+#endif
 }
 #endif // XASH_ENABLE_MAIN

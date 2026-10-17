@@ -114,6 +114,7 @@ void Xbox_ConPrint( const char *pMsg );
 qboolean Xbox_NetLogInit( void );
 void Xbox_NetLogPrint( const char *pMsg );
 qboolean Xbox_NanoSleep( int nsec );
+void Xbox_IGR_Poll( void ); // xbox_igr.c, divergence #179
 #endif
 
 #if XASH_NSWITCH

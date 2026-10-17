@@ -430,6 +430,8 @@ void Platform_RunEvents( void )
 
 #if XASH_PSVITA
 	PSVita_InputUpdate();
+#elif XASH_XBOX
+	Xbox_IGR_Poll(); // docs/r3d/divergences.md #179
 #endif
 }
 
