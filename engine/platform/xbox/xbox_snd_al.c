@@ -215,8 +215,15 @@ static void XboxAL_ProfWrite( const char *why, qboolean flush )
 			const double scrub = ( st.output_scrub_cycles - s_alp_st0.output_scrub_cycles ) * us / n;
 			const double total = ( st.output_cycles - s_alp_st0.output_cycles ) * us / n;
 
-			XboxAL_ProfCat( t, sizeof( t ), &len, "  thread: %.2f passes/update, per pass %.1f us: fifo %.1f, queue %.1f, scrub %.1f, rest %.1f\n",
+			XboxAL_ProfCat( t, sizeof( t ), &len, "  thread: %.2f passes/update, per pass %.1f us: fifo %.1f, queue %.1f, scrub %.1f, rest %.1f",
 				n / s_alp.updates, total, fifo, queue, scrub, total - fifo - queue - scrub );
+			// zero-copy: the codec plays the GP's ring in place; slips are
+			// pieces repeated or skipped in this window, the lead (frames the
+			// GP is ahead of the codec) is the run's least / most / last
+			if( st.output_zero_copy )
+				XboxAL_ProfCat( t, sizeof( t ), &len, "; zero-copy, slips %u, lead %u..%u (last %u)\n",
+					st.output_slips - s_alp_st0.output_slips, st.output_lead_min, st.output_lead_max, st.output_lead_last );
+			else XboxAL_ProfCat( t, sizeof( t ), &len, "; copy mode\n" );
 		}
 		s_alp_st0 = st;
 		if( s_alp_len + len <= sizeof( s_alp_text ))
