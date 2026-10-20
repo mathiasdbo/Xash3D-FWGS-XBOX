@@ -1328,6 +1328,136 @@ static void TestWindows( void )
 	free( o );
 }
 
+/* ---- the sink (#183): the blocks to a voice instead of a decode ---- */
+
+typedef struct sinkrec_s
+{
+	const track_t *t;
+	uint32_t n;          /* blocks received */
+	uint32_t next;       /* the block expected next; UINT32_MAX: any */
+	uint32_t last;       /* the last received */
+	int bad;             /* out of order, twice, or not the file's bytes */
+} sinkrec_t;
+
+static void SinkRecord( void *ctx, uint32_t block, const uint8_t *data )
+{
+	sinkrec_t *r = ctx;
+	const xbox_xwav_info_t *in = &r->t->info;
+
+	if(( r->next != UINT32_MAX && block != r->next ) || block >= ( in->frames + 63 ) / 64 )
+		r->bad++;
+	else if( memcmp( data, r->t->file + in->data_offset + block * in->block_bytes, in->block_bytes ))
+		r->bad++;
+	r->n++;
+	r->last = block;
+	r->next = block + 1;
+}
+
+/* The same reads on a decoding stream and a sinking one: the same
+   results and positions, and the sink has every block covering what was
+   handed out, in order, once, as the file holds it. With `seek_at` a
+   SetPos to `seek_to` source frames on both after that many reads; with
+   `unsink_at` the sink goes after that many reads, and from then on the
+   sinking stream's bytes are the decode's. */
+static void CheckSink( track_t *t, const int *sizes, int nsizes, int seek_at, uint32_t seek_to, int unsink_at )
+{
+	opened_t *a = malloc( sizeof( *a )), *b = malloc( sizeof( *b ));
+	const uint32_t fb = 2u * t->info.channels;
+	uint8_t *ba = malloc( 20000 ), *bb = malloc( 20000 );
+	sinkrec_t rec;
+	uint64_t handed; /* bytes; a frame handed out in part counts */
+	int k, sunk = 1;
+
+	memset( &rec, 0, sizeof( rec ));
+	rec.t = t;
+	rec.next = UINT32_MAX;
+	Open( a, t );
+	Open( b, t );
+	Xbox_MusicStream_SetSink( &b->s, SinkRecord, &rec );
+	handed = 0;
+
+	for( k = 0; k < 100000; k++ )
+	{
+		const int need = sizes[k % nsizes];
+		int ra, rb;
+
+		if( k == seek_at )
+		{
+			/* UINT32_MAX: 10 frames back, inside the block sunk last */
+			const uint32_t to = seek_to != UINT32_MAX ? seek_to : (uint32_t)Xbox_MusicStream_GetPos( &a->s ) - 10;
+
+			Xbox_MusicStream_SetPos( &a->s, (int)to );
+			Xbox_MusicStream_SetPos( &b->s, (int)to );
+			/* the jump: the block holding the target next */
+			rec.next = Xbox_MusicXwav_ToFileFrames( &t->info, to ) / 64;
+			handed = (uint64_t)Xbox_MusicXwav_ToFileFrames( &t->info, to ) * fb;
+			CHECK( Xbox_MusicStream_HandedFrame( &b->s ) == handed / fb );
+		}
+		if( k == unsink_at )
+		{
+			Xbox_MusicStream_SetSink( &b->s, NULL, NULL );
+			sunk = 0;
+		}
+		test_clock++;
+		ra = Xbox_MusicStream_Read( &a->s, need, ba );
+		rb = Xbox_MusicStream_Read( &b->s, need, bb );
+		CHECK( ra == rb );
+		CHECK( Xbox_MusicStream_GetPos( &a->s ) == Xbox_MusicStream_GetPos( &b->s ));
+		CHECK( Xbox_MusicStream_HandedFrame( &a->s ) == Xbox_MusicStream_HandedFrame( &b->s ));
+		if( ra != rb )
+			break;
+		if( ra > 0 )
+		{
+			handed += (uint32_t)ra;
+			CHECK( Xbox_MusicStream_HandedFrame( &b->s ) == ( handed + fb - 1 ) / fb );
+			if( sunk )
+			{
+				/* every frame handed out is in a block the sink has */
+				CHECK( rec.n > 0 && ( rec.last + 1 ) * 64 >= ( handed + fb - 1 ) / fb );
+			}
+			else if( memcmp( ba, bb, (size_t)ra ))
+			{
+				CHECK( !"bytes after the sink went differ from the decode" );
+				break;
+			}
+		}
+		if( ra == 0 && k > seek_at && k > unsink_at + 4 )
+			break;
+	}
+	CHECK( rec.bad == 0 );
+	CHECK( b->s.bad_blocks == 0 );
+	CheckReader( a );
+	CheckReader( b );
+	free( ba );
+	free( bb );
+	free( a );
+	free( b );
+}
+
+static void TestSink( void )
+{
+	static const int engine_like[] = { 16384, 16384, 2940, 2944, 2936, 3000, 4 };
+	static const int odd[] = { 1, 3, 4, 7, 100, 4095, 4096, 4097, 8191, 8192, 8193, 5000 * 4, 2 };
+	track_t t;
+	int k;
+
+	MakeTrack( &t, XBOX_XWAV_TAG_ADPCM, 2, 2048 * 5 + 1000 + 37, 44100, 44100, 8192 );
+	CheckSink( &t, engine_like, 7, -1, 0, -1 );
+	CheckSink( &t, odd, 13, -1, 0, -1 );
+	CheckSink( &t, engine_like, 7, 3, 3001, -1 );   /* forward, inside a block */
+	CheckSink( &t, odd, 13, 9, 70, -1 );            /* back */
+	CheckSink( &t, engine_like, 7, 3, UINT32_MAX, -1 ); /* back inside the last block sunk */
+	for( k = 1; k < 12; k++ )
+		CheckSink( &t, odd, 13, -1, 0, k );         /* the sink off part way through a chunk */
+	CheckSink( &t, engine_like, 7, 2, 5000, 4 );
+	FreeTrack( &t );
+
+	MakeTrack( &t, XBOX_XWAV_TAG_ADPCM, 1, 2048 * 3 + 600, 22050, 22050, 8192 );
+	CheckSink( &t, engine_like, 7, -1, 0, -1 );
+	CheckSink( &t, odd, 13, 5, 1234, 8 );
+	FreeTrack( &t );
+}
+
 int main( void )
 {
 	TestTables();
@@ -1341,6 +1471,8 @@ int main( void )
 		   and three requests late */
 		TestStream();
 	}
+	for( open_lag = -1; open_lag <= 3; open_lag += 4 )
+		TestSink();
 	open_lag = -1;
 	TestWindows();
 	TestDiscovery();

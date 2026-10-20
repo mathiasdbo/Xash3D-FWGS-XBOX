@@ -28,13 +28,13 @@ stays resident.
 
 WHAT. A sound in the stream class - the 8-bit mono 11/22/44 kHz PCM WAVs
 of retail speech, whose samples upstream's loader (Sound_LoadWAV,
-snd_wav.c:177-378) copies unchanged except for the unsigned-to-signed
-step - plays from a WINDOW: three units of U bytes of the file (U =
-r3d_vox_unit, 8 KiB on the hard disk), contiguous, 4096-aligned in the
-file and in memory, read with #172's overlapped unbuffered reads
-(compat/xbox/xbox_async_read.h). Sample s is file byte data_off + s; each
-unit is XORed with 0x80 over the data chunk as it lands, which is the
-loader's `(byte)*p - 128`. The window hangs off ch->data (the field
+snd_wav.c:177-378) copies unchanged (its unsigned-to-signed step is off
+on the Xbox: docs/r3d/design/x9-audio-apu-voices.md section 3) - plays
+from a WINDOW: three units of U bytes of the file (U = r3d_vox_unit, 8 KiB
+on the hard disk), contiguous, 4096-aligned in the file and in memory,
+read with #172's overlapped unbuffered reads
+(compat/xbox/xbox_async_read.h). Sample s is file byte data_off + s, as
+it is in a whole load. The window hangs off ch->data (the field
 upstream's VOX already sets per channel, so two channels saying one word
 each read their own), and S_RetrieveAudioSamples (s_main.c) maps
 upstream's own position and count into it: the pointer it hands the mixer
@@ -135,7 +135,7 @@ typedef struct vox_buf_s
 	uint32_t off;       /* the file offset of its first byte */
 	uint32_t valid;     /* READY: the bytes that arrived */
 	uint8_t state;      /* BUF_* */
-	uint8_t conv;       /* the data chunk's bytes in it are signed (XORed) */
+	uint8_t conv;       /* ready to hand out (Vox_Convert) */
 } vox_buf_t;
 
 /* A sound's header facts; the wavdata_t placeholder follows it in the
@@ -852,24 +852,18 @@ static byte *Vox_Dst( vox_slot_t *s, int t )
 	return s->loop + ( t - T_LOOP ) * s->unit;
 }
 
-/* The data chunk's bytes in buffer t, signed: Sound_LoadWAV's
-   `(byte)((int)((byte)*pData) - 128 )` (snd_wav.c:337-350) is an XOR with
-   0x80. Nothing outside [data_off, data_off + data_bytes) is touched or
-   ever handed out. */
+/* Buffer t made ready to hand out. The loader's unsigned-to-signed step
+   (snd_wav.c) is gone on the Xbox: the cache keeps 8-bit sounds unsigned,
+   as the APU plays them (docs/r3d/design/x9-audio-apu-voices.md section
+   3), so the window's bytes are the file's, as a whole load's are. Only
+   [data_off, data_off + data_bytes) is ever handed out. */
 static void Vox_Convert( vox_slot_t *s, int t )
 {
 	vox_buf_t *b = &s->b[t];
-	uint32_t lo, hi, i;
-	byte *p;
 
 	if( !s->hdr || b->state != BUF_READY || b->conv )
 		return;
 	b->conv = true;
-	lo = Q_max( b->off, s->hdr->data_off );
-	hi = Q_min( b->off + b->valid, s->hdr->data_off + s->hdr->data_bytes );
-	p = Vox_Dst( s, t ) - b->off;
-	for( i = lo; i < hi; i++ )
-		p[i] ^= 0x80;
 }
 
 /* Collects the read in flight: true when there is none left (it landed,
@@ -2179,7 +2173,7 @@ static qboolean Vox_CrcSentence( const char *name, vox_crc_stats_t *st )
 
 					r->at_end[e] = 999;
 					if( at >= 0 && S_RetrieveAudioSamples( src, &p, at, 1, false ) == 1 && p )
-						r->at_end[e] = *(const int8_t *)p;
+						r->at_end[e] = S_SAMPLE8( *(const int8_t *)p );
 				}
 			}
 			r->sample = ch.sample;

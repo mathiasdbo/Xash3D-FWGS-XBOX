@@ -18,5 +18,6 @@ void SX_Free( void );
 void SX_RoomFX( portable_samplepair_t *paint, int num_samples );
 void SX_ClearState( void );
 void SX_R3D_SetRate( void );
+#include "s_dsp_gp.h" /* the GP room kernel's parameters (divergence #180) */
 
 #endif

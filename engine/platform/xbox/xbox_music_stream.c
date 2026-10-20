@@ -76,6 +76,7 @@ waits for its read in flight before its buffer is freed.
 #include "xbox_music_adpcm.h"
 #include "xbox_music_stream.h"
 #include "xbox_async_read.h" /* compat/xbox: the overlapped reads, #172 */
+#include "xbox_snd_music_voice.h" /* #183: the blocks to a voice */
 
 /* Not archived on purpose: an A/B session that ended on 0 would otherwise
    keep the mp3 path on through the HDD's config.cfg, which shadows the
@@ -331,12 +332,16 @@ static stream_t *Music_OpenXwav( file_t *file, const char *path, const char *fil
 	stream->type = WF_PCMDATA;
 	stream->format = &xwav_format;
 
+	// #183: while the sounds are on voices, the APU decodes the blocks
+	if( Xbox_SndMusicVoice_Want( &info ))
+		Xbox_MusicStream_SetSink( &st->s, Xbox_SndMusicVoice_Sink, &st->s );
+
 	{
 		/* the codec, the read path and (#173) the file's rate */
 		char what[48];
 
-		Q_snprintf( what, sizeof( what ), "xwav %s %s %u", info.tag == XBOX_XWAV_TAG_ADPCM ? "adpcm" : "pcm",
-			st->async_on ? "async" : "sync", (unsigned)info.rate );
+		Q_snprintf( what, sizeof( what ), "xwav %s %s %u%s", info.tag == XBOX_XWAV_TAG_ADPCM ? "adpcm" : "pcm",
+			st->async_on ? "async" : "sync", (unsigned)info.rate, st->s.sink ? " voice" : "" );
 		Music_Note( what, filename, xbox_ft_span_kc_since( span ), (uint32_t)len );
 	}
 	return stream;
@@ -406,6 +411,15 @@ static stream_t *Music_Open( const char *filename, qboolean force, const char *x
 stream_t *Xbox_MusicStream_Open( const char *filename )
 {
 	return Music_Open( filename, false, NULL );
+}
+
+struct xbox_music_stream_s *Xbox_MusicStream_Sunk( stream_t *stream )
+{
+	music_state_t *st;
+
+	if( !stream || stream->format != &xwav_format || !( st = stream->ptr ))
+		return NULL;
+	return st->s.sink ? &st->s : NULL;
 }
 
 /* ---- r3d_music_ab: flip r3d_music_baked and pick the track up where it was ---- */

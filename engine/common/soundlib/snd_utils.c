@@ -413,6 +413,17 @@ static qboolean Sound_ResampleInternal( wavdata_t *sc, int outrate, int outwidth
 	return true;
 }
 
+#if XASH_XBOX
+void Sound_R3D_FlipSign8( wavdata_t *snd )
+{
+	if( snd->width == 1 )
+	{
+		for( size_t i = 0; i < snd->size; i++ )
+			snd->buffer[i] ^= 0x80;
+	}
+}
+#endif
+
 qboolean Sound_Process( wavdata_t **wav, int rate, int width, int channels, uint flags )
 {
 	wavdata_t *snd = *wav;
@@ -424,6 +435,12 @@ qboolean Sound_Process( wavdata_t **wav, int rate, int width, int channels, uint
 
 	if( likely( FBitSet( flags, SOUND_RESAMPLE ) && ( width > 0 || rate > 0	|| channels > 0 )))
 	{
+#if XASH_XBOX
+		// docs/r3d/design/x9-audio-apu-voices.md section 3: 8-bit sounds
+		// stay unsigned on the Xbox (the APU plays only unsigned 8-bit);
+		// the converters below read and write signed, so they get signed
+		Sound_R3D_FlipSign8( snd );
+#endif
 		result = Sound_ResampleInternal( snd, rate, width, channels );
 
 		if( result )
@@ -434,6 +451,9 @@ qboolean Sound_Process( wavdata_t **wav, int rate, int width, int channels, uint
 			Mem_Free( sound.tempbuffer );
 			sound.tempbuffer = NULL;
 		}
+#if XASH_XBOX
+		Sound_R3D_FlipSign8( snd ); // the result, or the input left as it was
+#endif
 	}
 
 	*wav = snd;

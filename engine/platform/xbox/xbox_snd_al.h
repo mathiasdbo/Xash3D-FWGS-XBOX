@@ -50,4 +50,9 @@ void Xbox_SndAL_Clear( void );
    otherwise SDL's. */
 void Xbox_Snd_ThreadStats( xbox_audio_thread_stats_t *out );
 
+/* With "r3d_snd_gpprobe 1" in a userconfig.d cfg, right after OpenAL opens:
+   checks on the console that a stereo send reaches a GP kernel unchanged,
+   writes gpprobe.txt (xbox_snd_gpprobe.c, #180). No-op otherwise. */
+void Xbox_SndAL_GpProbe( void );
+
 #endif /* XBOX_SND_AL_H */

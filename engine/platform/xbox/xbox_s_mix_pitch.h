@@ -96,8 +96,8 @@ static qboolean S_MixFixedStep( double offset_frac, double rate_scale, uint32_t 
 #define S_MIX_RUN_ADD( i ) \
 	do { pbuf[i].left += l; pbuf[i].right += r; } while( 0 )
 #define S_MIX_RUN_LR( x, LO, RO ) \
-	const int l = ( data[sample_idx + ( LO )] * lvol ) >> ( x - 8 ); \
-	const int r = ( data[sample_idx + ( RO )] * rvol ) >> ( x - 8 )
+	const int l = ( S_SAMPLE ## x( data[sample_idx + ( LO )] ) * lvol ) >> ( x - 8 ); \
+	const int r = ( S_SAMPLE ## x( data[sample_idx + ( RO )] ) * rvol ) >> ( x - 8 )
 #define S_MIX_RUNS( x, LO, RO, ST ) \
 	if( step_int == 0 && step_frac >= 0x10000000u && ( step_frac & ( step_frac - 1 )) == 0 ) \
 	{ \
@@ -163,7 +163,7 @@ static qboolean S_MixFixedStep( double offset_frac, double rate_scale, uint32_t 
 			S_MIX_RUNS( x, 0, 0, 1 ); \
 			for( int i = 0; i < num_samples; i++ ) \
 			{ \
-				const int s = data[sample_idx]; \
+				const int s = S_SAMPLE ## x( data[sample_idx] ); \
 				pbuf[i].left  += ( s * lvol ) >> ( x - 8 ); \
 				pbuf[i].right += ( s * rvol ) >> ( x - 8 ); \
 				frac += step_frac; \
@@ -173,8 +173,8 @@ static qboolean S_MixFixedStep( double offset_frac, double rate_scale, uint32_t 
 		} \
 		for( int i = 0; i < num_samples; i++ ) \
 		{ \
-			pbuf[i].left  += ( data[sample_idx] * lvol ) >> ( x - 8 ); \
-			pbuf[i].right += ( data[sample_idx] * rvol ) >> ( x - 8 ); \
+			pbuf[i].left  += ( S_SAMPLE ## x( data[sample_idx] ) * lvol ) >> ( x - 8 ); \
+			pbuf[i].right += ( S_SAMPLE ## x( data[sample_idx] ) * rvol ) >> ( x - 8 ); \
 			offset_frac += rate_scale; \
 			if( offset_frac >= 2.0 ) \
 			{ \
@@ -201,8 +201,8 @@ static qboolean S_MixFixedStep( double offset_frac, double rate_scale, uint32_t 
 			S_MIX_RUNS( x, 0, 1, 2 ); \
 			for( int i = 0; i < num_samples; i++ ) \
 			{ \
-				pbuf[i].left  += ( data[sample_idx+0] * lvol ) >> ( x - 8 ); \
-				pbuf[i].right += ( data[sample_idx+1] * rvol ) >> ( x - 8 ); \
+				pbuf[i].left  += ( S_SAMPLE ## x( data[sample_idx+0] ) * lvol ) >> ( x - 8 ); \
+				pbuf[i].right += ( S_SAMPLE ## x( data[sample_idx+1] ) * rvol ) >> ( x - 8 ); \
 				frac += step_frac; \
 				sample_idx += ( step_int + ( frac < step_frac )) << 1; \
 			} \
@@ -210,8 +210,8 @@ static qboolean S_MixFixedStep( double offset_frac, double rate_scale, uint32_t 
 		} \
 		for( int i = 0; i < num_samples; i++ ) \
 		{ \
-			pbuf[i].left  += ( data[sample_idx+0] * lvol ) >> ( x - 8 ); \
-			pbuf[i].right += ( data[sample_idx+1] * rvol ) >> ( x - 8 ); \
+			pbuf[i].left  += ( S_SAMPLE ## x( data[sample_idx+0] ) * lvol ) >> ( x - 8 ); \
+			pbuf[i].right += ( S_SAMPLE ## x( data[sample_idx+1] ) * rvol ) >> ( x - 8 ); \
 			offset_frac += rate_scale; \
 			if( offset_frac >= 2.0 ) \
 			{ \
@@ -225,6 +225,31 @@ static qboolean S_MixFixedStep( double offset_frac, double rate_scale, uint32_t 
 			} \
 		} \
 	} \
+
+/* docs/r3d/design/x9-audio-apu-voices.md section 3: the cache keeps 8-bit
+   sounds unsigned, so the two unpitched 8-bit loops are upstream's
+   (S_MakeMixMono / S_MakeMixStereo) with S_SAMPLE8's read; s_mix.c
+   instantiates only their 16-bit forms on the Xbox. Every loop here reads
+   through S_SAMPLE8 / S_SAMPLE16 for the same reason. */
+static void S_MixMono8( portable_samplepair_t *pbuf, const int *volume, const void *buf, int num_samples )
+{
+	const int8_t *data = buf;
+	for( int i = 0; i < num_samples; i++ )
+	{
+		pbuf[i].left  += S_SAMPLE8( data[i] ) * volume[0];
+		pbuf[i].right += S_SAMPLE8( data[i] ) * volume[1];
+	}
+}
+
+static void S_MixStereo8( portable_samplepair_t *pbuf, const int *volume, const void *buf, int num_samples )
+{
+	const int8_t *data = buf;
+	for( int i = 0; i < num_samples; i++ )
+	{
+		pbuf[i].left  += S_SAMPLE8( data[i * 2 + 0] ) * volume[0];
+		pbuf[i].right += S_SAMPLE8( data[i * 2 + 1] ) * volume[1];
+	}
+}
 
 S_MakeMixMonoPitchXbox( 8 )
 S_MakeMixMonoPitchXbox( 16 )
@@ -269,7 +294,7 @@ more: S_MixFixedStep) these run upstream's double loop unchanged.
 		{ \
 			for( int i = 0; i < num_samples; i++ ) \
 			{ \
-				const int s = S_LERP ## x( data[sample_idx], data[sample_idx + 1], frac ); \
+				const int s = S_LERP ## x( S_SAMPLE ## x( data[sample_idx] ), S_SAMPLE ## x( data[sample_idx + 1] ), frac ); \
 				pbuf[i].left  += ( s * lvol ) >> 8; \
 				pbuf[i].right += ( s * rvol ) >> 8; \
 				frac += step_frac; \
@@ -279,7 +304,7 @@ more: S_MixFixedStep) these run upstream's double loop unchanged.
 		} \
 		for( int i = 0; i < num_samples; i++ ) \
 		{ \
-			int s = (int)( data[sample_idx] * ( 1.0 - offset_frac ) + data[sample_idx + 1] * offset_frac ); \
+			int s = (int)( S_SAMPLE ## x( data[sample_idx] ) * ( 1.0 - offset_frac ) + S_SAMPLE ## x( data[sample_idx + 1] ) * offset_frac ); \
 			pbuf[i].left  += ( s * lvol ) >> ( x - 8 ); \
 			pbuf[i].right += ( s * rvol ) >> ( x - 8 ); \
 			offset_frac += rate_scale; \
@@ -299,8 +324,8 @@ more: S_MixFixedStep) these run upstream's double loop unchanged.
 		{ \
 			for( int i = 0; i < num_samples; i++ ) \
 			{ \
-				const int sl = S_LERP ## x( data[sample_idx + 0], data[sample_idx + 2], frac ); \
-				const int sr = S_LERP ## x( data[sample_idx + 1], data[sample_idx + 3], frac ); \
+				const int sl = S_LERP ## x( S_SAMPLE ## x( data[sample_idx + 0] ), S_SAMPLE ## x( data[sample_idx + 2] ), frac ); \
+				const int sr = S_LERP ## x( S_SAMPLE ## x( data[sample_idx + 1] ), S_SAMPLE ## x( data[sample_idx + 3] ), frac ); \
 				pbuf[i].left  += ( sl * lvol ) >> 8; \
 				pbuf[i].right += ( sr * rvol ) >> 8; \
 				frac += step_frac; \
@@ -310,8 +335,8 @@ more: S_MixFixedStep) these run upstream's double loop unchanged.
 		} \
 		for( int i = 0; i < num_samples; i++ ) \
 		{ \
-			int sl = (int)( data[sample_idx + 0] * ( 1.0 - offset_frac ) + data[sample_idx + 2] * offset_frac ); \
-			int sr = (int)( data[sample_idx + 1] * ( 1.0 - offset_frac ) + data[sample_idx + 3] * offset_frac ); \
+			int sl = (int)( S_SAMPLE ## x( data[sample_idx + 0] ) * ( 1.0 - offset_frac ) + S_SAMPLE ## x( data[sample_idx + 2] ) * offset_frac ); \
+			int sr = (int)( S_SAMPLE ## x( data[sample_idx + 1] ) * ( 1.0 - offset_frac ) + S_SAMPLE ## x( data[sample_idx + 3] ) * offset_frac ); \
 			pbuf[i].left  += ( sl * lvol ) >> ( x - 8 ); \
 			pbuf[i].right += ( sr * rvol ) >> ( x - 8 ); \
 			offset_frac += rate_scale; \

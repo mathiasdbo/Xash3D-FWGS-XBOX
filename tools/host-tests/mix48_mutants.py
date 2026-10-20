@@ -71,8 +71,8 @@ MUTANTS = [
      b"\tconst int64_t fi = (int64_t)f + ( (double)(int64_t)f != f && f < 4294967295.0 );"),
     # s_lerping on the fixed-point counter (divergence #174)
     (PITCH, "lerp: the next sample not read (point sampling again)",
-     b"const int s = S_LERP ## x( data[sample_idx], data[sample_idx + 1], frac );",
-     b"const int s = S_LERP ## x( data[sample_idx], data[sample_idx], frac );"),
+     b"const int s = S_LERP ## x( S_SAMPLE ## x( data[sample_idx] ), S_SAMPLE ## x( data[sample_idx + 1] ), frac );",
+     b"const int s = S_LERP ## x( S_SAMPLE ## x( data[sample_idx] ), S_SAMPLE ## x( data[sample_idx] ), frac );"),
     (PITCH, "lerp: the weight complemented (interpolating backwards)",
      b"#define S_LERP_WEIGHT16( frac ) ((int)(( frac ) >> 17 ))",
      b"#define S_LERP_WEIGHT16( frac ) ((int)(( ~( frac )) >> 17 ))"),
@@ -80,8 +80,8 @@ MUTANTS = [
      b"#define S_LERP8( a, b, frac )  ((( a ) * 256 ) + ((( (b) - (a) ) * S_LERP_WEIGHT8( frac )) >> 8 ))",
      b"#define S_LERP8( a, b, frac )  (( a ) + ((( (b) - (a) ) * S_LERP_WEIGHT8( frac )) >> 16 ))"),
     (PITCH, "lerp: the stereo right channel read from the left",
-     b"const int sr = S_LERP ## x( data[sample_idx + 1], data[sample_idx + 3], frac );",
-     b"const int sr = S_LERP ## x( data[sample_idx + 0], data[sample_idx + 2], frac );"),
+     b"const int sr = S_LERP ## x( S_SAMPLE ## x( data[sample_idx + 1] ), S_SAMPLE ## x( data[sample_idx + 3] ), frac );",
+     b"const int sr = S_LERP ## x( S_SAMPLE ## x( data[sample_idx + 0] ), S_SAMPLE ## x( data[sample_idx + 2] ), frac );"),
 ]
 
 

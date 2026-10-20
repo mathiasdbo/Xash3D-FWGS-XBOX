@@ -27,6 +27,7 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_snd_rate_cfg.h" // r3d_snd_rate read from the boot configs, #173
 #include "platform/xbox/xbox_snd_al.h" // the output, SDL or OpenAL, chosen at boot, #178
 #include "platform/xbox/xbox_vox_stream.h" // dialogue streamed, #177
+#include "platform/xbox/xbox_snd_voices.h" // sounds on the APU's voices, #182
 #endif
 
 // structure used for fading in and out client sound volume.
@@ -207,6 +208,9 @@ S_FreeChannel
 void S_FreeChannel( channel_t *ch )
 {
 	S_NotifyChannelUpdate( ch - snd.channels, NULL, -1 );
+#if XASH_XBOX
+	Xbox_SndVoices_Free( ch ); // #182: an ended sound plays out on its voice, a cut one stops
+#endif
 
 	// free the currently loaded word's audio cache before nuking the channel
 	if( ch->words )

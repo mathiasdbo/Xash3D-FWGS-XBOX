@@ -251,4 +251,7 @@ void Con_DPrintf( const char *fmt, ... );
 void Con_Reportf( const char *fmt, ... );
 int COM_RandomLong( int lMin, int lMax );
 
+/* the GP room kernel's parameters (divergence #180): S_PaintChannels' Xbox branch */
+#include "s_dsp_gp.h"
+
 #endif /* VOX_STUB_COMMON_H */

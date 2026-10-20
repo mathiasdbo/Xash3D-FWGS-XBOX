@@ -46,7 +46,7 @@ void SND_MoveMouth8( mouth_t *mouth, int pos, const wavdata_t *sc, int count, qb
 
 	while( i < count && scount < CAVGSAMPLES )
 	{
-		int data = pdata[i];
+		int data = S_SAMPLE8( pdata[i] );
 		savg += abs( data );
 
 		i += 80 + ((byte)data & 0x1F);

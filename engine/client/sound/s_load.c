@@ -19,6 +19,7 @@ GNU General Public License for more details.
 #if XASH_XBOX
 #include "platform/xbox/xbox_frametime.h" // first-use load counters, docs/r3d/divergences.md #141
 #include "platform/xbox/xbox_vox_stream.h" // placeholders of streamed sounds, #177
+#include "platform/xbox/xbox_snd_voices.h" // sounds on the APU's voices, #182
 #endif
 
 // during registration it is possible to have more sounds
@@ -268,6 +269,7 @@ void S_FreeSound( sfx_t *sfx )
 	}
 
 #if XASH_XBOX
+	Xbox_SndVoices_FreeSound( sfx ); // #182: no voice reads the samples after this
 	S_R3D_VoxForget( sfx ); // #177: a placeholder (sfx->cache goes NULL) and the facts kept for sfx
 #endif
 	if( clgame.soundFuncs.pfnS_FreeSound )

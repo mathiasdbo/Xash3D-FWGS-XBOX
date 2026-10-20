@@ -236,6 +236,10 @@ typedef struct xbox_music_window_s
 	int state;              /* xbox_music_win_state_t */
 } xbox_music_window_t;
 
+/* Receives block `block` of the file, block_bytes long, valid only during
+   the call (#183) */
+typedef void ( *xbox_music_sink_fn )( void *ctx, uint32_t block, const uint8_t *data );
+
 typedef struct xbox_music_stream_s
 {
 	xbox_xwav_info_t info;
@@ -262,6 +266,13 @@ typedef struct xbox_music_stream_s
 	uint32_t straddle_block; /* the block in `straddle`; UINT32_MAX for none */
 
 	int16_t carry[XBOX_ADPCM_BLOCK_FRAMES * 2];  /* one decoded block, for a chunk that starts or ends inside it */
+
+	/* The sink (#183): set, the stream decodes nothing; every block a pull
+	   reaches is handed to it once, in order, as the file holds it, and
+	   Read copies nothing out (the caller plays the blocks itself). */
+	xbox_music_sink_fn sink;
+	void *sink_ctx;
+	uint32_t sink_last;      /* the block last handed to the sink; UINT32_MAX for none */
 
 	uint32_t io_reads;      /* window reads issued, for the recorder and the tests */
 	uint32_t io_async;      /* ... of which were still running when `start` returned */
@@ -293,9 +304,20 @@ int Xbox_MusicStream_SetPos( xbox_music_stream_t *s, int newpos );
 /* Stream_GetPosMPG: in source frames. */
 int Xbox_MusicStream_GetPos( const xbox_music_stream_t *s );
 
+/* The sink (#183): `fn` NULL goes back to decoding. Turning it off part
+   way through a chunk decodes that chunk then, so Read hands out the
+   file's samples from the next byte on. */
+void Xbox_MusicStream_SetSink( xbox_music_stream_t *s, xbox_music_sink_fn fn, void *ctx );
+
+/* The frame (the file's) after the last one Read has handed out, a frame
+   handed out in part included: what a caller playing the blocks has been
+   given up to (#183) */
+uint32_t Xbox_MusicStream_HandedFrame( const xbox_music_stream_t *s );
+
 /* Decodes frames [first, first + count) of the file into `out`
    (interleaved int16), through the read-ahead. Returns the frames
-   written: fewer when the data runs out or a read fails. The baker and
+   written: fewer when the data runs out or a read fails. With a sink,
+   the blocks go to it instead and `out` is not written. The baker and
    the console check call it for whole-track CRCs. */
 uint32_t Xbox_MusicStream_DecodeFrames( xbox_music_stream_t *s, uint32_t first, uint32_t count, int16_t *out );
 

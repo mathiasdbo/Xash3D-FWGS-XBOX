@@ -39,6 +39,7 @@ typedef void *poolhandle_t;
 
 #define ARRAYSIZE( p ) ( sizeof( p ) / sizeof( 0[p] ))
 #define Q_min( a, b ) (((a) < (b)) ? (a) : (b))
+#define Q_max( a, b ) (((a) > (b)) ? (a) : (b))
 #define bound( min, num, max ) (( num ) >= ( min ) ? (( num ) < ( max ) ? ( num ) : ( max )) : ( min ))
 #define SetBits( iBitVector, bits ) (( iBitVector ) = ( iBitVector ) | ( bits ))
 #define ClearBits( iBitVector, bits ) (( iBitVector ) = ( iBitVector ) & ~( bits ))

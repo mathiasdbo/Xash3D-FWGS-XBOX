@@ -114,6 +114,18 @@ xbox_ft_waits_t xbox_ft_waits;
 xbox_ft_work_t xbox_ft_work;
 xbox_ft_spans_t xbox_ft_spans;
 int xbox_ft_snd_extra;
+/* divergence #180's room effect on the GP: never on here, so SX_RoomFX's branch runs */
+qboolean sx_r3d_gp;
+void SX_R3D_GpParams( int *params, qboolean active, int gain ) { (void)params; (void)active; (void)gain; }
+void Xbox_SndGpRoom_Paint( const portable_samplepair_t *room, int start, int end, const int *params ) { (void)room; (void)start; (void)end; (void)params; }
+/* divergence #182's sounds on APU voices: never on here, every channel mixes */
+qboolean Xbox_SndVoices_Channel( channel_t *ch, const wavdata_t *sc, double pitch ) { (void)ch; (void)sc; (void)pitch; return false; }
+void Xbox_SndVoices_BeginPaint( int start ) { (void)start; }
+void Xbox_SndVoices_EndPaint( void ) { }
+/* divergence #183's music on a voice: never on here */
+void Xbox_SndMusicVoice_Paint( qboolean paused ) { (void)paused; }
+void Xbox_SndVoices_Free( channel_t *ch ) { (void)ch; }
+void Xbox_SndVoices_FreeSound( const sfx_t *sfx ) { (void)sfx; }
 uint64_t xbox_ft_snd_dma_ticks;
 
 static int notes[8];

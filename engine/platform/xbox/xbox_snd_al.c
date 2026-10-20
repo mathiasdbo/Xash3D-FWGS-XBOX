@@ -40,6 +40,9 @@ verified on a console.
 #include "sound.h"
 #include "platform/xbox/xbox_snd_al.h"
 #include "platform/xbox/xbox_snd_al_queue.h"
+#include "platform/xbox/xbox_snd_gproom.h"
+#include "platform/xbox/xbox_snd_voices.h"
+#include "platform/xbox/xbox_snd_music_voice.h"
 #include "platform/xbox/xbox_frametime.h"
 
 #include <AL/al.h>
@@ -225,6 +228,9 @@ static void XboxAL_ProfWrite( const char *why, qboolean flush )
 					st.output_slips - s_alp_st0.output_slips, st.output_lead_min, st.output_lead_max, st.output_lead_last );
 			else XboxAL_ProfCat( t, sizeof( t ), &len, "; copy mode\n" );
 		}
+		len += Xbox_SndGpRoom_Stats( t + len, sizeof( t ) - len ); // #180
+		len += Xbox_SndVoices_Stats( t + len, sizeof( t ) - len ); // #182
+		len += Xbox_SndMusicVoice_Stats( t + len, sizeof( t ) - len ); // #183
 		s_alp_st0 = st;
 		if( s_alp_len + len <= sizeof( s_alp_text ))
 		{
@@ -262,6 +268,7 @@ static void XboxAL_Retire( void )
 		s_al_free[s_al_nfree++] = b;
 		Xbox_SndALQ_Retire( &s_al_queue );
 	}
+	Xbox_SndGpRoom_Retire(); // the room stream's buffers, played with these (#180)
 	snd.samplepos = s_al_queue.played * 2;
 	XboxAL_ProfAdd( ALP_RETIRE, t0 );
 }
@@ -274,10 +281,15 @@ static int XboxAL_Submit1( void *user, int pos, int frames )
 {
 	uint64_t t0;
 	ALuint b;
+	unsigned rb = 0;
 	ALenum err;
 
 	(void)user;
 	if( s_al_nfree <= 0 )
+		return 0;
+	// the room mix of the same frames, uploaded first: the two streams
+	// take the same buffers or neither does (#180)
+	if( Xbox_SndGpRoom_Active() && !Xbox_SndGpRoom_Upload( pos, frames, &rb ))
 		return 0;
 	b = s_al_free[--s_al_nfree];
 	t0 = xbox_ft_rdtsc();
@@ -295,9 +307,44 @@ static int XboxAL_Submit1( void *user, int pos, int frames )
 	if( err != AL_NO_ERROR )
 	{
 		s_al_free[s_al_nfree++] = b;
+		if( rb )
+			Xbox_SndGpRoom_Unused( rb );
 		return 0;
 	}
+	if( rb )
+		Xbox_SndGpRoom_Queue( rb );
 	return 1;
+}
+
+/* The output's sources (the dry one, and the room one while the room
+   effect is on the GP) started together: one alSourcePlayv puts both on the
+   same APU frame. From a stop, the room stream's frame 0 is the oldest
+   frame still queued (#180); the voice tick first sends the kernel's
+   changes still timed against the stream that stopped, or they would be
+   timed against the new one. */
+static void XboxAL_Play( void )
+{
+	ALuint src[2] = { s_al_source, Xbox_SndGpRoom_Source() };
+	ALint state = AL_PLAYING;
+
+	if( !Xbox_SndGpRoom_Active())
+	{
+		alSourcePlay( s_al_source );
+		return;
+	}
+	alGetSourcei( s_al_source, AL_SOURCE_STATE, &state );
+	if( state != AL_PAUSED )
+		alXboxUpdateVoices();
+	alSourcePlayv( 2, src );
+	if( state != AL_PAUSED )
+		Xbox_SndGpRoom_Started( s_al_queue.queued - Xbox_SndALQ_InFlight( &s_al_queue ));
+}
+
+static void XboxAL_Pause( void )
+{
+	ALuint src[2] = { s_al_source, Xbox_SndGpRoom_Source() };
+
+	alSourcePausev( Xbox_SndGpRoom_Active() ? 2 : 1, src );
 }
 
 /* The painted, unqueued part of the ring onto the source */
@@ -325,12 +372,18 @@ void Xbox_SndAL_Clear( void )
 		s_al_free[i] = s_al_buffers[i];
 	s_al_nfree = XBOX_SND_AL_MAX_BUFFERS;
 	Xbox_SndALQ_Flush( &s_al_queue );
+	Xbox_SndVoices_Clear(); // #182: the sounds on voices stop with the mix
+	Xbox_SndMusicVoice_Clear(); // #183
+	Xbox_SndGpRoom_Clear();
 	snd.samplepos = s_al_queue.played * 2;
 	s_al_cleared = true; // the stop that follows is not the source running dry
 }
 
 static void XboxAL_Shutdown( void )
 {
+	Xbox_SndMusicVoice_Shutdown(); // #183
+	Xbox_SndVoices_Shutdown(); // #182, before the room's slot goes
+	Xbox_SndGpRoom_Shutdown();
 	if( s_al_source )
 	{
 		alSourceStop( s_al_source );
@@ -503,7 +556,7 @@ static void XboxAL_Submit( void )
 			s_al_cleared = false;
 			XboxAL_Retire();
 			if( s_al_queue.count > 0 )
-				alSourcePlay( s_al_source );
+				XboxAL_Play();
 		}
 	}
 	XboxAL_ProfAdd( ALP_STATE, t1 );
@@ -535,9 +588,9 @@ static void XboxAL_Activate( qboolean active )
 		return;
 	s_al_paused = !active;
 	if( !active )
-		alSourcePause( s_al_source );
+		XboxAL_Pause();
 	else if( s_al_queue.count > 0 )
-		alSourcePlay( s_al_source );
+		XboxAL_Play();
 }
 
 void Xbox_Snd_ThreadStats( xbox_audio_thread_stats_t *out )
@@ -579,7 +632,12 @@ static void Xbox_Snd_WriteBackendNote( qboolean opened )
 	if( xbox_snd_want_al && !s_al_active )
 		FS_Printf( f, "openal failed: %s\n", s_al_why[0] ? s_al_why : "unknown" );
 	if( s_al_active )
+	{
 		FS_Printf( f, "renderer %s @ %d Hz\n", alGetString( AL_RENDERER ), SOUND_DMA_SPEED );
+		FS_Printf( f, "room on the GP: %s\n", Xbox_SndGpRoom_Active() ? "on" : "off" ); // #180
+		FS_Printf( f, "sounds on voices: %s\n", Xbox_SndVoices_Why()); // #182
+		FS_Printf( f, "music on a voice: %s\n", Xbox_SndMusicVoice_DebugSource() ? "on" : "off" ); // #183
+	}
 	FS_Close( f );
 }
 
@@ -593,7 +651,13 @@ qboolean SNDDMA_Init( void )
 		if( XboxAL_Init( ))
 		{
 			s_al_active = true;
-			Xbox_Snd_WriteBackendNote( true );
+			Xbox_SndAL_GpProbe(); // only with r3d_snd_gpprobe 1 (#180)
+			Xbox_SndGpRoom_Init( snd.samples / 2, snd.format.speed ); // only with r3d_snd_gproom 1 (#180)
+			Xbox_SndVoices_Init(); // only with r3d_snd_voices 1 and the room on the GP (#182)
+			Xbox_SndMusicVoice_Init(); // with the sounds on voices (#183)
+			Xbox_Snd_WriteBackendNote( true ); // after them: it says which came on
+			alSourcef( s_al_source, AL_XBOX_PRIORITY, Xbox_SndVoices_StreamPriority());
+			alGetError();
 			return true;
 		}
 		Con_Printf( S_WARN "Audio: OpenAL did not open (%s), using SDL\n", s_al_why );

@@ -478,6 +478,7 @@ int Xbox_MusicStream_Init( xbox_music_stream_t *s, const xbox_xwav_info_t *info,
 	s->ra = readahead;
 	s->frame_bytes = 2u * info->channels;
 	s->straddle_block = UINT32_MAX;
+	s->sink_last = UINT32_MAX;
 	for( i = 0; i < XBOX_MUSIC_WINDOWS; i++ )
 		s->win[i].state = XBOX_MUSIC_WIN_EMPTY;
 
@@ -765,7 +766,16 @@ uint32_t Xbox_MusicStream_DecodeFrames( xbox_music_stream_t *s, uint32_t first, 
 		if( n > count - done )
 			n = count - done;
 
-		if( s->info.tag == XBOX_XWAV_TAG_PCM )
+		if( s->sink )
+		{
+			/* #183: the block as it is, once */
+			if( s->sink_last != f / XBOX_ADPCM_BLOCK_FRAMES )
+			{
+				s->sink_last = f / XBOX_ADPCM_BLOCK_FRAMES;
+				s->sink( s->sink_ctx, s->sink_last, blk );
+			}
+		}
+		else if( s->info.tag == XBOX_XWAV_TAG_PCM )
 		{
 			/* little-endian int16 in the file and on both hosts */
 			memcpy( out + done * ch, blk + off * s->frame_bytes, n * s->frame_bytes );
@@ -824,8 +834,10 @@ int Xbox_MusicStream_Read( xbox_music_stream_t *s, int need, void *buffer )
 			outsize = ( need - bytesWritten );
 		else outsize = s->pos;
 
-		/* copy raw sample to output buffer */
-		memcpy( (uint8_t *)buffer + bytesWritten, s->chunk + s->buffsize, (size_t)outsize );
+		/* copy raw sample to output buffer (#183: with a sink there is
+		   nothing decoded to copy) */
+		if( !s->sink )
+			memcpy( (uint8_t *)buffer + bytesWritten, s->chunk + s->buffsize, (size_t)outsize );
 		bytesWritten += outsize;
 		s->pos -= outsize;
 		s->buffsize += outsize;
@@ -852,6 +864,8 @@ int Xbox_MusicStream_SetPos( xbox_music_stream_t *s, int newpos )
 
 	s->next_frame = f;
 	s->buffsize = 0;
+	s->pos = 0;
+	s->sink_last = UINT32_MAX;
 	s->seeked = 1;
 	s->ended = 0;
 	return 1;
@@ -872,4 +886,26 @@ int Xbox_MusicStream_GetPos( const xbox_music_stream_t *s )
 			return (int)Xbox_MusicXwav_ToSourceFrames( &s->info, s->info.tell_last_chunk );
 	}
 	return (int)Xbox_MusicXwav_ToSourceFrames( &s->info, s->next_frame );
+}
+
+void Xbox_MusicStream_SetSink( xbox_music_stream_t *s, xbox_music_sink_fn fn, void *ctx )
+{
+	/* the chunk Read is part way through was pulled into the sink: decode
+	   it now, so what it hands out next is the file's */
+	if( s->sink && !fn && s->pos > 0 )
+	{
+		const uint32_t pulled = (uint32_t)( s->buffsize + s->pos ) / s->frame_bytes;
+
+		s->sink = NULL;
+		Xbox_MusicStream_DecodeFrames( s, s->next_frame - pulled, pulled, (int16_t *)s->chunk );
+	}
+	s->sink = fn;
+	s->sink_ctx = ctx;
+	s->sink_last = UINT32_MAX;
+}
+
+uint32_t Xbox_MusicStream_HandedFrame( const xbox_music_stream_t *s )
+{
+	/* `pos` is what is left of the pulled chunk */
+	return s->next_frame - (uint32_t)s->pos / s->frame_bytes;
 }

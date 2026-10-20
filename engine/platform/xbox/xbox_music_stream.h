@@ -17,4 +17,8 @@ void Xbox_Music_Init( void );
    or NULL. snd_main.c declares it at its one call site. */
 struct stream_s *Xbox_MusicStream_Open( const char *filename );
 
+/* The baked stream behind `stream` when it hands its blocks to the music
+   voice (#183) instead of decoding them, else NULL */
+struct xbox_music_stream_s *Xbox_MusicStream_Sunk( struct stream_s *stream );
+
 #endif /* XBOX_MUSIC_STREAM_H */

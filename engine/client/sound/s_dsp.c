@@ -186,6 +186,9 @@ static dly_t stereodly;
 static int			rgsxlp[MAXLP];
 
 static void SX_Profiling_f( void );
+#if XASH_XBOX
+static void SX_R3D_GpCheck( void );
+#endif
 
 /*
 ============
@@ -842,9 +845,16 @@ static void SX_CheckPresets( void )
 
 	room_typeprev = idsp_room;
 
+#if XASH_XBOX
+	if( sx_r3d_gp ) // docs/r3d/divergences.md #180: the kernel sets up its own delays
+		SX_R3D_GpCheck();
+	else
+#endif
+	{
 	RVB_CheckNewReverbVal( );
 	DLY_CheckNewDelayVal( );
 	DLY_CheckNewStereoDelayVal();
+	}
 
 	ClearBits( sxrvb_size.flags, FCVAR_CHANGED );
 	ClearBits( sxdly_delay.flags, FCVAR_CHANGED );
@@ -906,6 +916,91 @@ void SX_R3D_SetRate( void )
 	// each delay is set up again from its cvar on the next SX_CheckPresets
 	SX_ReloadRoomFX();
 	SetBits( sxrvb_size.flags, FCVAR_CHANGED );
+}
+#endif
+
+#if XASH_XBOX
+/*
+===========
+SX_R3D_GpCheck / SX_R3D_GpParams
+
+docs/r3d/divergences.md #180. With sx_r3d_gp set, the room effect runs on
+the APU's GP (engine/platform/xbox/apu/gp_hldsp.asm), on the room mix the
+mixer queues to it, and the mixer calls SX_R3D_GpParams where it called
+SX_RoomFX. That runs SX_CheckPresets as SX_RoomFX does, the presets and
+the cvars and their changed flags; at its end, in place of the three
+*_CheckNew*Val calls that size and allocate the delay lines,
+SX_R3D_GpCheck turns what they would read into the kernel's words:
+lengths in samples by their expression (a delay of 0 turning the stage
+off), the lowpass flags and the feedbacks as the ints they keep, and a
+counter per delay stage that moves each time its length is applied, so
+the kernel runs the rest of those functions (the allocation as a fresh
+line, the crossfades to a new length) itself. A length of 0 or less turns
+the stage off (the reverb's by its first line); others are kept between 32
+samples (the kernel reads its delayed block before it writes the new one)
+and the kernel's line sizes, those of the 48 kHz mix at room_hires 2, and
+feedbacks to -255..255: the bounds reach only cvars set by hand.
+===========
+*/
+qboolean sx_r3d_gp;
+static int sx_gp[SXGP_PARAMS];
+
+static int SX_R3D_GpSamples( float delay, float max )
+{
+	int samples;
+
+	delay = Q_min( delay, max );
+	samples = (int)( delay * idsp_dma_speed ) << sxhires;
+	if( samples <= 0 )
+		return 0; // the stage off, as a length of 0 leaves it
+	return bound( 32, samples, (int)( max * 12000 ) << 2 );
+}
+
+static void SX_R3D_GpCheck( void )
+{
+	if( FBitSet( sxrvb_size.flags, FCVAR_CHANGED ))
+	{
+		float delay = sxrvb_size.value;
+
+		sx_gp[SXGP_RVB_GEN] = ( sx_gp[SXGP_RVB_GEN] + 1 ) & 0x7FFFFF;
+		sx_gp[SXGP_RVB_S1] = delay == 0.0f ? 0 : SX_R3D_GpSamples( delay, MAX_REVERB_DELAY );
+		sx_gp[SXGP_RVB_S2] = sx_gp[SXGP_RVB_S1] ? Q_max( SX_R3D_GpSamples( delay * 0.71f, MAX_REVERB_DELAY ), 32 ) : 0;
+	}
+	sx_gp[SXGP_RVB_LP] = (int)sxrvb_lp.value != 0;
+	sx_gp[SXGP_RVB_FB] = bound( -255, (int)( 255 * sxrvb_feedback.value ), 255 );
+
+	if( FBitSet( sxdly_delay.flags, FCVAR_CHANGED ))
+	{
+		float delay = sxdly_delay.value;
+
+		sx_gp[SXGP_DLY_GEN] = ( sx_gp[SXGP_DLY_GEN] + 1 ) & 0x7FFFFF;
+		sx_gp[SXGP_DLY_S] = delay == 0 ? 0 : SX_R3D_GpSamples( delay, MAX_MONO_DELAY );
+	}
+	sx_gp[SXGP_DLY_LP] = (int)sxdly_lp.value != 0;
+	sx_gp[SXGP_DLY_FB] = bound( -255, (int)( 255 * sxdly_feedback.value ), 255 );
+
+	if( FBitSet( sxste_delay.flags, FCVAR_CHANGED ))
+	{
+		float delay = sxste_delay.value;
+
+		sx_gp[SXGP_STE_GEN] = ( sx_gp[SXGP_STE_GEN] + 1 ) & 0x7FFFFF;
+		sx_gp[SXGP_STE_S] = delay == 0 ? 0 : SX_R3D_GpSamples( delay, MAX_STEREO_DELAY );
+	}
+}
+
+void SX_R3D_GpParams( int *params, qboolean active, int gain )
+{
+	// SX_RoomFX's early return, and S_PaintChannels' menu test around it
+	sx_gp[SXGP_RUN] = active && !room_off.value;
+	if( sx_gp[SXGP_RUN] )
+		SX_CheckPresets();
+
+	// what RVB_DoAMod, RVB_DoReverb and S_MixBufferWithGain read while they run
+	sx_gp[SXGP_GAIN] = bound( 0, gain, 256 );
+	sx_gp[SXGP_ALPHA] = dsp_coeff_table.value == 1.0f;
+	sx_gp[SXGP_AMOD_LP] = sxmod_lowpass.value != 0;
+	sx_gp[SXGP_AMOD_MOD] = sxmod_mod.value != 0;
+	memcpy( params, sx_gp, sizeof( sx_gp ));
 }
 #endif
 

@@ -48,6 +48,16 @@ extern int r3d_snd_dma_speed;
 
 #define CLIP16( x ) bound( SHRT_MIN + 8, x, SHRT_MAX - 8 )
 
+// an 8-bit sample of a loaded sound, as upstream's signed value: on the
+// Xbox the cache keeps the file's unsigned bytes, which the APU plays in
+// place (docs/r3d/design/x9-audio-apu-voices.md section 3)
+#if XASH_XBOX
+#define S_SAMPLE8( b ) ((int)(uint8_t)( b ) - 128 )
+#else
+#define S_SAMPLE8( b ) ((int)( b ))
+#endif
+#define S_SAMPLE16( s ) ((int)( s ))
+
 //====================================================================
 
 #define MAX_DYNAMIC_CHANNELS (60 + NUM_AMBIENTS)
@@ -108,6 +118,8 @@ void SX_RoomFX( portable_samplepair_t *paint, int num_samples );
 void SX_ClearState( void );
 #if XASH_XBOX
 void SX_R3D_SetRate( void ); // #173: the delays' lengths follow SOUND_DMA_SPEED
+
+#include "sound/s_dsp_gp.h" // #180: the room effect on the APU's GP
 #endif
 
 qboolean S_Init( void );

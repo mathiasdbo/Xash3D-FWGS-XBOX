@@ -372,6 +372,29 @@ xbox_snd_device() {
 }
 run_test xbox_snd_device xbox_snd_device
 
+# tools/host-tests/xbox_snd_voices_host_test.c, header (divergence #182):
+# the voice module against nxdk-ex's real OpenAL (its null backend, built
+# with clang as the library's own run_tests.py does): a channel's voice
+# set up, started and stopped at the stream's frame, played out, paused,
+# lost to the CPU, its buffer dropped before the samples.
+xbox_snd_voices() {
+	"$BASH" tools/host-tests/xbox_snd_voices.sh "$OUT/voices"
+}
+run_test xbox_snd_voices xbox_snd_voices
+
+# tools/host-tests/xbox_snd_music_voice_host_test.c, header (divergence
+# #183): the baked music's blocks on one OpenAL source against the real
+# library's null backend and the real stream; then every mutant in
+# xbox_snd_music_voice_mutants.py must make it fail.
+xbox_snd_music_voice() {
+	"$BASH" tools/host-tests/xbox_snd_music_voice.sh "$OUT/music-voice"
+}
+run_test xbox_snd_music_voice xbox_snd_music_voice
+xbox_snd_music_voice_mutants() {
+	MV_BASH="$BASH" python tools/host-tests/xbox_snd_music_voice_mutants.py "$OUT/music-voice-mutants"
+}
+run_test xbox_snd_music_voice_mutants xbox_snd_music_voice_mutants
+
 printf_test() {
 	gcc $HOST_CFLAGS -Wall -Wno-format -fstack-protector-all \
 		-Dvsnprintf=xb_vsnprintf -Dsnprintf=xb_snprintf -Dvsprintf=xb_vsprintf \
@@ -422,6 +445,13 @@ nv2a_atlas_util() {
 		-o "$OUT/nv2a_atlas_util_test" && "$OUT/nv2a_atlas_util_test"
 }
 run_test nv2a_atlas_util nv2a_atlas_util
+
+# tools/host-tests/gp_room_kernels_test.py, header (divergence #180): the
+# room effect's GP kernels in nxdk-ex's DSP56300 simulator.
+gp_room_kernels() {
+	python tools/host-tests/gp_room_kernels_test.py
+}
+run_test gp_room_kernels gp_room_kernels
 
 if [ "$ran" -eq 0 ]; then
 	echo "host-tests: ran zero tests - that is a broken script, not a pass" >&2

@@ -21,6 +21,9 @@ GNU General Public License for more details.
 // S_PaintChannels' spans: one set under k_snd, one under k_snd_extra
 #define S_MIX_SPAN( id, id_extra, stmt ) XBOX_FT_SPAN( xbox_ft_snd_extra ? ( id_extra ) : ( id ), stmt )
 #include "platform/xbox/xbox_vox_stream.h"
+#include "platform/xbox/xbox_snd_gproom.h" // #180
+#include "platform/xbox/xbox_snd_voices.h" // #182
+#include "platform/xbox/xbox_snd_music_voice.h" // #183
 // docs/r3d/divergences.md #177: a streamed sound mixes from its channel's window
 #define S_MIX_SOURCE( ch ) S_R3D_ChannelSource( ch )
 #else
@@ -115,11 +118,11 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 		} \
 	} \
 
-S_MakeMixMono( 8 )
 S_MakeMixMono( 16 )
-S_MakeMixStereo( 8 )
 S_MakeMixStereo( 16 )
 #if !XASH_XBOX
+S_MakeMixMono( 8 )
+S_MakeMixStereo( 8 )
 S_MakeMixMonoPitch( 8 )
 S_MakeMixMonoPitch( 16 )
 S_MakeMixStereoPitch( 8 )
@@ -280,6 +283,11 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 		}
 
 		const wavdata_t *wav = S_MIX_SOURCE( chan );
+#if XASH_XBOX
+		// docs/r3d/divergences.md #182: no buffer walks a channel an APU
+		// voice plays - its position and its end as upstream's, no mixing
+		if( pbuf )
+#endif
 		S_MixAudio( pbuf + offset, pvol, audio, wav->channels, wav->width, sample_frac, rate, out_count, lerp );
 
 		chan->sample += out_count * rate * timecompress_rate;
@@ -424,7 +432,12 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 		}
 		else
 		{
+#if XASH_XBOX
+			// #182: a channel on an APU voice is only walked
+			S_MixChannelToBuffer( Xbox_SndVoices_Channel( ch, sc, pitch ) ? NULL : dst, ch, num_samples, out_rate, pitch, 0, 0 );
+#else
 			S_MixChannelToBuffer( dst, ch, num_samples, out_rate, pitch, 0, 0 );
+#endif
 
 			if( FBitSet( ch->flags, FL_CHAN_FINISHED ))
 				S_FreeChannel( ch );
@@ -578,16 +591,37 @@ void S_PaintChannels( int endtime )
 		S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_ClearBuffers( num_samples ));
 
 		int room_channels;
+#if XASH_XBOX
+		Xbox_SndVoices_BeginPaint( snd.paintedtime ); // #182: the voices that ended go
+		Xbox_SndMusicVoice_Paint( cl.paused ); // #183: stops where the raw channel would go silent
+#endif
 		S_MIX_SPAN( XBOX_FT_S_SND_MIX, XBOX_FT_S_SNDX_MIX, room_channels = S_MixNormalChannelsToRoombuffer( roombuffer, end ));
+#if XASH_XBOX
+		Xbox_SndVoices_EndPaint(); // #182: the voices of channels it skipped pause
+#endif
 
 		S_MIX_SPAN( XBOX_FT_S_SND_MIX, XBOX_FT_S_SNDX_MIX, room_channels += S_MixRawChannels( end ));
 
+#if XASH_XBOX
+		// docs/r3d/divergences.md #180: the room effect and this mix run on
+		// the APU's GP, on the room buffer streamed beside the dry mix
+		if( sx_r3d_gp )
+		{
+			int params[SXGP_PARAMS];
+
+			S_MIX_SPAN( XBOX_FT_S_SND_DSP, XBOX_FT_S_SNDX_DSP, SX_R3D_GpParams( params, cls.key_dest != key_menu, gain ));
+			S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, Xbox_SndGpRoom_Paint( roombuffer, snd.paintedtime, end, params ));
+		}
+		else
+#endif
+		{
 		// now process DSP and mix result into paintbuffer
 		if( cls.key_dest != key_menu )
 			S_MIX_SPAN( XBOX_FT_S_SND_DSP, XBOX_FT_S_SNDX_DSP, SX_RoomFX( roombuffer, num_samples ));
 
 		if( room_channels > 0 || cls.key_dest != key_menu )
 			S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_MixBufferWithGain( paintbuffer, roombuffer, num_samples, gain ));
+		}
 
 		// transfer out according to DMA format
 		S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_TransferPaintBuffer( paintbuffer, end ));

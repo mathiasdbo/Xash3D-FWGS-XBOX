@@ -17,6 +17,9 @@ GNU General Public License for more details.
 #include "sound.h"
 #include "client.h"
 #include "soundlib.h"
+#if XASH_XBOX
+#include "platform/xbox/xbox_snd_music_voice.h" // docs/r3d/divergences.md #183
+#endif
 
 static struct
 {
@@ -249,6 +252,10 @@ void S_StreamBackgroundTrack( void )
 		{
 			// add to raw buffer
 			int music_vol = (int)(255.0f * S_GetMusicVolume());
+#if XASH_XBOX
+			// docs/r3d/divergences.md #183: a baked track's blocks play on a voice
+			if( !Xbox_SndMusicVoice_Samples( ch, s_bgTrack.stream, fileSamples, music_vol ))
+#endif
 			S_RawEntSamples( S_RAW_SOUND_BACKGROUNDTRACK, fileSamples, info->rate, info->width, info->channels, raw, music_vol, ATTN_NONE );
 		}
 		else

@@ -4,7 +4,8 @@ engine/platform/xbox/xbox_music_adpcm.c - a decode table bit, a clamp, the
 APU's 64-frame block, the stereo interleave, upstream's dropped tail, the
 mp3 position quirk, the seek, the parser, the rate conversion, the CRC,
 which file a request names, the read-ahead's windows and asynchronous
-reads (#172), the resampled bake's header (#173) -
+reads (#172), the resampled bake's header (#173), the sink that hands the
+blocks to the music voice (#183) -
 and the host test must fail on every one of them. A mutant the test
 passes is a gap in the test, reported and exit 1.
 
@@ -37,7 +38,7 @@ MUTANTS = [
     ("stream: the chunk offset not reset", b"\t\ts->buffsize = 0; /* no bytes remaining */", b"\t\t/* mutant */"),
     ("stream: libmpg's last-chunk position after a seek too", b"if( s->info.tell_last_chunk && !s->seeked && !s->ended )", b"if( s->info.tell_last_chunk && !s->ended )"),
     ("stream: libmpg's last-chunk position never used", b"return (int)Xbox_MusicXwav_ToSourceFrames( &s->info, s->info.tell_last_chunk );", b"return (int)Xbox_MusicXwav_ToSourceFrames( &s->info, s->next_frame );"),
-    ("seek: the chunk not flushed", b"\ts->next_frame = f;\n\ts->buffsize = 0;\n", b"\ts->next_frame = f;\n"),
+    ("seek: the chunk not flushed", b"\ts->next_frame = f;\n\ts->buffsize = 0;\n\ts->pos = 0;\n", b"\ts->next_frame = f;\n"),
     ("seek: past the end clamped", b"\ts->next_frame = f;\n\ts->buffsize = 0;", b"\ts->next_frame = f > s->info.frames ? s->info.frames : f;\n\ts->buffsize = 0;"),
     # a bake at another rate than its source (#173): only a resampled one, upward, named, the exact length
     ("parser: a source-rate bake of another length accepted", b"\t\tif( out->source_frames != out->frames )\n\t\t\treturn XBOX_XWAV_ERR_R3DM;", b"\t\tif( 0 )\n\t\t\treturn XBOX_XWAV_ERR_R3DM;"),
@@ -67,6 +68,13 @@ MUTANTS = [
     ("parser: samples per block not checked", b"rd16( f + 18 ) != XBOX_ADPCM_BLOCK_FRAMES", b"rd16( f + 18 ) == 0"),
     ("rate: file frames rounded down", b"* info->rate + info->source_rate - 1 ) / info->source_rate );", b"* info->rate ) / info->source_rate );"),
     ("crc: wrong polynomial", b"0xEDB88320u", b"0xEDB88321u"),
+    # the sink: the blocks to the music voice (#183)
+    ("sink: a block handed to it more than once", b"if( s->sink_last != f / XBOX_ADPCM_BLOCK_FRAMES )", b"if( 1 )"),
+    ("sink: a seek does not hand the target's block again", b"\ts->sink_last = UINT32_MAX;\n\ts->seeked = 1;", b"\ts->seeked = 1;"),
+    ("handed: the chunk's rest not taken off", b"return s->next_frame - (uint32_t)s->pos / s->frame_bytes;", b"return s->next_frame;"),
+    ("handed: a frame handed out in part not counted", b"return s->next_frame - (uint32_t)s->pos / s->frame_bytes;", b"return s->next_frame - ( (uint32_t)s->pos + s->frame_bytes - 1 ) / s->frame_bytes;"),
+    ("unsink: the chunk part way through not decoded", b"\t\tXbox_MusicStream_DecodeFrames( s, s->next_frame - pulled, pulled, (int16_t *)s->chunk );\n", b""),
+    ("unsink: the chunk decoded from its rest, not its start", b"const uint32_t pulled = (uint32_t)( s->buffsize + s->pos ) / s->frame_bytes;", b"const uint32_t pulled = (uint32_t)( s->pos ) / s->frame_bytes;"),
 ]
 
 

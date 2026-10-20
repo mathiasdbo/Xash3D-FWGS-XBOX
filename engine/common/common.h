@@ -558,6 +558,9 @@ int FS_ReadStream( stream_t *stream, int bytes, void *buffer );
 int FS_SetStreamPos( stream_t *stream, int newpos );
 int FS_GetStreamPos( stream_t *stream );
 qboolean Sound_Process( wavdata_t **wav, int rate, int width, int channels, uint flags );
+#if XASH_XBOX
+void Sound_R3D_FlipSign8( wavdata_t *snd ); // 8-bit data between unsigned and signed (x9-audio-apu-voices.md 3)
+#endif
 uint Sound_GetApproxWavePlayLen( const char *filepath );
 qboolean Sound_SupportedFileFormat( const char *fileext );
 

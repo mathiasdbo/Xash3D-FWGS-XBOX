@@ -335,7 +335,12 @@ qboolean Sound_LoadWAV( const char *name, const byte *buffer, fs_offset_t filesi
 	}
 
 	// now convert 8-bit sounds to signed
+#if XASH_XBOX
+	// docs/r3d/design/x9-audio-apu-voices.md section 3: kept unsigned, as the APU plays them
+	if( 0 )
+#else
 	if( sound.width == 1 )
+#endif
 	{
 		signed char	*pData = (signed char *)sound.wav;
 
@@ -368,7 +373,11 @@ qboolean Sound_LoadWAV( const char *name, const byte *buffer, fs_offset_t filesi
 		{
 			if( crc == broken_crcs[i] )
 			{
+#if XASH_XBOX
+				memset( sound.wav, sound.width == 1 ? 0x80 : 0, sound.size ); // unsigned 8-bit silence
+#else
 				memset( sound.wav, 0, sound.size );
+#endif
 				break;
 			}
 		}

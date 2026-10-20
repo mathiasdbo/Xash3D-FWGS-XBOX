@@ -36,12 +36,17 @@ VOXH = "engine/platform/xbox/xbox_vox_stream.h"
 LOAD = "engine/client/sound/s_load.c"
 MAIN = "engine/client/sound/s_main.c"
 SVOX = "engine/client/sound/s_vox.c"
+WAV = "engine/client/soundlib/snd_wav.c"
 
 MUTANTS = [
-    ("the loader's sign step dropped (no XOR 0x80)", VOX,
-     b"\t\tp[i] ^= 0x80;", b"\t\tp[i] ^= 0x00;"),
-    ("the sign step from one byte past the data's start", VOX,
-     b"lo = Q_max( b->off, s->hdr->data_off );", b"lo = Q_max( b->off, s->hdr->data_off + 1 );"),
+    # docs/r3d/design/x9-audio-apu-voices.md section 3: 8-bit sounds stay
+    # unsigned on the Xbox, in a whole load and in a window alike
+    ("a window's bytes made signed again (a stray XOR 0x80)", VOX,
+     b"\tb->conv = true;\n}",
+     b"\tb->conv = true;\n\tfor( uint32_t i = Q_max( b->off, s->hdr->data_off ); i < Q_min( b->off + b->valid, s->hdr->data_off + s->hdr->data_bytes ); i++ )\n"
+     b"\t\t( Vox_Dst( s, t ) - b->off )[i] ^= 0x80;\n}"),
+    ("the loader's unsigned-to-signed step back on the Xbox", WAV,
+     b"\tif( 0 )\n", b"\tif( sound.width == 1 )\n"),
     ("units read from one unit further on", VOX,
      b"\t\t\tVox_Issue( s, j, k * s->unit, Vox_UnitBytes( s, k ), true );", b"\t\t\tVox_Issue( s, j, ( k + 1 ) * s->unit, Vox_UnitBytes( s, k ), true );"),
     ("the window slid only when a fourth unit is needed (nothing queued ahead)", VOX,

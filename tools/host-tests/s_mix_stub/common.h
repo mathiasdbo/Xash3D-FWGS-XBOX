@@ -57,6 +57,13 @@ extern int s_mix_test_dma_speed;
 #define PAINTBUFFER_SIZE 1024
 #define S_RAW_SOUND_BACKGROUNDTRACK -2
 #define CLIP16( x ) bound( SHRT_MIN + 8, x, SHRT_MAX - 8 )
+// engine/client/sound.h's (x9-audio-apu-voices.md 3: 8-bit unsigned on the Xbox)
+#if XASH_XBOX
+#define S_SAMPLE8( b ) ((int)(uint8_t)( b ) - 128 )
+#else
+#define S_SAMPLE8( b ) ((int)( b ))
+#endif
+#define S_SAMPLE16( s ) ((int)( s ))
 #define MAX_CHANNEL_INAUDIBLE_TIME 0.5
 
 /* sound flags and channels: values do not matter to the test */
@@ -141,5 +148,8 @@ void VOX_LoadWord( channel_t *ch );
 void SX_RoomFX( portable_samplepair_t *paint, int num_samples );
 void SNDDMA_BeginPainting( void );
 void SNDDMA_Submit( void );
+
+/* the GP room kernel's parameters (divergence #180): S_PaintChannels' Xbox branch */
+#include "s_dsp_gp.h"
 
 #endif /* S_MIX_STUB_COMMON_H */

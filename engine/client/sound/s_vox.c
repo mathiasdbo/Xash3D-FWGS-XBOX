@@ -33,10 +33,10 @@ static const char *voxperiod = "_period", *voxcomma = "_comma";
 
 static qboolean S_ShouldTrimSample8( const int8_t *buf, int channels )
 {
-	if( abs( buf[0] ) > TRIM_SAMPLES_BELOW_8 )
+	if( abs( S_SAMPLE8( buf[0] )) > TRIM_SAMPLES_BELOW_8 ) // S_SAMPLE8: x9-audio-apu-voices.md 3
 		return false;
 
-	if( channels >= 2 && abs( buf[1] ) > TRIM_SAMPLES_BELOW_8 )
+	if( channels >= 2 && abs( S_SAMPLE8( buf[1] )) > TRIM_SAMPLES_BELOW_8 )
 		return false;
 
 	return true;
