@@ -5,6 +5,17 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: hardware audio from the menu, speech on the audio chip, an even machine gun
+
+The Audio menu has a "Hardware audio" switch (from the next start) that
+puts the whole mix on the console's audio chip - the room effect, the
+sounds, the music and now the spoken lines too - and a "Voices volume"
+slider for speech alone. On the chip, a held machine gun now fires evenly:
+each shot starts at its frame to within a few milliseconds, where before
+some started late with their first crack cut off and some ended early.
+`r3d_snd_meter 1` logs the final mix's level every two seconds to
+`sndmeter.txt`, to compare the chip's loudness with the CPU mix's.
+
 ### Changed - Xbox: dialogue streams from the disk instead of loading whole
 
 Every line a character speaks used to be read from the disk whole, in the

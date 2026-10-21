@@ -57,6 +57,8 @@ void Con_Printf( const char *fmt, ... )
 	va_end( ap );
 }
 
+snd_globals_t snd; /* the mixer's times: paintedtime places a cut made between paints */
+
 /* ---- the room module (#180), as far as the voices see it ---- */
 static ALuint s_room, s_ring, s_slot, s_fx;
 static int s_room_on = 1, s_base_valid = 1, s_base;
@@ -202,20 +204,45 @@ static void test_start( void )
 	tick( 2040 );                                              /* within the half update: starts */
 	CHECK( state_of( src ) == AL_PLAYING );
 
-	/* the next chunks: a volume change reaches the voice, the same ones send nothing */
+	/* the next chunks: a volume change reaches the voice at its chunk's frame, as the start did */
 	a->leftvol = 255;
 	chunk( 1000 + 3072, list, 1, &pitch );
 	alGetSourcefv( src, AL_XBOX_DIRECT_GAINS, g );
+	CHECK( g[0] == 0.5f && g[1] == 0.25f );                    /* frame 3072: 1032 ahead, waits */
+	CHECK( al_source_debug_timed_params( src ) == 1u );
+	tick( 3000 );                                              /* 960 an update: the window is 480 */
+	alGetSourcefv( src, AL_XBOX_DIRECT_GAINS, g );
 	CHECK( g[0] == 255.0f / 256.0f && g[1] == 0.25f );
 	CHECK( Xbox_SndVoices_DebugSource( a ) == src );
+	chunk( 1000 + 3584, list, 1, &pitch );                     /* the same ones send nothing */
+	CHECK( al_source_debug_timed_params( src ) == 0u );
+
+	/* gains and pitch together: both wait, then land on one tick */
+	a->leftvol = 64;
+	a->rightvol = 192;
+	{
+		const double half = 0.5;
+
+		chunk( 1000 + 4096, list, 1, &half );
+	}
+	CHECK( al_source_debug_timed_params( src ) == 2u );
+	tick( 3500 );                                              /* 596 ahead, the window 250 */
+	alGetSourcefv( src, AL_XBOX_DIRECT_GAINS, g );
+	alGetSourcef( src, AL_PITCH, &p );
+	CHECK( g[0] == 255.0f / 256.0f && g[1] == 0.25f && p == 1.25f );
+	tick( 4000 );                                              /* 96 ahead */
+	alGetSourcefv( src, AL_XBOX_DIRECT_GAINS, g );
+	alGetSourcef( src, AL_PITCH, &p );
+	CHECK( g[0] == 0.25f && g[1] == 0.75f && p == 0.5f );
+	CHECK( al_source_debug_timed_params( src ) == 0u );
 	printf( "    -> buffer, offset, loop, gains, pitch, priority, panned send; timed start [%s]\n", failures ? "FAIL" : "PASS" );
 }
 
 static void test_end_and_cut( void )
 {
-	channel_t *a = &s_ch[0], *b = &s_ch[1], *c = &s_ch[2];
+	channel_t *a = &s_ch[0], *b = &s_ch[1], *c = &s_ch[2], *d = &s_ch[3];
 	channel_t *list[2];
-	ALuint sa = Xbox_SndVoices_DebugSource( a ), sb, sc;
+	ALuint sa = Xbox_SndVoices_DebugSource( a ), sb, sc, sd;
 	const int f0 = failures;
 
 	printf( "[2] an ended sound plays out; a cut one stops at its frame; a short one freed before its frame still plays\n" );
@@ -262,6 +289,26 @@ static void test_end_and_cut( void )
 	alSourceStop( sc );
 	chunk( 1000 + 10240, NULL, 0, NULL );
 	CHECK( geti( sc, AL_BUFFER ) == 0 );
+
+	/* d is cut between paints - S_StartSound replacing it, as each held
+	   machine-gun shot replaces the last: at the frame the mixer painted
+	   to (snd.paintedtime), where the next sound starts, not at the start
+	   of the last chunk painted (11264), a chunk early */
+	chan_play( d, &s_sfx[3], 200, 200, 0 );
+	list[0] = d;
+	chunk( 1000 + 11264, list, 1, NULL );
+	sd = Xbox_SndVoices_DebugSource( d );
+	tick( 10752 );
+	tick( 11264 );
+	CHECK( state_of( sd ) == AL_PLAYING );
+	snd.paintedtime = 1000 + 12288;                            /* the chunk painted to here */
+	Xbox_SndVoices_Free( d );                                  /* outside any paint */
+	tick( 11776 );
+	CHECK( state_of( sd ) == AL_PLAYING );                    /* not at 11264 */
+	tick( 12288 );
+	CHECK( state_of( sd ) == AL_STOPPED );                    /* at 12288 */
+	chunk( 1000 + 12288, NULL, 0, NULL );
+	CHECK( geti( sd, AL_BUFFER ) == 0 );
 	printf( "    -> plays out, timed stop, a short sound's start kept [%s]\n", failures > f0 ? "FAIL" : "PASS" );
 }
 

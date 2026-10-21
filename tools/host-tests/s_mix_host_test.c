@@ -84,6 +84,13 @@ void Xbox_SndVoices_BeginPaint( int start ) { (void)start; }
 void Xbox_SndVoices_EndPaint( void ) { }
 /* divergence #183's music on a voice: never on here */
 void Xbox_SndMusicVoice_Paint( qboolean paused ) { (void)paused; }
+/* divergence #184's speech feed: never on here, every span mixes */
+qboolean Xbox_SndFeed_Take( channel_t *ch, const wavdata_t *wav, const void *audio, int available, double rate, double pitch, int out_count, int offset )
+{ (void)ch; (void)wav; (void)audio; (void)available; (void)rate; (void)pitch; (void)out_count; (void)offset; return false; }
+void Xbox_SndFeed_BeginPaint( int start ) { (void)start; }
+void Xbox_SndFeed_EndPaint( void ) { }
+qboolean Xbox_SndMeter_SDL( void ) { return false; } /* #189: no meter on the host */
+void Xbox_SndMeter_Block( const short *samples, int frames ) { (void)samples; (void)frames; }
 wavdata_t *S_LoadSound( sfx_t *sfx ) { return NULL; }
 void S_FreeChannel( channel_t *ch ) { }
 float S_GetMasterVolume( void ) { return 1.0f; }

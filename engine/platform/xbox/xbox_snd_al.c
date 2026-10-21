@@ -42,6 +42,7 @@ verified on a console.
 #include "platform/xbox/xbox_snd_al_queue.h"
 #include "platform/xbox/xbox_snd_gproom.h"
 #include "platform/xbox/xbox_snd_voices.h"
+#include "platform/xbox/xbox_snd_feed.h"
 #include "platform/xbox/xbox_snd_music_voice.h"
 #include "platform/xbox/xbox_frametime.h"
 
@@ -177,7 +178,7 @@ static void XboxAL_ProfWrite( const char *why, qboolean flush )
 {
 	const double us = 1.0 / 733.333;
 	ALXBOXSTATS st;
-	char t[1024];
+	char t[2048]; // a play window with every line is about 1.1 KiB (the timed line pushed the speech and music lines past 1024)
 	size_t len = 0;
 	int i;
 
@@ -228,8 +229,18 @@ static void XboxAL_ProfWrite( const char *why, qboolean flush )
 					st.output_slips - s_alp_st0.output_slips, st.output_lead_min, st.output_lead_max, st.output_lead_last );
 			else XboxAL_ProfCat( t, sizeof( t ), &len, "; copy mode\n" );
 		}
+		if( st.timed_holds + st.timed_mutes > 0 )
+		{
+			// nxdk-ex's held starts and mutes, since the open: the output
+			// thread makes a timed start or stop at its frame (not at this
+			// thread's update); its error against the frame in ms
+			XboxAL_ProfCat( t, sizeof( t ), &len, "  timed on the output thread: %u starts held, %u stops muted, %u refused; %u made by the thread, %u late by the game thread, %u passes skipped; error %.2f..%.2f ms, mean |%.2f|\n",
+				st.timed_holds, st.timed_mutes, st.timed_hold_refused, st.timed_hold_done, st.timed_hold_overdue, st.timed_hold_skipped,
+				st.timed_hold_err_min / 48.0, st.timed_hold_err_max / 48.0, st.timed_hold_err_mean / 48.0 );
+		}
 		len += Xbox_SndGpRoom_Stats( t + len, sizeof( t ) - len ); // #180
 		len += Xbox_SndVoices_Stats( t + len, sizeof( t ) - len ); // #182
+		len += Xbox_SndFeed_Stats( t + len, sizeof( t ) - len ); // #184
 		len += Xbox_SndMusicVoice_Stats( t + len, sizeof( t ) - len ); // #183
 		s_alp_st0 = st;
 		if( s_alp_len + len <= sizeof( s_alp_text ))
@@ -373,6 +384,7 @@ void Xbox_SndAL_Clear( void )
 	s_al_nfree = XBOX_SND_AL_MAX_BUFFERS;
 	Xbox_SndALQ_Flush( &s_al_queue );
 	Xbox_SndVoices_Clear(); // #182: the sounds on voices stop with the mix
+	Xbox_SndFeed_Clear(); // #184
 	Xbox_SndMusicVoice_Clear(); // #183
 	Xbox_SndGpRoom_Clear();
 	snd.samplepos = s_al_queue.played * 2;
@@ -383,6 +395,7 @@ static void XboxAL_Shutdown( void )
 {
 	Xbox_SndMusicVoice_Shutdown(); // #183
 	Xbox_SndVoices_Shutdown(); // #182, before the room's slot goes
+	Xbox_SndFeed_Shutdown(); // #184, likewise
 	Xbox_SndGpRoom_Shutdown();
 	if( s_al_source )
 	{
@@ -636,6 +649,7 @@ static void Xbox_Snd_WriteBackendNote( qboolean opened )
 		FS_Printf( f, "renderer %s @ %d Hz\n", alGetString( AL_RENDERER ), SOUND_DMA_SPEED );
 		FS_Printf( f, "room on the GP: %s\n", Xbox_SndGpRoom_Active() ? "on" : "off" ); // #180
 		FS_Printf( f, "sounds on voices: %s\n", Xbox_SndVoices_Why()); // #182
+		FS_Printf( f, "speech fed to voices: %s\n", Xbox_SndFeed_Why()); // #184
 		FS_Printf( f, "music on a voice: %s\n", Xbox_SndMusicVoice_DebugSource() ? "on" : "off" ); // #183
 	}
 	FS_Close( f );
@@ -654,6 +668,7 @@ qboolean SNDDMA_Init( void )
 			Xbox_SndAL_GpProbe(); // only with r3d_snd_gpprobe 1 (#180)
 			Xbox_SndGpRoom_Init( snd.samples / 2, snd.format.speed ); // only with r3d_snd_gproom 1 (#180)
 			Xbox_SndVoices_Init(); // only with r3d_snd_voices 1 and the room on the GP (#182)
+			Xbox_SndFeed_Init(); // only with r3d_snd_voices_speech 1 and the room on the GP (#184)
 			Xbox_SndMusicVoice_Init(); // with the sounds on voices (#183)
 			Xbox_Snd_WriteBackendNote( true ); // after them: it says which came on
 			alSourcef( s_al_source, AL_XBOX_PRIORITY, Xbox_SndVoices_StreamPriority());

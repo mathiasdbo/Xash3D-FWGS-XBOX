@@ -39,6 +39,11 @@ Runs:
   read in flight; the static-channel reuse that memsets a playing channel;
   more sentences at once than the stream has slots; r3d_vox_unit 32768;
   r3d_vox_stream 0; r3d_vox_crc's own check of every sentence.
+Divergence #184's speech feed is never on here (every span mixes), but
+each span S_MixChannelToBuffer would hand it is recorded per build: the
+spans are the same in both (position, length, bytes), each covers every
+sample the CPU mix reads from it, and a word's spans without timecompress
+follow on from each other exactly (Xbox_SndFeed_SpanFrames).
 The disk is scripted (vox_stub/xbox_async_read.h): a queued read's buffer
 holds garbage until it lands, so a read used early shows in the output;
 the test's allocator fails a free of a buffer a read is still writing,
@@ -57,6 +62,7 @@ stream ran: a comparison of two whole-load runs would also be identical.
 #include "const.h"
 #include "platform/xbox/xbox_frametime.h"
 #include "xbox_async_read.h"
+#include "platform/xbox/xbox_snd_feed.h"
 #include <io.h> /* mkdir */
 
 /* ---- the two builds ---- */
@@ -126,6 +132,11 @@ void Xbox_SndVoices_EndPaint( void ) { }
 void Xbox_SndMusicVoice_Paint( qboolean paused ) { (void)paused; }
 void Xbox_SndVoices_Free( channel_t *ch ) { (void)ch; }
 void Xbox_SndVoices_FreeSound( const sfx_t *sfx ) { (void)sfx; }
+void Xbox_SndFeed_BeginPaint( int start ) { (void)start; }
+void Xbox_SndFeed_EndPaint( void ) { }
+qboolean Xbox_SndMeter_SDL( void ) { return false; } /* #189: no meter on the host */
+void Xbox_SndMeter_Block( const short *samples, int frames ) { (void)samples; (void)frames; }
+void Xbox_SndFeed_Free( channel_t *ch ) { (void)ch; }
 uint64_t xbox_ft_snd_dma_ticks;
 
 static int notes[8];
@@ -561,6 +572,108 @@ static int busy( void )
 	return 0;
 }
 
+/* ---- #184's speech feed: the spans the walk would hand it ---- */
+#define MAX_SPANS 2048
+typedef struct { int chan, start, n; uint32_t crc; byte head[64]; int vol[2]; } span_t;
+static span_t spans[2][MAX_SPANS];
+static int nspans[2], feed_side = -1;
+static struct { const sfx_t *sfx; int word, end; } feed_last[2][MAX_CHANNELS];
+static long feed_spans, feed_tiled, feed_frames;
+
+static void feed_forget( void )
+{
+	memset( feed_last, 0, sizeof( feed_last ));
+}
+
+/* Records the span instead of taking it: every channel still mixes */
+qboolean Xbox_SndFeed_Take( channel_t *ch, const wavdata_t *wav, const void *audio, int available, double rate, double pitch, int out_count, int offset )
+{
+	const int side = feed_side;
+	snd_globals_t *g;
+	int idx, start, n, last, k, tc;
+	uint32_t crc = 2166136261u;
+	const byte *b = audio;
+
+	(void)pitch;
+	(void)offset;
+	if( side < 0 )
+		return false;
+	g = side ? xb_t_snd() : up_t_snd();
+	idx = (int)( ch - g->channels );
+	start = (int)ch->sample;
+	n = Xbox_SndFeed_SpanFrames( ch->sample, rate, out_count, available );
+	/* S_MixAudio reads floor( frac + i * rate ) for i < out_count (and one
+	   more with s_lerping, the interpolation's, which the APU does not
+	   need): within the span, or (upsampled) its end, the next span's first */
+	last = (int)floor(( ch->sample - floor( ch->sample )) + ( out_count - 1 ) * rate );
+	CHECK( last <= n );
+	/* upstream's 8-bit samples are signed, the Xbox build's unsigned (#181:
+	   what the APU plays, AL_FORMAT_MONO8): compared as the Xbox's */
+	for( k = 0; k < n * wav->width * wav->channels; k++ )
+		crc = ( crc ^ (byte)( b[k] ^ ( side == 0 && wav->width == 1 ? 0x80 : 0 ))) * 16777619u;
+	tc = ch->words ? ch->words[ch->word_index].timecompress : 0;
+	if( idx >= 0 && idx < MAX_CHANNELS )
+	{
+		const qboolean loops = FBitSet( ch->flags, FL_CHAN_USE_LOOP ) && FBitSet( wav->flags, SOUND_LOOPED );
+
+		/* a looping sound's wrap goes back to its loop start: not checked */
+		if( feed_last[side][idx].sfx == ch->sfx && feed_last[side][idx].word == ch->word_index
+			&& tc == 0 && !( loops && start < feed_last[side][idx].end ))
+		{
+			CHECK( start == feed_last[side][idx].end ); /* no gap, no overlap */
+			feed_tiled++;
+		}
+		feed_last[side][idx].sfx = ch->sfx;
+		feed_last[side][idx].word = ch->word_index;
+		feed_last[side][idx].end = start + n;
+	}
+	if( nspans[side] < MAX_SPANS )
+	{
+		span_t *s = &spans[side][nspans[side]++];
+
+		s->chan = idx;
+		s->start = start;
+		s->n = n;
+		s->crc = crc;
+		memcpy( s->head, b, n * wav->width < 64 ? (size_t)( n * wav->width ) : 64u );
+		s->vol[0] = ch->leftvol;
+		s->vol[1] = ch->rightvol;
+	}
+	feed_spans++;
+	feed_frames += n;
+	return false;
+}
+
+/* The two builds handed the same spans this paint */
+static void feed_compare( void )
+{
+	int i;
+
+	CHECK( nspans[0] == nspans[1] );
+	for( i = 0; i < nspans[0] && i < nspans[1]; i++ )
+	{
+		const span_t *a = &spans[0][i], *b = &spans[1][i];
+
+		if( a->chan != b->chan || a->start != b->start || a->n != b->n || a->crc != b->crc )
+		{
+			if( verbose || failures < 20 )
+				printf( "  span %d: up chan %d at %d, %d frames, crc %08x; xb chan %d at %d, %d frames, crc %08x\n",
+					i, a->chan, a->start, a->n, a->crc, b->chan, b->start, b->n, b->crc );
+			if( verbose || failures < 20 )
+			{
+				int k;
+				printf( "    vol up %d/%d xb %d/%d; first bytes up/xb:", a->vol[0], a->vol[1], b->vol[0], b->vol[1] );
+				for( k = 0; k < 12; k++ )
+					printf( " %02x/%02x", a->head[k], b->head[k] );
+				printf( "\n" );
+			}
+			CHECK( !"a span differs between the builds" );
+			break;
+		}
+	}
+	nspans[0] = nspans[1] = 0;
+}
+
 /* one frame: what SND_UpdateSound does, then a paint of a random length */
 static int paints;
 static void frame( int max_paint )
@@ -570,8 +683,12 @@ static void frame( int max_paint )
 
 	up_t_frame();
 	xb_t_frame();
+	feed_side = 0;
 	up_S_PaintChannels( end );
+	feed_side = 1;
 	xb_S_PaintChannels( end );
+	feed_side = -1;
+	feed_compare();
 	paints++;
 	compare(( paints % 5 ) == 0 );
 }
@@ -582,6 +699,7 @@ static void start( const char *name, int ent, int chan, int pitch, int flags )
 	const vec3_t pos = { 0, 0, 0 };
 
 	CHECK( strlen( name ) < MAX_QPATH ); /* S_FindName drops a longer name: nothing would play */
+	feed_forget(); /* a channel may be taken over */
 	CHECK( hu == hx );
 	up_S_StartSound( pos, ent, chan, hu, 1.0f, ATTN_NORM, pitch, flags );
 	xb_S_StartSound( pos, ent, chan, hx, 1.0f, ATTN_NORM, pitch, flags );
@@ -612,6 +730,7 @@ static void save_restore( qboolean jump )
 	}
 	up_S_StopAllSounds( true );
 	xb_S_StopAllSounds( true );
+	feed_forget();
 	for( i = 0; i < na && i < nb; i++ )
 	{
 		soundlist_t *e = &la[i];
@@ -717,6 +836,7 @@ static int count_sentences( void )
 
 static void reset_both( void )
 {
+	feed_forget();
 	up_t_shutdown();
 	xb_t_shutdown();
 	up_t_init();
@@ -1115,6 +1235,8 @@ int main( int argc, char **argv )
 	printf( "xbox_vox_stream: disk reads %ld (%ld KiB), opens %ld; whole-file loads %ld KiB; notes: sound %d, vox %d (last: %s); "
 		"live blocks at exit %ld\n", disk_reads, disk_bytes / 1024, disk_opens, fs_whole_bytes / 1024, notes[XBOX_FT_NOTE_SOUND], notes[XBOX_FT_NOTE_VOX],
 		last_vox_note, live_blocks );
+	printf( "xbox_vox_stream: #184's spans: %ld handed (%ld frames), %ld checked to follow on from the one before\n", feed_spans, feed_frames, feed_tiled );
+	CHECK( feed_tiled > ( quick ? 100 : 10000 ));
 	printf( "xbox_vox_stream: %d checks, %d failures\n", checks, failures );
 	return failures ? 1 : 0;
 }

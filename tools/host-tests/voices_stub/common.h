@@ -1,5 +1,5 @@
 /*
-voices_stub/common.h - what engine/platform/xbox/xbox_snd_voices.c and xbox_snd_music_voice.c need from the engine
+voices_stub/common.h - what engine/platform/xbox/xbox_snd_voices.c, xbox_snd_music_voice.c and xbox_snd_feed.c need from the engine
 Copyright (C) 2026 Resonance3D contributors
 
 This program is free software: you can redistribute it and/or modify
@@ -26,6 +26,7 @@ GNU General Public License for more details.
 
 typedef int qboolean;
 typedef unsigned int uint;
+typedef uint8_t byte;
 #define false 0
 #define true 1
 
@@ -90,7 +91,7 @@ typedef struct rawchan_s
 	volatile uint s_rawend;
 	size_t max_samples;
 } rawchan_t;
-typedef struct { int paintedtime, soundtime; } snd_globals_t;
+typedef struct { int paintedtime, soundtime; struct { int speed; } format; } snd_globals_t;
 extern snd_globals_t snd;
 #define SOUND_DMA_SPEED 48000
 #define S_RAW_SOUND_BACKGROUNDTRACK -2

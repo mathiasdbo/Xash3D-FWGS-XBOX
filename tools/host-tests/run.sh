@@ -382,6 +382,16 @@ xbox_snd_voices() {
 }
 run_test xbox_snd_voices xbox_snd_voices
 
+# tools/host-tests/xbox_snd_feed_host_test.c, header (divergence #184):
+# the speech feed against nxdk-ex's real OpenAL (its null backend): a
+# speech channel's spans in its source's ring as handed over, its start,
+# gains and pitch timed to the stream, played out, cut, run dry and
+# started again, lost to the CPU, another format to the CPU.
+xbox_snd_feed() {
+	"$BASH" tools/host-tests/xbox_snd_feed.sh "$OUT/feed"
+}
+run_test xbox_snd_feed xbox_snd_feed
+
 # tools/host-tests/xbox_snd_music_voice_host_test.c, header (divergence
 # #183): the baked music's blocks on one OpenAL source against the real
 # library's null backend and the real stream; then every mutant in

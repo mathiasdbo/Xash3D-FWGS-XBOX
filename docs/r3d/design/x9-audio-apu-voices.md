@@ -67,10 +67,11 @@ So the voice starts and stops **at the stream frame of the paint chunk** that
 starts or ends it, the way `alXboxEffectSlotAtSample` times the kernel's
 parameters. This is a library mechanism (generic: "start/stop a source at a
 streaming source's frame"), requested in section 4. Volume and pitch changes
-are not timed: they reach the voice at once, 0.12 s before the CPU mix
-would have applied them, and the APU ramps them. That is a divergence only
-in the direction of less latency (the listener's position and the entity's
-are this frame's).
+were not timed at first: they reached the voice at once, 0.12 s before the
+CPU mix would have applied them. Since B0 (nxdk-ex
+`alXboxSourcefvAtSample`, section 7.5) a playing voice's changes are timed
+to their chunk's frame too, in the same half-update window; a voice's
+first values are set before its timed start.
 
 A sound that ends by itself is not stopped: the walk marks it finished
 0.12 s before the voice reaches its end, and `S_FreeChannel` lets the voice
@@ -358,10 +359,24 @@ and timecompress), a line across the pause menu, a save restored mid-line.
 ### 7.7 Steps
 
 - **B0 (nxdk-ex):** the timed parameters and the ring sized by format, with
-  library tests; a 5 min host test of a fed stream at 11025 Hz.
+  library tests; a 5 min host test of a fed stream at 11025 Hz. *Built
+  (2026-10-20, nxdk-ex feat/openal-timed-params):* `alXboxSourcefvAtSample`
+  (`AL_PITCH`, `AL_XBOX_DIRECT_GAINS`; 8 a source, the oldest made at once
+  when full) and the ring sized by format (8-bit mono 16 KiB); stage A's
+  voices use the timed changes. `test_al_stream_feed`: 5 min of 48 ms
+  pieces at 11025 Hz, every frame in the ring as fed, the clock exact, no
+  starvation, 201 laps of the 16 KiB ring.
 - **B1:** the feed for one-format channels with a constant pitch and volume:
   the 593 one-word sentences and the streamed non-sentence speech, the bulk
-  of what is heard. Host test: the engine's real `S_MixChannelToBuffer`
+  of what is heard. *Built (2026-10-20, divergence #184,
+  `engine/platform/xbox/xbox_snd_feed.c`, behind `r3d_snd_voices_speech 1`),
+  with B2's timed pitch and volume since B0 was there: every one-format
+  sentence, multi-word ones included. The span rule is
+  `floor( sample + out_count * rate ) - floor( sample )`, computed as the walk
+  advances, so a word's spans tile exactly; `k_snd_feed` is the feed's
+  cycles in `sndalprof.txt`'s line rather than a recorder span. Host tests:
+  `xbox_snd_feed_host_test.c` (the module against the library) and the
+  span checks in `xbox_vox_stream_host_test.c` (every retail sentence).* Host test: the engine's real `S_MixChannelToBuffer`
   walk (as `xbox_vox_stream_host_test.c` builds it) over every retail
   sentence, the fed bytes compared with the samples the CPU mix reads,
   chunk by chunk, timecompress and trims included.

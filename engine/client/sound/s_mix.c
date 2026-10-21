@@ -24,6 +24,8 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_snd_gproom.h" // #180
 #include "platform/xbox/xbox_snd_voices.h" // #182
 #include "platform/xbox/xbox_snd_music_voice.h" // #183
+#include "platform/xbox/xbox_snd_meter.h" // #189
+#include "platform/xbox/xbox_snd_feed.h" // #184
 // docs/r3d/divergences.md #177: a streamed sound mixes from its channel's window
 #define S_MIX_SOURCE( ch ) S_R3D_ChannelSource( ch )
 #else
@@ -285,8 +287,9 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 		const wavdata_t *wav = S_MIX_SOURCE( chan );
 #if XASH_XBOX
 		// docs/r3d/divergences.md #182: no buffer walks a channel an APU
-		// voice plays - its position and its end as upstream's, no mixing
-		if( pbuf )
+		// voice plays - its position and its end as upstream's, no mixing;
+		// #184: a speech channel's span goes to its fed source instead
+		if( pbuf && !Xbox_SndFeed_Take( chan, wav, audio, available, rate, pitch, out_count, offset ))
 #endif
 		S_MixAudio( pbuf + offset, pvol, audio, wav->channels, wav->width, sample_frac, rate, out_count, lerp );
 
@@ -559,6 +562,10 @@ static void S_TransferPaintBuffer( const portable_samplepair_t *src, int endtime
 
 		// write a linear blast of samples
 		S_WriteLinearBlastStereo16( snd_out, snd_p, snd_linear_count );
+#if XASH_XBOX
+		if( Xbox_SndMeter_SDL( )) // #189: the SDL output's level
+			Xbox_SndMeter_Block( snd_out, snd_linear_count >> 1 );
+#endif
 
 		snd_p += snd_linear_count;
 		lpaintedtime += (snd_linear_count >> 1);
@@ -593,11 +600,13 @@ void S_PaintChannels( int endtime )
 		int room_channels;
 #if XASH_XBOX
 		Xbox_SndVoices_BeginPaint( snd.paintedtime ); // #182: the voices that ended go
+		Xbox_SndFeed_BeginPaint( snd.paintedtime ); // #184: the fed sources that played out go
 		Xbox_SndMusicVoice_Paint( cl.paused ); // #183: stops where the raw channel would go silent
 #endif
 		S_MIX_SPAN( XBOX_FT_S_SND_MIX, XBOX_FT_S_SNDX_MIX, room_channels = S_MixNormalChannelsToRoombuffer( roombuffer, end ));
 #if XASH_XBOX
 		Xbox_SndVoices_EndPaint(); // #182: the voices of channels it skipped pause
+		Xbox_SndFeed_EndPaint(); // #184: a skipped speech channel's staged samples go now
 #endif
 
 		S_MIX_SPAN( XBOX_FT_S_SND_MIX, XBOX_FT_S_SNDX_MIX, room_channels += S_MixRawChannels( end ));

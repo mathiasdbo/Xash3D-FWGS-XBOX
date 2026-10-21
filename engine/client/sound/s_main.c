@@ -28,6 +28,9 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_snd_al.h" // the output, SDL or OpenAL, chosen at boot, #178
 #include "platform/xbox/xbox_vox_stream.h" // dialogue streamed, #177
 #include "platform/xbox/xbox_snd_voices.h" // sounds on the APU's voices, #182
+#include "platform/xbox/xbox_snd_meter.h" // r3d_snd_meter, the output's level, #189
+#include "platform/xbox/xbox_snd_feed.h" // speech fed to the APU's voices, #184
+#include "platform/xbox/xbox_snd_gproom.h" // Xbox_SndCfg_Hardware: the Audio menu's "Hardware audio", #182-#184
 #endif
 
 // structure used for fading in and out client sound volume.
@@ -210,6 +213,7 @@ void S_FreeChannel( channel_t *ch )
 	S_NotifyChannelUpdate( ch - snd.channels, NULL, -1 );
 #if XASH_XBOX
 	Xbox_SndVoices_Free( ch ); // #182: an ended sound plays out on its voice, a cut one stops
+	Xbox_SndFeed_Free( ch ); // #184: the same for a speech channel's fed source
 #endif
 
 	// free the currently loaded word's audio cache before nuking the channel
@@ -586,6 +590,28 @@ static void S_SpatializeChannel( short *left_vol, short *right_vol, int master_v
 SND_Spatialize
 =================
 */
+#if XASH_XBOX
+/* The Audio menu's "Voices volume": speech - a sentence, or a sound on an
+   entity's voice or stream channel - scaled after its volumes are set, so
+   the CPU mix, the sounds on voices (#182) and the fed speech (#184) all
+   follow it, live */
+static CVAR_DEFINE_AUTO( r3d_speech_volume, "1", FCVAR_ARCHIVE|FCVAR_FILTERABLE, "volume of speech (sentences, voice and stream channels), 0 to 1, on top of volume" );
+
+static void S_R3D_SpeechVolume( channel_t *ch )
+{
+	const float v = bound( 0.0f, r3d_speech_volume.value, 1.0f );
+
+	if( v < 1.0f && ( ch->words || ch->entchannel == CHAN_VOICE || ch->entchannel == CHAN_STREAM ))
+	{
+		ch->leftvol = (int)( ch->leftvol * v );
+		ch->rightvol = (int)( ch->rightvol * v );
+	}
+}
+#define S_R3D_SPEECH_VOLUME( ch ) S_R3D_SpeechVolume( ch )
+#else
+#define S_R3D_SPEECH_VOLUME( ch )
+#endif
+
 static void SND_Spatialize( channel_t *ch )
 {
 	if( clgame.soundFuncs.pfnS_Spatialize )
@@ -602,6 +628,7 @@ static void SND_Spatialize( channel_t *ch )
 
 		// if playing a word, set volume
 		VOX_SetChanVol( ch );
+		S_R3D_SPEECH_VOLUME( ch );
 		return;
 	}
 
@@ -635,6 +662,7 @@ static void SND_Spatialize( channel_t *ch )
 
 	// if playing a word, set volume
 	VOX_SetChanVol( ch );
+	S_R3D_SPEECH_VOLUME( ch );
 }
 
 /*
@@ -1732,6 +1760,10 @@ static qboolean S_R3D_ValidRate( int rate )
 
 /* #178: the output the device opens on, read at boot like r3d_snd_rate;
    -sndbackend on the command line wins over the configs */
+/* #182-#184: the Audio menu's "Hardware audio", saved in config.cfg and
+   read from it at the next boot (Xbox_SndCfg_Hardware): the OpenAL output,
+   the room on the GP, the sounds on voices and the speech fed to them */
+static CVAR_DEFINE_AUTO( r3d_snd_hw, "0", FCVAR_ARCHIVE, "mix on the Xbox's APU (applies at the next boot): the OpenAL output, the room on the GP, the sounds on voices and the speech fed to them (docs/r3d/divergences.md #182-#184)" );
 static CVAR_DEFINE_AUTO( r3d_snd_backend, "sdl", 0, "sound output on the Xbox, set at boot (applies at the next boot): sdl (SDL's audio thread on the AC97) or al (OpenAL on the MCPX APU) (docs/r3d/divergences.md #178)" );
 
 /* The boot configs' r3d_snd_rate and r3d_snd_backend, read before the
@@ -1773,6 +1805,16 @@ static void S_R3D_ReadBootRate( void )
 	if( backend[0] )
 		Cvar_DirectSet( &r3d_snd_backend, backend );
 	Mem_Free( t );
+}
+
+/* The menu's "Hardware audio" at boot: the APU's output, whatever the
+   userconfig.d files say (the steps it turns on need it) */
+static void S_R3D_ReadBootHardware( void )
+{
+	if( !Xbox_SndCfg_Hardware())
+		return;
+	Con_Printf( "r3d_snd_hw: on at boot - the mix on the APU\n" );
+	Cvar_DirectSet( &r3d_snd_backend, "al" );
 }
 
 static qboolean s_r3d_device_lost;  // a reopen lost the device: S_Shutdown unwinds the rest
@@ -1893,6 +1935,7 @@ void SND_UpdateSound( void )
 #if XASH_XBOX
 	S_R3D_ApplyRate(); // #173: a changed r3d_snd_rate reopens the device
 	if( !snd.initialized ) return;
+	Xbox_SndMeter_Frame(); // #189
 #endif
 
 	if( clgame.soundFuncs.pfnS_UpdateSound )
@@ -2317,7 +2360,11 @@ qboolean S_Init( void )
 	// #173: the rate the device opens at; a later change reopens it
 	Cvar_RegisterVariable( &r3d_snd_rate );
 	Cvar_RegisterVariable( &r3d_snd_backend ); // #178
+	Cvar_RegisterVariable( &r3d_snd_hw ); // #182-#184
+	Cvar_RegisterVariable( &r3d_speech_volume ); // the Audio menu's "Voices volume"
+	Xbox_SndMeter_Init(); // #189
 	S_R3D_ReadBootRate();
+	S_R3D_ReadBootHardware();
 	r3d_snd_dma_speed = S_R3D_ValidRate( (int)r3d_snd_rate.value ) ? (int)r3d_snd_rate.value : SOUND_48k;
 	{
 		string backend;

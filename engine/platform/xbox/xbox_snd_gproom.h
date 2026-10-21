@@ -73,5 +73,10 @@ size_t Xbox_SndGpRoom_Stats( char *buf, size_t size );
 
 /* "key 1" (any nonzero value) in a userconfig.d cfg */
 qboolean Xbox_SndCfg_Asked( const char *key );
+/* r3d_snd_hw (the Audio menu's "Hardware audio"), as the boot configs set
+   it: config.cfg, where the menu saves it, then the userconfig.d files,
+   the last setting winning. On, it asks for r3d_snd_gproom,
+   r3d_snd_voices and r3d_snd_voices_speech, and the OpenAL output. */
+qboolean Xbox_SndCfg_Hardware( void );
 
 #endif /* XBOX_SND_GPROOM_H */

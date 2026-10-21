@@ -159,9 +159,10 @@ def stage(f, a):
     put_text(f, CFGDIR + "/" + ROUTE_CFG,
              ["// tools/xbox-ftp-route-bmi.py (%s): remove after the run" % a.label,
               'host_frametime_label "%s"' % a.label,
-              "host_frametime_analysis 2"] + list(a.cfg) + ["map c0a0"])
-    put_text(f, MAPDIR + "/" + END_CFG, END_LINES)
-    say("staged %s. Boot the game; it ends on c0a0e after about 7 minutes and quits." % a.label)
+              "host_frametime_analysis %d" % (1 if a.no_overlay else 2)] + list(a.cfg) + ["map c0a0"])
+    # --stay: the route opens the tram and hands over; the recording runs on until the game quits
+    put_text(f, MAPDIR + "/" + END_CFG, END_LINES[:END_LINES.index("ent_fire barnwalk3 use") + 1] + ["echo route-bmi: done, play on"] if a.stay else END_LINES)
+    say("staged %s. Boot the game; it ends on c0a0e after about 7 minutes%s." % (a.label, "" if a.stay else " and quits"))
 
 
 def restore(f, a):
@@ -198,6 +199,8 @@ def main():
     p.add_argument("--label", help="stage: the recording's label")
     p.add_argument("--xbe", help="stage: the XBE to run")
     p.add_argument("--cfg", action="append", default=[], help="stage: an extra cfg line (repeatable)")
+    p.add_argument("--no-overlay", action="store_true", help="stage: record without drawing the overlay (host_frametime_analysis 1)")
+    p.add_argument("--stay", action="store_true", help="stage: at the end point hand over and keep recording (quit from the menu to close it)")
     p.add_argument("--keep", default="voxstream", help="suffix the console's own default.xbe is kept under")
     p.add_argument("--xbe-back", action="store_true", help="restore: put default.xbe.<keep> back too")
     a = p.parse_args()

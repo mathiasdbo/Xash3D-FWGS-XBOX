@@ -33,7 +33,9 @@ the channel's (a restored save starts part way in), and it starts with
 alXboxSourcePlayAtSample at the room stream's frame for the paint chunk,
 so it is heard when the CPU mix would have been. From then on the mixer
 walks the channel without mixing it, and each chunk this file hands the
-voice the channel's volumes and pitch when they change. A channel freed
+voice the channel's volumes and pitch when they change, timed to the
+chunk's stream frame as the start is (alXboxSourcefvAtSample), so a volume
+or pan change is heard with the chunk it belongs to. A channel freed
 because its sound ended leaves its voice to play out; one freed early
 (replaced, stopped) stops at the frame the mixer is at. A channel the
 mixer skips (paused by the menu, inaudible) has its voice paused until it
@@ -110,6 +112,7 @@ static vbuf_t s_buf[VOICE_BUFS];
 static ALuint s_filter;
 static uintptr_t s_next_token = 1;
 static int s_start; /* the chunk's frame time */
+static qboolean s_painting; /* between BeginPaint and EndPaint */
 static uint32_t s_n_starts, s_n_now, s_n_lost, s_n_cpu, s_n_full, s_n_stops, s_n_bufs, s_n_updates, s_n_nobuf;
 static char s_why[96] = "off: not set up (OpenAL did not open)"; /* why Init left them off */
 static int s_peak;
@@ -141,13 +144,23 @@ static void Voice_Release( voice_t *v )
 	v->pending = false;
 }
 
+/* Where a cut lands: in a chunk, its start; between paints - S_StartSound
+   replacing the sound, S_StopSound - the frame the mixer painted to,
+   snd.paintedtime, where the CPU mix cuts it and where the replacing
+   sound starts (the next chunk's start). It was the last chunk's start:
+   up to a chunk early, a gap before every repeated weapon shot. */
+static int Voice_CutFrame( void )
+{
+	return s_painting ? s_start : snd.paintedtime;
+}
+
 /* Stops at the stream frame the mixer is at (now when the streams have no
    known start), and leaves the channel */
 static void Voice_StopTimed( voice_t *v )
 {
 	unsigned frame;
 
-	if( Xbox_SndGpRoom_StreamFrame( s_start, &frame ))
+	if( Xbox_SndGpRoom_StreamFrame( Voice_CutFrame(), &frame ))
 		alXboxSourceStopAtSample( v->src, Xbox_SndGpRoom_Source(), frame );
 	else
 		alSourceStop( v->src );
@@ -265,7 +278,21 @@ static int Voice_LoopedPosition( const wavdata_t *sc, int pos, qboolean loop )
 	return pos;
 }
 
-static void Voice_Volumes( voice_t *v, const channel_t *ch )
+/* A pitch or gains change at the stream frame of the chunk being painted
+   (now when the streams have no known start, or before the voice starts:
+   its start is timed) */
+static void Voice_Set( voice_t *v, ALenum param, const ALfloat *values, qboolean timed )
+{
+	unsigned frame;
+
+	if( timed && Xbox_SndGpRoom_StreamFrame( s_start, &frame ))
+		alXboxSourcefvAtSample( v->src, param, values, Xbox_SndGpRoom_Source(), frame );
+	else
+		alSourcefv( v->src, param, values );
+	s_n_updates++;
+}
+
+static void Voice_Volumes( voice_t *v, const channel_t *ch, qboolean timed )
 {
 	const short lv = (short)bound( 0, ch->leftvol, 255 ), rv = (short)bound( 0, ch->rightvol, 255 );
 
@@ -274,14 +301,13 @@ static void Voice_Volumes( voice_t *v, const channel_t *ch )
 		// S_MixChannelToBuffer's ( sample * vol ) >> 8 on the 16-bit scale
 		const ALfloat g[2] = { lv / 256.0f, rv / 256.0f };
 
-		alSourcefv( v->src, AL_XBOX_DIRECT_GAINS, g );
+		Voice_Set( v, AL_XBOX_DIRECT_GAINS, g, timed );
 		v->lv = lv;
 		v->rv = rv;
-		s_n_updates++;
 	}
 }
 
-static void Voice_Pitch( voice_t *v, double pitch )
+static void Voice_Pitch( voice_t *v, double pitch, qboolean timed )
 {
 	// upstream's rate is pitch * sound rate / mixer rate: the APU plays the
 	// buffer at pitch * its rate
@@ -289,9 +315,10 @@ static void Voice_Pitch( voice_t *v, double pitch )
 
 	if( p != v->pitch )
 	{
-		alSourcef( v->src, AL_PITCH, p > 0.0f ? p : 1.0f / 256.0f );
+		const ALfloat ap = p > 0.0f ? p : 1.0f / 256.0f;
+
+		Voice_Set( v, AL_PITCH, &ap, timed );
 		v->pitch = p;
-		s_n_updates++;
 	}
 }
 
@@ -347,8 +374,8 @@ static qboolean Voice_Start( channel_t *ch, const wavdata_t *sc, double pitch )
 	}
 	v->lv = v->rv = -1;
 	v->pitch = -1.0f;
-	Voice_Volumes( v, ch );
-	Voice_Pitch( v, pitch );
+	Voice_Volumes( v, ch, false );
+	Voice_Pitch( v, pitch, false );
 
 	v->pending = false;
 	if( Xbox_SndGpRoom_StreamFrame( s_start, &frame ))
@@ -427,8 +454,8 @@ qboolean Xbox_SndVoices_Channel( channel_t *ch, const wavdata_t *sc, double pitc
 			v->loop = loop;
 		}
 	}
-	Voice_Volumes( v, ch );
-	Voice_Pitch( v, pitch );
+	Voice_Volumes( v, ch, true );
+	Voice_Pitch( v, pitch, true );
 	alGetError();
 	return true;
 }
@@ -438,6 +465,7 @@ void Xbox_SndVoices_BeginPaint( int start )
 	int i;
 
 	s_start = start;
+	s_painting = true;
 	if( !s_on )
 		return;
 	if( !Xbox_SndGpRoom_Active())
@@ -471,7 +499,10 @@ void Xbox_SndVoices_EndPaint( void )
 	int i;
 
 	if( !s_on )
+	{
+		s_painting = false;
 		return;
+	}
 	for( i = 0; i < VOICE_SLOTS; i++ )
 	{
 		voice_t *v = &s_voice[i];
@@ -496,6 +527,7 @@ void Xbox_SndVoices_EndPaint( void )
 		}
 	}
 	alGetError();
+	s_painting = false;
 }
 
 void Xbox_SndVoices_Free( channel_t *ch )

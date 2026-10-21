@@ -65,13 +65,52 @@ static int s_base;              /* the frame time of the streams' frame 0 */
 static qboolean s_base_valid;
 static uint32_t s_n_timed, s_n_now, s_n_retry, s_n_starts; /* since the last Stats */
 
+/* A config file's setting of `key`: true and its value when it has one */
+static qboolean SndCfg_FileValue( const char *file, const char *key, char *val, int size )
+{
+	fs_offset_t len = 0;
+	byte *data = FS_LoadFile( file, &len, false );
+	char *text;
+	qboolean found;
+
+	if( !data )
+		return false;
+	text = Mem_Malloc( host.mempool, (size_t)len + 1 );
+	memcpy( text, data, (size_t)len );
+	text[len] = 0;
+	Mem_Free( data );
+	found = Xbox_SndCfg_Parse( text, key, val, size );
+	Mem_Free( text );
+	return found;
+}
+
+qboolean Xbox_SndCfg_Hardware( void )
+{
+	search_t *t;
+	char val[8] = "";
+	int i;
+
+	SndCfg_FileValue( "config.cfg", "r3d_snd_hw", val, (int)sizeof( val ));
+	if(( t = FS_Search( "userconfig.d/*.cfg", true, false )))
+	{
+		for( i = 0; i < t->numfilenames; i++ )
+			SndCfg_FileValue( t->filenames[i], "r3d_snd_hw", val, (int)sizeof( val ));
+		Mem_Free( t );
+	}
+	return Q_atoi( val ) != 0;
+}
+
 qboolean Xbox_SndCfg_Asked( const char *key )
 {
-	search_t *t = FS_Search( "userconfig.d/*.cfg", true, false );
+	search_t *t;
 	qboolean asked = false;
 	int i;
 
-	if( !t )
+	// the menu's "Hardware audio" asks for every step at once
+	if(( !Q_strcmp( key, "r3d_snd_gproom" ) || !Q_strcmp( key, "r3d_snd_voices" ) || !Q_strcmp( key, "r3d_snd_voices_speech" ))
+		&& Xbox_SndCfg_Hardware())
+		return true;
+	if( !( t = FS_Search( "userconfig.d/*.cfg", true, false )))
 		return false;
 	for( i = 0; i < t->numfilenames && !asked; i++ )
 	{

@@ -41,6 +41,7 @@ extern int r3d_snd_dma_speed;
 #if VOX_TEST_XBOX
 #include "platform/xbox/xbox_vox_stream.h"
 #include "platform/xbox/xbox_snd_voices.h" /* #182: S_FreeChannel's and S_FreeSound's calls (stubbed, never on) */
+#include "platform/xbox/xbox_snd_feed.h" /* #184: S_FreeChannel's call (stubbed, never on) */
 #endif
 
 /* ---- what s_main.c defines around the extracted functions ---- */
