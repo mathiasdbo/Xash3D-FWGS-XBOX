@@ -98,11 +98,11 @@ int main() {
         CHECK(nv2aCheckHosting(small, 2048, 1 * kMiB, 1 * kMiB, 4 * kMiB, 1000, 200 * 1024, 100, 900, 2).ok, "a small map hosts 2 players");
 
         // 2 players over single-player: server packet entities 2 x 64 x 64 x 340
-        // - 4 x 64 x 340, one more sv_client_t, client packet entities 64 x 64 x 340
-        // - 4 x 64 x 340, frames 2 x 64 x 6128 - 4 x 6128 (~4.3 MiB in all).
+        // - 4 x 128 x 340, one more sv_client_t, client packet entities 64 x 64 x 340
+        // - 4 x 128 x 340, frames 2 x 64 x 6128 - 4 x 6128 (~4.3 MiB in all).
         const Nv2aHostingCost two = nv2aHostingCost(2);
-        CHECK(two.beforeWorld == 2 * 64 * 64 * 340 - 4 * 64 * 340 + nv2aZoneChunk(91296), "2 players: server buffers before the world");
-        CHECK(two.afterWorld == 64 * 64 * 340 - 4 * 64 * 340 + 2 * 64 * 6128 - 4 * 6128, "2 players: client buffers and frames");
+        CHECK(two.beforeWorld == 2 * 64 * 64 * 340 - 4 * 128 * 340 + nv2aZoneChunk(91296), "2 players: server buffers before the world");
+        CHECK(two.afterWorld == 64 * 64 * 340 - 4 * 128 * 340 + 2 * 64 * 6128 - 4 * 6128, "2 players: client buffers and frames");
         const Nv2aHostingCost three = nv2aHostingCost(3);
         const uint64_t perPlayer = (three.beforeWorld + three.afterWorld) - (two.beforeWorld + two.afterWorld);
         CHECK(perPlayer == 64 * 64 * 340 + nv2aZoneChunk(91296) + 64 * 6128, "each further player adds packet entities, a client slot and frames");

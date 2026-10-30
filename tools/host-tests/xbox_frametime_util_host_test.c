@@ -190,11 +190,15 @@ static void test_encoders( void )
 	   streams (x9-audio-vox-stream, #177) after it. */
 	CHECK( XBOX_FT_W_SND_BACKEND == 195 );
 	CHECK( XBOX_FT_W_VOX_STARTS == 196 && XBOX_FT_W_VOX_WINDOW_KB == 212 );
-	CHECK( XBOX_FT_W_COUNT == 213 );
-	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 884 && xbox_ft_frame_bytes( 0 ) == 32 );
+	/* The brush and studio split (x9-perf-cpuprof) closes it. */
+	CHECK( XBOX_FT_W_BR_ENTS == 213 && XBOX_FT_W_BR_WORST_MDL == 226 );
+	CHECK( XBOX_FT_W_ST_ENTS == 227 && XBOX_FT_W_ST_WORST_MDL == 237 );
+	CHECK( XBOX_FT_W_ST_WORST_MDL + 3 == XBOX_FT_W_ST_MESH_KC );
+	CHECK( XBOX_FT_W_COUNT == 241 );
+	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_COUNT ) == 996 && xbox_ft_frame_bytes( 0 ) == 32 );
 	CHECK( xbox_ft_frame_bytes( XBOX_FT_W_SPAN_CALLS ) == 112 );
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", XBOX_FT_W_COUNT ) == XBOX_FT_HEADER_BYTES );
-	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 884 );
+	CHECK( rd32( buf + 8 ) == 2 && rd32( buf + 16 ) == 996 );
 	/* Version 1 is the same header without counters. */
 	CHECK( xbox_ft_encode_header( buf, 1024, 733000000u, 3375000u, 0x1122334455667788ull, 42, 2, "build x", 0 ) == XBOX_FT_HEADER_BYTES );
 	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 );
@@ -220,15 +224,15 @@ static void test_encoders( void )
 	CHECK( xbox_ft_encode_frame( buf, &f, 0 ) == XBOX_FT_FRAME_BYTES );
 	CHECK( rd32( buf ) == 7 && buf[4] == 0xDD && buf[7] == 0xAA && rd32( buf + 24 ) == 6 );
 	CHECK( buf[28] == 0x01 && buf[29] == 0x80 && buf[30] == 0 && buf[31] == 0 );
-	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 884 );
+	CHECK( xbox_ft_encode_frame( buf, &f, XBOX_FT_W_COUNT ) == 996 );
 	CHECK( rd32( buf ) == 7 && buf[28] == 0x01 && buf[29] == 0x80 );
 	CHECK( rd32( buf + 32 ) == 0x01000000u && rd32( buf + 32 + 4 * XBOX_FT_W_LM_TEXELS ) == 0x01000000u + XBOX_FT_W_LM_TEXELS );
-	CHECK( rd32( buf + 880 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
+	CHECK( rd32( buf + 992 ) == 0x01000000u + XBOX_FT_W_COUNT - 1 );
 
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, 0 ) == 16 );
 	CHECK( rd32( buf ) == XBOX_FT_CHUNK_FRAMES && rd32( buf + 4 ) == 8 + 3 * 32 && rd32( buf + 8 ) == 10 && rd32( buf + 12 ) == 3 );
 	CHECK( xbox_ft_encode_frames_chunk_head( buf, 10, 3, XBOX_FT_W_COUNT ) == 16 );
-	CHECK( rd32( buf + 4 ) == 8 + 3 * 884 );
+	CHECK( rd32( buf + 4 ) == 8 + 3 * 996 );
 
 	/* The COUNTERS chunk: every name, NUL-padded to 16 bytes. */
 	CHECK( xbox_ft_encode_counters( buf, XBOX_FT_W_COUNT ) == 8 + 4 + XBOX_FT_W_COUNT * 16 );
@@ -309,6 +313,14 @@ static void test_encoders( void )
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_MUSIC_READ_KC, "music_read_kc" ) == 0 );
 	CHECK( XBOX_FT_W_CHROME_GPU + 6 == XBOX_FT_W_MUSIC_READ_KC );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SND_THR_KC, "snd_thr_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_BR_ENTS, "br_ents" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_BR_FACE_KC, "br_face_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_BR_WORST_MDL, "br_worst_mdl" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_ST_ENTS, "st_ents" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_ST_XFORM_KC, "st_xform_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_ST_SUBMIT_KC, "st_submit_kc" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_ST_WORST_MDL, "st_worst_mdl" ) == 0 );
+	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_ST_MESH_KC, "st_mesh_kc" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SND_UNDERRUNS, "snd_underruns" ) == 0 );
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_SND_RATE, "snd_rate" ) == 0 );
 	CHECK( XBOX_FT_W_MUSIC_READ_KC + 6 == XBOX_FT_W_SND_RATE );
@@ -319,7 +331,8 @@ static void test_encoders( void )
 	CHECK( strcmp( (const char *)buf + 12 + 16 * XBOX_FT_W_VOX_WINDOW_KB, "vox_window_kb" ) == 0 );
 	CHECK( XBOX_FT_W_SND_RATE + 1 == XBOX_FT_W_SND_BACKEND );
 	CHECK( XBOX_FT_W_SND_BACKEND + 1 == XBOX_FT_W_VOX_STARTS );
-	CHECK( XBOX_FT_W_VOX_WINDOW_KB == XBOX_FT_W_COUNT - 1 );
+	CHECK( XBOX_FT_W_VOX_WINDOW_KB + 1 == XBOX_FT_W_BR_ENTS );
+	CHECK( XBOX_FT_W_ST_MESH_KC == XBOX_FT_W_COUNT - 1 );
 	for( i = 0; i < XBOX_FT_W_COUNT; i++ )
 		CHECK( xbox_ft_work_names[i] && strlen( xbox_ft_work_names[i] ) < XBOX_FT_COUNTER_NAME_BYTES && buf[12 + 16 * i + 15] == 0 );
 
@@ -608,7 +621,7 @@ static void test_segments( void )
 	seg.tsc_open = 0x1122334455667788ull;
 	memset( buf, 0xCC, sizeof( buf ));
 	CHECK( xbox_ft_encode_header_v3( buf, 1024, 733000000u, 3375000u, 77, 42, 2, "build y", XBOX_FT_W_COUNT, &seg ) == XBOX_FT_HEADER_V3_BYTES );
-	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 && rd32( buf + 8 ) == 3 && rd32( buf + 12 ) == 256 && rd32( buf + 16 ) == 884 );
+	CHECK( memcmp( buf, "R3DFTIME", 8 ) == 0 && rd32( buf + 8 ) == 3 && rd32( buf + 12 ) == 256 && rd32( buf + 16 ) == 996 );
 	CHECK( rd64( buf + 40 ) == 77 && rd64( buf + 48 ) == 42 && rd32( buf + 56 ) == 2 && strcmp( (const char *)buf + 64, "build y" ) == 0 );
 	CHECK( memcmp( buf + 128, id, 16 ) == 0 );
 	CHECK( rd32( buf + 144 ) == 4 && rd32( buf + 148 ) == XBOX_FT_SEG_SIZE && rd32( buf + 152 ) == 12345 && rd32( buf + 156 ) == 0 );

@@ -788,6 +788,7 @@ void Xbox_FT_LoadEnd( const xbox_ft_load_t *l, const char *stage )
 	char name[XBOX_FT_NOTE_NAME_BYTES];
 	uint64_t now;
 
+	Xbox_MemReport_Stage( stage ); /* #195 */
 	if( !l->t0 || !xbox_ft_waits.active )
 		return;
 	now = xbox_ft_rdtsc();
@@ -801,6 +802,7 @@ void Xbox_FT_LoadAccum( const xbox_ft_load_t *l, int acc )
 {
 	xbox_ft_load_acc_t *a;
 
+	Xbox_MemReport_Stage( "a load stage" ); /* #195 */
 	if( !l->t0 || !xbox_ft_waits.active || acc < 0 || acc >= XBOX_FT_LACC_COUNT )
 		return;
 	a = &ft_load_acc[acc];
@@ -855,6 +857,7 @@ void Xbox_FrameTime_Init( void )
 	/* r3d_membench (#142) rides on this init rather than a call site of
 	   its own in host.c: the same platform, the same lifetime. */
 	Xbox_MemBench_Init();
+	Xbox_MemReport_Init(); /* r3d_memreport (#195), the same way */
 	Xbox_MixBench_Init(); /* r3d_mixbench (#174), the same way */
 	/* r3d_music_baked and its commands (#171), likewise: registered
 	   before config.cfg and userconfig.d set them */
@@ -875,6 +878,7 @@ void Xbox_FrameTime_BeginFrame( void )
 	   Host_Error out of a PM_Move would leave them set. */
 	xbox_ft_pm.side = 0;
 	xbox_ft_pm.depth = 0;
+	Xbox_MemReport_Frame(); /* #195: on its own cvar, recording or not */
 
 	/* The whole cost when off (and the server game frame's state reset
 	   for the same reason as xbox_ft_snd_extra: a longjmp out of

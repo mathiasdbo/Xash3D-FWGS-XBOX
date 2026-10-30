@@ -839,7 +839,7 @@ static void SV_SetupClients( void )
 #endif
 
 	svs.clients = Z_Realloc( svs.clients, sizeof( sv_client_t ) * svs.maxclients );
-	svs.num_client_entities = svs.maxclients * SV_UPDATE_BACKUP * NUM_PACKET_ENTITIES;
+	svs.num_client_entities = svs.maxclients * SV_UPDATE_BACKUP * R3D_PACKET_ENTITIES( svs.maxclients ); // #202
 	svs.packet_entities = Z_Realloc( svs.packet_entities, sizeof( entity_state_t ) * svs.num_client_entities );
 	Con_Reportf( "%s alloced by server packet entities\n", Q_memprint( sizeof( entity_state_t ) * svs.num_client_entities ));
 

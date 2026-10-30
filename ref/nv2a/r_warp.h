@@ -94,6 +94,8 @@ typedef struct
 } nv2a_warp_stats_t;
 extern nv2a_warp_stats_t nv2a_warp_stats;
 
+size_t nv2a_warp_contiguous( void ); /* #195: the water buffer's bytes, for r3d_gpumem */
+
 #ifdef __cplusplus
 }
 #endif

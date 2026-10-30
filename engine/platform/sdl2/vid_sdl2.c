@@ -28,6 +28,7 @@ GNU General Public License for more details.
 
 #if XASH_XBOX
 #include <hal/video.h> // XVideoSetMode - see R_Init_Video's XASH_XBOX arm
+#include "platform/xbox/xbox_snd_gproom.h" // Xbox_BootCfg_Value: r3d_vid_mode, #190
 #endif // XASH_XBOX
 
 static vidmode_t *vidmodes = NULL;
@@ -484,6 +485,8 @@ void VID_SaveWindowSize( int width, int height )
 			render_h = height / (int)scale;
 			Con_Printf( "%s: Xbox render target %dx%d (vid_scale %g), presented unscaled\n", __func__, render_w, render_h, scale );
 		}
+		else // Resonance3D: anamorphic 16:9 reports 854x480 (VID_XboxRenderWidth)
+			render_w = VID_XboxRenderWidth( render_w, render_h );
 	}
 #endif
 	R_SaveVideoMode( width, height, render_w, render_h, maximized );
@@ -999,10 +1002,29 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 	// SDL_PIXELFORMAT_RGB888 and what SDL_XBOX_CreateWindowFramebuffer
 	// then hands SW_CreateBuffer as the window surface (4 bytes/pixel,
 	// one of the two widths ref_soft's blitter tables accept).
-	if( !XVideoSetMode( 640, 480, 32, REFRESH_DEFAULT ))
+	// Resonance3D (#190): r3d_vid_mode 1, the Display screen's "Video
+	// mode" (from the next start), asks for 1280x720. nxdk lists it only
+	// for an HDTV pack with 720p allowed in the Dashboard (video.c,
+	// XVideoListModes); anything else, or a failed set, falls back to
+	// 640x480, which nxdk itself makes 480p where the Dashboard allows it.
+	// Read from the configs before they run: pb_init sizes its surfaces
+	// from the mode set here.
 	{
-		Con_Printf( S_ERROR "%s: XVideoSetMode( 640, 480, 32 ) failed\n", __func__ );
-		return false;
+		char mode[8] = "";
+		qboolean hd = false;
+
+		Xbox_BootCfg_Value( "r3d_vid_mode", mode, (int)sizeof( mode ));
+		if( Q_atoi( mode ) == 1 )
+		{
+			hd = XVideoSetMode( 1280, 720, 32, REFRESH_DEFAULT );
+			if( !hd )
+				Con_Printf( S_WARN "%s: r3d_vid_mode 1, but 720p is not allowed in the Dashboard or there is no HDTV pack; 640x480\n", __func__ );
+		}
+		if( !hd && !XVideoSetMode( 640, 480, 32, REFRESH_DEFAULT ))
+		{
+			Con_Printf( S_ERROR "%s: XVideoSetMode( 640, 480, 32 ) failed\n", __func__ );
+			return false;
+		}
 	}
 
 	// XM.1 item 7: real hardware state for the Display screen's
@@ -1019,8 +1041,8 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 	// the driver never lists. Ask for what the hardware is actually
 	// showing, windowed, and let the common path below do the rest
 	// unchanged.
-	Cvar_DirectSetValue( &window_width, 640 );
-	Cvar_DirectSetValue( &window_height, 480 );
+	Cvar_DirectSetValue( &window_width, XVideoGetMode().width );
+	Cvar_DirectSetValue( &window_height, XVideoGetMode().height );
 	Cvar_DirectSetValue( &vid_fullscreen, WINDOW_MODE_WINDOWED );
 #endif
 
@@ -1105,12 +1127,12 @@ rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mod
 	// (fullscreen would only send VID_SetScreenResolution hunting for a
 	// display mode the driver never lists), and the cvars are re-pinned so
 	// the next VID_SetMode does not ask again.
-	if( width != 640 || height != 480 || window_mode != WINDOW_MODE_WINDOWED )
+	if( width != XVideoGetMode().width || height != XVideoGetMode().height || window_mode != WINDOW_MODE_WINDOWED )
 	{
-		Con_Printf( S_WARN "%s: %dx%d %s requested; Xbox runs the mode XVideoSetMode set, 640x480 windowed\n",
-			__func__, width, height, window_mode == WINDOW_MODE_WINDOWED ? "windowed" : "fullscreen" );
-		width = 640;
-		height = 480;
+		Con_Printf( S_WARN "%s: %dx%d %s requested; Xbox runs the mode XVideoSetMode set, %dx%d windowed\n",
+			__func__, width, height, window_mode == WINDOW_MODE_WINDOWED ? "windowed" : "fullscreen", XVideoGetMode().width, XVideoGetMode().height );
+		width = XVideoGetMode().width;
+		height = XVideoGetMode().height;
 		window_mode = WINDOW_MODE_WINDOWED;
 		Cvar_DirectSetValue( &window_width, width );
 		Cvar_DirectSetValue( &window_height, height );

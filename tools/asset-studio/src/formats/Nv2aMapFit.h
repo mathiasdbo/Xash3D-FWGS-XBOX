@@ -303,7 +303,8 @@ namespace formats {
     constexpr uint64_t kEntityStateBytes = 340;
     constexpr uint64_t kClientFrameBytes = 6128;
     constexpr uint64_t kSvClientBytes = 91296;
-    constexpr uint64_t kPacketEntities = 64;      // NUM_PACKET_ENTITIES under XASH_LOW_MEMORY
+    constexpr uint64_t kPacketEntities = 64;      // NUM_PACKET_ENTITIES under XASH_LOW_MEMORY (multiplayer)
+    constexpr uint64_t kSpPacketEntities = 128;   // R3D_SP_PACKET_ENTITIES (engine/common/netchan.h, #202)
     constexpr uint64_t kMultiplayerBackup = 64;   // MULTIPLAYER_BACKUP
     constexpr uint64_t kSingleplayerBackup = 4;   // SINGLEPLAYER_BACKUP under XASH_LOW_MEMORY
     constexpr uint32_t kHostEdictsPerPlayer = 16; // the player, 14 weapons, a weaponbox
@@ -316,7 +317,7 @@ namespace formats {
 
     // What hosting `players` adds over the single-player load.
     inline Nv2aHostingCost nv2aHostingCost(uint32_t players) {
-        const uint64_t spFrames = kSingleplayerBackup * kPacketEntities * kEntityStateBytes;
+        const uint64_t spFrames = kSingleplayerBackup * kSpPacketEntities * kEntityStateBytes;
         const uint64_t mpFrames = kMultiplayerBackup * kPacketEntities * kEntityStateBytes;
         Nv2aHostingCost c;
         c.beforeWorld = players * mpFrames - spFrames                        // server packet entities

@@ -52,4 +52,10 @@ extern uint32_t nv2a_ft_imm3d_counter;
    c_studio_models_drawn), which the game client also increments. */
 uint32_t nv2a_studio_models_drawn( void );
 
+/* x9-perf-cpuprof (XBOX_FT_W_ST_*): r_studio.c's studio times, summed in
+   ticks, rounded into the counters at R_EndFrame; and the per-model note
+   thresholds, cleared at R_NewMap. */
+void nv2a_ft_studio_close_frame( void );
+void nv2a_ft_studio_new_map( void );
+
 #endif /* NV2A_FT_H */

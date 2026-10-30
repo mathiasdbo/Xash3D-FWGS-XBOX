@@ -413,6 +413,20 @@ with `pixel_aspect_ratio` coming from the platform — on Xbox, from the
 dashboard's widescreen flag, which nxdk exposes, rather than from a setting
 the player has to find.
 
+**Built (divergence #186), one step earlier than that.** Rather than give
+`V_AdjustFov` a pixel aspect, the engine tells the whole client the screen is
+854×480 (`VID_XboxRenderWidth`, `engine/client/vid_common.c`). That size is
+already 16:9 in square units, so `V_AdjustFov`'s own pixel test sees
+widescreen and widens Hor+; the HUD anchors to an 854-wide `ScreenWidth`; and
+mainui's height-anchored canvas grows wider. `ref/nv2a` maps it onto the 640
+real pixels with no change of its own: the 3D viewport is always the whole
+framebuffer, the projection takes `fov_x` and `fov_y` as given, and the 2D
+matrix already scales the engine's size to the back buffer's
+(`nv2a_2d_build_matrix`). The source is the Dashboard's widescreen flag,
+with `r3d_vid_aspect` (the Display screen's Aspect row) to force 4:3 or
+16:9. It is live, and `ref/soft` (which draws the engine's size 1:1) keeps
+640.
+
 Note also that an exact-equality test is the wrong shape for a continuous
 quantity. 16:10 (1680×1050, 1920×1200) is neither 4:3 nor 16:9 and falls
 through to a branch written for 16:9. **Do not enumerate ratios.** Handle a
@@ -477,8 +491,9 @@ obviously broken one.
 
 ### Test matrix
 
-Every one of these must be checked; the second row is the one that is broken
-today.
+Every one of these must be checked. The second row was broken until #186
+(above). The third, 720×480, is a mode this fork never sets: the 480p output
+uses the 640×480 framebuffer, so it is the second row again.
 
 | Mode | Buffer | Pixel aspect | Display aspect |
 |---|---|---|---|

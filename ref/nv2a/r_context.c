@@ -51,6 +51,7 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include "xash3d_types.h"
 #include "const.h"
 #include "com_strings.h" /* S_ERROR - not pulled in transitively here, unlike ref/soft/ref/gl's own r_local.h/gl_local.h */
+#include "crtlib.h" /* #194: COM_FileExtension, Q_stricmp - not transitive here */
 #include "protocol.h" /* PROTOCOL_VERSION, for the no-world backdrop's version string (ref/gl's gl_local.h includes it too) */
 #include "entity_types.h" /* X9-M: ET_BEAM, for R_AddEntity */
 #include "cvardef.h"
@@ -98,6 +99,19 @@ real-console run is the only definitive close-out (divergences.md #100 (a)).
 #include <pbkit/pbkit.h>
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
+/* #190: nxdk-ex's pbkit (engine/platform/xbox/pbkit/), linked in place of
+   nxdk's libpbkit.lib; nxdk's <pbkit/pbkit.h>, which this file includes,
+   does not declare them. */
+void pb_back_buffers( int n );
+void pb_wait_for_flip( void );
+void pb_release_debug_screen( void );
+/* #203: a block ended without its kick (the write-combining flush, the
+   NV_PFB_WC_CACHE spin and the PUT write of pbkit.c pb_start): sent once
+   4 KiB have built up, or by the next pb_end, pb_busy, pb_wait_for_flip,
+   pb_wait_for_vbl, pb_reset or pb_finished - every wait this file makes
+   on the GPU is one of those. Every block of this file ends this way. */
+void pb_end_deferred( uint32_t *pEnd );
+void pb_kick( void );
 #include "platform/xbox/xbox_frametime.h" /* X9-X item 14 step 13: the frame-time recorder's wait counters (divergences.md #141) */
 #include "nv2a_ft.h" /* ... and its work counters (format v2) */
 
@@ -985,7 +999,7 @@ static CVAR_DEFINE_AUTO( nv2a_r_noalphatest, "1", 0, "ref_nv2a: disable native a
    fix pending verification like nv2a_r_nocullback/nv2a_r_noalphatest above,
    so it needs no "ship disabled until A/B'd" caution - the filter value
    itself is already proven, only which stage it's applied to is new here. */
-static CVAR_DEFINE_AUTO( nv2a_r_texturenearest, "0", 0, "ref_nv2a: point-filter the diffuse stage only (lightmap always stays bilinear)" );
+static CVAR_DEFINE_AUTO( nv2a_r_texturenearest, "0", FCVAR_ARCHIVE, "ref_nv2a: point-filter the textures, not the lightmap (the Display screen's Texture filtering, inverted)" );
 
 /* X9-N2: the two knobs ref/gl has for how soon mipmapped textures blur -
    gl_anisotropy (default "8") and gl_texture_lodbias (default "0.0"),
@@ -998,8 +1012,43 @@ static CVAR_DEFINE_AUTO( nv2a_r_texturenearest, "0", 0, "ref_nv2a: point-filter 
    gfx_nv2a.cpp sets 0x10 on mipmapped textures and caps at 2x); 4 and 8
    are selectable to test. The LOD bias goes in FILTER bits 0-12 as signed
    fixed point with 8 fraction bits, clamped to +-3. */
-static CVAR_DEFINE_AUTO( nv2a_r_anisotropy, "2", 0, "ref_nv2a: anisotropic filtering for mipmapped textures: 1, 2, 4 or 8 (2 is hardware-proven)" );
+static CVAR_DEFINE_AUTO( nv2a_r_anisotropy, "2", FCVAR_ARCHIVE, "ref_nv2a: anisotropic filtering for mipmapped textures: 1, 2, 4 or 8 (2 is hardware-proven)" );
 static CVAR_DEFINE_AUTO( nv2a_r_lodbias, "0", 0, "ref_nv2a: mip LOD bias, -3..3 (negative = sharper, later switch to smaller levels)" );
+
+/* divergences.md #188: anti-aliasing of the 3D view, the hardware's own
+   multisampling. The world pass (GL_RenderFrame, through every 3D draw up
+   to the engine's next R_Set2DMode(true)) renders into a surface pair of
+   our own whose SET_SURFACE_FORMAT carries the ANTI_ALIASING mode, and is
+   then resolved into pbkit's back buffer by one full-screen quad; the HUD,
+   console and menus draw after it, at the output's own resolution.
+   - 1, 2x: CENTER_CORNER_2, two samples a pixel stored as two adjacent
+     columns (1280x480), resolved by a bilinear tap halfway between them.
+   - 2, Quincunx: the same two samples, resolved with the texture unit's
+     CONVOLUTION_2D_LOD0 filter and its QUINCUNX kernel (D3D8's
+     2_SAMPLES_MULTISAMPLE_QUINCUNX). xemu draws that filter as a 3x3
+     Gaussian (glsl/psh.c, "FIXME: Quincunx"); the console is the check.
+   - 3, 4x: SQUARE_OFFSET_4, a 2x2 block a pixel (1280x960), resolved by a
+     bilinear tap at the block's centre.
+   Every coordinate the 3D pass sends - its viewport matrix, the surface
+   clip, the clear rect - stays in output pixels: the hardware scales them
+   for the samples (measured in nxdk_pgraph_tests' antialiasing_tests.cpp,
+   whose goldens are hardware captures; xemu's vsh-prog.c divides by the
+   logical size the same way). Both surfaces get the same pitch: the
+   hardware raises a limit error when either is too narrow for the mode
+   (the same test's own note). Memory: 2.3 MiB each at 2x and Quincunx,
+   4.7 MiB each at 4x, taken between frames and given back before a map's
+   own buffers are made (nv2a_try_pending_upload). */
+static CVAR_DEFINE_AUTO( nv2a_r_aa, "0", FCVAR_ARCHIVE, "ref_nv2a: 3D anti-aliasing: 0 off, 1 2x, 2 Quincunx, 3 4x" );
+
+#define NV2A_AA_DMA 3 /* pbkit's whole-memory 3D DMA object (pb_init): the surface offsets are physical addresses, as pbkitplusplus's RenderToSurfaceStart uses it */
+
+static void    *nv2a_aa_color, *nv2a_aa_zeta; /* the sample surfaces, or NULL */
+static uint32_t nv2a_aa_rows;                 /* the sample rows they were made for: the output's height, or twice it for 4x */
+static int      nv2a_aa_failed_mode;          /* a mode whose surfaces could not be had, not asked again until the cvar or the map changes */
+static int      nv2a_aa_frame_mode;           /* the mode this frame's 3D pass is drawing in, 0 when it draws into the back buffer */
+static qboolean nv2a_aa_resolving;            /* nv2a_2d_resolve_batch_key binds the AA color surface */
+static void nv2a_aa_free( void );
+static void nv2a_aa_begin( void );
 
 /* X9-X, C5: the 2D viewport matrix's own M[3][0]/M[3][1] - unverified
    live (design doc's own note). 0 until a real Xbox run judges the
@@ -1575,7 +1624,7 @@ static void nv2a_upload_vertex_programs( void )
 		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, 0 );
-	pb_end( p );
+	pb_end_deferred( p );
 
 	for( v = 0; v < NV2A_VP_COUNT; v++ )
 	{
@@ -1596,7 +1645,7 @@ static void nv2a_upload_vertex_programs( void )
 				memcpy( p, &nv2a_vp_table[v].words[( i + k ) * 4], 4 * 4 );
 				p += 4;
 			}
-			pb_end( p );
+			pb_end_deferred( p );
 			i += n;
 		}
 		slot += count;
@@ -1628,7 +1677,7 @@ static void nv2a_vp_load_slots( uint32_t slot, const uint32_t *words, uint32_t c
 		| MASK( NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE, NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE_PRIV ));
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_LOAD, slot );
-	pb_end( p );
+	pb_end_deferred( p );
 
 	while( i < count )
 	{
@@ -1643,7 +1692,7 @@ static void nv2a_vp_load_slots( uint32_t slot, const uint32_t *words, uint32_t c
 			memcpy( p, &words[( i + k ) * 4], 4 * 4 );
 			p += 4;
 		}
-		pb_end( p );
+		pb_end_deferred( p );
 		i += n;
 	}
 
@@ -1723,7 +1772,7 @@ static void nv2a_vp_start_program( nv2a_vp_t vp, uint32_t slot )
 		p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN, 0 );
 	}
 	p = pb_push1( p, NV097_SET_TRANSFORM_PROGRAM_START, slot );
-	pb_end( p );
+	pb_end_deferred( p );
 	nv2a_vp_selected = vp;
 }
 
@@ -1782,7 +1831,7 @@ static void nv2a_select_pixel_program( nv2a_ps_t ps )
 	{
 		#include "ps_2d.inl"
 	}
-	pb_end( p );
+	pb_end_deferred( p );
 	nv2a_ps_selected = ps;
 	nv2a_fog_pushed_valid = false;
 }
@@ -1875,7 +1924,7 @@ static void nv2a_push_fog_scaled( const nv2a_fog_hw_t *fog, float w_scale )
 	}
 	p = pb_push1( p, NV097_SET_FOG_ENABLE, want.enable ? 1 : 0 );
 	p = pb_push1( p, NV097_SET_COMBINER_SPECULAR_FOG_CW0, nv2a_final_combiner_cw0( want.enable ));
-	pb_end( p );
+	pb_end_deferred( p );
 
 	nv2a_fog_pushed = want;
 	nv2a_fog_pushed_w_scale = w_scale;
@@ -1929,7 +1978,7 @@ static void nv2a_push_near_cull( float w_scale )
 		memcpy( &word, &clip_max, sizeof( word ));
 		p = pb_push1( p, NV097_SET_CLIP_MAX, word );
 	}
-	pb_end( p );
+	pb_end_deferred( p );
 	nv2a_clip_min_pushed = clip_min;
 	nv2a_clip_min_pushed_valid = true;
 }
@@ -1949,7 +1998,7 @@ static void nv2a_set_attrib_pointer( unsigned int index, unsigned int format, un
 		| MASK( NV097_SET_VERTEX_DATA_ARRAY_FORMAT_SIZE, size )
 		| MASK( NV097_SET_VERTEX_DATA_ARRAY_FORMAT_STRIDE, stride ));
 	p = pb_push1( p, NV097_SET_VERTEX_DATA_ARRAY_OFFSET + index * 4, (uint32_t)data & 0x03ffffff );
-	pb_end( p );
+	pb_end_deferred( p );
 }
 
 /* X9-X: the 3D state the world and the brush entities expect. pbkit
@@ -1966,7 +2015,7 @@ static void nv2a_set_3d_state( void )
 	p = pb_push1( p, NV097_SET_DEPTH_MASK, 1 );
 	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 1 );
 	p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
-	pb_end( p );
+	pb_end_deferred( p );
 }
 
 /* X9-F: port of ref/gl/gl_frustum.c's own GL_FrustumCullBox - the same
@@ -2056,7 +2105,7 @@ static void nv2a_draw_index_range( uint32_t begin, uint32_t end )
 		memcpy( p, &nv2a_map_index_dwords[i], batch * sizeof( uint32_t ));
 		p += batch;
 		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
-		pb_end( p );
+		pb_end_deferred( p );
 		NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
 
 		i += batch;
@@ -2096,7 +2145,7 @@ static void nv2a_bind_vertex_base( uint32_t base )
 		   address. */
 		uint32_t *p = pb_begin();
 		p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
-		pb_end( p );
+		pb_end_deferred( p );
 	}
 	nv2a_bound_vertex_base = base;
 }
@@ -2146,7 +2195,7 @@ static void nv2a_draw_exact_indices( uint32_t begin, uint32_t end )
 		if( k < begin + n )
 			p = pb_push1( p, NV097_ARRAY_ELEMENT32, idx16[k] );
 		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
-		pb_end( p );
+		pb_end_deferred( p );
 		NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
 
 		begin += n;
@@ -2285,7 +2334,7 @@ static void nv2a_bind_map_texture_stage0( const nv2a_map_texture_t *tex )
 	   hardware filters with the convolution kernel and smears (Perfect
 	   Dark X's gfx_nv2a.cpp documents the same). */
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, ( nv2a_r_texturenearest.value ? 0x01032000 : 0x02062000 ) | nv2a_lod_bias_bits() );
-	pb_end( p );
+	pb_end_deferred( p );
 }
 
 /*
@@ -2404,7 +2453,10 @@ static void nv2a_texanim_build( const model_t *world )
 	if( !animated )
 		return; /* nothing to animate: leave nv2a_texanim_count 0, every lookup returns at once */
 
-	texinfo_tex = (uint16_t *)malloc( numtexinfo * sizeof( *texinfo_tex ) + n * ( sizeof( *extras ) + sizeof( *names ) + sizeof( *used )));
+	/* the texinfo table padded to an even count, as `names` below places
+	   it: an odd numtexinfo (c1a2a's 2057) otherwise ran `used` 2 bytes
+	   past the block, into the next chunk's header, and free() aborted */
+	texinfo_tex = (uint16_t *)malloc(( numtexinfo + ( numtexinfo & 1 )) * sizeof( *texinfo_tex ) + n * ( sizeof( *extras ) + sizeof( *names ) + sizeof( *used )));
 	if( !texinfo_tex )
 	{
 		gEngfuncs.Con_Printf( S_WARN "ref_nv2a: no memory for the animated-texture tables; textures stay on their first frame\n" );
@@ -2641,7 +2693,7 @@ static qboolean nv2a_bind_lightmap_stage1( qboolean lit )
 	NV2A_FT_ADD( XBOX_FT_W_TEX_BINDS, 1 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL1 + 0x40, pitch << 16 );
 	p = pb_push1( p, NV097_SET_TEXTURE_IMAGE_RECT + 0x40, ( w << 16 ) | h );
-	pb_end( p );
+	pb_end_deferred( p );
 	return true;
 }
 
@@ -2919,7 +2971,7 @@ static qboolean nv2a_bind_flat_color_stage0( byte r, byte g, byte b, byte a )
 	p = pb_push1( p, NV097_SET_TEXTURE_ADDRESS, 0x00030303 );
 	p = pb_push1( p, NV097_SET_TEXTURE_CONTROL0, 0x4003ffc0 );
 	p = pb_push1( p, NV097_SET_TEXTURE_FILTER, 0x01012000 ); /* nearest - every texel is identical; never a zero convolution-kernel field (divergences.md #102) */
-	pb_end( p );
+	pb_end_deferred( p );
 	return true;
 }
 
@@ -2958,7 +3010,7 @@ static qboolean nv2a_set_render_mode( const cl_entity_t *e, float blend )
 	{
 		byte a = (byte)bound( 0, e->curstate.renderamt, 255 );
 
-		pb_end( p ); /* nv2a_bind_flat_color_stage0 opens its own block - these pairs don't nest */
+		pb_end_deferred( p ); /* nv2a_bind_flat_color_stage0 opens its own block - these pairs don't nest */
 
 		if( !nv2a_bind_flat_color_stage0( e->curstate.rendercolor.r, e->curstate.rendercolor.g, e->curstate.rendercolor.b, a ))
 			return false; /* no contiguous memory for the synthetic texture - draw nothing rather than the wrong thing */
@@ -2969,7 +3021,7 @@ static qboolean nv2a_set_render_mode( const cl_entity_t *e, float blend )
 		p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA );
 		p = pb_push1( p, NV097_SET_BLEND_FUNC_DFACTOR, NV097_SET_BLEND_FUNC_DFACTOR_V_ONE_MINUS_SRC_ALPHA );
 		p = pb_push1( p, NV097_SET_ALPHA_TEST_ENABLE, 0 );
-		pb_end( p );
+		pb_end_deferred( p );
 		return true;
 	}
 	case kRenderTransAdd:
@@ -3017,7 +3069,7 @@ static qboolean nv2a_set_render_mode( const cl_entity_t *e, float blend )
 		break;
 	}
 
-	pb_end( p );
+	pb_end_deferred( p );
 	return true;
 }
 
@@ -3039,7 +3091,7 @@ static void nv2a_reset_render_mode( void )
 		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GEQUAL );
 		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x80 );
 	}
-	pb_end( p );
+	pb_end_deferred( p );
 }
 
 /* The GPU state every lit draw (the world, and each brush entity) draws
@@ -3116,7 +3168,7 @@ static void nv2a_enter_lit_state( void )
 	p = pb_push1( p, NV097_SET_CONTROL0,
 		NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE | NV097_SET_CONTROL0_TEXTURE_PERSPECTIVE_ENABLE
 		| NV097_SET_CONTROL0_STENCIL_WRITE_ENABLE );
-	pb_end( p );
+	pb_end_deferred( p );
 
 	/* X9-I: native alpha test (nv2a_r_noalphatest's own declaration
 	   comment above has the full account of why this is safe to apply
@@ -3140,7 +3192,7 @@ static void nv2a_enter_lit_state( void )
 		p = pb_push1( p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GEQUAL );
 		p = pb_push1( p, NV097_SET_ALPHA_REF, 0x80 );
 	}
-	pb_end( p );
+	pb_end_deferred( p );
 
 	p = pb_begin();
 	p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
@@ -3154,13 +3206,13 @@ static void nv2a_enter_lit_state( void )
 		memcpy( p, vs_lit_c4, sizeof( vs_lit_c4 ));
 		p += 4;
 	}
-	pb_end( p );
+	pb_end_deferred( p );
 
 	p = pb_begin();
 	pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
 	for( i = 0; i < 16; i++ )
 		*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
-	pb_end( p );
+	pb_end_deferred( p );
 
 	/* Position (slot 0), diffuse UV (slot 9) and lightmap UV (slot 10 -
 	   vs_lit.vs.cg's own TEXCOORD1, confirmed by a real vp20compiler run,
@@ -3178,6 +3230,10 @@ static void nv2a_enter_lit_state( void )
    (gl_polyoffset_bmodels) and the kRenderTransTexture back-to-front face
    sort. Dynamic lights (step 8), fog (step 11) and decals (step 12) have
    landed since this list was written. */
+/* The recorder's brush-entity times (x9-perf-cpuprof, XBOX_FT_W_BR_*):
+   summed in ticks per piece, rounded once in R_EndFrame. */
+static uint64_t nv2a_ft_br_face_ticks, nv2a_ft_br_decal_ticks, nv2a_ft_br_trans_ticks, nv2a_ft_br_moved_ticks;
+
 /* R_DrawBrushModel's entry checks and cull (gl_rsurf.c:1822-1855): only
    this map's own submodels share its baked faces - anything else (a brush
    model from another BSP) has nothing to draw here - and an entity whose
@@ -3231,9 +3287,23 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 	qboolean alternate = e->curstate.frame != 0.0f; /* gl_rsurf.c:522: RI.currententity->curstate.frame */
 	qboolean lit;
 	int i;
+	/* x9-perf-cpuprof: the surface loop's counts, added once after it */
+	uint32_t ft_surfs = 0, ft_faces = 0, ft_back = 0, ft_binds = 0;
+	xbox_ft_span_t ft_span;
+	/* #204 (a): the pending run of faces whose index ranges follow on */
+	uint32_t run_begin = 0, run_end = 0;
+	qboolean have_run = false;
 
+	NV2A_FT_ADD( XBOX_FT_W_BR_ENTS, 1 );
 	if( !nv2a_brush_entity_visible( world, e, &rotated, mins ))
+	{
+		NV2A_FT_ADD( XBOX_FT_W_BR_CULLED, 1 );
 		return;
+	}
+	if( e->curstate.rendermode != kRenderNormal )
+		NV2A_FT_ADD( XBOX_FT_W_BR_TRANS, 1 );
+	if( rotated || !VectorIsNull( e->origin ))
+		NV2A_FT_ADD( XBOX_FT_W_BR_MOVED, 1 );
 
 	/* Everything below draws under the world pass's state and only
 	   rebinds what differs per entity. Since a48b415e (X9-X step 5) this
@@ -3317,8 +3387,9 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 		memcpy( p, vs_lit_c4, sizeof( vs_lit_c4 ));
 		p += 4;
 	}
-	pb_end( p );
+	pb_end_deferred( p );
 
+	xbox_ft_span_begin( &ft_span );
 	for( i = 0; i < clmodel->nummodelsurfaces; i++ )
 	{
 		uint32_t orig = (uint32_t)( clmodel->firstmodelsurface + i );
@@ -3326,6 +3397,7 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 		const nv2a_map_face_t *face;
 		uint32_t sorted;
 
+		ft_surfs++;
 		if( orig >= (uint32_t)world->numsurfaces || orig >= nv2a_map_face_remap_count )
 			continue;
 		sorted = nv2a_map_face_remap[orig];
@@ -3385,7 +3457,10 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 			if( psurf->pdecals && e->curstate.rendermode == kRenderTransTexture )
 				R_DecalAddBrushSurface( e, (msurface_t *)psurf, true );
 			if( !nv2a_r_nocullback.value )
+			{
+				ft_back++;
 				continue;
+			}
 		}
 		else if( psurf->pdecals )
 		{
@@ -3410,20 +3485,64 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 			draw_dir = anim_per_surface ? nv2a_texanim_dir_for( anim_src, alternate, psurf ) : anim_dir;
 			if( draw_dir != bound_texture )
 			{
+				if( have_run ) /* #204 (a): the run so far draws under the old texture */
+				{
+					nv2a_draw_exact_indices( run_begin, run_end );
+					have_run = false;
+				}
 				nv2a_bind_map_texture_stage0( &nv2a_map_textures[draw_dir] );
 				bound_texture = draw_dir;
+				ft_binds++;
 			}
 		}
 		if( nv2a_face_vertex_base( face ) != nv2a_bound_vertex_base ) /* X9-S: entity faces may sit in any chunk */
+		{
+			if( have_run ) /* #204 (a) */
+			{
+				nv2a_draw_exact_indices( run_begin, run_end );
+				have_run = false;
+			}
 			nv2a_bind_vertex_base( nv2a_face_vertex_base( face ));
-		nv2a_draw_exact_indices( face->index_begin, nv2a_face_index_end( face ));
+		}
+		/* #204 (a): a face whose indices follow on from the previous drawn
+		   face's, under the same texture and vertex base, joins its draw
+		   instead of opening its own BEGIN/END. The baker sorts faces by
+		   (texture, chunk, leaf) stably, and a submodel's faces belong to
+		   no leaf, so one entity's consecutive same-texture faces are
+		   consecutive in the index buffer too. The same triangles go out in
+		   the same order under the same state - TRIANGLES does not care
+		   where the BEGIN/END blocks fall - so the image is unchanged; the
+		   loop above only queues (decals, water) between faces, it never
+		   pushes, so nothing lands between a run's faces either. */
+		if( have_run && face->index_begin == run_end )
+		{
+			run_end = nv2a_face_index_end( face );
+		}
+		else
+		{
+			if( have_run )
+				nv2a_draw_exact_indices( run_begin, run_end );
+			run_begin = face->index_begin;
+			run_end = nv2a_face_index_end( face );
+			have_run = true;
+		}
+		ft_faces++;
 	}
+	if( have_run ) /* #204 (a) */
+		nv2a_draw_exact_indices( run_begin, run_end );
+	nv2a_ft_br_face_ticks += xbox_ft_span_ticks_since( &ft_span );
+	NV2A_FT_ADD( XBOX_FT_W_BR_SURFS, ft_surfs );
+	NV2A_FT_ADD( XBOX_FT_W_BR_FACES, ft_faces );
+	NV2A_FT_ADD( XBOX_FT_W_BR_BACK, ft_back );
+	NV2A_FT_ADD( XBOX_FT_W_BR_BINDS, ft_binds );
 
 	/* X9-X item 14 step 12: the entity's decals, under its render mode
 	   and matrix (R_DrawBrushModel's DrawDecalsBatch, gl_rsurf.c:1914,
 	   and the DrawSurfaceDecals R_RenderDecalsForSurface calls for a
 	   non-kRenderNormal entity - here after its faces, r_decals.c). */
+	xbox_ft_span_begin( &ft_span );
 	R_DecalDrawBrushEntity( e, blend );
+	nv2a_ft_br_decal_ticks += xbox_ft_span_ticks_since( &ft_span );
 
 	nv2a_reset_render_mode();
 	if( !lit )
@@ -3438,6 +3557,33 @@ static void nv2a_draw_brush_entity( const model_t *world, cl_entity_t *e, float 
 	   it never sets). */
 	nv2a_2d_dirty = true;
 	XBOX_FT_SPAN( XBOX_FT_S_WARP_BRUSH, R_WarpDrawBrushEntity( e, blend, rotated, (const float (*)[4])mvp ));
+}
+
+/* k_brush around one brush entity, and its share of the recorder's
+   per-class brush times (x9-perf-cpuprof): translucent, moved, the
+   slowest entity of the frame. */
+static void nv2a_draw_brush_entity_ft( const model_t *world, cl_entity_t *e, float blend )
+{
+	xbox_ft_span_t span;
+
+	xbox_ft_span_begin( &span );
+	nv2a_draw_brush_entity( world, e, blend );
+	if( span.t0 )
+	{
+		const uint64_t t = xbox_ft_span_ticks_since( &span );
+		const uint32_t kc = xbox_ft_span_kcyc( t );
+
+		if( e->curstate.rendermode != kRenderNormal )
+			nv2a_ft_br_trans_ticks += t;
+		if( !VectorIsNull( e->angles ) || !VectorIsNull( e->origin ))
+			nv2a_ft_br_moved_ticks += t;
+		if( kc > xbox_ft_work.c[XBOX_FT_W_BR_WORST_KC] )
+		{
+			NV2A_FT_SET( XBOX_FT_W_BR_WORST_KC, kc );
+			NV2A_FT_SET( XBOX_FT_W_BR_WORST_MDL, e->curstate.modelindex );
+		}
+	}
+	xbox_ft_span_end( &span, XBOX_FT_S_BRUSH );
 }
 
 /* Brush's own direct constant-96 push (nv2a_draw_brush_entity) leaves the
@@ -3455,7 +3601,7 @@ static void nv2a_restore_world_constant96( void )
 	pb_push( p++, NV097_SET_TRANSFORM_CONSTANT, 16 );
 	memcpy( p, nv2a_map_viewproj, 16 * 4 );
 	p += 16;
-	pb_end( p );
+	pb_end_deferred( p );
 }
 
 /* ref/gl's R_DrawEntitiesOnList (gl_rmain.c), the solid-entity half:
@@ -3486,7 +3632,7 @@ static void nv2a_draw_solid_entities( const model_t *world )
 		else if( e->model->type == mod_brush && can_draw_brush )
 		{
 			nv2a_2d_flush();
-			XBOX_FT_SPAN( XBOX_FT_S_BRUSH, nv2a_draw_brush_entity( world, e, 1.0f ));
+			nv2a_draw_brush_entity_ft( world, e, 1.0f ); /* k_brush */
 			nv2a_2d_dirty = true;
 			drew_brush = true;
 		}
@@ -3554,7 +3700,7 @@ static void nv2a_draw_trans_entities( const model_t *world )
 		else if( e->model->type == mod_brush && can_draw_brush )
 		{
 			nv2a_2d_flush();
-			XBOX_FT_SPAN( XBOX_FT_S_BRUSH, nv2a_draw_brush_entity( world, e, blend ));
+			nv2a_draw_brush_entity_ft( world, e, blend ); /* k_brush */
 			nv2a_2d_dirty = true;
 			drew_brush = true;
 		}
@@ -4148,6 +4294,50 @@ static void nv2a_free_map_resources( void )
 	nv2a_texanim_reset(); /* X9-X item 14 step 9: same fixed-storage reason as the line above */
 }
 
+/*
+#195: r3d_gpumem - every contiguous block the renderer holds, by holder,
+and the video memory pbkit took at pb_init (computed: its colour buffers
+and the Z24S8 depth at the output's size, the 512 KiB push buffer; at 480
+also nxdk's scan-out buffer, which 720p gives back). The engine's
+r3d_memreport runs it into memreport.txt; the kernel's statistics put all
+of this in one figure.
+*/
+static void R_GpuMem_f( void )
+{
+	const size_t frame = (size_t)nv2a_width * nv2a_height * 4;
+	const size_t colour = frame * ( nv2a_height == 720 ? 2 : 3 );
+	const size_t scanout = nv2a_height == 720 ? 0 : frame;
+	const size_t map_tex = ( nv2a_map_texture_data ? MmQueryAllocationSize( nv2a_map_texture_data ) : 0 );
+	size_t arena, skins, fallbacks, total;
+	uint32_t nfallback;
+
+	nv2a_tex_contiguous( &arena, &skins, &fallbacks, &nfallback );
+	total = colour + frame + 512 * 1024 + scanout + arena + skins + fallbacks + map_tex
+		+ ( nv2a_map_lightmap ? MmQueryAllocationSize( nv2a_map_lightmap ) : 0 ) + ( nv2a_map_vb ? MmQueryAllocationSize( nv2a_map_vb ) : 0 )
+		+ ( nv2a_2d_ring ? MmQueryAllocationSize( nv2a_2d_ring ) : 0 ) + ( nv2a_decal_vb ? MmQueryAllocationSize( nv2a_decal_vb ) : 0 ) + ( nv2a_unlit_page ? MmQueryAllocationSize( nv2a_unlit_page ) : 0 ) + ( nv2a_flat_color_page ? MmQueryAllocationSize( nv2a_flat_color_page ) : 0 )
+		+ ( nv2a_aa_color ? MmQueryAllocationSize( nv2a_aa_color ) : 0 ) + ( nv2a_aa_zeta ? MmQueryAllocationSize( nv2a_aa_zeta ) : 0 ) + nv2a_sgpu_contiguous() + nv2a_warp_contiguous();
+
+#define GM_KIB( b ) ( (double)( b ) / 1024.0 )
+	gEngfuncs.Con_Printf( "gpumem: %.1f KiB contiguous in the renderer and pbkit\n", GM_KIB( total ));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  video: %d colour buffers %dx%d and the depth buffer (computed)\n",
+		GM_KIB( colour + frame ), nv2a_height == 720 ? 2 : 3, nv2a_width, nv2a_height );
+	gEngfuncs.Con_Printf( "  %8.1f KiB  push buffer (computed)\n", GM_KIB( 512 * 1024 ));
+	if( scanout )
+		gEngfuncs.Con_Printf( "  %8.1f KiB  nxdk's scan-out buffer (computed)\n", GM_KIB( scanout ));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  map textures\n", GM_KIB( map_tex ));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  map lightmaps\n", GM_KIB( ( nv2a_map_lightmap ? MmQueryAllocationSize( nv2a_map_lightmap ) : 0 ) ));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  map vertices\n", GM_KIB( ( nv2a_map_vb ? MmQueryAllocationSize( nv2a_map_vb ) : 0 ) ));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  texture arena\n", GM_KIB( arena ));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  textures outside the arena (%u)\n", GM_KIB( fallbacks ), nfallback );
+	gEngfuncs.Con_Printf( "  %8.1f KiB  studio skin cache chunks\n", GM_KIB( skins ));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  studio GPU vertex chunks\n", GM_KIB( nv2a_sgpu_contiguous()));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  water vertices\n", GM_KIB( nv2a_warp_contiguous()));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  2D ring, decal vertices, unlit and flat pages\n",
+		GM_KIB( ( nv2a_2d_ring ? MmQueryAllocationSize( nv2a_2d_ring ) : 0 ) + ( nv2a_decal_vb ? MmQueryAllocationSize( nv2a_decal_vb ) : 0 ) + ( nv2a_unlit_page ? MmQueryAllocationSize( nv2a_unlit_page ) : 0 ) + ( nv2a_flat_color_page ? MmQueryAllocationSize( nv2a_flat_color_page ) : 0 ) ));
+	gEngfuncs.Con_Printf( "  %8.1f KiB  AA sample surfaces\n", GM_KIB( ( nv2a_aa_color ? MmQueryAllocationSize( nv2a_aa_color ) : 0 ) + ( nv2a_aa_zeta ? MmQueryAllocationSize( nv2a_aa_zeta ) : 0 ) ));
+#undef GM_KIB
+}
+
 static qboolean R_Init( void )
 {
 	qboolean video_ok;
@@ -4168,6 +4358,7 @@ static qboolean R_Init( void )
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_noalphatest );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_texturenearest );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_anisotropy );
+	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_aa );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_lodbias );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_2d_pixeloffset );
 	gEngfuncs.Cvar_RegisterVariable( &nv2a_r_wscale );
@@ -4211,6 +4402,11 @@ static qboolean R_Init( void )
 	   path), tracked as a real, deferred limitation - see
 	   docs/r3d/divergences.md #88 - not attempted in this vendored
 	   dependency for a bring-up milestone. */
+	/* #190: at 720p two frame buffers, not three - 3.5 MiB the fight
+	   maps need (the console's free memory at 720p went down to 5.6 MiB
+	   on c1a0e, bmi-vis-720b); R_BeginFrame waits for each flip */
+	if( XVideoGetMode().height == 720 )
+		pb_back_buffers( 1 );
 	if(( debug_pb_status = pb_init()) != 0 )
 	{
 		debug_marker = 4;
@@ -4232,6 +4428,22 @@ static qboolean R_Init( void )
 
 	nv2a_width  = pb_back_buffer_width();
 	nv2a_height = pb_back_buffer_height();
+
+	/* #190: at 720p, give back the 3.5 MiB scan-out buffer XVideoSetMode
+	   allocated (nxdk video.c, XVideoInit), through nxdk-ex's pbkit, which
+	   kept it only as its debug screen: after the release it never shows
+	   it (its GPU error report, pb_kill's restore of the old scan-out) and
+	   prints its reports with DbgPrint. nxdk's debugPrint must not run
+	   after this; its other callers are fatal paths (assert, the stack
+	   check, a pure call) and debug-only switches. 480 keeps it, as it has
+	   room to spare; 720p does not. */
+	if( nv2a_height == 720 )
+	{
+		pb_release_debug_screen();
+		gEngfuncs.Con_Printf( "ref_nv2a: 720p - nxdk's scan-out buffer (%u KiB) given back\n", (unsigned)( 1280 * 720 * 4 / 1024 ));
+	}
+
+	gEngfuncs.Cmd_AddCommand( "r3d_gpumem", R_GpuMem_f, "the renderer's contiguous memory, by holder (docs/r3d/divergences.md #195)" );
 
 	/* X9-X D1: the texture manager's own arena/table, and the 2D pass's
 	   own vertex ring - both allocated once, here, before any map. */
@@ -4328,6 +4540,7 @@ static void R_Shutdown( void )
 		MmFreeContiguousMemory( nv2a_2d_ring );
 		nv2a_2d_ring = NULL;
 	}
+	nv2a_aa_free(); /* divergences.md #188 */
 	if( nv2a_decal_vb )
 	{
 		MmFreeContiguousMemory( nv2a_decal_vb );
@@ -4688,7 +4901,45 @@ thumbnail reads both rows of a block with 16-byte SSE loads (two 8-byte
 bus reads each, half the transactions) and averages two channels at a
 time; the bytes are the same. The aspect is the framebuffer's pixel ratio, right while the
 output is 4:3 only.
+
+#194: a shot is skipped, with a console error, when the free memory
+cannot hold it - the read, what the writer allocates on top (a PNG
+filters a copy and deflates into a third buffer; a BMP copies once) and
+SHOT_KEEP left over - instead of the zone allocator stopping the game
+halfway through it (720p PNG in c1a0e: 3.87 MiB refused with 9 MiB
+free). Full-size shots (screenshot, snapshot) are read 24-bit, as the
+writers store them anyway: 2.6 MiB at 720p instead of 3.5.
 */
+#define SHOT_KEEP ( 1024 * 1024 )
+
+static qboolean VID_ScreenShotFits( const char *filename, size_t read_size, size_t out_size, int shot_type )
+{
+	MM_STATISTICS ms;
+	uint64_t need = read_size;
+	const char *ext = COM_FileExtension( filename );
+
+	/* the writer's buffers: a PNG filters a copy (1 byte more a row) and
+	   deflates into a buffer of deflateBound's size, plus the deflate
+	   state; a BMP or TGA one copy. A resample (levelshot, thumbnail,
+	   mapshot) allocates its own output before the writer runs. */
+	if( !Q_stricmp( ext, "png" ))
+		need += 2 * (uint64_t)out_size + out_size / 512 + 512 * 1024;
+	else
+		need += out_size;
+	if( shot_type != VID_SCREENSHOT && shot_type != VID_SNAPSHOT )
+		need += out_size;
+
+	ms.Length = sizeof( ms );
+	if( !NT_SUCCESS( MmQueryStatistics( &ms )))
+		return true;
+	if( (uint64_t)ms.AvailablePages * 4096u >= need + SHOT_KEEP )
+		return true;
+
+	gEngfuncs.Con_Printf( S_ERROR "Screenshot skipped, not enough memory: %s needs %u KiB and %u KiB left free, %u KiB free\n",
+		filename, (unsigned)( need / 1024 ), SHOT_KEEP / 1024, (unsigned)( ms.AvailablePages * 4 ));
+	return false;
+}
+
 static qboolean VID_ScreenShot( const char *filename, int shot_type )
 {
 	uint flags = 0;
@@ -4718,13 +4969,32 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 	if( !fb || src_w <= 0 || src_h <= 0 )
 		return false;
 
-	step = ( shot_type == VID_MINISHOT ) ? 2 : 1;
+	/* #191: at 720p a third of the size, not half - 426x240 (400 KiB)
+	   instead of 640x360 (900 KiB) on its way to the 200-line thumbnail,
+	   the save's memory peak during play; each pixel the average of the
+	   2x2 corner of its 3x3 block */
+	step = ( shot_type == VID_MINISHOT ) ? ( src_h >= 720 ? 3 : 2 ) : 1;
+
+	{
+		const qboolean full = shot_type == VID_SCREENSHOT || shot_type == VID_SNAPSHOT;
+		const size_t read_size = (size_t)( src_w / step ) * ( src_h / step ) * ( full ? 3 : 4 );
+		size_t out_size = full ? read_size : (size_t)( shot_type == VID_MAPSHOT ? 1024 * 768 : 3 * 480 * 854 );
+
+		if( shot_type == VID_MINISHOT )
+			out_size = 3 * 200 * 356;
+		if( !VID_ScreenShotFits( filename, read_size, out_size, shot_type ))
+		{
+			xbox_ft_span_end( &read_span, XBOX_FT_S_SHOT_READ );
+			return false;
+		}
+	}
 
 	r_shot = Mem_Calloc( r_temppool, sizeof( rgbdata_t ));
 	r_shot->width = src_w / step;
 	r_shot->height = src_h / step;
 	r_shot->flags = IMAGE_HAS_COLOR;
-	r_shot->type = PF_BGRA_32;
+	/* #194: 24-bit for a full-size shot, the alpha is 255 anyway */
+	r_shot->type = ( shot_type == VID_SCREENSHOT || shot_type == VID_SNAPSHOT ) ? PF_BGR_24 : PF_BGRA_32;
 	r_shot->size = r_shot->width * r_shot->height * gEngfuncs.Image_GetPFDesc( r_shot->type )->bpp;
 	r_shot->palette = NULL;
 	r_shot->buffer = Mem_Malloc( r_temppool, r_shot->size );
@@ -4732,9 +5002,23 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 	// get screen frame
 	for( y = 0; y < (int)r_shot->height; y++ )
 	{
-		byte *dst = r_shot->buffer + (size_t)y * r_shot->width * 4;
+		byte *dst = r_shot->buffer + (size_t)y * r_shot->width * ( r_shot->type == PF_BGR_24 ? 3 : 4 );
 
-		if( step == 1 )
+		if( step == 1 && r_shot->type == PF_BGR_24 )
+		{
+			const byte *src = fb + (size_t)y * pitch;
+
+			for( x = 0; x < (int)r_shot->width; x++, src += 4, dst += 3 )
+			{
+				uint32_t px;
+
+				memcpy( &px, src, 4 ); /* one uncached 32-bit read: B, G, R, X */
+				dst[0] = (byte)px;
+				dst[1] = (byte)( px >> 8 );
+				dst[2] = (byte)( px >> 16 );
+			}
+		}
+		else if( step == 1 )
 		{
 			const byte *src = fb + (size_t)y * pitch;
 
@@ -4749,8 +5033,9 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 		}
 		else
 		{
-			const byte *row0 = fb + (size_t)( y * 2 ) * pitch;
+			const byte *row0 = fb + (size_t)( y * step ) * pitch;
 			const byte *row1 = row0 + pitch;
+			const int stride = step * 4; /* bytes from one block to the next */
 
 			x = 0;
 			/* #153: two output pixels per pass from one 16-byte read of
@@ -4760,7 +5045,7 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 			   replaces). movaps needs both rows on 16 bytes: the buffer
 			   starts on a page and a 640/720-pixel pitch is a multiple;
 			   otherwise, and for an odd last pixel, 32-bit reads. */
-			if( !((uintptr_t)fb & 15u ) && !( pitch & 15u ))
+			if( step == 2 && !((uintptr_t)fb & 15u ) && !( pitch & 15u ))
 			{
 				for( ; x + 2 <= (int)r_shot->width; x += 2, dst += 8 )
 				{
@@ -4788,10 +5073,10 @@ static qboolean VID_ScreenShot( const char *filename, int shot_type )
 			{
 				uint32_t a, b, c, d, p;
 
-				memcpy( &a, row0 + x * 8, 4 );
-				memcpy( &b, row0 + x * 8 + 4, 4 );
-				memcpy( &c, row1 + x * 8, 4 );
-				memcpy( &d, row1 + x * 8 + 4, 4 );
+				memcpy( &a, row0 + x * stride, 4 );
+				memcpy( &b, row0 + x * stride + 4, 4 );
+				memcpy( &c, row1 + x * stride, 4 );
+				memcpy( &d, row1 + x * stride + 4, 4 );
 				p = nv2a_shot_avg4( a, b, c, d );
 				memcpy( dst, &p, 4 );
 			}
@@ -5945,6 +6230,7 @@ static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte
 
 	if( !create )
 	{
+		nv2a_gpu_settle(); /* #193: the map's buffers and a studio model's skins are freed below */
 		if( mod == nv2a_map_owner )
 			nv2a_free_map_resources();
 		/* X9-X step 5 / gl_context.c:106-111,131-136: the OTHER unload this
@@ -5965,6 +6251,7 @@ static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte
 		const char *dot = strrchr( mod->name, '.' );
 		size_t stem = dot ? (size_t)( dot - mod->name ) : strlen( mod->name );
 
+		nv2a_gpu_settle(); /* #193 */
 		nv2a_free_map_resources();
 		if( stem + sizeof( ".mpak" ) > sizeof( archive_name ) || buffersize < MPAK_SECTOR_SIZE )
 			return true;
@@ -6619,7 +6906,7 @@ int nv2a_decal_gpu_begin( const cl_entity_t *e, float blend )
 	   final combiner, so the fog goes back on after it. */
 	p = pb_begin();
 	#include "ps_decal.inl"
-	pb_end( p );
+	pb_end_deferred( p );
 	nv2a_ps_selected = NV2A_PS_DECAL;
 	nv2a_resident_program = NV2A_RESIDENT_NONE;
 	nv2a_sgpu_entered = false;
@@ -6658,7 +6945,7 @@ int nv2a_decal_gpu_begin( const cl_entity_t *e, float blend )
 		memcpy( &word, &bias, sizeof( word ));
 		p = pb_push1( p, NV097_SET_POLYGON_OFFSET_BIAS, word );
 	}
-	pb_end( p );
+	pb_end_deferred( p );
 
 	/* The attribute arrays on the decal buffer; each polygon draws from
 	   its own start index. nv2a_bound_vertex_base no longer describes
@@ -6668,7 +6955,7 @@ int nv2a_decal_gpu_begin( const cl_entity_t *e, float blend )
 	nv2a_set_attrib_pointer( 10, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_lit_vertex_t ), &nv2a_decal_vb[0].uv1[0] );
 	p = pb_begin();
 	p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
-	pb_end( p );
+	pb_end_deferred( p );
 	nv2a_bound_vertex_base = 0xFFFFFFFFu;
 
 	nv2a_decal_bound_texnum = -1;
@@ -6732,7 +7019,7 @@ static qboolean nv2a_decal_bind_texture( int texnum )
 		p = pb_push1( p, NV097_SET_BLEND_FUNC_SFACTOR, premult ? NV097_SET_BLEND_FUNC_SFACTOR_V_ONE : NV097_SET_BLEND_FUNC_SFACTOR_V_SRC_ALPHA );
 		nv2a_decal_bound_premult = premult;
 	}
-	pb_end( p );
+	pb_end_deferred( p );
 
 	nv2a_decal_bound_texnum = texnum;
 	return true;
@@ -6856,7 +7143,7 @@ void nv2a_decal_gpu_draw( int texture, const float *v, int numverts, const msurf
 		MASK( NV097_DRAW_ARRAYS_COUNT, (uint32_t)numverts - 1 )
 		| MASK( NV097_DRAW_ARRAYS_START_INDEX, nv2a_decal_vb_used ));
 	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
-	pb_end( p );
+	pb_end_deferred( p );
 	NV2A_FT_ADD( XBOX_FT_W_DRAWS, 1 );
 	NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
 	NV2A_FT_ADD( XBOX_FT_W_VERTS_DECAL, numverts );
@@ -6876,7 +7163,7 @@ void nv2a_decal_gpu_end( void )
 	p = pb_push1( p, NV097_SET_CULL_FACE_ENABLE, 1 );
 	p = pb_push1( p, NV097_SET_DEPTH_MASK, 1 );
 	p = pb_push1( p, NV097_SET_BLEND_ENABLE, 0 );
-	pb_end( p );
+	pb_end_deferred( p );
 
 	/* The program, the arrays and stage 0 are the decals' now: the next
 	   lit draw re-enters the lit state (ps_lit, arrays, constants) and the
@@ -7314,6 +7601,9 @@ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 		nv2a_texanim_begin_frame( gp_cl->models[1] == nv2a_map_owner ? gp_cl->models[1] : NULL );
 		/* M2 span k_world (#141): sky, world and world decals. */
 		xbox_ft_span_begin( &world_span );
+		/* divergences.md #188: from here to the engine's next
+		   R_Set2DMode(true), the 3D draws go to the AA sample surfaces. */
+		nv2a_aa_begin();
 		/* X9-X item 14 step 10: the skybox, before the world (#137). */
 		XBOX_FT_SPAN( XBOX_FT_S_SKY, nv2a_draw_sky());
 		nv2a_draw_map_geometry(); /* ends with the world's opaque water (r_warp.c) */
@@ -7599,6 +7889,26 @@ static qboolean nv2a_2d_resolve_batch_key( nv2a_2d_batch_key_t *key )
 	qboolean bilinear;
 	uint32_t color_format;
 
+	/* divergences.md #188: the AA resolve's quad samples the AA color
+	   surface, a linear texture in texel coordinates, clamped. */
+	if( nv2a_aa_resolving )
+	{
+		key->offset = (uint32_t)nv2a_aa_color & 0x03ffffff;
+		key->width = nv2a_width * 2;
+		key->height = nv2a_aa_rows;
+		key->pitch = nv2a_width * 4 * 2;
+		key->bilinear = true;
+		key->color_format = NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X8R8G8B8;
+		key->address = 0x00030303;
+		key->mip_levels = 1;
+		key->control0 = 0x4003ffc0;
+		/* Quincunx: MAG CONVOLUTION_2D_LOD0 (4), MIN CONVOLUTION_2D_LOD0
+		   (7), kernel QUINCUNX (1); otherwise the tent (bilinear), with
+		   the non-zero kernel field real hardware requires (#102). */
+		key->filter = nv2a_aa_frame_mode == 2 ? 0x04072000 : 0x02022000;
+		return true;
+	}
+
 	/* X9-X step 11: a map directory texture, with exactly the words
 	   nv2a_bind_map_texture_stage0 gives the world's own faces. */
 	if( nv2a_tri_map_texture != NV2A_TRI_NO_MAP_TEXTURE )
@@ -7690,7 +8000,7 @@ static void nv2a_push_stage0( const nv2a_2d_batch_key_t *key )
 	uint32_t *p = pb_begin();
 
 	p = nv2a_emit_stage0( p, key );
-	pb_end( p );
+	pb_end_deferred( p );
 }
 
 /* The number of vertices ONE output primitive of a given hardware
@@ -7732,7 +8042,7 @@ static void nv2a_2d_emit_draw_arrays( uint32_t start, uint32_t count, void *ctx 
 		MASK( NV097_DRAW_ARRAYS_COUNT, count - 1 )
 		| MASK( NV097_DRAW_ARRAYS_START_INDEX, start ));
 	p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
-	pb_end( p );
+	pb_end_deferred( p );
 	NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
 }
 
@@ -7792,13 +8102,13 @@ static void nv2a_2d_flush( void )
 		   (NV2A_STUDIO_ALPHA_REF_MASKED) survives a re-entry. Every other
 		   caller still leaves this at its own default of 0. */
 		p = pb_push1( p, NV097_SET_ALPHA_REF, nv2a_2d_batch_state.alpha_ref );
-		pb_end( p );
+		pb_end_deferred( p );
 
 		p = pb_begin();
 		pb_push( p++, NV097_SET_VERTEX_DATA_ARRAY_FORMAT, 16 );
 		for( i = 0; i < 16; i++ )
 			*( p++ ) = NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F;
-		pb_end( p );
+		pb_end_deferred( p );
 
 		if( nv2a_2d_batch_state.space == NV2A_IMM_SPACE_2D )
 		{
@@ -7807,7 +8117,7 @@ static void nv2a_2d_flush( void )
 
 			p = pb_begin();
 			p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 0 );
-			pb_end( p );
+			pb_end_deferred( p );
 
 			/* C5: rebuilt every re-entry from the engine's own reported 2D
 			   size against the real back buffer - NOT
@@ -7823,7 +8133,7 @@ static void nv2a_2d_flush( void )
 			p += 16;
 			memcpy( p, vs_c4, sizeof( vs_c4 ));
 			p += 4;
-			pb_end( p );
+			pb_end_deferred( p );
 		}
 		else
 		{
@@ -7855,7 +8165,7 @@ static void nv2a_2d_flush( void )
 			   renders on hardware (item 12's frame times). */
 			p = pb_begin();
 			p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
-			pb_end( p );
+			pb_end_deferred( p );
 
 			p = pb_begin();
 			p = pb_push1( p, NV097_SET_TRANSFORM_CONSTANT_LOAD, 96 );
@@ -7872,7 +8182,7 @@ static void nv2a_2d_flush( void )
 			p += 16;
 			memcpy( p, vs_c4, sizeof( vs_c4 ));
 			p += 4;
-			pb_end( p );
+			pb_end_deferred( p );
 		}
 
 		nv2a_lit_state_current = false; /* program, stage 1 and arrays are the TriAPI's now - a later brush entity re-enters */
@@ -7922,7 +8232,7 @@ static void nv2a_2d_flush( void )
 
 		p = pb_begin();
 		p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
-		pb_end( p );
+		pb_end_deferred( p );
 
 		nv2a_2d_pushed_base_offset = nv2a_2d_ring_batch_base_offset;
 		nv2a_2d_pushed_base_space = nv2a_2d_batch_state.space;
@@ -7955,7 +8265,7 @@ static void nv2a_2d_flush( void )
 			p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, nv2a_2d_batch_state.depth_test_disable ? 0 : 1 );
 			p = pb_push1( p, NV097_SET_DEPTH_FUNC, nv2a_2d_batch_state.depth_func_equal ? NV097_SET_DEPTH_FUNC_V_EQUAL : NV097_SET_DEPTH_FUNC_V_LEQUAL );
 		}
-		pb_end( p );
+		pb_end_deferred( p );
 
 		nv2a_2d_pushed = nv2a_2d_batch_state;
 		nv2a_2d_pushed_valid = true;
@@ -8002,7 +8312,7 @@ static void nv2a_2d_flush( void )
 		uint32_t *p = pb_begin();
 		p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
 		p = pb_push1( p, NV097_SET_DEPTH_FUNC, NV097_SET_DEPTH_FUNC_V_LEQUAL );
-		pb_end( p );
+		pb_end_deferred( p );
 		nv2a_2d_pushed.depth_test_disable = false;
 		nv2a_2d_pushed.depth_func_equal = false;
 	}
@@ -8127,7 +8437,7 @@ static void nv2a_blk_close( nv2a_pb_block_t *b )
 	/* pb_begin only reads the put pointer (pbkit.c:1786, DBG off), so an
 	   empty block needs no pb_end and costs nothing. */
 	if( b->p != b->start )
-		pb_end( b->p );
+		pb_end_deferred( b->p );
 	b->start = b->p;
 }
 
@@ -8361,7 +8671,7 @@ qboolean nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float m
 		nv2a_set_attrib_pointer( 9, NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F, 2, sizeof( nv2a_sgpu_vertex_t ), vb + 32 );
 		p = pb_begin();
 		p = pb_push1( p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0 );
-		pb_end( p );
+		pb_end_deferred( p );
 		nv2a_sgpu_bound_vb = geo->vb;
 	}
 
@@ -8426,7 +8736,7 @@ qboolean nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float m
 		memcpy( p, &geo->index_dwords[i], batch * sizeof( uint32_t ));
 		p += batch;
 		p = pb_push1( p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END );
-		pb_end( p );
+		pb_end_deferred( p );
 		NV2A_FT_ADD( XBOX_FT_W_PRIMS, 1 );
 		i += batch;
 	}
@@ -8438,7 +8748,7 @@ qboolean nv2a_sgpu_draw_mesh( const nv2a_sgpu_geometry_t *geo, int mesh, float m
 		p = pb_begin();
 		p = pb_push1( p, NV097_SET_DEPTH_TEST_ENABLE, 1 );
 		p = pb_push1( p, NV097_SET_DEPTH_FUNC, NV097_SET_DEPTH_FUNC_V_LEQUAL );
-		pb_end( p );
+		pb_end_deferred( p );
 	}
 	return true;
 }
@@ -8803,6 +9113,22 @@ void nv2a_2d_flush_and_wait( void )
 	nv2a_wait_gpu_idle();
 }
 
+/* #193: the CPU and GPU overlap across frames. R_EndFrame no longer waits
+   for the GPU: frame N draws while the CPU runs frame N+1's game code, up
+   to R_BeginFrame, which waits first. Anything that frees or rewrites
+   memory the GPU reads while no frame is open (a texture or skin freed, a
+   map unloaded, the next map's upload) calls this first: it waits once
+   after a frame's submit and is free after that. Not after R_Shutdown's
+   pb_kill (nv2a_ready is down by then, and the GPU idle). */
+static qboolean nv2a_gpu_in_flight;
+
+void nv2a_gpu_settle( void )
+{
+	if( nv2a_gpu_in_flight && nv2a_ready )
+		nv2a_wait_gpu_idle();
+	nv2a_gpu_in_flight = false;
+}
+
 /* X9-X step 4 Part C: the one append path both spaces share - refactored
    out of the old nv2a_2d_append_quad() (kept below as a thin wrapper for
    R_DrawStretchPic/FillRGBA, unchanged). Flushes first if the desired
@@ -8915,6 +9241,163 @@ static void nv2a_2d_append_quad( float x, float y, float w, float h, float s1, f
 	nv2a_2d_append( NV2A_IMM_SPACE_2D, NV097_SET_BEGIN_END_OP_QUADS, verts, 4 );
 }
 
+/* divergences.md #188: the AA sample surfaces. */
+static void nv2a_aa_free( void )
+{
+	if( nv2a_aa_color )
+		MmFreeContiguousMemory( nv2a_aa_color );
+	if( nv2a_aa_zeta )
+		MmFreeContiguousMemory( nv2a_aa_zeta );
+	nv2a_aa_color = nv2a_aa_zeta = NULL;
+	nv2a_aa_rows = 0;
+}
+
+#define NV2A_AA_KEEP ( 4u * 1024u * 1024u )
+
+static int nv2a_aa_wanted( void )
+{
+	int mode = (int)nv2a_r_aa.value;
+
+	/* #190: at 720p, 4x's sample surfaces would take 28 MiB; 2x and
+	   Quincunx (14 MiB) only where nv2a_aa_prepare finds the room */
+	if( mode == 3 && nv2a_width > 640 )
+		return 0;
+	return mode >= 1 && mode <= 3 ? mode : 0;
+}
+
+/* Between frames only (R_BeginFrame, the GPU idle since R_EndFrame): the
+   surfaces nv2a_r_aa asks for, made or given back. A mode that cannot
+   have them is drawn without AA until the cvar or the map changes. */
+static void nv2a_aa_prepare( void )
+{
+	const int mode = nv2a_aa_wanted();
+	const uint32_t rows = mode == 3 ? nv2a_height * 2 : nv2a_height;
+	const uint32_t size = nv2a_width * 4 * 2 * rows;
+
+	if( mode != nv2a_aa_failed_mode )
+		nv2a_aa_failed_mode = 0;
+
+	if( !mode )
+	{
+		nv2a_aa_free();
+		return;
+	}
+
+	if( nv2a_aa_rows == rows || mode == nv2a_aa_failed_mode )
+		return;
+
+	nv2a_aa_free();
+	/* #190: never down to the last pages - the map still allocates after
+	   this (sounds, textures, the client's own); NV2A_AA_KEEP stays free */
+	{
+		MM_STATISTICS ms;
+
+		ms.Length = sizeof( ms );
+		if( NT_SUCCESS( MmQueryStatistics( &ms )) && (uint64_t)ms.AvailablePages * 4096u < 2u * (uint64_t)size + NV2A_AA_KEEP )
+		{
+			nv2a_aa_failed_mode = mode;
+			gEngfuncs.Con_Printf( S_WARN "ref_nv2a: anti-aliasing mode %d needs 2 x %u KiB and %u KiB left free, %u KiB free; drawing without it\n",
+				mode, size / 1024, NV2A_AA_KEEP / 1024, (unsigned)( ms.AvailablePages * 4 ));
+			return;
+		}
+	}
+	nv2a_aa_color = MmAllocateContiguousMemoryEx( size, 0, 0x03FFAFFF, 0x1000, PAGE_READWRITE | PAGE_WRITECOMBINE );
+	nv2a_aa_zeta = nv2a_aa_color ? MmAllocateContiguousMemoryEx( size, 0, 0x03FFAFFF, 0x1000, PAGE_READWRITE | PAGE_WRITECOMBINE ) : NULL;
+	if( !nv2a_aa_zeta )
+	{
+		nv2a_aa_free();
+		nv2a_aa_failed_mode = mode;
+		gEngfuncs.Con_Printf( S_WARN "ref_nv2a: no memory for anti-aliasing mode %d (2 x %u KiB), drawing without it\n", mode, size / 1024 );
+		return;
+	}
+	nv2a_aa_rows = rows;
+}
+
+/* The start of the frame's world pass: the 3D draws go to the sample
+   surfaces, cleared, if nv2a_aa_prepare has them for the asked mode. */
+static void nv2a_aa_begin( void )
+{
+	const int mode = nv2a_aa_wanted();
+	const uint32_t pitch = nv2a_width * 4 * 2;
+	uint32_t *p;
+
+	if( nv2a_aa_frame_mode || !mode || !nv2a_aa_color || nv2a_aa_rows != ( mode == 3 ? nv2a_height * 2 : nv2a_height ))
+		return;
+
+	p = pb_begin();
+	p = pb_push1( p, NV097_SET_CONTEXT_DMA_COLOR, NV2A_AA_DMA );
+	p = pb_push1( p, NV097_SET_CONTEXT_DMA_ZETA, NV2A_AA_DMA );
+	p = pb_push1( p, NV097_SET_SURFACE_PITCH, MASK( NV097_SET_SURFACE_PITCH_COLOR, pitch ) | MASK( NV097_SET_SURFACE_PITCH_ZETA, pitch ));
+	p = pb_push1( p, NV097_SET_SURFACE_COLOR_OFFSET, (uint32_t)nv2a_aa_color & 0x03ffffff );
+	p = pb_push1( p, NV097_SET_SURFACE_ZETA_OFFSET, (uint32_t)nv2a_aa_zeta & 0x03ffffff );
+	/* output pixels, scaled by the hardware for the samples */
+	p = pb_push1( p, NV097_SET_SURFACE_CLIP_HORIZONTAL, (uint32_t)nv2a_width << 16 );
+	p = pb_push1( p, NV097_SET_SURFACE_CLIP_VERTICAL, (uint32_t)nv2a_height << 16 );
+	/* pbkit's own word (pb_GPUFrameBuffersFormat, pbkit.c) plus the mode */
+	p = pb_push1( p, NV097_SET_SURFACE_FORMAT,
+		MASK( NV097_SET_SURFACE_FORMAT_COLOR, NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8 )
+		| MASK( NV097_SET_SURFACE_FORMAT_ZETA, NV097_SET_SURFACE_FORMAT_ZETA_Z24S8 )
+		| MASK( NV097_SET_SURFACE_FORMAT_TYPE, NV097_SET_SURFACE_FORMAT_TYPE_PITCH )
+		| MASK( NV097_SET_SURFACE_FORMAT_ANTI_ALIASING, mode == 3
+			? NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_SQUARE_OFFSET_4
+			: NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_CENTER_CORNER_2 ));
+	/* R_BeginFrame's clears (pb_erase_depth_stencil_buffer, pb_fill), on these */
+	p = pb_push1( p, NV097_SET_CLEAR_RECT_HORIZONTAL, (( nv2a_width - 1 ) << 16 ));
+	p = pb_push1( p, NV097_SET_CLEAR_RECT_VERTICAL, (( nv2a_height - 1 ) << 16 ));
+	p = pb_push1( p, NV097_SET_ZSTENCIL_CLEAR_VALUE, 0xffffff00 );
+	p = pb_push1( p, NV097_SET_COLOR_CLEAR_VALUE, 0x00000000 );
+	p = pb_push1( p, NV097_CLEAR_SURFACE, NV097_CLEAR_SURFACE_Z | NV097_CLEAR_SURFACE_STENCIL | NV097_CLEAR_SURFACE_COLOR );
+	pb_end_deferred( p );
+
+	nv2a_aa_frame_mode = mode;
+}
+
+/* The end of the world pass (the engine's first R_Set2DMode(true) after
+   it, or R_EndFrame): its last batch flushed into the sample surfaces,
+   the back buffer targeted again, and one quad over the whole output
+   sampling the color samples - each output pixel's centre lands halfway
+   between its two columns (and rows, at 4x), where the bilinear tap
+   averages exactly its own samples. */
+static void nv2a_aa_end( void )
+{
+	nv2a_2d_shadow_t saved;
+	byte saved_color[4];
+	uint32_t *p;
+
+	if( !nv2a_aa_frame_mode )
+		return;
+
+	nv2a_2d_flush();
+
+	pb_target_back_buffer();
+	p = pb_begin();
+	/* pbkit's depth object again: set_draw_buffer only re-sends it when
+	   its own cached depth state changes, which it does not here */
+	p = pb_push1( p, NV097_SET_CONTEXT_DMA_ZETA, 10 );
+	/* the samples written before they are read as a texture
+	   (pbkitplusplus's WaitForGPU) */
+	p = pb_push1( p, NV097_NO_OPERATION, 0 );
+	p = pb_push1( p, NV097_WAIT_FOR_IDLE, 0 );
+	pb_end_deferred( p );
+
+	saved = nv2a_2d_desired;
+	memcpy( saved_color, nv2a_2d_color, sizeof( saved_color ));
+	nv2a_2d_desired.blend_enable = false;
+	nv2a_2d_desired.alpha_test_enable = false;
+	nv2a_2d_color[0] = nv2a_2d_color[1] = nv2a_2d_color[2] = nv2a_2d_color[3] = 255;
+
+	nv2a_aa_resolving = true;
+	nv2a_2d_append_quad( 0.0f, 0.0f, (float)gpGlobals->width, (float)gpGlobals->height,
+		0.0f, 0.0f, (float)( nv2a_width * 2 ), (float)nv2a_aa_rows );
+	nv2a_2d_flush();
+	nv2a_aa_resolving = false;
+	nv2a_aa_frame_mode = 0;
+
+	nv2a_2d_desired = saved;
+	memcpy( nv2a_2d_color, saved_color, sizeof( saved_color ));
+	nv2a_2d_dirty = true;
+}
+
 static void nv2a_draw_no_world_backdrop( void );
 
 /* C1. */
@@ -8932,6 +9415,10 @@ static void R_Set2DMode( qboolean enable )
 			nv2a_2d_desired.cull_enable = false;
 			nv2a_2d_dirty = true;
 		}
+
+		/* divergences.md #188: the world pass ends here - resolved into
+		   the back buffer before any 2D draws over it. */
+		nv2a_aa_end();
 
 		/* The first R_Set2DMode(true) after R_BeginFrame's own is
 		   V_PostRender's (cl_view.c:530), ahead of every HUD, console and
@@ -9464,10 +9951,20 @@ static void R_BeginFrame( qboolean clearScene )
 	if( !nv2a_ready )
 		return;
 
+	/* #193: frame N's GPU work, left running by R_EndFrame, retires here -
+	   before the pending upload, the AA surfaces, pb_reset rewinding the
+	   pushbuffer, and the per-frame buffers reset below */
+	nv2a_wait_gpu_idle();
+	nv2a_gpu_in_flight = false;
+
 	/* X9-T: the one retry of a failed R_NewMap upload - by the first frame
 	   after it, the client has freed the previous map's unused models. */
 	if( nv2a_pending_upload.pending && nv2a_pending_upload.retried )
 		nv2a_try_pending_upload();
+
+	/* divergences.md #188: the AA surfaces, with the GPU idle */
+	nv2a_aa_frame_mode = 0;
+	nv2a_aa_prepare();
 
 	debug_frame_count++;
 
@@ -9477,6 +9974,15 @@ static void R_BeginFrame( qboolean clearScene )
 	nv2a_world_drawn_this_frame = false;
 
 	nv2a_wait_vblank();
+	/* #190: double buffering at 720p - the back buffer about to be drawn
+	   is the one on screen until the last finished frame is shown */
+	if( xbox_ft_waits.active )
+	{
+		uint64_t t0 = xbox_ft_rdtsc();
+		pb_wait_for_flip();
+		xbox_ft_waits.vblank += xbox_ft_rdtsc() - t0;
+	}
+	else pb_wait_for_flip();
 	pb_reset();
 	/* pbkit's pb_begin() (pbkit.c:1786) only returns the write pointer
 	   when DBG is off, as it is (pbkit.c:14): no block is opened. Taken
@@ -9489,8 +9995,8 @@ static void R_BeginFrame( qboolean clearScene )
 	pb_erase_depth_stencil_buffer( 0, 0, nv2a_width, nv2a_height );
 	pb_fill( 0, 0, nv2a_width, nv2a_height, 0x00000000 );
 
-	nv2a_wait_gpu_idle();
-
+	/* #193: no wait for the clears - the GPU was idle before them, and
+	   nothing the CPU writes from here on is read by them */
 	nv2a_frame_open = true;
 	nv2a_lit_state_current = false; /* only the world pass (or a brush entity) establishes it within a frame */
 	nv2a_sgpu_entered = false; /* divergences.md #143: re-entered by the first GPU studio mesh */
@@ -9520,8 +10026,8 @@ static void R_EndFrame( void )
 	   some changelevel frames, cl_scrn.c:703) still owes the no-world
 	   backdrop; R_Set2DMode(true) draws it. Before nv2a_frame_open drops -
 	   nv2a_2d_append refuses a closed frame. */
-	if( nv2a_no_world_backdrop_pending )
-		R_Set2DMode( true );
+	if( nv2a_no_world_backdrop_pending || nv2a_aa_frame_mode )
+		R_Set2DMode( true ); /* and the AA resolve a frame with no 2D still owes (#188) */
 
 	nv2a_frame_open = false;
 
@@ -9536,8 +10042,18 @@ static void R_EndFrame( void )
 	NV2A_FT_SET( XBOX_FT_W_WORLD_FACES, nv2a_world_drawn_this_frame ? nv2a_cull_faces_visible : 0 );
 	NV2A_FT_SET( XBOX_FT_W_PVS_LEAVES, nv2a_world_drawn_this_frame ? nv2a_ft_pvs_leaves : 0 );
 	NV2A_FT_SET( XBOX_FT_W_STUDIO_MODELS, nv2a_studio_models_drawn() - nv2a_ft_models_frame_start );
+	/* x9-perf-cpuprof: the brush and studio times summed in ticks */
+	NV2A_FT_ADD( XBOX_FT_W_BR_FACE_KC, xbox_ft_span_kcyc( nv2a_ft_br_face_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_BR_DECAL_KC, xbox_ft_span_kcyc( nv2a_ft_br_decal_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_BR_TRANS_KC, xbox_ft_span_kcyc( nv2a_ft_br_trans_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_BR_MOVED_KC, xbox_ft_span_kcyc( nv2a_ft_br_moved_ticks ));
+	nv2a_ft_br_face_ticks = nv2a_ft_br_decal_ticks = nv2a_ft_br_trans_ticks = nv2a_ft_br_moved_ticks = 0;
+	nv2a_ft_studio_close_frame();
 
-	nv2a_wait_gpu_idle();
+	/* #193: no wait for the GPU here - it draws this frame while the CPU
+	   runs the next one's game code; R_BeginFrame (or nv2a_gpu_settle
+	   between frames) waits */
+	nv2a_gpu_in_flight = true;
 	nv2a_wait_swap();
 }
 
@@ -9548,6 +10064,7 @@ static void R_EndFrame( void )
    keeps the tables for one retry, unless it was the retry. */
 static void nv2a_try_pending_upload( void )
 {
+	nv2a_gpu_settle(); /* #193: it frees the skins, the studio geometry, the AA surfaces and the old map */
 	/* X9-X step 5 follow-up: the world's buffers get the memory before
 	   studio skins do - they re-upload lazily on their next bind. Both
 	   callers run between frames (R_NewMap during the load, R_BeginFrame
@@ -9557,6 +10074,10 @@ static void nv2a_try_pending_upload( void )
 	   each submodel's next draw. Same safety argument as the skins. */
 	if( !nv2a_frame_open )
 		nv2a_sgpu_cache_flush();
+	/* divergences.md #188: the AA surfaces too - asked for again by the
+	   next frame, after the map has its memory */
+	nv2a_aa_free();
+	nv2a_aa_failed_mode = 0;
 
 	/* X9-U: the tables first. R_NewMap runs before the client frees the
 	   previous map's unused models (Mod_FreeUnused, cl_parse.c), so a
@@ -9612,6 +10133,11 @@ static void nv2a_try_pending_upload( void )
 		Xbox_FT_LoadBegin( &ft_gpu );
 		R_WarpGpuNewMap( nv2a_map_owner );
 		Xbox_FT_LoadEnd( &ft_gpu, "nv_water" );
+		/* divergences.md #210: the skins on screen before the load, back
+		   before its first frame instead of a few a frame after it */
+		Xbox_FT_LoadBegin( &ft_gpu );
+		nv2a_tex_reload_skins();
+		Xbox_FT_LoadEnd( &ft_gpu, "nv_skins" );
 	}
 	else if( nv2a_pending_upload.retried )
 	{
@@ -9629,6 +10155,7 @@ static void R_NewMap( void )
 
 	/* X9-X item 14 step 11: the water textures' fog parameters. */
 	R_WarpNewMap( gp_cl->models[1] );
+	nv2a_ft_studio_new_map(); /* x9-perf-cpuprof: the studio notes start over */
 
 	/* X9-X item 14 step 12: R_ClearDecals, gl_context.c:403 - clear all
 	   level decals - and GL_BuildLightmaps' reset of every surface's decal
@@ -9640,6 +10167,7 @@ static void R_NewMap( void )
 	   model on a map change - the client index<->model_t mapping is only
 	   valid for the map that built it. */
 	R_StudioResetPlayerModels();
+	R_StudioLightCacheNewMap(); /* #205 (b): the lighting traced on the old map */
 }
 
 const ref_interface_t gReffuncs =

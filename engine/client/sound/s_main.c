@@ -31,6 +31,7 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_snd_meter.h" // r3d_snd_meter, the output's level, #189
 #include "platform/xbox/xbox_snd_feed.h" // speech fed to the APU's voices, #184
 #include "platform/xbox/xbox_snd_gproom.h" // Xbox_SndCfg_Hardware: the Audio menu's "Hardware audio", #182-#184
+#include "platform/xbox/xbox_snd_adpcm.h" // resident sounds as Xbox ADPCM, #200
 #endif
 
 // structure used for fading in and out client sound volume.
@@ -101,6 +102,57 @@ static int S_AdjustLoopedSamplePosition( const wavdata_t *source, int current_sa
 	return current_sample;
 }
 
+#if XASH_XBOX
+/*
+docs/r3d/divergences.md #200: an ADPCM sound hands out its frames decoded
+into one window, valid until the next call - every caller (the mixer, the
+speech feed, the mouths) reads them before it asks again, all on the main
+thread. A walk (s_r3d_adpcm_walk, an APU voice playing the channel) reads
+nothing, so nothing is decoded for it. The mixer asks for at most
+PAINTBUFFER_SIZE output frames at a time, ~2.4 times as many source
+frames at the highest pitch; a larger request gets the window's worth
+and the mixer's loop asks again for the rest.
+*/
+CVAR_DEFINE_AUTO( r3d_snd_adpcm, "0", 0, "1: keep the map's mono sounds as Xbox ADPCM, about half the memory (docs/r3d/divergences.md #200)" );
+qboolean s_r3d_adpcm_walk;
+
+#define R3D_ADPCM_WINDOW ( 4 * PAINTBUFFER_SIZE + 2 * XBOX_ADPCM_BLOCK_FRAMES )
+static int16_t s_r3d_adpcm_window[R3D_ADPCM_WINDOW];
+static int16_t s_r3d_adpcm_trim[256];
+
+static int S_R3D_AdpcmSamples( const wavdata_t *source, const void **output_buffer, int frame, int num_samples )
+{
+	if( num_samples > R3D_ADPCM_WINDOW )
+		num_samples = R3D_ADPCM_WINDOW;
+	if( !s_r3d_adpcm_walk )
+		Xbox_SndAdpcm_Decode( source->buffer, (uint32_t)frame, (uint32_t)num_samples, s_r3d_adpcm_window );
+	*output_buffer = s_r3d_adpcm_window;
+	return num_samples;
+}
+
+const int16_t *S_R3D_AdpcmTrimData( const wavdata_t *wav, int sample, int dir )
+{
+	const int samples = (int)wav->samples;
+	int lo, hi;
+
+	if( dir > 0 )
+	{
+		lo = sample;
+		hi = Q_min( sample + 255, samples );
+	}
+	else
+	{
+		lo = Q_max( sample - 254, 0 );
+		hi = sample + 1;
+	}
+	memset( s_r3d_adpcm_trim, 0, sizeof( s_r3d_adpcm_trim ));
+	if( lo < 0 || lo >= hi || hi > samples )
+		return s_r3d_adpcm_trim; // upstream's loop reads nothing here
+	Xbox_SndAdpcm_Decode( wav->buffer, (uint32_t)lo, (uint32_t)( hi - lo ), s_r3d_adpcm_trim );
+	return s_r3d_adpcm_trim + ( sample - lo );
+}
+#endif
+
 int S_RetrieveAudioSamples( const wavdata_t *source, const void **output_buffer, int start_position, int num_samples, qboolean enable_looping )
 {
 	// handle looping
@@ -128,6 +180,9 @@ int S_RetrieveAudioSamples( const wavdata_t *source, const void **output_buffer,
 	// bytes (read or waited for now); a placeholder holds none
 	if( FBitSet( source->flags, SOUND_R3D_WINDOW | SOUND_R3D_HEADER ))
 		return S_R3D_VoxSamples( source, output_buffer, start_position, num_samples );
+	// #200: decoded into a window
+	if( FBitSet( source->flags, SOUND_R3D_ADPCM ))
+		return S_R3D_AdpcmSamples( source, output_buffer, start_position / frame_size, num_samples );
 #endif
 	*output_buffer = source->buffer + start_position;
 
@@ -1637,11 +1692,21 @@ static int S_GetSoundtime( void )
 #endif
 
 //=============================================================================
+#if XASH_XBOX
+static double s_r3d_channels_time; // Sys_DoubleTime of the last S_UpdateChannels (#207)
+// #207, #208: under OpenAL an update closer than this to the last one is
+// skipped: one every other frame at 60 fps, one a frame below 40
+#define S_R3D_AL_UPDATE_GAP 0.025
+#endif
+
 static void S_UpdateChannels( void )
 {
 	uint	endtime;
 	int	samps;
 
+#if XASH_XBOX
+	s_r3d_channels_time = Sys_DoubleTime();
+#endif
 	SNDDMA_BeginPainting();
 
 	if( !snd.buffer ) return;
@@ -1687,6 +1752,15 @@ void S_ExtraUpdate( void )
 {
 	if( !snd.initialized ) return;
 #if XASH_XBOX
+	// docs/r3d/divergences.md #208: under OpenAL each update is the
+	// library's service as well as the paint (the played buffers retired, the
+	// mix queued, the voice tick: ~100 us on a console, bmi-720-perf6), and
+	// the paint is in whole played buffers (snd.samplepos moves a buffer,
+	// ~1536 frames, at a time), so every other update painted nothing. One
+	// every other frame paints the same chunks, found up to a frame later
+	// inside the 120 ms mixed ahead.
+	if( Xbox_SndAL_Active() && Sys_DoubleTime() - s_r3d_channels_time < S_R3D_AL_UPDATE_GAP )
+		return;
 	xbox_ft_snd_extra = 1; // S_PaintChannels' spans go under k_snd_extra (#141)
 #endif
 	S_UpdateChannels ();
@@ -2015,6 +2089,19 @@ void SND_UpdateSound( void )
 #endif
 
 	// mix some sound
+#if XASH_XBOX
+	// docs/r3d/divergences.md #207: under OpenAL each update is the
+	// library's work as well as the paint (the played buffers retired, the
+	// source's state read, its stream brought up to date: ~25 us a call on a
+	// console, bmi-720-perf3), and this one comes a few ms after the last
+	// frame's S_ExtraUpdate (V_PostRender), which painted up to the mix-ahead:
+	// it found almost nothing to paint (k_snd_mix 0.00 ms in play). So it is
+	// skipped while that paint is recent; the next one is this frame's
+	// S_ExtraUpdate. With 120 ms mixed ahead, a paint every frame is plenty;
+	// a frame that draws no view (no S_ExtraUpdate) paints here as before.
+	if( Xbox_SndAL_Active() && Sys_DoubleTime() - s_r3d_channels_time < S_R3D_AL_UPDATE_GAP )
+		return;
+#endif
 	S_UpdateChannels ();
 }
 
@@ -2362,6 +2449,7 @@ qboolean S_Init( void )
 	Cvar_RegisterVariable( &r3d_snd_backend ); // #178
 	Cvar_RegisterVariable( &r3d_snd_hw ); // #182-#184
 	Cvar_RegisterVariable( &r3d_speech_volume ); // the Audio menu's "Voices volume"
+	Cvar_RegisterVariable( &r3d_snd_adpcm ); // #200
 	Xbox_SndMeter_Init(); // #189
 	S_R3D_ReadBootRate();
 	S_R3D_ReadBootHardware();

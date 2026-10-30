@@ -64,6 +64,9 @@ extern int s_mix_test_dma_speed;
 #define S_SAMPLE8( b ) ((int)( b ))
 #endif
 #define S_SAMPLE16( s ) ((int)( s ))
+#if XASH_XBOX
+extern qboolean s_r3d_adpcm_walk; // engine/client/sound.h's (#200): set around each retrieve
+#endif
 #define MAX_CHANNEL_INAUDIBLE_TIME 0.5
 
 /* sound flags and channels: values do not matter to the test */

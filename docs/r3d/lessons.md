@@ -86,7 +86,13 @@ to the slower double loop, and lost the run path, without any test
 failing. **When a change moves a parameter an earlier optimisation or
 proof depended on (a rate, a size, an alignment), find that proof's
 precondition in the code and check it at the new value before relying on
-the property.**
+the property.** Recurred 2026-10-27 with a format: a 16-bit depth buffer
+was costed as "one call before pb_init, 1.8 MiB saved at 720p", but the
+W-buffer puts 1024 depth steps per world unit because the 24-bit range
+holds a map's farthest corner at that scale (`ref/nv2a/nv2a_studio_util.h:105`),
+and the view model's band under the near plane is a sixteenth of it:
+at 16 bits the weapon would get one step per 4 units. A format's range
+is such a parameter.
 
 ### NEVER call a host-tested module tested while its engine glue allocates and frees on its own
 
@@ -2259,3 +2265,18 @@ deterministic for a given binary, total once it starts, and comes and
 goes with changes that cannot touch it, stop bisecting and look in the
 failing subsystem for the state that latches: a flag, a lost wakeup, a
 counter that never recovers.**
+
+## A cost's share in the slow frames does not say which of its causes to remove
+
+perf10 (2026-10-28): the studio light callbacks cost 2.0 ms in the frames
+over 33 ms against 0.4 ms in normal ones, and #205's cache was skipped for
+any model a dlight could reach. The two facts were read as cause and
+effect, and #212 cached the traced light through dlights. On the console
+the slow frames' light cost per draw did not fall (38 us before, 43 us
+after); the misses were the moving models, whose origin is part of the
+cache key, not the dlights. The specialist's report had marked the saving
+a guess and said it could not tell the two shares apart; a counter for
+each reason for a miss was step 0 and was skipped. **When a cost grows in
+the slow frames and two mechanisms could explain it, count each
+mechanism's share (a counter per miss reason) before building the fix for
+either; a plausible mechanism that fits the correlation is a hypothesis.**

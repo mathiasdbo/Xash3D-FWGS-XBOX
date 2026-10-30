@@ -274,6 +274,7 @@ static qboolean nv2a_tex_alloc_storage( nv2a_texture_t *tex, size_t bytes )
 
 static void nv2a_tex_free_storage_now( qboolean has_arena_storage, size_t gpu_offset, void *fallback )
 {
+	nv2a_gpu_settle(); /* #193: the last frame may still be sampling it */
 	if( has_arena_storage )
 		nv2a_arena_free( nv2a_texture_arena, gpu_offset );
 	else if( fallback )
@@ -730,7 +731,10 @@ static void nv2a_tex_drop_skin( nv2a_texture_t *tex )
 		if( nv2a_frame_is_open())
 			nv2a_tex_queue_free_skin( offset );
 		else
+		{
+			nv2a_gpu_settle(); /* #193 */
 			nv2a_skin_cache_free_offset( nv2a_skin_cache, offset );
+		}
 	}
 	nv2a_tex_clear_skin_storage( tex );
 
@@ -1043,6 +1047,80 @@ void nv2a_tex_mark_used( unsigned int texnum )
 		nv2a_skin_cache_touch( nv2a_skin_cache, texnum, tex->last_used_frame );
 }
 
+/* divergences.md #210: a map load flushes every skin so the world's GPU
+   buffers get the memory first (nv2a_try_pending_upload), and the skins
+   then came back lazily at NV2A_STUDIO_SKIN_UPLOADS_PER_FRAME: the view
+   model and every model on screen drew white for several frames after
+   each load. The ones resident at the flush - the working set, which
+   mostly carries over a level change - are noted here and uploaded again
+   in the load, after the world's buffers (nv2a_tex_reload_skins). They
+   held that memory before the flush, so the load ends where it started;
+   a skin the new map does not draw is evicted as any other. */
+#define NV2A_SKIN_RELOAD_MAX 64
+static struct
+{
+	unsigned int texnum;
+	uint32_t     last_used;
+	char         name[64];
+} nv2a_skin_reload[NV2A_SKIN_RELOAD_MAX];
+static int nv2a_skin_reload_count;
+
+static void nv2a_tex_note_resident_skins( void )
+{
+	unsigned int i;
+	int n = 0, j;
+
+	for( i = 1; i < NV2A_MAX_TEXTURES; i++ )
+	{
+		const nv2a_texture_t *tex = &nv2a_textures[i];
+
+		if( !tex->has_skin_storage || !tex->skin || Q_strlen( tex->name ) >= (int)sizeof( nv2a_skin_reload[0].name ))
+			continue;
+		/* most recently drawn first: insertion into the sorted list, the
+		   oldest dropped when it is full */
+		for( j = n; j > 0 && nv2a_skin_reload[j - 1].last_used < tex->last_used_frame; j-- )
+			if( j < NV2A_SKIN_RELOAD_MAX )
+				nv2a_skin_reload[j] = nv2a_skin_reload[j - 1];
+		if( j >= NV2A_SKIN_RELOAD_MAX )
+			continue;
+		nv2a_skin_reload[j].texnum = i;
+		nv2a_skin_reload[j].last_used = tex->last_used_frame;
+		Q_strncpy( nv2a_skin_reload[j].name, tex->name, sizeof( nv2a_skin_reload[j].name ));
+		if( n < NV2A_SKIN_RELOAD_MAX )
+			n++;
+	}
+	nv2a_skin_reload_count = n;
+}
+
+void nv2a_tex_reload_skins( void )
+{
+	int i, n = nv2a_skin_reload_count;
+
+	nv2a_skin_reload_count = 0;
+	if( !nv2a_skin_cache || nv2a_frame_is_open())
+		return;
+
+	for( i = 0; i < n; i++ )
+	{
+		nv2a_texture_t *tex = &nv2a_textures[nv2a_skin_reload[i].texnum];
+		qboolean permanent = false;
+		qboolean uploaded;
+
+		/* the same skin still registered in that slot, and not back yet */
+		if( !tex->skin || tex->skin->failed || tex->has_skin_storage || Q_strcmp( tex->name, nv2a_skin_reload[i].name ))
+			continue;
+		nv2a_skin_cache_reset_allowance( nv2a_skin_cache );
+		XBOX_FT_SPAN( XBOX_FT_S_SKIN_READ, uploaded = nv2a_tex_upload_skin( tex, &permanent ));
+		if( !uploaded )
+		{
+			if( permanent )
+				tex->skin->failed = true;
+			else
+				break; /* the budget or the memory is full: the rest load lazily */
+		}
+	}
+}
+
 void nv2a_tex_flush_skin_cache( void )
 {
 	/* Only between frames: R_EndFrame's pb_busy spin (r_context.c) has
@@ -1052,7 +1130,10 @@ void nv2a_tex_flush_skin_cache( void )
 	if( !nv2a_skin_cache || nv2a_frame_is_open())
 		return;
 
+	nv2a_gpu_settle(); /* #193: R_EndFrame no longer waits for the GPU */
 	nv2a_tex_begin_frame(); /* skin bytes waiting in the D4 queue keep their chunk backed */
+	if( nv2a_skin_cache_resident_count( nv2a_skin_cache ) > 0 )
+		nv2a_tex_note_resident_skins(); /* #210: a second flush before the reload keeps the first one's list */
 	nv2a_skin_cache_flush( nv2a_skin_cache, nv2a_tex_skin_evicted, NULL );
 }
 
@@ -1624,10 +1705,15 @@ void nv2a_tex_coord_scale( const nv2a_texture_t *tex, float *scale_s, float *sca
 /* D5 helper.                                                          */
 /* ------------------------------------------------------------------ */
 
-/* Port of GL_TextureFilteringEnabled (ref/gl/gl_image.c:72-90). No
-   TF_DEPTHMAP branch (this manager never uploads a depth map) and no
-   TF_NOMIPMAP/numMips branch (D2: no mip chain exists this phase, so
-   that branch of the reference is unconditionally taken here). */
+/* Port of GL_TextureFilteringEnabled (ref/gl/gl_image.c:72-92). No
+   TF_DEPTHMAP branch (this manager never uploads a depth map). D2 keeps
+   no mip chain, so the reference's numMips test is read from the flag: a
+   texture the reference would mipmap (no TF_NOMIPMAP - model skins,
+   world sprites, decals) follows nv2a_r_texturenearest, as gl_image.c:91
+   has it follow gl_texture_nearest. Until divergence #187 every texture
+   took the unmipped branch, so only the world's faces (bound apart,
+   nv2a_bind_map_texture_stage0) ever went nearest. The lightmap atlas
+   stays bilinear whatever its flags (divergences.md #102). */
 qboolean nv2a_texture_filtering_enabled( const nv2a_texture_t *tex )
 {
 	if( FBitSet( tex->flags, TF_NEAREST ))
@@ -1636,10 +1722,15 @@ qboolean nv2a_texture_filtering_enabled( const nv2a_texture_t *tex )
 	if( FBitSet( tex->flags, TF_ATLAS_PAGE ))
 		return true; /* the nv2a lightmap stage is always bilinear, divergences.md #102 */
 
-	if( FBitSet( tex->flags, TF_ALLOW_NEAREST ))
-		return !nv2a_global_texture_nearest();
+	if( FBitSet( tex->flags, TF_NOMIPMAP ))
+	{
+		if( FBitSet( tex->flags, TF_ALLOW_NEAREST ))
+			return !nv2a_global_texture_nearest();
 
-	return true;
+		return true;
+	}
+
+	return !nv2a_global_texture_nearest();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1655,6 +1746,26 @@ size_t nv2a_tex_memory( void )
 		total += nv2a_textures[i].gpu_size;
 
 	return total;
+}
+
+void nv2a_tex_contiguous( size_t *arena, size_t *skin_chunks, size_t *fallbacks, uint32_t *fallback_count )
+{
+	size_t i;
+
+	*arena = ( nv2a_texture_arena_mem ? MmQueryAllocationSize( nv2a_texture_arena_mem ) : 0 );
+	*skin_chunks = 0;
+	for( i = 0; i < NV2A_SKIN_MAX_CHUNKS; i++ )
+		*skin_chunks += ( nv2a_skin_chunk_mem[i] ? MmQueryAllocationSize( nv2a_skin_chunk_mem[i] ) : 0 );
+	*fallbacks = 0;
+	*fallback_count = 0;
+	for( i = 0; nv2a_textures && i < NV2A_MAX_TEXTURES; i++ )
+	{
+		if( nv2a_textures[i].fallback )
+		{
+			*fallbacks += MmQueryAllocationSize( nv2a_textures[i].fallback );
+			( *fallback_count )++;
+		}
+	}
 }
 
 void nv2a_tex_arena_stats( size_t *used, size_t *free_bytes, size_t *largest_free, uint32_t *fallback_count )

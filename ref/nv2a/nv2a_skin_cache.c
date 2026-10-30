@@ -388,6 +388,14 @@ size_t nv2a_skin_cache_used( const nv2a_skin_cache_t *cache )
 	return total;
 }
 
+void nv2a_skin_cache_reset_allowance( nv2a_skin_cache_t *cache )
+{
+	if( !cache )
+		return;
+	cache->uploads_this_frame = 0;
+	cache->bytes_this_frame = 0;
+}
+
 uint32_t nv2a_skin_cache_resident_count( const nv2a_skin_cache_t *cache )
 {
 	return cache ? cache->resident_count : 0;

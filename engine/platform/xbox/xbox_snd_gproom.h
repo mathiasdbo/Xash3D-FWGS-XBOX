@@ -78,5 +78,11 @@ qboolean Xbox_SndCfg_Asked( const char *key );
    the last setting winning. On, it asks for r3d_snd_gproom,
    r3d_snd_voices and r3d_snd_voices_speech, and the OpenAL output. */
 qboolean Xbox_SndCfg_Hardware( void );
+/* A setting as the boot configs leave it, before they run: config.cfg,
+   then the userconfig.d files, the last one winning. True and its value
+   in val when one of them sets it. Also read for r3d_vid_mode (#190). */
+qboolean Xbox_BootCfg_Value( const char *key, char *val, int size );
+/* Before alcOpenDevice: the GP scratch only the room kernel needs (#191) */
+void Xbox_SndGpRoom_PreOpen( void );
 
 #endif /* XBOX_SND_GPROOM_H */

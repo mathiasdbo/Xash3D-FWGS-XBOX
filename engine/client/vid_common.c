@@ -50,6 +50,15 @@ CVAR_DEFINE( vid_height, "vid_height", "0", FCVAR_READ_ONLY, "actual window view
 // ever computes for real. Xbox-only, cheapest divergence rule.
 CVAR_DEFINE( vid_refresh, "vid_refresh", "0", FCVAR_READ_ONLY, "actual display refresh rate in Hz" );
 CVAR_DEFINE( vid_aspect, "vid_aspect", "", FCVAR_READ_ONLY, "actual display aspect/format" );
+// Resonance3D: anamorphic 16:9 on the 640x480 output (ui-architecture.md
+// section 8). 0 follows the Dashboard's widescreen setting, 1 is 4:3, 2 is
+// 16:9; the index of the Display screen's "Aspect" row. Live: a change
+// re-reports the screen size (VID_CheckChanges).
+static CVAR_DEFINE_AUTO( r3d_vid_aspect, "0", FCVAR_ARCHIVE, "640x480 output's aspect: 0 as the Dashboard is set, 1 4:3, 2 16:9 (anamorphic)" );
+// Resonance3D (#190): the output mode, read at boot before the configs run
+// (vid_sdl2.c, R_Init_Video); a change here applies at the next start. The
+// index of the Display screen's "Video mode" row.
+static CVAR_DEFINE_AUTO( r3d_vid_mode, "0", FCVAR_ARCHIVE, "output mode from the next start: 0 640x480 (480p where the Dashboard allows it), 1 1280x720 where the Dashboard allows 720p" );
 #endif // XASH_XBOX
 
 glwstate_t	glw_state;
@@ -165,14 +174,52 @@ void VID_SetXboxVideoCvars( void )
 	DWORD enc = XVideoGetEncoderSettings();
 	const char *aspect;
 
-	if( FBitSet( enc, VIDEO_WIDESCREEN ))
+	if( vm.height == 720 )
+		aspect = "16:9"; // square pixels: no anamorphic mapping (#190)
+	else if( VID_XboxRenderWidth( 640, 480 ) != 640 )
 		aspect = "16:9";
+	else if( FBitSet( enc, VIDEO_WIDESCREEN ))
+		aspect = "16:9 set, 4:3 drawn"; // r3d_vid_aspect 1, or a renderer that draws 1:1
 	else if( FBitSet( enc, VIDEO_LETTERBOX ))
 		aspect = "Letterbox";
 	else aspect = "4:3";
 
 	Cvar_FullSet( "vid_refresh", va( "%d", vm.refresh ), vid_refresh.flags );
 	Cvar_FullSet( "vid_aspect", aspect, vid_aspect.flags );
+}
+
+/*
+=================
+VID_XboxRenderWidth
+
+Resonance3D: the width the game is told the w x h output has. Xbox
+widescreen at 480 lines is anamorphic: the framebuffer stays 640x480 and
+the television stretches it to 16:9, so its pixels are 4:3 wide, not
+square. Reported as 854x480, the whole client - V_AdjustFov's Hor+
+widening (it reads the aspect from pixel sizes, cl_view.c), the HUD's
+ScreenWidth anchors, mainui's height-anchored canvas - lays out a 16:9
+screen, and ref/nv2a maps that onto the 640 real pixels: the 3D
+viewport is always the whole framebuffer, the projection takes fov_x and
+fov_y as given, and the 2D matrix scales the engine's size to the back
+buffer's (nv2a_2d_build_matrix). ref/soft draws the engine's size 1:1
+into its surface, so it keeps 640. HD modes (720p) have square pixels.
+=================
+*/
+int VID_XboxRenderWidth( int w, int h )
+{
+	const char *ref_name = ref.dllFuncs.R_GetConfigName ? ref.dllFuncs.R_GetConfigName() : NULL;
+	int aspect = (int)r3d_vid_aspect.value;
+
+	if( w != 640 || h != 480 )
+		return w;
+
+	if( !ref_name || Q_strcmp( ref_name, "ref_nv2a" ))
+		return w;
+
+	if( aspect != 1 && aspect != 2 )
+		aspect = FBitSet( XVideoGetEncoderSettings(), VIDEO_WIDESCREEN ) ? 2 : 1;
+
+	return aspect == 2 ? (( h * 16 / 9 + 1 ) & ~1 ) : w;
 }
 #endif // XASH_XBOX
 
@@ -191,6 +238,22 @@ void VID_CheckChanges( void )
 		SCR_RegisterTextures(); // reload 'lambda' image
 		ClearBits( cl_allow_levelshots.flags, FCVAR_CHANGED );
 	}
+
+#if XASH_XBOX
+	if( FBitSet( r3d_vid_aspect.flags, FCVAR_CHANGED ))
+	{
+		const int w = window_width.value, h = window_height.value;
+
+		ClearBits( r3d_vid_aspect.flags, FCVAR_CHANGED );
+
+		// not under vid_scale's quarter-size render target
+		if( refState.height == h )
+		{
+			VID_SetXboxVideoCvars(); // before the menu's VidInit reads it
+			R_SaveVideoMode( w, h, VID_XboxRenderWidth( w, h ), h, vid_maximized.value );
+		}
+	}
+#endif
 
 	if( host.renderinfo_changed )
 	{
@@ -292,6 +355,8 @@ void VID_Init( void )
 #if XASH_XBOX
 	Cvar_RegisterVariable( &vid_refresh );
 	Cvar_RegisterVariable( &vid_aspect );
+	Cvar_RegisterVariable( &r3d_vid_aspect );
+	Cvar_RegisterVariable( &r3d_vid_mode );
 #endif
 	Cvar_Get( "_window_xpos", "-1", FCVAR_RENDERINFO, "deprecated cvar" );
 	Cvar_Get( "_window_ypos", "-1", FCVAR_RENDERINFO, "deprecated cvar" );

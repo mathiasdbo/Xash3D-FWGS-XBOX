@@ -90,6 +90,7 @@ qboolean Xbox_SndFeed_Take( channel_t *ch, const wavdata_t *wav, const void *aud
 void Xbox_SndFeed_BeginPaint( int start ) { (void)start; }
 void Xbox_SndFeed_EndPaint( void ) { }
 qboolean Xbox_SndMeter_SDL( void ) { return false; } /* #189: no meter on the host */
+qboolean s_r3d_adpcm_walk; /* #200: no ADPCM sound here; s_mix.c sets it around the retrieve */
 void Xbox_SndMeter_Block( const short *samples, int frames ) { (void)samples; (void)frames; }
 wavdata_t *S_LoadSound( sfx_t *sfx ) { return NULL; }
 void S_FreeChannel( channel_t *ch ) { }

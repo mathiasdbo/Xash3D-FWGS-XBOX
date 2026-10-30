@@ -103,7 +103,9 @@ CHUNK_SPANS = 6             # span name -> parent span name (recorders from 2026
 CHUNK_CLASSES = 7           # per-classname server game frame totals (recorders from 2026-10-05)
 CHUNK_NOTES = 8             # named one-off events: sounds loaded in play, slow server messages (2026-10-06)
 NOTE_BYTES = 64
-NOTE_KINDS = {1: "sound", 2: "message", 3: "menu", 4: "load", 5: "music", 6: "vox"}  # music #171, vox #177
+NOTE_KINDS = {1: "sound", 2: "message", 3: "menu", 4: "load", 5: "music", 6: "vox",  # music #171, vox #177
+              7: "studio"}  # x9-perf-cpuprof: name = the model, bytes = its model index
+NOTE_STUDIO = 7
 NOTE_SOUND = 1
 # A sound note's name from x9-audio-vox-stream (divergence #177): "<sound>
 # <tag>:<io kc>,<opens>,<reads>,<seeks>,<probes>" (xbox_ft_sound_note_name),
@@ -176,6 +178,12 @@ SND_LABELS = ("snd_rate", "snd_backend")
 # stream memory).
 VOX_TIMES = ("vox_open_kc", "vox_wait_kc", "vox_io_kc", "vox_first_kc")
 VOX_LABELS = ("vox_slots", "vox_window_kb")
+# The brush and studio split (x9-perf-cpuprof): times, and the slowest
+# entity's model index, a label
+BRST_TIMES = ("br_face_kc", "br_decal_kc", "br_trans_kc", "br_moved_kc", "br_worst_kc",
+              "st_xform_kc", "st_submit_kc", "st_light_kc", "st_bbox_kc", "st_worst_kc",
+              "st_consts_kc", "st_skin_kc", "st_mesh_kc")
+BRST_LABELS = ("br_worst_mdl", "st_worst_mdl")
 # The sv_game counts the summary shows, with their headings.
 G_TABLE = [("g_ents", "ents"), ("g_thinks", "thinks"), ("g_touches", "touches"), ("g_moves", "SV_Move"),
            ("g_dll_traces", "DLL traces"), ("g_clip_ents", "clip cands"), ("g_links", "links"),
@@ -1233,6 +1241,25 @@ def segment_stats(rec, seg, include_flush=False, include_level_change=False):
         st["gpu_hi_frames"] = len(work_hi)
         st["work_gpu_hi"] = {k: sum(v) / len(work_hi) for k, v in zip(names, zip(*work_hi))} if work_hi else None
         st["work_gpu_lo"] = {k: sum(v) / len(work_lo) for k, v in zip(names, zip(*work_lo))} if work_lo else None
+        # x9-perf-cpuprof: the model index that was the frame's slowest
+        # studio draw / brush entity, per model: [index, frames, kc summed,
+        # kc worst], most time first.
+        for pre in ("st", "br"):
+            if pre + "_worst_mdl" in names:
+                im, ik = names.index(pre + "_worst_mdl"), names.index(pre + "_worst_kc")
+                agg = {}
+                for fw in work:
+                    if fw[im]:
+                        a = agg.setdefault(int(fw[im]), [int(fw[im]), 0, 0, 0])
+                        a[1] += 1
+                        a[2] += fw[ik]
+                        a[3] = max(a[3], fw[ik])
+                st[pre + "_worst"] = sorted(agg.values(), key=lambda a: (-a[2], a[0]))
+        if "st_worst_mdl" in names and frames:
+            # the studio notes name the model indices of this map
+            lo, hi = frames[0][0], frames[-1][0]
+            st["st_names"] = {n["bytes"]: n["name"] for n in rec["notes"]
+                              if n["kind"] == NOTE_STUDIO and lo <= n["seq"] <= hi}
     if snames:
         incl = {s: v / n for s, v in span_sum.items()}
         top = sum(incl[s] for s, p in rec["spans"] if not p)
@@ -1286,7 +1313,7 @@ def work_correlation(rec, include_flush=False, include_level_change=False):
     # counters, and the g_worst_cls/ent are labels.
     timed = set(span_names(rec)) | set(G_TIMES) | set(G_LABELS) | set(LOAD_TIMES) | set(PM_TIMES) | set(CE_TIMES) \
         | set(PART_TIMES) | set(EFX_TIMES) | set(CHROME_TIMES) | set(MUSIC_TIMES) | set(SND_TIMES) | set(SND_LABELS) \
-        | set(VOX_TIMES) | set(VOX_LABELS)
+        | set(VOX_TIMES) | set(VOX_LABELS) | set(BRST_TIMES) | set(BRST_LABELS)
     cpu, gpu, work = [], [], []
     lc = level_change_frames(rec)
     for seg in segments(rec):
@@ -1543,6 +1570,8 @@ def summary_text(rec, rows, sess):
     lines.extend(particles_text(rec, rows))
     lines.extend(beams_text(rec, rows))
     lines.extend(chrome_text(rec, rows))
+    lines.extend(brush_text(rec, rows))
+    lines.extend(studio_text(rec, rows))
     lines.extend(music_text(rec, rows))
     lines.extend(audio_text(rec, rows))
     lines.extend(dialogue_text(rec, rows))
@@ -1906,6 +1935,89 @@ def chrome_text(rec, rows):
             r["map"][:18], "%s/%s" % (short(a.get("chrome_meshes", 0.0)), short(r["work_peak"].get("chrome_meshes", 0.0))),
             short(a.get("chrome_verts", 0.0)), short(a.get("chrome_gpu", 0.0)),
             r.get("span_ms", {}).get("k_studio_points", 0.0), a.get("chrome_kc", 0.0) * k))
+    return lines
+
+
+def _worst_models(rec, r, pre, names=None, top=3):
+    """The models most often the frame's slowest (x9-perf-cpuprof):
+    "name frames% avg ms", from the *_worst rows segment_stats built."""
+    k = 1e6 / rec["tsc_hz"]
+    out = []
+    for mi, frames, kc, _ in r.get(pre + "_worst", [])[:top]:
+        name = (names or {}).get(mi, "#%d" % mi)
+        name = name.replace("models/", "").replace(".mdl", "")
+        out.append("%s %d%% %.2f" % (name, round(100.0 * frames / r["frames"]), kc * k / frames))
+    return ", ".join(out) or "-"
+
+
+def brush_text(rec, rows):
+    """Brush entities per in-play frame (recorders from 2026-10-24,
+    x9-perf-cpuprof): submitted, frustum-culled, drawn translucent and
+    moved; their surfaces walked, faces drawn, back faces dropped,
+    texture binds; then k_brush and the parts of it: the surface loops,
+    the decals, the translucent and the moved entities whole; and the
+    model indices most often the frame's slowest brush entity."""
+    if "br_ents" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r and r["work_avg"].get("br_ents", 0.0)]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "brush entities per in-play frame: submitted avg/peak, culled, drawn translucent / moved, surfaces "
+             "walked, faces drawn, back faces, binds (exact in xemu); ms: k_brush, of it the surface loops, decals, "
+             "translucent and moved entities; us per face; the slowest entity by model index (share of frames, avg ms)"]
+    lines.append("%-18s %9s %6s %5s %5s %6s %6s %5s %5s %7s %6s %6s %6s %6s %6s  %s" % (
+        "map", "ents", "culled", "trans", "moved", "surfs", "faces", "back", "binds",
+        "k_brush", "faces", "decal", "trans", "moved", "us/fc", "slowest"))
+    for r in maps:
+        a, pk = r["work_avg"], r["work_peak"]
+        faces = a.get("br_faces", 0.0)
+        lines.append("%-18s %9s %6s %5s %5s %6s %6s %5s %5s %7.3f %6.3f %6.3f %6.3f %6.3f %6s  %s" % (
+            r["map"][:18], "%s/%s" % (short(a["br_ents"]), short(pk.get("br_ents", 0.0))),
+            short(a.get("br_culled", 0.0)), short(a.get("br_trans", 0.0)), short(a.get("br_moved", 0.0)),
+            short(a.get("br_surfs", 0.0)), short(faces), short(a.get("br_back", 0.0)), short(a.get("br_binds", 0.0)),
+            r.get("span_ms", {}).get("k_brush", 0.0), a.get("br_face_kc", 0.0) * k, a.get("br_decal_kc", 0.0) * k,
+            a.get("br_trans_kc", 0.0) * k, a.get("br_moved_kc", 0.0) * k,
+            "%.1f" % (a.get("br_face_kc", 0.0) * k * 1000.0 / faces) if faces else "-",
+            _worst_models(rec, r, "br")))
+    return lines
+
+
+def studio_text(rec, rows):
+    """Studio models per in-play frame (recorders from 2026-10-24,
+    x9-perf-cpuprof): draws, bounding-box culls, submodels drawn and of
+    them CPU-transformed, their CPU vertices; then k_client_studio split
+    into the game client's own work (bone setup above all: its own time
+    minus the lighting and bounding-box callbacks), those callbacks, and
+    k_studio_points split into transform+lighting and the mesh loop; and
+    the models most often the frame's slowest draw, named by the studio
+    notes where one was written (a draw over 2 ms)."""
+    if "st_ents" not in rec["counters"]:
+        return []
+    maps = [r for r in rows if r.get("frames") and "work_avg" in r and r["work_avg"].get("st_ents", 0.0)]
+    if not maps:
+        return []
+    k = 1e6 / rec["tsc_hz"]
+    lines = ["", "studio models per in-play frame: draws avg/peak, culled by StudioCheckBBox, submodels drawn, of them "
+             "CPU-transformed, CPU vertices (exact in xemu); ms: k_client_studio, the client's own (bones), lighting "
+             "and bbox callbacks; k_studio_points, its transform+lighting and mesh loop (of it the GPU constants, "
+             "the skins, the meshes; recorders from 2026-10-26); the slowest draw by model"]
+    lines.append("%-18s %9s %6s %6s %6s %7s %8s %6s %6s %6s %8s %6s %6s %6s %6s %6s  %s" % (
+        "map", "draws", "culled", "parts", "cpu", "cpu vtx", "k_client", "bones", "light", "bbox",
+        "k_points", "xform", "submit", "consts", "skin", "mesh", "slowest"))
+    for r in maps:
+        a, pk = r["work_avg"], r["work_peak"]
+        spans = r.get("span_ms", {})
+        client = spans.get("k_client_studio", 0.0)
+        points = spans.get("k_studio_points", 0.0)
+        light, bbox = a.get("st_light_kc", 0.0) * k, a.get("st_bbox_kc", 0.0) * k
+        lines.append("%-18s %9s %6s %6s %6s %7s %8.3f %6.3f %6.3f %6.3f %8.3f %6.3f %6.3f %6.3f %6.3f %6.3f  %s" % (
+            r["map"][:18], "%s/%s" % (short(a["st_ents"]), short(pk.get("st_ents", 0.0))),
+            short(a.get("st_culled", 0.0)), short(a.get("st_parts", 0.0)), short(a.get("st_parts_cpu", 0.0)),
+            short(a.get("st_verts_cpu", 0.0)), client, max(client - points - light - bbox, 0.0), light, bbox,
+            points, a.get("st_xform_kc", 0.0) * k, a.get("st_submit_kc", 0.0) * k,
+            a.get("st_consts_kc", 0.0) * k, a.get("st_skin_kc", 0.0) * k, a.get("st_mesh_kc", 0.0) * k,
+            _worst_models(rec, r, "st", r.get("st_names"))))
     return lines
 
 

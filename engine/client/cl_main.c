@@ -1601,6 +1601,52 @@ static void CL_Rcon_f( void )
 }
 
 
+#if XASH_XBOX
+/*
+=====================
+CL_R3D_BindBackup
+
+Resonance3D (#191): cl.frames, cl.commands and cl.predicted_frames for
+CL_UPDATE_BACKUP slots, zeroed: SINGLEPLAYER_BACKUP static ones, or
+MULTIPLAYER_BACKUP taken from the host pool the first time a server asks
+for more, and kept. After the wipe of cl (CL_ClearState) and when
+CL_InitEdicts changes the count.
+=====================
+*/
+void CL_R3D_BindBackup( void )
+{
+	static frame_t		sp_frames[SINGLEPLAYER_BACKUP];
+	static runcmd_t		sp_commands[SINGLEPLAYER_BACKUP];
+	static local_state_t	sp_predicted[SINGLEPLAYER_BACKUP];
+	static frame_t		*mp_frames;
+	static runcmd_t		*mp_commands;
+	static local_state_t	*mp_predicted;
+
+	if( CL_UPDATE_BACKUP > SINGLEPLAYER_BACKUP )
+	{
+		if( !mp_frames )
+		{
+			mp_frames = Mem_Malloc( host.mempool, sizeof( frame_t ) * MULTIPLAYER_BACKUP );
+			mp_commands = Mem_Malloc( host.mempool, sizeof( runcmd_t ) * MULTIPLAYER_BACKUP );
+			mp_predicted = Mem_Malloc( host.mempool, sizeof( local_state_t ) * MULTIPLAYER_BACKUP );
+		}
+		cl.frames = mp_frames;
+		cl.commands = mp_commands;
+		cl.predicted_frames = mp_predicted;
+	}
+	else
+	{
+		cl.frames = sp_frames;
+		cl.commands = sp_commands;
+		cl.predicted_frames = sp_predicted;
+	}
+
+	memset( cl.frames, 0, sizeof( frame_t ) * CL_UPDATE_BACKUP );
+	memset( cl.commands, 0, sizeof( runcmd_t ) * CL_UPDATE_BACKUP );
+	memset( cl.predicted_frames, 0, sizeof( local_state_t ) * CL_UPDATE_BACKUP );
+}
+#endif
+
 /*
 =====================
 CL_ClearState
@@ -1623,6 +1669,9 @@ void CL_ClearState( void )
 
 	// wipe the entire cl structure
 	memset( &cl, 0, sizeof( cl ));
+#if XASH_XBOX
+	CL_R3D_BindBackup(); // #191: the slots the wipe zeroed in place before
+#endif
 	MSG_Clear( &cls.netchan.message );
 	memset( &clgame.fade, 0, sizeof( clgame.fade ));
 	memset( &clgame.shake, 0, sizeof( clgame.shake ));
@@ -3993,6 +4042,10 @@ void CL_Init( void )
 
 	if( host.type == HOST_DEDICATED )
 		return; // nothing running on the client
+
+#if XASH_XBOX
+	CL_R3D_BindBackup(); // #191: never NULL, before the first CL_ClearState
+#endif
 
 	CL_InitLocal();
 

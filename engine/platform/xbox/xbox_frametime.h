@@ -269,6 +269,10 @@ void Xbox_FrameTime_Shutdown( void );      /* Host_ShutdownWithReason */
 /* xbox_membench.c (#142): registers `r3d_membench`; called from
    Xbox_FrameTime_Init. */
 void Xbox_MemBench_Init( void );
+/* r3d_memreport (#195, xbox_memreport.c) */
+void Xbox_MemReport_Init( void );
+void Xbox_MemReport_Frame( void );
+void Xbox_MemReport_Stage( const char *stage );
 
 /* xbox_s_mix_bench.c (#174): registers `r3d_mixbench`; likewise. */
 void Xbox_MixBench_Init( void );

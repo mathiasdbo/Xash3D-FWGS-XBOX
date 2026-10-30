@@ -100,6 +100,7 @@ reserved for) are in docs/r3d/fork-plan.md, X12 item 4.
 #include "soundlib.h"
 #include "xbox_frametime.h"
 #include "xbox_vox_stream.h"
+#include "xbox_snd_adpcm.h" /* SOUND_R3D_ADPCM, #200 */
 #include "xbox_async_read.h" /* compat/xbox: the overlapped reads, #172 */
 
 /* Not archived, like r3d_music_baked: an A/B that ended on 0 would keep
@@ -2160,7 +2161,7 @@ static qboolean Vox_CrcSentence( const char *name, vox_crc_stats_t *st )
 				r->rounded = (uint32_t)(int)round( w->end * 0.01f * src->samples );
 				r->whole = !FBitSet( src->flags, SOUND_R3D_WINDOW );
 				r->data_crc = 0;
-				if( r->whole )
+				if( r->whole && !FBitSet( src->flags, SOUND_R3D_ADPCM )) // #200: blocks, not the file's bytes
 				{
 					CRC32_Init( &r->data_crc );
 					CRC32_ProcessBuffer( &r->data_crc, src->buffer, (int)src->samples );

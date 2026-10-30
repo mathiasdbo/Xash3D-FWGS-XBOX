@@ -126,6 +126,11 @@ size_t   nv2a_skin_cache_chunk_bytes( const nv2a_skin_cache_t *cache );
 size_t   nv2a_skin_cache_backed( const nv2a_skin_cache_t *cache );   /* bytes of chunks backed right now */
 size_t   nv2a_skin_cache_used( const nv2a_skin_cache_t *cache );     /* bytes allocated within them */
 uint32_t nv2a_skin_cache_resident_count( const nv2a_skin_cache_t *cache );
+
+/* The current frame's upload allowance given back: the next acquire goes
+   as a frame's first would. For uploads made between frames, in a load,
+   where nothing is drawn and no frame can hitch (divergences.md #210). */
+void nv2a_skin_cache_reset_allowance( nv2a_skin_cache_t *cache );
 uint32_t nv2a_skin_cache_eviction_count( const nv2a_skin_cache_t *cache );
 
 /* RGBA32 (R,G,B,A bytes per texel) -> the 16-bit words

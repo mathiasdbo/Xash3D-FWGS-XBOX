@@ -69,6 +69,7 @@ static nv2a_sgpu_entry_t  nv2a_sgpu_entries[NV2A_STUDIO_GPU_MAX_ENTRIES];
 static uint16_t           nv2a_sgpu_buckets[NV2A_SGPU_BUCKETS];
 static uint32_t           nv2a_sgpu_build_frame;
 static uint32_t           nv2a_sgpu_builds_this_frame;
+static uint32_t           nv2a_sgpu_build_verts_this_frame; /* #211 */
 
 static uint32_t nv2a_sgpu_bucket( const studiohdr_t *hdr, const mstudiomodel_t *sub )
 {
@@ -193,6 +194,15 @@ void nv2a_sgpu_cache_flush( void )
 	nv2a_sgpu_cache_stats.failures = 0;
 }
 
+size_t nv2a_sgpu_contiguous( void )
+{
+	size_t i, bytes = 0;
+
+	for( i = 0; i < NV2A_SGPU_MAX_CHUNKS; i++ )
+		bytes += ( nv2a_sgpu_chunk_mem[i] ? MmQueryAllocationSize( nv2a_sgpu_chunk_mem[i] ) : 0 );
+	return bytes;
+}
+
 void nv2a_sgpu_cache_shutdown( void )
 {
 	if( !nv2a_sgpu_cache )
@@ -306,14 +316,18 @@ const nv2a_sgpu_geometry_t *nv2a_sgpu_cache_get( const studiohdr_t *hdr, const m
 	{
 		nv2a_sgpu_build_frame = frame;
 		nv2a_sgpu_builds_this_frame = 0;
+		nv2a_sgpu_build_verts_this_frame = 0;
 	}
-	if( nv2a_sgpu_builds_this_frame >= NV2A_STUDIO_GPU_BUILDS_PER_FRAME )
+	if( nv2a_sgpu_builds_this_frame > 0
+		&& ( nv2a_sgpu_builds_this_frame >= NV2A_STUDIO_GPU_BUILDS_PER_FRAME
+			|| nv2a_sgpu_build_verts_this_frame + (uint32_t)( sub->numverts > 0 ? sub->numverts : 0 ) > NV2A_STUDIO_GPU_BUILD_VERTS_PER_FRAME ))
 		return NULL;
 
 	slot = nv2a_sgpu_free_slot();
 	if( slot < 0 || sub->nummesh <= 0 || sub->nummesh > MAXSTUDIOMESHES )
 		return NULL;
 	nv2a_sgpu_builds_this_frame++;
+	nv2a_sgpu_build_verts_this_frame += (uint32_t)( sub->numverts > 0 ? sub->numverts : 0 );
 
 	pmesh = (const mstudiomesh_t *)((const byte *)hdr + sub->meshindex );
 	for( m = 0; m < sub->nummesh; m++ )

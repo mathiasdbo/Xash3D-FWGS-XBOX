@@ -524,6 +524,50 @@ enum
 	XBOX_FT_W_VOX_SMALL,     /* candidates left to S_LoadSound for their size (U bytes of data or less) */
 	XBOX_FT_W_VOX_FALLBACKS, /* candidates left to upstream for another reason, and windows that fell back to a whole load */
 	XBOX_FT_W_VOX_WINDOW_KB, /* KiB the streams hold at the frame's close - slots, loop units, header entries, whole fallbacks (a state) */
+	/* Brush entities (2026-10-24, x9-perf-cpuprof): where k_brush goes,
+	   counted in ref/nv2a's nv2a_draw_brush_entity (r_context.c). An
+	   entity is "moved" when it draws with an origin or angles (a door, a
+	   fan, a train), static when both are zero (a func_wall or
+	   func_breakable where the map put it). Times are summed in ticks and
+	   rounded once at R_EndFrame; br_*_kc are parts of k_brush, which
+	   also holds its warp child span. */
+	XBOX_FT_W_BR_ENTS,       /* brush entities submitted from the solid and translucent lists */
+	XBOX_FT_W_BR_CULLED,     /* ... of which the frustum box test dropped */
+	XBOX_FT_W_BR_TRANS,      /* drawn ones whose render mode is not kRenderNormal */
+	XBOX_FT_W_BR_MOVED,      /* drawn ones with a non-zero origin or angles */
+	XBOX_FT_W_BR_SURFS,      /* their model surfaces walked */
+	XBOX_FT_W_BR_FACES,      /* ... of which drawn (one index run each) */
+	XBOX_FT_W_BR_BACK,       /* ... of which dropped as back faces */
+	XBOX_FT_W_BR_BINDS,      /* stage-0 texture binds those faces caused */
+	XBOX_FT_W_BR_FACE_KC,    /* time: the surface loops (cull, texture animation, bind, index push) */
+	XBOX_FT_W_BR_DECAL_KC,   /* time: R_DecalDrawBrushEntity */
+	XBOX_FT_W_BR_TRANS_KC,   /* time: whole brush entities with a render mode other than normal */
+	XBOX_FT_W_BR_MOVED_KC,   /* time: whole brush entities with an origin or angles */
+	XBOX_FT_W_BR_WORST_KC,   /* time: the frame's slowest brush entity */
+	XBOX_FT_W_BR_WORST_MDL,  /* its model index (curstate.modelindex; 0: none) */
+	/* Studio models (2026-10-24, x9-perf-cpuprof): where k_client_studio
+	   and k_studio_points go (r_studio.c). The game client's own work -
+	   bone setup above all - is k_client_studio's own time minus
+	   st_light_kc and st_bbox_kc, the engine callbacks it makes outside
+	   R_StudioDrawPoints. A draw costing XBOX_FT_NOTE_STUDIO_KC or more
+	   writes a "studio" note with its model's name, again only when it
+	   doubles the time of its model's last note in the map. */
+	XBOX_FT_W_ST_ENTS,       /* studio draws (R_StudioDrawModelInternal: models and players) */
+	XBOX_FT_W_ST_CULLED,     /* StudioCheckBBox calls that culled */
+	XBOX_FT_W_ST_PARTS,      /* R_StudioDrawPoints calls (one per drawn submodel) */
+	XBOX_FT_W_ST_PARTS_CPU,  /* ... of which ran the CPU transform and lighting (a mesh the vertex unit could not take) */
+	XBOX_FT_W_ST_VERTS_CPU,  /* vertices those transformed on the CPU */
+	XBOX_FT_W_ST_XFORM_KC,   /* time: in k_studio_points, setup, CPU transform and per-normal lighting */
+	XBOX_FT_W_ST_SUBMIT_KC,  /* time: in k_studio_points, the mesh loop - GPU constants, skins, draws or TriAPI emit */
+	XBOX_FT_W_ST_LIGHT_KC,   /* time: StudioDynamicLight, StudioEntityLight, StudioSetupLighting callbacks */
+	XBOX_FT_W_ST_BBOX_KC,    /* time: StudioCheckBBox callbacks */
+	XBOX_FT_W_ST_WORST_KC,   /* time: the frame's slowest studio draw (its k_client_studio time) */
+	XBOX_FT_W_ST_WORST_MDL,  /* its model index (curstate.modelindex; 0: none) */
+	/* st_submit_kc split (2026-10-26): where a draw's fixed cost goes when
+	   an explosion shows ~190 small models (~45 us each, bmi-720-perf6) */
+	XBOX_FT_W_ST_CONSTS_KC,  /* time: a GPU submodel's light, local-light and gamma constants (nv2a_sgpu_begin_submodel) */
+	XBOX_FT_W_ST_SKIN_KC,    /* time: R_StudioSetupSkin - the bind, and a lazy skin read */
+	XBOX_FT_W_ST_MESH_KC,    /* time: the meshes themselves - the GPU draw or the CPU path's vertices */
 	XBOX_FT_W_END
 };
 
@@ -740,6 +784,11 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
                          class; chunks: a chunk header past what the
                          stream reads; big: a request wider than the
                          window); kilocycles = the decision.
+     XBOX_FT_NOTE_STUDIO (2026-10-24, x9-perf-cpuprof) one studio draw
+                         that took XBOX_FT_NOTE_STUDIO_KC or more of
+                         k_client_studio, the first in the map for its
+                         model or twice that model's last note: name =
+                         the model, bytes = its model index.
    From the same build a sound note's name is xbox_ft_sound_note_name's
    below (the load's caller and its file calls); earlier ones hold the
    sound's name alone.
@@ -752,6 +801,8 @@ size_t xbox_ft_encode_classes( uint8_t *out, const xbox_ft_class_t *classes, uin
 #define XBOX_FT_NOTE_LOAD        4u
 #define XBOX_FT_NOTE_MUSIC       5u
 #define XBOX_FT_NOTE_VOX         6u
+#define XBOX_FT_NOTE_STUDIO      7u
+#define XBOX_FT_NOTE_STUDIO_KC   1467u /* 2 ms at 733 MHz */
 #define XBOX_FT_NOTE_NAME_BYTES  48u
 #define XBOX_FT_NOTE_BYTES       ( 16u + XBOX_FT_NOTE_NAME_BYTES )
 #define XBOX_FT_NOTES_MAX        64u

@@ -34,6 +34,16 @@ GNU General Public License for more details.
 #endif
 
 static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAINTBUFFER_SIZE+1)];
+#if XASH_XBOX
+// docs/r3d/divergences.md #208: with every sound on an APU voice the mixer
+// writes nothing into either buffer, and the room effect runs on the GP: a
+// chunk with no writes leaves both buffers zero and its output is silence.
+// s_r3d_mix_writes counts the channels a chunk mixed into them;
+// s_r3d_dirty_n is how far into them the last chunk with writes reached (0:
+// both zero), so a clear is needed only up to there.
+static int s_r3d_mix_writes;
+static int s_r3d_dirty_n = PAINTBUFFER_SIZE;
+#endif
 
 #define S_MakeMixMono( x ) \
 	static void S_MixMono ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, int num_samples ) \
@@ -251,7 +261,13 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 
 		// get sample pointer and also amount of samples available
 		const void *audio = NULL;
+#if XASH_XBOX
+		s_r3d_adpcm_walk = !pbuf; // #200: an ADPCM sound is not decoded for a walk
+#endif
 		int available = S_RetrieveAudioSamples( S_MIX_SOURCE( chan ), &audio, chan->sample, request_num_samples, FBitSet( chan->flags, FL_CHAN_USE_LOOP ));
+#if XASH_XBOX
+		s_r3d_adpcm_walk = false;
+#endif
 
 		// no samples available, exit
 		if( !available )
@@ -428,6 +444,9 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 
 		if( ch->words )
 		{
+#if XASH_XBOX
+			s_r3d_mix_writes++; // #208
+#endif
 			VOX_MixChannelToBuffer( dst, ch, num_samples, out_rate, pitch );
 
 			if( FBitSet( ch->flags, FL_CHAN_SENTENCE_FINISHED ))
@@ -437,7 +456,11 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 		{
 #if XASH_XBOX
 			// #182: a channel on an APU voice is only walked
-			S_MixChannelToBuffer( Xbox_SndVoices_Channel( ch, sc, pitch ) ? NULL : dst, ch, num_samples, out_rate, pitch, 0, 0 );
+			const qboolean on_voice = Xbox_SndVoices_Channel( ch, sc, pitch );
+
+			if( !on_voice )
+				s_r3d_mix_writes++; // #208
+			S_MixChannelToBuffer( on_voice ? NULL : dst, ch, num_samples, out_rate, pitch, 0, 0 );
 #else
 			S_MixChannelToBuffer( dst, ch, num_samples, out_rate, pitch, 0, 0 );
 #endif
@@ -489,6 +512,9 @@ static int S_MixRawChannels( int end )
 
 		uint stop = (end < ch->s_rawend) ? end : ch->s_rawend;
 		const uint mask = ch->max_samples - 1;
+#if XASH_XBOX
+		s_r3d_mix_writes++; // #208
+#endif
 
 		for( size_t i = 0, j = snd.paintedtime; j < stop; i++, j++ )
 		{
@@ -539,6 +565,7 @@ static void S_WriteLinearBlastStereo16( short *snd_out, const int *snd_p, size_t
 	}
 }
 
+// src NULL: silence (#208)
 static void S_TransferPaintBuffer( const portable_samplepair_t *src, int endtime )
 {
 	const int *snd_p = (const int *)src;
@@ -561,13 +588,19 @@ static void S_TransferPaintBuffer( const portable_samplepair_t *src, int endtime
 		snd_linear_count <<= 1;
 
 		// write a linear blast of samples
+#if XASH_XBOX
+		if( !src )
+			memset( snd_out, 0, snd_linear_count * sizeof( short )); // #208
+		else
+#endif
 		S_WriteLinearBlastStereo16( snd_out, snd_p, snd_linear_count );
 #if XASH_XBOX
 		if( Xbox_SndMeter_SDL( )) // #189: the SDL output's level
 			Xbox_SndMeter_Block( snd_out, snd_linear_count >> 1 );
 #endif
 
-		snd_p += snd_linear_count;
+		if( src )
+			snd_p += snd_linear_count;
 		lpaintedtime += (snd_linear_count >> 1);
 	}
 
@@ -595,7 +628,15 @@ void S_PaintChannels( int endtime )
 
 		const int num_samples = end - snd.paintedtime;
 
+#if XASH_XBOX
+		// #208: only as far as the last chunk with writes reached
+		if( !sx_r3d_gp || s_r3d_dirty_n > 0 )
+			S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_ClearBuffers( sx_r3d_gp && s_r3d_dirty_n > num_samples ? s_r3d_dirty_n : num_samples ));
+		s_r3d_dirty_n = 0;
+		s_r3d_mix_writes = 0;
+#else
 		S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_ClearBuffers( num_samples ));
+#endif
 
 		int room_channels;
 #if XASH_XBOX
@@ -614,12 +655,13 @@ void S_PaintChannels( int endtime )
 #if XASH_XBOX
 		// docs/r3d/divergences.md #180: the room effect and this mix run on
 		// the APU's GP, on the room buffer streamed beside the dry mix
+		const qboolean silent = sx_r3d_gp && s_r3d_mix_writes == 0; // #208: both buffers still zero
 		if( sx_r3d_gp )
 		{
 			int params[SXGP_PARAMS];
 
 			S_MIX_SPAN( XBOX_FT_S_SND_DSP, XBOX_FT_S_SNDX_DSP, SX_R3D_GpParams( params, cls.key_dest != key_menu, gain ));
-			S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, Xbox_SndGpRoom_Paint( roombuffer, snd.paintedtime, end, params ));
+			S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, Xbox_SndGpRoom_Paint( silent ? NULL : roombuffer, snd.paintedtime, end, params ));
 		}
 		else
 #endif
@@ -633,7 +675,13 @@ void S_PaintChannels( int endtime )
 		}
 
 		// transfer out according to DMA format
+#if XASH_XBOX
+		if( !silent )
+			s_r3d_dirty_n = num_samples; // S_ClearBuffers clears one past it: the resamplers' extra sample
+		S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_TransferPaintBuffer( silent ? NULL : paintbuffer, end ));
+#else
 		S_MIX_SPAN( XBOX_FT_S_SND_OUT, XBOX_FT_S_SNDX_OUT, S_TransferPaintBuffer( paintbuffer, end ));
+#endif
 		snd.paintedtime = end;
 	}
 }

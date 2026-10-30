@@ -28,6 +28,7 @@ void     R_StudioInit( void );
 
 /* R_NewMap. */
 void R_StudioResetPlayerModels( void );
+void R_StudioLightCacheNewMap( void ); /* #205 (b) */
 
 /* Assigned into gReffuncs by name (r_context.c). */
 qboolean R_StudioFillAPI( engine_studio_api_t *api, r_studio_interface_t *pDefaultDraw );

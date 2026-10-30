@@ -5,6 +5,49 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: faster frames in Office Complex, cheaper hardware audio
+
+Measured over the same 45-minute route at 720p on a console:
+
+- Office Complex holds 60 fps more often: frames over 33 ms fell from 5% to
+  about 1-3% on c1a2 and from 4.5% to 1% on c1a2a. The renderer sends the
+  GPU its work in larger batches, merges a brush entity's faces into fewer
+  draws, and reuses a model's lighting while nothing around it changed.
+  Single player's entity snapshots hold 128 entities instead of 64, so the
+  server stops sending every entity whole in rooms with more than that
+  (5-6 ms a frame in the offices).
+- Hardware audio costs the main thread less: about 0.30 ms a frame, from
+  about 0.45 ms. The audio library no longer reads every sound source each
+  frame, and the mix and its upkeep run every other frame.
+- Monsters' route checks are cheaper. Each trace now rejects entities
+  outside its box before reading their model, and the world's entity grid
+  is finer.
+- Sounds can be held compressed in memory (`r3d_snd_adpcm 1`, from the
+  next map): the audio chip's ADPCM, a quarter of the 16-bit size.
+- Explosions that throw dozens of debris pieces hitch less: each new
+  piece's geometry goes to the GPU in the frame it appears, instead of two
+  a frame with the rest drawn on the CPU meanwhile.
+
+### Fixed - Xbox: the crash loading c1a2a from Office Complex, models untextured after a load
+
+- The renderer's texture animation table ran two bytes past its block on
+  maps with an odd number of texinfos (c1a2a has 2057), and the heap
+  aborted the load.
+- The level change's save buffer (up to 4 MiB) is freed once it is
+  written, instead of being held until the new map has spawned: at 720p
+  that ran the same load out of memory.
+- Models no longer flash untextured after a level load: the skins that
+  were on screen are loaded again during the load, not a couple a frame
+  after it.
+
+### Added - Xbox: 720p, widescreen and image quality settings
+
+The Display screen sets 1280x720 where the Dashboard allows it, anamorphic
+16:9 at 480 lines (following the Dashboard, or forced 4:3 or 16:9),
+anti-aliasing of the 3D view (2x, Quincunx or 4x) and texture filtering
+with anisotropy. `r3d_memreport` writes where the memory goes at each map
+start.
+
 ### Changed - Xbox: hardware audio from the menu, speech on the audio chip, an even machine gun
 
 The Audio menu has a "Hardware audio" switch (from the next start) that

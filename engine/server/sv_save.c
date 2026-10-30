@@ -22,6 +22,7 @@ GNU General Public License for more details.
 #include "ref_common.h" // decals
 #if XASH_XBOX && !XASH_DEDICATED
 #include "platform/xbox/xbox_frametime.h" // the frame-time recorder's save spans, docs/r3d/divergences.md #141
+#include <xboxkrnl/xboxkrnl.h> // MmQueryStatistics: the save buffer's size (#192)
 #else
 #define XBOX_FT_SPAN( id, stmt ) stmt
 #define XBOX_FT_SPAN_BEGIN( var )
@@ -54,6 +55,13 @@ SaveClose returns, as upstream's FS_Close.
 */
 #define SAVE_STAGE_MIN ( 64 * 1024 ) // a smaller free tail is not worth staging into: write through
 #define SAVE_STAGE_ALIGN 4096        // the stage and every file read into it start on a page
+// #192: the save buffer is SAVE_HEAPSIZE when that leaves SAVE_KEEP free,
+// halved down to SAVE_HEAPSIZE_MIN otherwise; below that the save is refused
+#define SAVE_HEAPSIZE_MIN ( 512 * 1024 )
+#define SAVE_KEEP ( 1536 * 1024 )
+
+// #192: set where a save is refused for memory, shown by SaveRefused_Show
+static qboolean save_refused_memory;
 
 typedef struct save_stage_s
 {
@@ -1017,8 +1025,46 @@ The load path keeps SaveInit: it parses the token table it reads in.
 static SAVERESTOREDATA *SaveInitUncleared( int size, int tokenCount )
 {
 	SAVERESTOREDATA	*pSaveData;
+#if !XASH_DEDICATED
+	MM_STATISTICS ms;
+#endif
+	const int asked = size;
 
-	pSaveData = Mem_Malloc( host.mempool, sizeof( SAVERESTOREDATA ) + size );
+	/*
+	#192: at 720p a map can leave less than 5 MiB free; the 4 MiB buffer
+	(twice per save, one after the other) then stopped the game (the
+	zone's Sys_Error) on a save from the menu. A level's state is a few
+	hundred KiB (c1a1b's .HL1 108 KiB), the rest of the buffer only the
+	write stage (SaveStage_Begin), which works with less. So the buffer
+	is halved until it leaves SAVE_KEEP free (the shot, the .sav's
+	head, the next frames' allocations), down to SAVE_HEAPSIZE_MIN, and
+	allocated without stopping the game; NULL refuses the save. A state
+	that overflows a smaller buffer is refused too (SaveOverflowed).
+	*/
+#if !XASH_DEDICATED
+	memset( &ms, 0, sizeof( ms ));
+	ms.Length = sizeof( ms );
+	if( NT_SUCCESS( MmQueryStatistics( &ms )))
+	{
+		while( size > SAVE_HEAPSIZE_MIN && (uint64_t)ms.AvailablePages * 4096u < (uint64_t)size + SAVE_KEEP )
+			size /= 2;
+	}
+#endif
+	for( ;; )
+	{
+		pSaveData = Mem_TryMalloc( host.mempool, sizeof( SAVERESTOREDATA ) + size );
+		if( pSaveData || size <= SAVE_HEAPSIZE_MIN )
+			break;
+		size /= 2;
+	}
+	if( !pSaveData )
+	{
+		Con_Printf( S_ERROR "%s: not enough memory for the save buffer (%d KiB)\n", __func__, size / 1024 );
+		save_refused_memory = true;
+		return NULL;
+	}
+	if( size != asked )
+		Con_Reportf( "%s: save buffer %d KiB (memory is short)\n", __func__, size / 1024 );
 	memset( pSaveData, 0, sizeof( SAVERESTOREDATA ));
 	pSaveData->pTokens = (char **)Mem_Calloc( host.mempool, tokenCount * sizeof( char* ));
 	pSaveData->tokenCount = tokenCount;
@@ -1103,6 +1149,59 @@ StoreHashTable
 write the stringtable into file
 =============
 */
+#if XASH_XBOX
+/*
+=============
+SaveOverflowed
+
+#192: true when the state written so far, plus the token table
+StoreHashTable is about to append, does not fit the buffer. The game
+DLL's CSaveRestoreBuffer::BufferCheck stops writing at an overflow and
+sets size to bufferSize; StoreHashTable writes without a check. Only a
+buffer SaveInitUncleared made smaller than asked is refused: the full
+4 MiB keeps upstream's behaviour.
+=============
+*/
+static qboolean SaveOverflowed( SAVERESTOREDATA *pSaveData )
+{
+	size_t tokens = 0;
+
+	if( pSaveData->bufferSize >= SAVE_HEAPSIZE )
+		return false;
+	if( pSaveData->size >= pSaveData->bufferSize )
+		return true;
+	if( pSaveData->pTokens )
+	{
+		for( int i = 0; i < pSaveData->tokenCount; i++ )
+			tokens += ( pSaveData->pTokens[i] ? Q_strlen( pSaveData->pTokens[i] ) : 0 ) + 1;
+	}
+	return (size_t)( pSaveData->pCurrentData - pSaveData->pBaseData ) + tokens > (size_t)pSaveData->bufferSize;
+}
+
+#if !XASH_DEDICATED
+void CL_CenterPrint( const char *text, float y ); // cl_game.c
+#endif
+
+/*
+=============
+SaveRefused_Show
+
+#192: a save refused for memory said on screen, not only in the console
+(which the console build never shows): the player knows the game was
+not saved. Clears the flag either way.
+=============
+*/
+static void SaveRefused_Show( void )
+{
+	if( !save_refused_memory )
+		return;
+	save_refused_memory = false;
+#if !XASH_DEDICATED
+	CL_CenterPrint( "Not enough memory to save the game.\nThe game was NOT saved.", 0.25f );
+#endif
+}
+#endif
+
 static char *StoreHashTable( SAVERESTOREDATA *pSaveData )
 {
 	char	*pTokenData = pSaveData->pCurrentData;
@@ -1801,6 +1900,10 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
 #endif
 
 	XBOX_FT_SPAN( XBOX_FT_S_SAVE_INIT, pSaveData = SaveInitUncleared( SAVE_HEAPSIZE, SAVE_HASHSTRINGS ));
+#if XASH_XBOX
+	if( !pSaveData )
+		return NULL; // #192: no room for the buffer, the save is refused
+#endif
 	XBOX_FT_SPAN_BEGIN( ft_ents );
 
 	Q_snprintf( name, sizeof( name ), DEFAULT_SAVE_DIRECTORY "%s.HL1", sv.name );
@@ -1890,6 +1993,16 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
 		svgame.dllFuncs.pfnSaveWriteFields( pSaveData, "ETABLE", &pSaveData->pTable[i], gEntityTable, ARRAYSIZE( gEntityTable ));
 
 	tableSize = pSaveData->size - dataSize;
+
+#if XASH_XBOX
+	if( SaveOverflowed( pSaveData ))
+	{
+		Con_Printf( S_ERROR "%s: the level's state does not fit the %d KiB save buffer (memory is short)\n", __func__, pSaveData->bufferSize / 1024 );
+		save_refused_memory = true;
+		SaveFinish( pSaveData );
+		return NULL;
+	}
+#endif
 
 	// Write entity string token table
 	pTokenData = StoreHashTable( pSaveData );
@@ -2401,6 +2514,10 @@ static qboolean SaveGameSlot( const char *pSaveName, const char *pSaveComment )
 	SaveFinish( pSaveData );
 	pSaveData = SaveInitUncleared( SAVE_HEAPSIZE, SAVE_HASHSTRINGS ); // re-init the buffer
 	XBOX_FT_SPAN_END( ft_init, XBOX_FT_S_SAVE_INIT );
+#if XASH_XBOX
+	if( !pSaveData )
+		return false; // #192: no room for the buffer, the save is refused
+#endif
 	XBOX_FT_SPAN_BEGIN( ft_globals );
 
 	Q_strncpy( hlPath, DEFAULT_SAVE_DIRECTORY "*.HL?", sizeof( hlPath ) );
@@ -2413,6 +2530,16 @@ static qboolean SaveGameSlot( const char *pSaveName, const char *pSaveComment )
 
 	// Write the game globals
 	svgame.dllFuncs.pfnSaveGlobalState( pSaveData );
+
+#if XASH_XBOX
+	if( SaveOverflowed( pSaveData ))
+	{
+		Con_Printf( S_ERROR "%s: the game's globals do not fit the %d KiB save buffer (memory is short)\n", __func__, pSaveData->bufferSize / 1024 );
+		save_refused_memory = true;
+		SaveFinish( pSaveData );
+		return false;
+	}
+#endif
 
 	// Write entity string token table
 	pTokenData = StoreHashTable( pSaveData );
@@ -2799,6 +2926,9 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 
 		// save the current level's state
 		XBOX_FT_LOAD_BEGIN( ft_save ); // #162
+#if XASH_XBOX
+		save_refused_memory = false;
+#endif
 		pSaveData = SaveGameState( true );
 		XBOX_FT_LOAD_END( ft_save, "sv_lvlsave" );
 
@@ -2807,9 +2937,20 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 			// make user notice the error
 			// do not use Host_Error, so the game progress won't be lost
 			Sys_Warn( "Can't write save file for performaing change level; check permissions" );
+#if XASH_XBOX
+			SaveRefused_Show(); // #192
+#endif
 			svgame.globals->changelevel = false;
 			return;
 		}
+#if XASH_XBOX
+		/* #201: the level's state is on disk once its staged bytes are
+		   written; LoadAdjacentEnts below reads the files. Upstream keeps
+		   the buffer (up to 4 MiB) until the new map has spawned, which at
+		   720p left c1a2 -> c1a2a out of memory in the load */
+		SaveFinish( pSaveData );
+		pSaveData = NULL;
+#endif
 	}
 
 	XBOX_FT_LOAD_BEGIN( ft_deact ); // #162
@@ -2979,7 +3120,14 @@ qboolean SV_SaveGame( const char *pName )
 	SaveBuildComment( comment, sizeof( comment ));
 
 	qboolean saved;
+#if XASH_XBOX
+	save_refused_memory = false;
+#endif
 	XBOX_FT_SPAN( XBOX_FT_S_SAVE, saved = SaveGameSlot( savename, comment ));
+#if XASH_XBOX
+	if( !saved )
+		SaveRefused_Show();
+#endif
 	return saved;
 }
 

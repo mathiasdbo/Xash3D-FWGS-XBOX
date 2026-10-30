@@ -20,13 +20,21 @@ GNU General Public License for more details.
 #include "platform/xbox/xbox_frametime.h" // first-use load counters, docs/r3d/divergences.md #141
 #include "platform/xbox/xbox_vox_stream.h" // placeholders of streamed sounds, #177
 #include "platform/xbox/xbox_snd_voices.h" // sounds on the APU's voices, #182
+#include "platform/xbox/xbox_snd_adpcm.h" // resident sounds as Xbox ADPCM, #200
 #endif
 
 // during registration it is possible to have more sounds
 // than could actually be referenced during gameplay,
 // because we don't want to free anything until we are
 // sure we won't need it.
+#if XASH_XBOX
+// #201: 8192 slots are 512 KiB of BSS. A map precaches at most
+// MAX_SOUNDS (2048); a load holds the old map's until S_EndRegistration,
+// half-life's maps 150-400 each (272 in c1a2 at 720p)
+#define MAX_SFX      2048
+#else
 #define MAX_SFX      8192
+#endif
 #define MAX_SFX_HASH (MAX_SFX/4)
 
 static int      s_numSfx = 0;
@@ -83,7 +91,13 @@ S_CreateDefaultSound
 */
 static wavdata_t *S_CreateDefaultSound( void )
 {
+#if XASH_XBOX
+	// docs/r3d/divergences.md #198: silence either way; a second of it was
+	// 94 KiB at 48 kHz, held by "*default" and by every sound that failed to load
+	uint samples = 64;
+#else
 	uint samples = SOUND_DMA_SPEED;
+#endif
 	uint channels = 1;
 	uint width = 2;
 	size_t size = samples * width * channels;
@@ -158,6 +172,7 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 
 #if XASH_XBOX
 	S_R3D_VoxDetach( sfx ); // #177: the placeholder this load replaces
+	sc = S_R3D_AdpcmCompress( sc ); // #200
 #endif
 	sfx->cache = sc;
 
@@ -178,6 +193,44 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 
 	return sfx->cache;
 }
+
+#if XASH_XBOX
+/*
+=================
+S_R3D_AdpcmCompress
+
+docs/r3d/divergences.md #200: with r3d_snd_adpcm 1, a mono sound of two
+blocks or more becomes Xbox ADPCM in its own allocation, encoded in place
+and shrunk: 0.5625 bytes a frame, against 1 (8-bit) or 2 (16-bit). A
+looped sound whose loop does not start and end on a block stays PCM: the
+APU's voices play ADPCM loops on whole blocks (al_buffer.c and apu_vp.c
+take any frame, and no console probe has played one inside a block), so
+its voice would have to go to the CPU.
+=================
+*/
+wavdata_t *S_R3D_AdpcmCompress( wavdata_t *sc )
+{
+	const uint blk = XBOX_ADPCM_BLOCK_FRAMES;
+	size_t bytes;
+
+	if( !r3d_snd_adpcm.value || sc->type != WF_PCMDATA || sc->channels != 1 || ( sc->width != 1 && sc->width != 2 )
+		|| sc->samples < XBOX_SND_ADPCM_MIN_FRAMES || FBitSet( sc->flags, SOUND_R3D_WINDOW | SOUND_R3D_HEADER | SOUND_R3D_ADPCM ))
+		return sc;
+	if( FBitSet( sc->flags, SOUND_LOOPED ) && ( sc->loop_start % blk || sc->samples % blk ))
+		return sc;
+	bytes = Xbox_SndAdpcm_Bytes( sc->samples );
+	if( bytes >= sc->size )
+		return sc;
+
+	// every block reads its frames before it writes (xbox_snd_adpcm.h)
+	Xbox_SndAdpcm_Encode( sc->buffer, sc->width, sc->samples, sc->buffer );
+	sc->size = bytes;
+	sc->width = 2;
+	SetBits( sc->flags, SOUND_R3D_ADPCM );
+	// a smaller size: dlmalloc keeps the block where it is and frees its end
+	return Mem_Realloc( host.soundpool, sc, sizeof( *sc ) + bytes );
+}
+#endif
 
 /*
 ==================
@@ -224,7 +277,12 @@ sfx_t *S_FindName( const char *pname, qboolean *pfInCache )
 	if( i == s_numSfx )
 	{
 		if( s_numSfx == MAX_SFX )
+		{
+#if XASH_XBOX
+			Con_Reportf( S_WARN "%s: %d sounds known, %s left out\n", __func__, MAX_SFX, name );
+#endif
 			return NULL;
+		}
 		s_numSfx++;
 	}
 

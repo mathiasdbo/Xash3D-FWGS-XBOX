@@ -206,6 +206,13 @@ static void XboxAL_ProfWrite( const char *why, qboolean flush )
 				( st.update_stream_cycles - s_alp_st0.update_stream_cycles ) * us / n,
 				( st.update_voice_cycles - s_alp_st0.update_voice_cycles ) * us / n,
 				( st.update_service_cycles - s_alp_st0.update_service_cycles ) * us / n );
+			// the rest of the call: the timed operations (inside streams),
+			// the GP slots' check, the EFX timed service, the whole call
+			XboxAL_ProfCat( t, sizeof( t ), &len, " (timed %.1f, gp check %.1f, efx %.1f, whole %.1f)",
+				( st.update_timed_cycles - s_alp_st0.update_timed_cycles ) * us / n,
+				( st.update_gp_check_cycles - s_alp_st0.update_gp_check_cycles ) * us / n,
+				( st.update_efx_cycles - s_alp_st0.update_efx_cycles ) * us / n,
+				( st.update_cycles - s_alp_st0.update_cycles ) * us / n );
 		}
 		XboxAL_ProfCat( t, sizeof( t ), &len, "\n" );
 		if( st.output_passes > s_alp_st0.output_passes )
@@ -441,6 +448,7 @@ static qboolean XboxAL_Init( void )
 	// default (the console A/B: 2.4 MiB less free than SDL). X12 5b (sounds
 	// on voices, their APU copies in the pool) raises it.
 	alXboxSetPoolSize( XBOX_SND_AL_POOL_BYTES );
+	Xbox_SndGpRoom_PreOpen();
 	s_al_device = alcOpenDevice( NULL );
 	if( !s_al_device )
 	{

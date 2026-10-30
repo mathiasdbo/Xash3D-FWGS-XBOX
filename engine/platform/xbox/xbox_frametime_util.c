@@ -83,6 +83,11 @@ const char *const xbox_ft_work_names[XBOX_FT_W_COUNT] =
 	"vox_starts", "vox_slots", "vox_opens", "vox_open_kc", "vox_reads", "vox_read_kb",
 	"vox_async", "vox_sync", "vox_waits", "vox_wait_kc", "vox_seeks", "vox_io_kc",
 	"vox_first_kc", "vox_pf_hits", "vox_small", "vox_fallbacks", "vox_window_kb",
+	"br_ents", "br_culled", "br_trans", "br_moved", "br_surfs", "br_faces", "br_back", "br_binds",
+	"br_face_kc", "br_decal_kc", "br_trans_kc", "br_moved_kc", "br_worst_kc", "br_worst_mdl",
+	"st_ents", "st_culled", "st_parts", "st_parts_cpu", "st_verts_cpu",
+	"st_xform_kc", "st_submit_kc", "st_light_kc", "st_bbox_kc", "st_worst_kc", "st_worst_mdl",
+	"st_consts_kc", "st_skin_kc", "st_mesh_kc",
 };
 
 /* A name list one short (or one long) of the enum is a compile error,

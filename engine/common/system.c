@@ -385,6 +385,10 @@ NOTE: we must prepare engine to shutdown
 before call this
 ================
 */
+#if XASH_XBOX
+extern fs_api_t g_fsapi; // filesystem_engine.c
+#endif
+
 void Sys_Error( const char *error, ... )
 {
 	va_list	argptr;
@@ -407,6 +411,22 @@ void Sys_Error( const char *error, ... )
 	va_end( argptr );
 
 	Sys_DebugBreak();
+
+#if XASH_XBOX
+	// #192: the message box and the console print reach no screen or log
+	// on the console; lasterror.txt (beside config.cfg) keeps the text.
+	// Small allocations only: an out-of-memory error is a big block.
+	if( g_fsapi.Open ) // FS_LoadProgs has run
+	{
+		file_t *f = FS_Open( "lasterror.txt", "w", true );
+
+		if( f )
+		{
+			FS_Printf( f, "%s\n", text );
+			FS_Close( f );
+		}
+	}
+#endif
 
 	SV_SysError( text );
 

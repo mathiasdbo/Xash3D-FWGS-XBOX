@@ -368,6 +368,8 @@ void *_Mem_Realloc( poolhandle_t poolptr, void *memptr, size_t size, qboolean cl
 	ALLOC_CHECK( 3 ) WARN_UNUSED_RESULT;
 void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
 	ALLOC_CHECK( 2 ) MALLOC_LIKE( _Mem_Free, 1 ) WARN_UNUSED_RESULT;
+void *_Mem_TryAlloc( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
+	ALLOC_CHECK( 2 ) MALLOC_LIKE( _Mem_Free, 1 ) WARN_UNUSED_RESULT;
 poolhandle_t _Mem_AllocPool( const char *name, unsigned int flags, const char *filename, int fileline )
 	WARN_UNUSED_RESULT;
 
@@ -379,10 +381,14 @@ void _Mem_EmptyPool( poolhandle_t poolptr, const char *filename, int fileline );
 void _Mem_Check( const char *filename, int fileline );
 qboolean Mem_IsAllocatedExt( poolhandle_t poolptr, void *data );
 void Mem_PrintStats( void );
+#if XASH_XBOX
+qboolean Mem_PoolInfo( size_t i, const char **name, size_t *total, size_t *real ); // Resonance3D #195
+#endif
 void Mem_Stats_f( void );
 
 #define Mem_Malloc( pool, size ) _Mem_Alloc( pool, size, false, __FILE__, __LINE__ )
 #define Mem_Calloc( pool, size ) _Mem_Alloc( pool, size, true, __FILE__, __LINE__ )
+#define Mem_TryMalloc( pool, size ) _Mem_TryAlloc( pool, size, false, __FILE__, __LINE__ )
 #define Mem_Realloc( pool, ptr, size ) _Mem_Realloc( pool, ptr, size, true, __FILE__, __LINE__ )
 #define Mem_Free( mem ) _Mem_Free( mem, __FILE__, __LINE__ )
 #define Mem_Free2( ptr ) { \

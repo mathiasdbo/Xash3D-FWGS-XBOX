@@ -37,7 +37,15 @@ GNU General Public License for more details.
 #include "filesystem_internal.h"
 #include "common/com_strings.h"
 
+#if XASH_XBOX
+// Resonance3D (#191): a save load extracts each level file with this
+// buffer while the old map is still resident (sv_save.c DirectoryExtract)
+// - 1 MiB taken at the console's tightest moment, for files a few hundred
+// KiB long. 64 KiB reads are as fast from its disk.
+#define FILE_COPY_SIZE		(64 * 1024)
+#else
 #define FILE_COPY_SIZE		(1024 * 1024)
+#endif
 
 static void FS_Purge( file_t *file )
 {
@@ -1163,7 +1171,11 @@ qboolean FS_FileCopy( file_t *pOutput, file_t *pInput, int fileSize )
 	}
 #endif
 
-	buf = Mem_Malloc( fs_mempool, FILE_COPY_SIZE );
+	if( fileSize <= 0 )
+		return done;
+
+	// no bigger than the file: a save's small files take what they need (#191)
+	buf = Mem_Malloc( fs_mempool, fileSize < FILE_COPY_SIZE ? fileSize : FILE_COPY_SIZE );
 
 	while( fileSize > 0 )
 	{

@@ -55,6 +55,7 @@ marks a channel that stays on the CPU.
 #include "platform/xbox/xbox_snd_voices.h"
 #include "platform/xbox/xbox_snd_gproom.h"
 #include "platform/xbox/xbox_vox_stream.h"
+#include "platform/xbox/xbox_snd_adpcm.h" // #200: SOUND_R3D_ADPCM
 #include "platform/xbox/openal/al_limits.h"
 
 #define AL_ALEXT_PROTOTYPES 1
@@ -228,14 +229,17 @@ static ALuint Buf_For( const sfx_t *sfx, const wavdata_t *sc )
 		return b->buf;
 	if( b )
 		Buf_Delete( b );
-	if( sc->channels == 1 )
+	if( FBitSet( sc->flags, SOUND_R3D_ADPCM ))
+		fmt = AL_FORMAT_MONO_XBOX_ADPCM; // #200: the blocks as they are, decoded by the APU
+	else if( sc->channels == 1 )
 		fmt = sc->width == 1 ? AL_FORMAT_MONO8 : AL_FORMAT_MONO16;
 	else
 		fmt = sc->width == 1 ? AL_FORMAT_STEREO8 : AL_FORMAT_STEREO16;
 	alGenBuffers( 1, &buf );
 	if( alGetError() != AL_NO_ERROR )
 		return 0;
-	alBufferDataStatic( buf, fmt, sc->buffer, (ALsizei)( sc->samples * sc->width * sc->channels ), sc->rate );
+	alBufferDataStatic( buf, fmt, sc->buffer, FBitSet( sc->flags, SOUND_R3D_ADPCM ) ? (ALsizei)sc->size
+		: (ALsizei)( sc->samples * sc->width * sc->channels ), sc->rate );
 	if( FBitSet( sc->flags, SOUND_LOOPED ) && sc->loop_start < sc->samples )
 	{
 		// S_RetrieveAudioSamples' loop: back to loop_start at the end
@@ -362,6 +366,11 @@ static qboolean Voice_Start( channel_t *ch, const wavdata_t *sc, double pitch )
 	alSourcei( v->src, AL_LOOPING, loop ? AL_TRUE : AL_FALSE );
 	v->loop = loop;
 	pos = Voice_LoopedPosition( sc, (int)ch->sample, loop );
+	// #200: an ADPCM voice starts on a block (the APU is not probed inside
+	// one): up to 63 frames early, a restored save's or a reused channel's
+	// part-way start
+	if( FBitSet( sc->flags, SOUND_R3D_ADPCM ))
+		pos -= pos % (int)XBOX_ADPCM_BLOCK_FRAMES;
 	alSourcei( v->src, AL_SAMPLE_OFFSET, pos < (int)sc->samples ? pos : 0 );
 	// the louder ear ranks it among the voices (0..1); the streams hold
 	// STREAM_PRIORITY, so a sound never takes the mix's own voice

@@ -270,6 +270,16 @@ xbox_music_adpcm_mutants() {
 }
 run_test xbox_music_adpcm_mutants xbox_music_adpcm_mutants
 
+# tools/host-tests/xbox_snd_adpcm_host_test.c, header (divergence #200):
+# the load-time encoder of resident sounds and the windowed decoder,
+# against xemu's steps.
+xbox_snd_adpcm() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/platform/xbox \
+		tools/host-tests/xbox_snd_adpcm_host_test.c engine/platform/xbox/xbox_snd_adpcm.c \
+		engine/platform/xbox/xbox_music_adpcm.c -lm -o "$OUT/xbox_snd_adpcm_test" && "$OUT/xbox_snd_adpcm_test"
+}
+run_test xbox_snd_adpcm xbox_snd_adpcm
+
 # tools/host-tests/s_mix_host_test.c, header (divergence #145): the real
 # engine/client/sound/s_mix.c built with XASH_XBOX 0 and 1 against a stub
 # engine (tools/host-tests/s_mix_stub), and the two builds' pitched mixer

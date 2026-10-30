@@ -119,6 +119,14 @@ void SX_ClearState( void );
 #if XASH_XBOX
 void SX_R3D_SetRate( void ); // #173: the delays' lengths follow SOUND_DMA_SPEED
 
+// docs/r3d/divergences.md #200: resident sounds kept as Xbox ADPCM
+extern convar_t r3d_snd_adpcm;
+extern qboolean s_r3d_adpcm_walk; // s_mix.c: the mixer only walks the channel (an APU voice plays it)
+wavdata_t *S_R3D_AdpcmCompress( wavdata_t *sc );
+// s_vox.c, S_TrimStart (dir > 0) and S_TrimEnd (dir < 0) on an ADPCM sound:
+// as S_R3D_VoxTrimData, 16-bit
+const int16_t *S_R3D_AdpcmTrimData( const wavdata_t *wav, int sample, int dir );
+
 #include "sound/s_dsp_gp.h" // #180: the room effect on the APU's GP
 #endif
 

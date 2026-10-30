@@ -1095,6 +1095,18 @@ static qboolean SV_ClipToEntity( edict_t *touch, moveclip_t *clip )
 	trace_t	trace;
 	model_t	*mod;
 
+#if XASH_XBOX
+	// docs/r3d/divergences.md #209: nearly every entity in the area nodes a
+	// trace walks is outside its box, and this test reads only the edict:
+	// first, before the filters that read its model, call into the game
+	// library or follow its owner (a monster's route check walked up to 99k
+	// candidates in a frame, bmi-720-perf6). Each test only rejects, so the
+	// order does not change which entities are clipped. A trigger in the
+	// list (Host_Error below) is still found when the trace reaches it.
+	if( !BoundsIntersect( clip->boxmins, clip->boxmaxs, touch->v.absmin, touch->v.absmax ))
+		return true;
+#endif
+
 	if( SV_IsValidEdict( clip->passedict ) && !SV_CheckGroupTrace( touch, clip->passedict ))
 		return true;
 

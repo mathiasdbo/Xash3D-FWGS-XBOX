@@ -236,7 +236,7 @@ static qboolean Mem_CheckAllocHeaderSmall( const char *func, const memheader_sma
 	return true;
 }
 
-void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
+static void *Mem_AllocExt( poolhandle_t poolptr, size_t size, qboolean clear, qboolean fatal, const char *filename, int fileline )
 {
 	if( size <= 0 )
 		return NULL;
@@ -258,6 +258,8 @@ void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char 
 
 		if( mem == NULL )
 		{
+			if( !fatal )
+				return NULL;
 			Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", __func__, Q_memprint( size ), filename, fileline );
 			return NULL;
 		}
@@ -278,6 +280,8 @@ void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char 
 
 		if( mem == NULL )
 		{
+			if( !fatal )
+				return NULL;
 			Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", __func__, Q_memprint( size ), filename, fileline );
 			return NULL;
 		}
@@ -291,6 +295,22 @@ void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char 
 
 		return (byte *)mem + sizeof( memheader_t );
 	}
+}
+
+void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
+{
+	return Mem_AllocExt( poolptr, size, clear, true, filename, fileline );
+}
+
+/*
+Resonance3D (docs/r3d/divergences.md #192): _Mem_Alloc, but out of memory
+returns NULL instead of stopping the game (Sys_Error), for a caller that
+can do without the block: a save that cannot get its buffer is refused,
+the game goes on.
+*/
+void *_Mem_TryAlloc( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
+{
+	return Mem_AllocExt( poolptr, size, clear, false, filename, fileline );
 }
 
 static void Mem_FreeBlockBig( memheader_t *mem, const char *filename, int fileline )
@@ -624,6 +644,23 @@ void _Mem_Check( const char *filename, int fileline )
 			Mem_CheckAllocHeaderSmall( __func__, mem, filename, fileline );
 	}
 }
+
+#if XASH_XBOX
+/*
+Resonance3D (docs/r3d/divergences.md #195): pool i's name and totals, for
+the Xbox memory report (engine/platform/xbox/xbox_memreport.c); false past
+the last pool. A freed pool's slot reports zero.
+*/
+qboolean Mem_PoolInfo( size_t i, const char **name, size_t *total, size_t *real )
+{
+	if( i >= poolcount )
+		return false;
+	*name = poolchain[i].filename ? poolchain[i].name : "";
+	*total = poolchain[i].filename ? poolchain[i].totalsize : 0;
+	*real = poolchain[i].filename ? poolchain[i].realsize : 0;
+	return true;
+}
+#endif
 
 void Mem_PrintStats( void )
 {

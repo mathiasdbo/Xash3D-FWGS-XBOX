@@ -149,7 +149,11 @@ void SDLash_Init( void )
 	// before a real Xbox entry point lands. XASH_XBOX only, not
 	// XASH_WIN32: every other XASH_WIN32 target has a real window to own.
 #if XASH_XBOX
-	if( SDL_Init( SDL_INIT_TIMER | SDL_INIT_EVENTS ) )
+	// Resonance3D (#195): no SDL_INIT_TIMER - it starts SDL's timer thread
+	// with the XBE's default 1 MiB stack, and nothing here sets an SDL
+	// timer (SDL_AddTimer would start it on first use); SDL_GetTicks does
+	// not need it.
+	if( SDL_Init( SDL_INIT_EVENTS ) )
 #else
 	if( SDL_Init( SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_EVENTS ) )
 #endif

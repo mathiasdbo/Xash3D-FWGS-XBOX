@@ -84,19 +84,27 @@ static qboolean SndCfg_FileValue( const char *file, const char *key, char *val, 
 	return found;
 }
 
-qboolean Xbox_SndCfg_Hardware( void )
+qboolean Xbox_BootCfg_Value( const char *key, char *val, int size )
 {
 	search_t *t;
-	char val[8] = "";
+	qboolean found;
 	int i;
 
-	SndCfg_FileValue( "config.cfg", "r3d_snd_hw", val, (int)sizeof( val ));
+	found = SndCfg_FileValue( "config.cfg", key, val, size );
 	if(( t = FS_Search( "userconfig.d/*.cfg", true, false )))
 	{
 		for( i = 0; i < t->numfilenames; i++ )
-			SndCfg_FileValue( t->filenames[i], "r3d_snd_hw", val, (int)sizeof( val ));
+			found |= SndCfg_FileValue( t->filenames[i], key, val, size );
 		Mem_Free( t );
 	}
+	return found;
+}
+
+qboolean Xbox_SndCfg_Hardware( void )
+{
+	char val[8] = "";
+
+	Xbox_BootCfg_Value( "r3d_snd_hw", val, (int)sizeof( val ));
 	return Q_atoi( val ) != 0;
 }
 
@@ -190,6 +198,21 @@ static void GpRoom_Off( const char *why )
 		alSourcei( s_src, AL_BUFFER, 0 );
 	}
 	alGetError();
+}
+
+/* nxdk-ex apu_gp.h (built in, engine/platform/xbox/openal/apu_gp.c) */
+void apu_gp_debug_set_scratch_bytes( uint32_t bytes );
+
+void Xbox_SndGpRoom_PreOpen( void )
+{
+	// #191: the GP's scratch sized for the one kernel this engine loads -
+	// the room's delay lines (GP_HLDSP_K_SCRATCH_BYTES) past the 8 KiB
+	// bootstrap image, and a page to spare - not the library's 512 KiB
+	// default, sized for its own reverb and two echoes, which the engine
+	// never loads: 368 KiB of contiguous memory back. Taken by the next
+	// apu_gp_init, at alcOpenDevice.
+	if( Xbox_SndCfg_Asked( "r3d_snd_gproom" ))
+		apu_gp_debug_set_scratch_bytes( 0x2000u + GP_HLDSP_K_SCRATCH_BYTES + 0x1000u );
 }
 
 void Xbox_SndGpRoom_Init( int ring_frames, int speed )
@@ -406,8 +429,20 @@ void Xbox_SndGpRoom_Paint( const portable_samplepair_t *room, int start, int end
 	if( !s_on )
 		return;
 	// the ring keeps 16 bits: the full range, the nearest to upstream's ints
-	// (only its stages and the output clip them, to CLIP16's range)
-	for( t = start, i = 0; t < end; t++, i++ )
+	// (only its stages and the output clip them, to CLIP16's range); room
+	// NULL: a chunk nothing was mixed into, silence (#208)
+	if( !room )
+	{
+		for( t = start; t < end; )
+		{
+			const int at = t & mask;
+			const int n = Q_min( end - t, s_ring_frames - at );
+
+			memset( s_ring + at * 2, 0, n * 2 * sizeof( int16_t ));
+			t += n;
+		}
+	}
+	else for( t = start, i = 0; t < end; t++, i++ )
 	{
 		int16_t *out = s_ring + ( t & mask ) * 2;
 

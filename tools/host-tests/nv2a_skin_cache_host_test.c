@@ -181,6 +181,12 @@ static void test_frame_allowance( void )
 	CHECK( nv2a_skin_cache_acquire( c, 3, G, 2, &off, NULL, NULL ) == NV2A_SKIN_OK, "allowance: second upload under both caps goes" );
 	CHECK( nv2a_skin_cache_acquire( c, 4, G, 2, &off, NULL, NULL ) == NV2A_SKIN_FRAME_CAP, "allowance: third upload hits the count cap" );
 	CHECK( !nv2a_skin_cache_is_resident( c, 4 ), "allowance: a deferred skin is not resident" );
+	/* #210: a load's uploads, between frames, each go as a frame's first */
+	nv2a_skin_cache_reset_allowance( c );
+	CHECK( nv2a_skin_cache_acquire( c, 4, G, 2, &off, NULL, NULL ) == NV2A_SKIN_OK, "allowance: reset - the same frame's next upload goes" );
+	nv2a_skin_cache_reset_allowance( c );
+	CHECK( nv2a_skin_cache_acquire( c, 5, 8 * G, 2, &off, NULL, NULL ) == NV2A_SKIN_OK, "allowance: reset - even past the byte cap" );
+	CHECK( nv2a_skin_cache_acquire( c, 6, G, 2, &off, NULL, NULL ) == NV2A_SKIN_FRAME_CAP, "allowance: without a reset the cap holds again" );
 	nv2a_skin_cache_destroy( c );
 }
 

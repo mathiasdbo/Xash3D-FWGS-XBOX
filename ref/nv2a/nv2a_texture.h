@@ -215,6 +215,10 @@ size_t nv2a_tex_memory( void );
 /* `texturelist`'s own extra reporting (D7): arena used/free/largest-free
    and how many slots fell back to a standalone allocation. */
 void nv2a_tex_arena_stats( size_t *used, size_t *free_bytes, size_t *largest_free, uint32_t *fallback_count );
+/* #195: the contiguous memory r_image.c holds - the arena's span, the
+   studio skin cache's chunks, the textures stored outside the arena -
+   for r3d_gpumem (r_context.c) */
+void nv2a_tex_contiguous( size_t *arena, size_t *skin_chunks, size_t *fallbacks, uint32_t *fallback_count );
 
 /* The texnum currently bound to tmu 0 (GL_Bind only ever tracks tmu 0 -
    D6) - what the 2D flush (r_context.c) pushes the stage-0 texture
@@ -259,6 +263,10 @@ int nv2a_tex_register_studio_skin( const char *texname, texFlags_t flags, const 
    a map's GPU upload. A no-op inside a frame (the GPU may still be
    reading skins then). */
 void nv2a_tex_flush_skin_cache( void );
+/* divergences.md #210: the skins resident before the last flush uploaded
+   again, most recently drawn first, while the budget has room - between
+   frames, after the map's GPU buffers have their memory */
+void nv2a_tex_reload_skins( void );
 
 /* The builtins GL_CreateTexture records (D1) - used by FillRGBA (r_context.c,
    C3: binds *white) and by GL_Bind's own fallback. */
@@ -275,6 +283,7 @@ unsigned int nv2a_tex_gray( void );
    and filter-selection logic - see each call site's own comment. */
 qboolean nv2a_frame_is_open( void );          /* D4: is a frame currently open (R_BeginFrame..R_EndFrame)? */
 uint32_t nv2a_current_frame_number( void );   /* D4: this frame's own counter, for the same-frame write hazard */
+void     nv2a_gpu_settle( void );             /* #193: wait for the last submitted frame before freeing GPU-read memory between frames */
 void     nv2a_2d_flush_and_wait( void );      /* D4: flush the pending 2D batch (if any) and spin pb_busy */
 qboolean nv2a_global_texture_nearest( void ); /* D5: nv2a_r_texturenearest.value != 0 */
 

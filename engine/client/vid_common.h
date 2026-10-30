@@ -48,6 +48,7 @@ void VID_CheckChanges( void );
 const char *VID_GetModeString( int vid_mode );
 #if XASH_XBOX
 void VID_SetXboxVideoCvars( void );
+int VID_XboxRenderWidth( int w, int h );
 #endif
 
 #endif // VID_COMMON

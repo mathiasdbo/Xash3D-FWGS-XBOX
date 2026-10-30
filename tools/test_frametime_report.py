@@ -569,7 +569,7 @@ class Spans(unittest.TestCase):
     def test_spans_chunk(self):
         r = self.rec
         self.assertEqual(r["version"], 2)
-        self.assertEqual(len(r["counters"]), 213)
+        self.assertEqual(len(r["counters"]), 241)
         self.assertEqual(r["counters"][20], "span_calls")
         self.assertEqual(len(r["spans"]), 73)
         # Counts after the spans (2026-10-02, R5) are plain counters.
@@ -598,7 +598,14 @@ class Spans(unittest.TestCase):
                                                "vox_starts", "vox_slots", "vox_opens", "vox_open_kc", "vox_reads",
                                                "vox_read_kb", "vox_async", "vox_sync", "vox_waits", "vox_wait_kc",
                                                "vox_seeks", "vox_io_kc", "vox_first_kc", "vox_pf_hits", "vox_small",
-                                               "vox_fallbacks", "vox_window_kb"])
+                                               "vox_fallbacks", "vox_window_kb",
+                                               "br_ents", "br_culled", "br_trans", "br_moved", "br_surfs",
+                                               "br_faces", "br_back", "br_binds", "br_face_kc", "br_decal_kc",
+                                               "br_trans_kc", "br_moved_kc", "br_worst_kc", "br_worst_mdl",
+                                               "st_ents", "st_culled", "st_parts", "st_parts_cpu", "st_verts_cpu",
+                                               "st_xform_kc", "st_submit_kc", "st_light_kc", "st_bbox_kc",
+                                               "st_worst_kc", "st_worst_mdl", "st_consts_kc", "st_skin_kc",
+                                               "st_mesh_kc"])
         self.assertNotIn("ce_ents", fr.span_names(r))
         self.assertNotIn("pm_sv_cmds", fr.span_names(r))
         self.assertNotIn("snd_loads", fr.span_names(r))
@@ -714,7 +721,7 @@ class Spans(unittest.TestCase):
         self.assertIn("g_moves", names)
         self.assertFalse([n for n in names if n.startswith("k_")])
         # The g_* times and labels are not counts either, nor is snd_load_kc.
-        self.assertFalse([n for n in names if n.endswith("_kc") or n.startswith("g_worst")])
+        self.assertFalse([n for n in names if n.endswith("_kc") or n.startswith("g_worst") or n.endswith("_worst_mdl")])
         self.assertIn("snd_loads", names)
 
     def test_classes_chunk(self):
@@ -899,7 +906,7 @@ class Sessions(unittest.TestCase):
         self.assertTrue(s["id"].startswith(s["short"]))
         self.assertEqual(fr.systime_date(s["systime"]).year, 2022)
         self.assertEqual(r["end"], {"tsc": r["end"]["tsc"], "lost": 1, "next": fr.SEG_SIZE})
-        self.assertEqual(len(r["counters"]), 213)            # every segment has its own COUNTERS ...
+        self.assertEqual(len(r["counters"]), 241)            # every segment has its own COUNTERS ...
         self.assertEqual(len(r["spans"]), 73)                # ... and SPANS
         self.assertEqual(self.seg[3]["session"]["reason"], fr.SEG_SIZE)
         self.assertEqual(self.seg[3]["end"]["next"], fr.SEG_SESSION)
@@ -1137,6 +1144,34 @@ class RouteCheck(unittest.TestCase):
         for bad in ("c1a0:vox_starts", ":vox_starts:1", "c1a0::1", "c1a0:vox_starts:x"):
             with self.assertRaises(ValueError):
                 fr.parse_min(bad)
+
+
+class BrushStudio(unittest.TestCase):
+    """The brush and studio split (x9-perf-cpuprof): the two summary
+    sections, from rows segment_stats would build."""
+
+    def test_sections(self):
+        rec = {"counters": ["br_ents", "br_faces", "br_face_kc", "st_ents", "st_light_kc", "st_bbox_kc",
+                            "st_worst_kc", "st_worst_mdl"], "tsc_hz": 1e9, "notes": []}
+        row = {"map": "c1a2", "frames": 4,
+               "work_avg": {"br_ents": 84.0, "br_faces": 200.0, "br_face_kc": 1000.0,
+                            "st_ents": 50.0, "st_light_kc": 500.0, "st_bbox_kc": 100.0},
+               "work_peak": {"br_ents": 90.0, "st_ents": 97.0},
+               "span_ms": {"k_brush": 2.0, "k_client_studio": 5.0, "k_studio_points": 1.5},
+               "st_worst": [[12, 3, 6000.0, 2500.0], [7, 1, 900.0, 900.0]],
+               "st_names": {12: "models/scientist.mdl"}}
+        brush = fr.brush_text(rec, [row])
+        self.assertEqual(brush[2].split()[0], "map")
+        cols = brush[3].split()
+        self.assertEqual(cols[:2], ["c1a2", "84/90"])
+        self.assertIn("1.000", cols)                       # the face loops, 1000 kc at 1 GHz
+        self.assertEqual(cols[-2], "5.0")                  # us per face
+        studio = fr.studio_text(rec, [row])
+        line = studio[3]
+        self.assertIn("50/97", line)
+        self.assertIn(" 2.900 ", line)                     # bones: 5.0 - 1.5 - 0.5 - 0.1
+        self.assertIn("scientist 75% 2.00, #7 25% 0.90", line)
+        self.assertEqual(fr.brush_text({"counters": ["draws"], "tsc_hz": 1e9}, [row]), [])
 
 
 if __name__ == "__main__":

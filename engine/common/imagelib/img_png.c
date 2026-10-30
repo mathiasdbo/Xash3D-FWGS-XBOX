@@ -541,7 +541,17 @@ qboolean Image_SavePNG( const char *name, rgbdata_t *pix )
 	uint filtered_size = ( rowsize + 1 ) * pix->height;
 
 	byte *filtered_buffer;
+#if XASH_XBOX
+	// Resonance3D (#194): out of memory fails the write, not the game
+	out = filtered_buffer = Mem_TryMalloc( host.imagepool, filtered_size );
+	if( !filtered_buffer )
+	{
+		Con_Printf( S_ERROR "%s: not enough memory to write %s\n", __func__, name );
+		return false;
+	}
+#else
 	out = filtered_buffer = Mem_Malloc( host.imagepool, filtered_size );
+#endif
 
 	// apply adaptive filter to image
 	for( uint y = 0; y < pix->height; y++ )
@@ -612,7 +622,17 @@ qboolean Image_SavePNG( const char *name, rgbdata_t *pix )
 	png_hdr.ihdr_crc32 = BigLong( crc32 );
 
 	byte *buffer;
+#if XASH_XBOX
+	out = buffer = (byte *)Mem_TryMalloc( host.imagepool, outsize );
+	if( !buffer )
+	{
+		Con_Printf( S_ERROR "%s: not enough memory to write %s\n", __func__, name );
+		Mem_Free( filtered_buffer );
+		return false;
+	}
+#else
 	out = buffer = (byte *)Mem_Malloc( host.imagepool, outsize );
+#endif
 
 	stream.next_in = filtered_buffer;
 	stream.avail_in = filtered_size;

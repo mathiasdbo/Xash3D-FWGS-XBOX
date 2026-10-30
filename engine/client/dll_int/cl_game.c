@@ -999,9 +999,21 @@ void CL_InitEdicts( int maxclients )
 
 	if( !clgame.mempool ) return; // Host_Error without client
 #if XASH_LOW_MEMORY != 2
+#if XASH_XBOX
+	{
+		const int backup = ( maxclients <= 1 ) ? SINGLEPLAYER_BACKUP : MULTIPLAYER_BACKUP;
+
+		if( backup != CL_UPDATE_BACKUP )
+		{
+			CL_UPDATE_BACKUP = backup;
+			CL_R3D_BindBackup(); // #191: the slots for the new count
+		}
+	}
+#else
 	CL_UPDATE_BACKUP = ( maxclients <= 1 ) ? SINGLEPLAYER_BACKUP : MULTIPLAYER_BACKUP;
 #endif
-	cls.num_client_entities = CL_UPDATE_BACKUP * NUM_PACKET_ENTITIES;
+#endif
+	cls.num_client_entities = CL_UPDATE_BACKUP * R3D_PACKET_ENTITIES( maxclients ); // #202
 	cls.packet_entities = Mem_Realloc( clgame.mempool, cls.packet_entities, sizeof( entity_state_t ) * cls.num_client_entities );
 #if XASH_XBOX
 	// Resonance3D (divergences.md #116): HISTORY_MAX 16 on Xbox; the SDK
@@ -1664,6 +1676,14 @@ int GAME_EXPORT CL_GetScreenInfo( SCREENINFO *pscrinfo )
 	// setup screen info
 	clgame.scrInfo.iSize = sizeof( clgame.scrInfo );
 	clgame.scrInfo.iFlags = SCRINFO_SCREENFLASH;
+
+#if XASH_XBOX
+	// Resonance3D (#190): at 720p the HUD lays out the 853x480 screen it
+	// has at 480 lines in 16:9, not a 1280x720 one where its 640-class
+	// sprites come out two thirds as large. hud_scale set by hand wins.
+	if( !hud_scale.value && refState.height == 720 )
+		scale_factor = 1.5f;
+#endif
 
 	if( hud_scale.value >= 320.0f && hud_scale.value >= hud_scale_minimal_width.value )
 	{

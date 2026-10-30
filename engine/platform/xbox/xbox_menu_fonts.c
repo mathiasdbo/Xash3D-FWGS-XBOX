@@ -22,6 +22,7 @@ GNU General Public License for more details.
 #if XASH_XBOX && !XASH_DEDICATED
 
 #include <xboxkrnl/xboxkrnl.h>
+#include <hal/video.h> /* XVideoGetMode: 720p keeps the fonts released (#196) */
 #include "xbox_frametime.h"
 #include "xbox_menu_fonts.h"
 
@@ -57,6 +58,15 @@ void Xbox_MenuFonts_MapLoaded( void )
 	   without it has nothing to restore. */
 	if( !Cmd_Exists( MENU_RESTORE_CMD ))
 		return;
+
+	/* #196: at 720p the fonts stay released in play (1.9 MiB of atlases,
+	   the owner's choice): the first pause-menu open after a load
+	   rebuilds them, about 0.3 s, as before #127 */
+	if( XVideoGetMode().height == 720 )
+	{
+		Xbox_FT_Note( XBOX_FT_NOTE_MENU, "fonts left released, 720p", 0, 0 );
+		return;
+	}
 
 	before = Xbox_MenuFonts_FreePages();
 	if( before < XBOX_MENU_FONTS_MIN_FREE_PAGES )

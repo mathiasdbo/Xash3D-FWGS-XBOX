@@ -19,6 +19,8 @@ GNU General Public License for more details.
 #include <ctype.h>
 #if XASH_XBOX
 #include "platform/xbox/xbox_vox_stream.h" // dialogue streamed, docs/r3d/divergences.md #177
+#include "platform/xbox/xbox_snd_voices.h" // #197: Xbox_SndVoices_FreeSound
+#include "platform/xbox/xbox_snd_adpcm.h" // #200: SOUND_R3D_ADPCM
 #endif
 
 #define TRIM_SCAN_MAX 255
@@ -80,7 +82,12 @@ static int S_TrimStart( const wavdata_t *wav, int start )
 	}
 	else if( width == 2 )
 	{
+#if XASH_XBOX
+		// #200: an ADPCM sound's frames decoded
+		const int16_t *data = FBitSet( wav->flags, SOUND_R3D_ADPCM ) ? S_R3D_AdpcmTrimData( wav, start, 1 ) : (const int16_t *)&wav->buffer[channels * width * start];
+#else
 		const int16_t *data = (const int16_t *)&wav->buffer[channels * width * start];
+#endif
 
 		for( size_t i = 0; i < TRIM_SCAN_MAX && start < wav->samples; i++ )
 		{
@@ -122,7 +129,12 @@ static int S_TrimEnd( const wavdata_t *wav, int end )
 	}
 	else if( width == 2 )
 	{
+#if XASH_XBOX
+		// #200: an ADPCM sound's frames decoded
+		const int16_t *data = FBitSet( wav->flags, SOUND_R3D_ADPCM ) ? S_R3D_AdpcmTrimData( wav, end - 1, -1 ) : (const int16_t *)&wav->buffer[channels * width * ( end - 1 )];
+#else
 		const int16_t *data = (const int16_t *)&wav->buffer[channels * width * ( end - 1 )];
+#endif
 
 		for( size_t i = 0; i < TRIM_SCAN_MAX && end > 0; i++ )
 		{
@@ -209,7 +221,12 @@ void VOX_FreeWord( channel_t *ch )
 		S_R3D_VoxDetach( word->sfx ); // #177: a placeholder holds no samples to free
 	else
 #endif
-	FS_FreeSound( word->sfx->cache );
+	{
+#if XASH_XBOX
+		Xbox_SndVoices_FreeSound( word->sfx ); // #197: no voice still reads the word's samples
+#endif
+		FS_FreeSound( word->sfx->cache );
+	}
 	word->sfx->cache = NULL;
 	word->sfx = NULL;
 }

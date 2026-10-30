@@ -217,9 +217,20 @@ typedef struct
 
 	uint		checksum;			// for catching cheater maps
 
+#if XASH_XBOX
+	// Resonance3D (#191): CL_UPDATE_BACKUP slots, not MULTIPLAYER_BACKUP -
+	// every index is masked with CL_UPDATE_MASK, and single player uses 4
+	// of the 64 (1.35 MiB unused). CL_R3D_BindBackup points them at 4
+	// static slots, or at 64 taken the first time a multiplayer server
+	// asks for them, after each wipe of cl and each change of the count.
+	frame_t		*frames;
+	runcmd_t		*commands;
+	local_state_t	*predicted_frames;
+#else
 	frame_t		frames[MULTIPLAYER_BACKUP];		// alloced on svc_serverdata
 	runcmd_t		commands[MULTIPLAYER_BACKUP];		// each mesage will send several old cmds
 	local_state_t	predicted_frames[MULTIPLAYER_BACKUP];	// local client state
+#endif
 
 	double		timedelta;		// floating delta between two updates
 
@@ -791,6 +802,9 @@ void CL_UpdateFrameLerp( void );
 int CL_IsDevOverviewMode( void );
 void CL_SignonReply( connprotocol_t proto );
 void CL_ClearState( void );
+#if XASH_XBOX
+void CL_R3D_BindBackup( void ); // #191
+#endif
 void CL_SetCheatState( qboolean multiplayer, qboolean allow_cheats );
 void CL_SendGoldSrcConnectPacket( netadr_t adr, int challenge, const void *ticket, size_t ticketlen );
 void CL_NotifyServerListResponse( void );

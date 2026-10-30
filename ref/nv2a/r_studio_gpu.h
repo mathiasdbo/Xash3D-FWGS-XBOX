@@ -33,8 +33,14 @@ extern "C" {
 /* Builds per frame: a build walks every tricmd of the submodel once, so a
    view that suddenly shows many new models spreads them over a few frames
    (drawn by the CPU path until then) - the skin cache's own rule
-   (NV2A_STUDIO_SKIN_UPLOADS_PER_FRAME). */
-#define NV2A_STUDIO_GPU_BUILDS_PER_FRAME 2u
+   (NV2A_STUDIO_SKIN_UPLOADS_PER_FRAME). divergences.md #211: budgeted by
+   the vertices walked, not a flat two - an explosion's break pieces are
+   dozens of submodels of a few dozen vertices each, and at two a frame
+   most of them stayed on the CPU path for its first frames (70-144 CPU
+   submodels in the c1a3/c1a3d spikes, bmi-720-perf6). The first build of
+   a frame always goes; two whole characters still fit, as before. */
+#define NV2A_STUDIO_GPU_BUILDS_PER_FRAME      32u
+#define NV2A_STUDIO_GPU_BUILD_VERTS_PER_FRAME 2048u
 #define NV2A_STUDIO_GPU_EVICT_MIN_AGE    2u
 /* A submodel that could not get memory is not retried for this long. */
 #define NV2A_STUDIO_GPU_RETRY_FRAMES     60u
@@ -64,6 +70,7 @@ extern nv2a_sgpu_cache_stats_t nv2a_sgpu_cache_stats;
 /* r_studio_gpu.c */
 void nv2a_sgpu_cache_init( void );
 void nv2a_sgpu_cache_shutdown( void );   /* GPU idle */
+size_t nv2a_sgpu_contiguous( void );      /* #195: its chunks' bytes, for r3d_gpumem */
 void nv2a_sgpu_cache_flush( void );      /* between frames (the skin cache's flush point) */
 void nv2a_sgpu_cache_forget( const void *hdr ); /* a studio model is being freed */
 

@@ -382,9 +382,25 @@ qboolean Image_SaveBMP( const char *name, rgbdata_t *pix )
 		return false;
 	}
 
+#if XASH_XBOX
+	// Resonance3D (#194): the pixel buffer before the file is opened, so
+	// out of memory fails the write - no half-written file - not the game
+	byte *pbBmpBits = Mem_TryMalloc( host.imagepool, ((pix->width + 3) & ~3) * pix->height * pixel_size );
+	if( !pbBmpBits )
+	{
+		Con_Printf( S_ERROR "%s: not enough memory to write %s\n", __func__, name );
+		return false;
+	}
+#endif
+
 	file_t *pfile = FS_Open( name, "wb", false );
 	if( !pfile )
+	{
+#if XASH_XBOX
+		Mem_Free( pbBmpBits );
+#endif
 		return false;
+	}
 
 	// NOTE: align transparency column will sucessfully removed
 	// after create sprite or lump image, it's just standard requiriments
@@ -412,7 +428,9 @@ qboolean Image_SaveBMP( const char *name, rgbdata_t *pix )
 	FS_Write( pfile, &hdr, sizeof( bmp_t ));
 	le_struct_swap( bmp_swap, &hdr );
 
+#if !XASH_XBOX
 	byte *pbBmpBits = Mem_Malloc( host.imagepool, cbBmpBits );
+#endif
 
 	if( pixel_size == 1 )
 	{

@@ -101,6 +101,20 @@ GNU General Public License for more details.
 	#define NET_MAX_FRAGMENT		32768
 #endif
 
+#if XASH_XBOX
+// Resonance3D (docs/r3d/divergences.md #202): the single-player snapshot
+// ring per frame slot. With 4 x 64 a frame of 128 entities or more
+// (c1a2's offices show 130-140) pushes the frame it is delta-coded from
+// out of the ring, so the server sends every entity whole and searches a
+// baseline for each: 5-6 ms a frame on the console. 4 x 128 holds two
+// frames of up to 256. Multiplayer keeps NUM_PACKET_ENTITIES: its ring
+// is MULTIPLAYER_BACKUP slots a player.
+#define R3D_SP_PACKET_ENTITIES 128
+#define R3D_PACKET_ENTITIES( maxclients ) (( maxclients ) <= 1 ? R3D_SP_PACKET_ENTITIES : NUM_PACKET_ENTITIES )
+#else
+#define R3D_PACKET_ENTITIES( maxclients ) NUM_PACKET_ENTITIES
+#endif
+
 /*
 ==============================================================
 

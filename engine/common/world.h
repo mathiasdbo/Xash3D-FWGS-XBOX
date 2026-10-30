@@ -30,8 +30,16 @@ ENTITY AREA CHECKING
 ===============================================================================
 */
 #define MAX_TOTAL_ENT_LEAFS		128
+#if XASH_XBOX
+// docs/r3d/divergences.md #209: one level deeper, so a monster's or a
+// breakable's links sit in cells half the size and a trace walks fewer of
+// them (Office Complex: ~90 func_breakable, up to 99k clip candidates a frame)
+#define AREA_NODES			64
+#define AREA_DEPTH			5
+#else
 #define AREA_NODES			32
 #define AREA_DEPTH			4
+#endif
 
 #include "lightstyle.h"
 

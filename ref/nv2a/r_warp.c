@@ -420,6 +420,11 @@ faces never changes. r_warp_gpu 0 forces the CPU path. */
 static CVAR_DEFINE_AUTO( r_warp_gpu, "1", 0, "ref_nv2a: warp water on the GPU's vertex unit (0 = CPU path)" );
 
 static nv2a_warp_gpu_vertex_t *nv2a_warp_gpu_vb;    /* contiguous, write-combined */
+
+size_t nv2a_warp_contiguous( void )
+{
+	return ( nv2a_warp_gpu_vb ? MmQueryAllocationSize( nv2a_warp_gpu_vb ) : 0 );
+}
 static uint32_t               nv2a_warp_gpu_count;
 static const model_t          *nv2a_warp_gpu_world;  /* whose faces it holds */
 

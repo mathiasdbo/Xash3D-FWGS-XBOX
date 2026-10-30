@@ -29,6 +29,7 @@ separately (nv2a_studio_util.c, tools/host-tests).
 #include "r_warp.h" /* X9-X item 14 step 11: R_WarpAllowFog */
 #include "r_studio.h"
 #include "nv2a_ft.h" /* frame-time work counters (divergences.md #141) */
+#include "pm_local.h" /* #205 (b): physent_t, MAX_PHYSENTS */
 #include "r_sprite.h" /* X9-X step 6: TriSpriteTexture (gl_triapi.c:242) */
 #include "r_studio_gpu.h" /* divergences.md #143: the GPU studio path */
 #include <stdlib.h> /* calloc/free, R_StudioAllocStatics */
@@ -1472,6 +1473,33 @@ static void R_StudioSetupModel( int bodypart, void **ppbodypart, void **ppsubmod
 		*ppsubmodel = m_pSubModel;
 }
 
+/* x9-perf-cpuprof (XBOX_FT_W_ST_*): the studio path's times, in ticks,
+   rounded once a frame (nv2a_ft_studio_close_frame, from R_EndFrame);
+   the time of each model's last "studio" note in the map, kilocycles
+   (saturated), 0: none yet. */
+static uint64_t nv2a_ft_st_xform_ticks, nv2a_ft_st_submit_ticks, nv2a_ft_st_light_ticks, nv2a_ft_st_bbox_ticks;
+static uint64_t nv2a_ft_st_consts_ticks, nv2a_ft_st_skin_ticks, nv2a_ft_st_mesh_ticks; /* st_submit_kc's split */
+#define NV2A_FT_ST_NOTED_MAX 1024 /* model indices past it leave no note (2 KiB, not MAX_MODELS' 8) */
+static uint16_t nv2a_ft_st_noted[NV2A_FT_ST_NOTED_MAX];
+
+void nv2a_ft_studio_close_frame( void )
+{
+	NV2A_FT_ADD( XBOX_FT_W_ST_XFORM_KC, xbox_ft_span_kcyc( nv2a_ft_st_xform_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_ST_SUBMIT_KC, xbox_ft_span_kcyc( nv2a_ft_st_submit_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_ST_CONSTS_KC, xbox_ft_span_kcyc( nv2a_ft_st_consts_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_ST_SKIN_KC, xbox_ft_span_kcyc( nv2a_ft_st_skin_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_ST_MESH_KC, xbox_ft_span_kcyc( nv2a_ft_st_mesh_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_ST_LIGHT_KC, xbox_ft_span_kcyc( nv2a_ft_st_light_ticks ));
+	NV2A_FT_ADD( XBOX_FT_W_ST_BBOX_KC, xbox_ft_span_kcyc( nv2a_ft_st_bbox_ticks ));
+	nv2a_ft_st_xform_ticks = nv2a_ft_st_submit_ticks = nv2a_ft_st_light_ticks = nv2a_ft_st_bbox_ticks = 0;
+	nv2a_ft_st_consts_ticks = nv2a_ft_st_skin_ticks = nv2a_ft_st_mesh_ticks = 0;
+}
+
+void nv2a_ft_studio_new_map( void )
+{
+	memset( nv2a_ft_st_noted, 0, sizeof( nv2a_ft_st_noted ));
+}
+
 /*
 ===============
 R_StudioCheckBBox
@@ -1480,10 +1508,18 @@ R_StudioCheckBBox
 */
 static int R_StudioCheckBBox( void )
 {
+	xbox_ft_span_t span;
+	int visible;
+
 	if( !nv2a_studio_ctx.currententity || !nv2a_studio_ctx.currentmodel )
 		return false;
 
-	return R_StudioComputeBBox( NULL );
+	xbox_ft_span_begin( &span );
+	visible = R_StudioComputeBBox( NULL );
+	nv2a_ft_st_bbox_ticks += xbox_ft_span_ticks_since( &span );
+	if( !visible )
+		NV2A_FT_ADD( XBOX_FT_W_ST_CULLED, 1 );
+	return visible;
 }
 
 /*
@@ -1570,6 +1606,299 @@ static void R_StudioEntityLight( alight_t *lightinfo )
 			}
 		}
 	}
+}
+
+/*
+===============
+#205 (b): R_EntityDynamicLight, cached per entity
+
+The shared R_EntityDynamicLight (ref_light.c) traces into the world for
+every studio draw - a sky trace and up to five light traces through the
+brush physents - and an entity that has not moved gets the same answer
+every frame. Its result is kept per entity and handed back while nothing
+the function reads has changed:
+- the entity: origin, model (and its type and flags), effects, renderfx,
+  iuser4 - the entry's key;
+- the world: the map (R_NewMap drops the cache), the world model and its
+  lightdata, every brush physent's model, origin and angles in order, the
+  values of every light style a surface of this map uses, the sky colour
+  and vector, the engine's feature flags, r_lighting_extended, v_direct
+  and r_dynamic - any change starts a new generation, and an entry from
+  an older one is not used;
+- the dynamic lights: an entry is only stored or used while no dlight can
+  reach the entity (the function's own test, with a unit of margin so a
+  float rounded differently here cannot skip a light it adds).
+Fullbright entities, r_fullbright and draws outside the world pass take
+the function's cheap early return and are not cached. Its lightspot and
+lightvec writes, which the sky branch skips, are recorded and replayed as
+they happened. A brush physent from another BSP (its surfaces' styles are
+not in this map's list), or more brush physents than the snapshot holds,
+turns the cache off for that call.
+===============
+*/
+#define NV2A_ELC_SLOTS    256 /* by entity index; a collision only costs a trace */
+#define NV2A_ELC_MAX_PHYS 128 /* brush physents the snapshot holds */
+
+typedef struct
+{
+	const model_t *model;
+	vec3_t        origin;
+	vec3_t        angles;
+} nv2a_elc_phys_t;
+
+typedef struct
+{
+	qboolean      valid;
+	uint32_t      gen;
+	/* key */
+	int           index;
+	const model_t *model;
+	int           model_type;
+	int           model_flags;
+	vec3_t        origin;
+	int           effects;
+	int           renderfx;
+	int           iuser4;
+	/* the function's outputs */
+	int           ambientlight;
+	int           shadelight;
+	vec3_t        color;
+	vec3_t        plightvec;
+	colorVec      floor;
+	qboolean      spot_written;
+	vec3_t        lightspot;
+	vec3_t        lightvec;
+} nv2a_elc_entry_t;
+
+static nv2a_elc_entry_t nv2a_elc[NV2A_ELC_SLOTS];
+
+static struct
+{
+	qboolean        valid;
+	uint32_t        gen;
+	const model_t   *world;
+	const void      *lightdata;
+	int             features;
+	float           extended, direct, dynamic;
+	vec3_t          skycolor, skyvec;
+	int             num_phys;
+	nv2a_elc_phys_t phys[NV2A_ELC_MAX_PHYS];
+	/* the styles this map's surfaces use, and their values at gen */
+	const model_t   *styles_world;
+	int             num_styles;
+	byte            styles[MAX_LIGHTSTYLES];
+	int             style_values[MAX_LIGHTSTYLES];
+} nv2a_elc_world;
+
+/* R_NewMap: nothing traced on the old map holds on the new one. */
+void R_StudioLightCacheNewMap( void )
+{
+	memset( nv2a_elc, 0, sizeof( nv2a_elc ));
+	nv2a_elc_world.valid = false;
+	nv2a_elc_world.styles_world = NULL;
+	nv2a_elc_world.gen++;
+}
+
+/* The styles any surface of the world (its submodels share its surfaces)
+   lights with - all R_RecursiveLightPoint can read. */
+static void nv2a_elc_build_styles( const model_t *world )
+{
+	static qboolean used[MAX_LIGHTSTYLES];
+	int i, j;
+
+	memset( used, 0, sizeof( used ));
+	for( i = 0; i < world->numsurfaces; i++ )
+	{
+		const msurface_t *surf = &world->surfaces[i];
+
+		for( j = 0; j < MAXLIGHTMAPS && surf->styles[j] != 255; j++ )
+			used[surf->styles[j]] = true;
+	}
+	nv2a_elc_world.num_styles = 0;
+	for( i = 0; i < MAX_LIGHTSTYLES; i++ )
+	{
+		if( used[i] )
+			nv2a_elc_world.styles[nv2a_elc_world.num_styles++] = (byte)i;
+	}
+	nv2a_elc_world.styles_world = world;
+	nv2a_elc_world.valid = false; /* the style values below are not this list's */
+}
+
+/* Checks everything outside the entity that the function reads against
+   the snapshot, and starts a new generation when it changed. False: this
+   call cannot be cached. */
+static qboolean nv2a_elc_world_check( void )
+{
+	static nv2a_elc_phys_t phys[NV2A_ELC_MAX_PHYS];
+	const model_t *world = gp_cl->models[1];
+	qboolean changed = false;
+	int i, n = 0;
+
+	if( !world || world->type != mod_brush || !world->surfaces )
+		return false;
+
+	for( i = 0; i < MAX_PHYSENTS; i++ )
+	{
+		const physent_t *pe = gEngfuncs.EV_GetPhysent( i );
+
+		if( !pe )
+			break;
+		if( !pe->model || pe->model->type != mod_brush )
+			continue; /* R_LightVecInternal skips these too */
+		if( pe->model->surfaces != world->surfaces || n >= NV2A_ELC_MAX_PHYS )
+			return false;
+		memset( &phys[n], 0, sizeof( phys[n] ));
+		phys[n].model = pe->model;
+		VectorCopy( pe->origin, phys[n].origin );
+		VectorCopy( pe->angles, phys[n].angles );
+		n++;
+	}
+
+	if( nv2a_elc_world.styles_world != world )
+		nv2a_elc_build_styles( world );
+
+	if( !nv2a_elc_world.valid
+		|| nv2a_elc_world.world != world
+		|| nv2a_elc_world.lightdata != (const void *)world->lightdata
+		|| nv2a_elc_world.features != (int)gp_host->features
+		|| memcmp( &nv2a_elc_world.extended, &r_lighting_extended.value, sizeof( float ))
+		|| memcmp( &nv2a_elc_world.direct, &v_direct->value, sizeof( float ))
+		|| memcmp( &nv2a_elc_world.dynamic, &r_dynamic->value, sizeof( float ))
+		|| memcmp( nv2a_elc_world.skycolor, gp_movevars->skycolor, sizeof( vec3_t ))
+		|| memcmp( nv2a_elc_world.skyvec, gp_movevars->skyvec, sizeof( vec3_t ))
+		|| nv2a_elc_world.num_phys != n
+		|| memcmp( nv2a_elc_world.phys, phys, n * sizeof( phys[0] )))
+		changed = true;
+
+	for( i = 0; !changed && i < nv2a_elc_world.num_styles; i++ )
+	{
+		int s = nv2a_elc_world.styles[i];
+
+		if( nv2a_elc_world.style_values[s] != g_lightstylevalue[s] )
+			changed = true;
+	}
+
+	if( changed )
+	{
+		nv2a_elc_world.world = world;
+		nv2a_elc_world.lightdata = (const void *)world->lightdata;
+		nv2a_elc_world.features = (int)gp_host->features;
+		nv2a_elc_world.extended = r_lighting_extended.value;
+		nv2a_elc_world.direct = v_direct->value;
+		nv2a_elc_world.dynamic = r_dynamic->value;
+		VectorCopy( gp_movevars->skycolor, nv2a_elc_world.skycolor );
+		VectorCopy( gp_movevars->skyvec, nv2a_elc_world.skyvec );
+		nv2a_elc_world.num_phys = n;
+		memcpy( nv2a_elc_world.phys, phys, n * sizeof( phys[0] ));
+		for( i = 0; i < nv2a_elc_world.num_styles; i++ )
+		{
+			int s = nv2a_elc_world.styles[i];
+
+			nv2a_elc_world.style_values[s] = g_lightstylevalue[s];
+		}
+		nv2a_elc_world.valid = true;
+		nv2a_elc_world.gen++;
+	}
+	return true;
+}
+
+/* R_EntityDynamicLight's dlight loop as a yes/no: can any dlight add to
+   this entity's light? */
+static qboolean nv2a_elc_dlight_reaches( const cl_entity_t *ent, double time )
+{
+	int lnum;
+
+	for( lnum = 0; lnum < MAX_DLIGHTS; lnum++ )
+	{
+		const dlight_t *dl = &gp_dlights[lnum];
+		vec3_t dist;
+
+		if( dl->die < time || !r_dynamic->value )
+			continue;
+
+		VectorSubtract( ent->origin, dl->origin, dist );
+		if( dl->radius - VectorLength( dist ) > -1.0f )
+			return true;
+	}
+	return false;
+}
+
+static void nv2a_entity_dynamic_light( cl_entity_t *ent, alight_t *plight, qboolean draw_world, double time, vec3_t lightspot, vec3_t lightvec )
+{
+	static const uint32_t sentinel = 0x7FC0DEADu; /* a NaN: R_LightVecInternal clears lspot first */
+	nv2a_elc_entry_t *c;
+	vec3_t spot, vec;
+	qboolean cacheable;
+
+	if( !plight || !ent || !ent->model || !draw_world || r_fullbright->value || FBitSet( ent->curstate.effects, EF_FULLBRIGHT ))
+	{
+		R_EntityDynamicLight( ent, plight, draw_world, time, lightspot, lightvec );
+		return;
+	}
+
+	c = &nv2a_elc[(uint32_t)ent->index % NV2A_ELC_SLOTS];
+	cacheable = nv2a_elc_world_check() && !nv2a_elc_dlight_reaches( ent, time );
+
+	if( cacheable && c->valid && c->gen == nv2a_elc_world.gen
+		&& c->index == ent->index
+		&& c->model == ent->model
+		&& c->model_type == (int)ent->model->type
+		&& c->model_flags == ent->model->flags
+		&& !memcmp( c->origin, ent->origin, sizeof( vec3_t ))
+		&& c->effects == ent->curstate.effects
+		&& c->renderfx == ent->curstate.renderfx
+		&& c->iuser4 == ent->curstate.iuser4 )
+	{
+		plight->ambientlight = c->ambientlight;
+		plight->shadelight = c->shadelight;
+		VectorCopy( c->color, plight->color );
+		VectorCopy( c->plightvec, plight->plightvec );
+		ent->cvFloorColor = c->floor;
+		if( c->spot_written )
+		{
+			VectorCopy( c->lightspot, lightspot );
+			VectorCopy( c->lightvec, lightvec );
+		}
+		return;
+	}
+
+	/* The function reads lightvec only after R_LightVec wrote it, so it
+	   can trace into locals; they reach the caller's only if written. */
+	memcpy( &spot[0], &sentinel, sizeof( sentinel ));
+	spot[1] = spot[2] = 0.0f;
+	VectorClear( vec );
+	R_EntityDynamicLight( ent, plight, draw_world, time, spot, vec );
+
+	c->spot_written = memcmp( &spot[0], &sentinel, sizeof( sentinel )) != 0;
+	if( c->spot_written )
+	{
+		VectorCopy( spot, lightspot );
+		VectorCopy( vec, lightvec );
+	}
+
+	if( !cacheable )
+	{
+		c->valid = false;
+		return;
+	}
+
+	c->valid = true;
+	c->gen = nv2a_elc_world.gen;
+	c->index = ent->index;
+	c->model = ent->model;
+	c->model_type = (int)ent->model->type;
+	c->model_flags = ent->model->flags;
+	VectorCopy( ent->origin, c->origin );
+	c->effects = ent->curstate.effects;
+	c->renderfx = ent->curstate.renderfx;
+	c->iuser4 = ent->curstate.iuser4;
+	c->ambientlight = plight->ambientlight;
+	c->shadelight = plight->shadelight;
+	VectorCopy( plight->color, c->color );
+	VectorCopy( plight->plightvec, c->plightvec );
+	c->floor = ent->cvFloorColor;
+	VectorCopy( spot, c->lightspot );
+	VectorCopy( vec, c->lightvec );
 }
 
 /*
@@ -2436,6 +2765,7 @@ static void R_StudioDrawPointsInternal( void )
 	qboolean         chrome_only = false;
 	xbox_ft_span_t   chrome_span;
 	uint64_t         chrome_ticks = 0;
+	xbox_ft_span_t   ft_span; /* x9-perf-cpuprof: st_xform_kc, then st_submit_kc */
 
 	if( !m_pStudioHeader )
 		return;
@@ -2458,6 +2788,9 @@ static void R_StudioDrawPointsInternal( void )
 		}
 		return;
 	}
+
+	xbox_ft_span_begin( &ft_span );
+	NV2A_FT_ADD( XBOX_FT_W_ST_PARTS, 1 );
 
 	m_skinnum = nv2a_studio_ctx.currententity->curstate.skin;
 	ptexture = (mstudiotexture_t *)((byte *)m_pStudioHeader + m_pStudioHeader->textureindex );
@@ -2603,6 +2936,14 @@ static void R_StudioDrawPointsInternal( void )
 	if( chrome_only )
 		chrome_ticks += xbox_ft_span_ticks_since( &chrome_span );
 
+	if( cpu_needed )
+	{
+		NV2A_FT_ADD( XBOX_FT_W_ST_PARTS_CPU, 1 );
+		NV2A_FT_ADD( XBOX_FT_W_ST_VERTS_CPU, m_pSubModel->numverts );
+	}
+	nv2a_ft_st_xform_ticks += xbox_ft_span_ticks_since( &ft_span );
+	xbox_ft_span_begin( &ft_span );
+
 	if( r_studio_sort_textures.value && need_sort )
 	{
 		// resort opaque and translucent meshes draw order
@@ -2643,12 +2984,15 @@ static void R_StudioDrawPointsInternal( void )
 	{
 		float light[4], elights[NV2A_SGPU_ELIGHT_REGS][4];
 		nv2a_sgpu_elights_t el;
+		xbox_ft_span_t sub_span;
 
+		xbox_ft_span_begin( &sub_span );
 		nv2a_sgpu_light_consts( g_studio.ambientlight, g_studio.shadelight, light, &gpu_flat_illum );
 		R_StudioGpuElightState( &el );
 		nv2a_sgpu_elight_consts( &el, sgpu_gamma_reg, elights );
 		gpu_drawing = nv2a_sgpu_begin_submodel( gpu, light, (const float (*)[4])sgpu_lut, sgpu_lut_serial,
 			(const float (*)[4])elights );
+		nv2a_ft_st_consts_ticks += xbox_ft_span_ticks_since( &sub_span );
 	}
 
 	nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_STUDIO;
@@ -2689,7 +3033,12 @@ static void R_StudioDrawPointsInternal( void )
 				R_AllowFog( false );
 			}
 
+			xbox_ft_span_t sub_span;
+
+			xbox_ft_span_begin( &sub_span );
 			R_StudioSetupSkin( m_pStudioHeader, pskinref[pmesh->skinref] );
+			nv2a_ft_st_skin_ticks += xbox_ft_span_ticks_since( &sub_span );
+			xbox_ft_span_begin( &sub_span );
 
 			if( gpu && gpu_mesh[pmesh - pmesh_base] == SGPU_MESH_GPU )
 			{
@@ -2714,6 +3063,7 @@ static void R_StudioDrawPointsInternal( void )
 				R_StudioDrawFloatMesh( ptricmds, pstudionorms );
 			else
 				R_StudioDrawNormalMesh( ptricmds, pstudionorms, s, t );
+			nv2a_ft_st_mesh_ticks += xbox_ft_span_ticks_since( &sub_span );
 
 			nv2a_studio_restore_mesh_state();
 
@@ -2728,6 +3078,7 @@ static void R_StudioDrawPointsInternal( void )
 	nv2a_ft_imm3d_counter = XBOX_FT_W_VERTS_TRI;
 	if( chrome_ticks )
 		NV2A_FT_ADD( XBOX_FT_W_CHROME_KC, ( chrome_ticks + 500u ) / 1000u );
+	nv2a_ft_st_submit_ticks += xbox_ft_span_ticks_since( &ft_span );
 }
 
 /* M2 span k_studio_points (#141). A wrapper, not a span at a call site:
@@ -3477,7 +3828,7 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			nv2a_studio_ctx.currententity->curstate.body = 1; // force helmet
 
 		lighting.plightvec = dir;
-		R_EntityDynamicLight( nv2a_studio_ctx.currententity, &lighting, FBitSet( nv2a_studio_ctx.rvp_flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec );
+		nv2a_entity_dynamic_light( nv2a_studio_ctx.currententity, &lighting, FBitSet( nv2a_studio_ctx.rvp_flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec ); /* #205 (b) */
 
 		R_StudioEntityLight( &lighting );
 
@@ -3602,7 +3953,7 @@ static int R_StudioDrawModel( int flags )
 	if( flags & STUDIO_RENDER )
 	{
 		lighting.plightvec = dir;
-		R_EntityDynamicLight( nv2a_studio_ctx.currententity, &lighting, FBitSet( nv2a_studio_ctx.rvp_flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec );
+		nv2a_entity_dynamic_light( nv2a_studio_ctx.currententity, &lighting, FBitSet( nv2a_studio_ctx.rvp_flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec ); /* #205 (b) */
 
 		R_StudioEntityLight( &lighting );
 
@@ -3634,6 +3985,7 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 	   selected or for the menu preview. */
 	xbox_ft_span_t span;
 
+	NV2A_FT_ADD( XBOX_FT_W_ST_ENTS, 1 );
 	xbox_ft_span_begin( &span );
 	if( !FBitSet( nv2a_studio_ctx.rvp_flags, RF_DRAW_WORLD ))
 	{
@@ -3656,6 +4008,23 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 			pStudioDraw->StudioDrawPlayer( flags, R_StudioGetPlayerState( e->index - 1 ));
 		else
 			pStudioDraw->StudioDrawModel( flags );
+	}
+	if( span.t0 ) /* x9-perf-cpuprof: the frame's slowest draw, and a note for a slow one */
+	{
+		const uint32_t kc = xbox_ft_span_kc_since( &span );
+		const int mi = e->curstate.modelindex;
+
+		if( kc > xbox_ft_work.c[XBOX_FT_W_ST_WORST_KC] )
+		{
+			NV2A_FT_SET( XBOX_FT_W_ST_WORST_KC, kc );
+			NV2A_FT_SET( XBOX_FT_W_ST_WORST_MDL, mi );
+		}
+		if( kc >= XBOX_FT_NOTE_STUDIO_KC && mi > 0 && mi < NV2A_FT_ST_NOTED_MAX && e->model
+			&& kc >= 2u * nv2a_ft_st_noted[mi] )
+		{
+			nv2a_ft_st_noted[mi] = kc > 0xFFFFu ? 0xFFFFu : (uint16_t)kc;
+			Xbox_FT_Note( XBOX_FT_NOTE_STUDIO, e->model->name, kc, (uint32_t)mi );
+		}
 	}
 	xbox_ft_span_end( &span, XBOX_FT_S_CLIENT_STUDIO );
 }
@@ -4032,9 +4401,33 @@ void Mod_StudioUnloadTextures( void *data )
 	nv2a_sgpu_cache_forget( phdr );
 }
 
+/* x9-perf-cpuprof: the game client's lighting callbacks, timed into
+   st_light_kc (the built-in renderer calls the R_ functions directly) */
 static void pfnStudioDynamicLight( cl_entity_t *ent, alight_t *plight )
 {
-	R_EntityDynamicLight( ent, plight, FBitSet( nv2a_studio_ctx.rvp_flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec );
+	xbox_ft_span_t span;
+
+	xbox_ft_span_begin( &span );
+	nv2a_entity_dynamic_light( ent, plight, FBitSet( nv2a_studio_ctx.rvp_flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec ); /* #205 (b) */
+	nv2a_ft_st_light_ticks += xbox_ft_span_ticks_since( &span );
+}
+
+static void pfnStudioEntityLight( alight_t *plight )
+{
+	xbox_ft_span_t span;
+
+	xbox_ft_span_begin( &span );
+	R_StudioEntityLight( plight );
+	nv2a_ft_st_light_ticks += xbox_ft_span_ticks_since( &span );
+}
+
+static void pfnStudioSetupLighting( alight_t *plight )
+{
+	xbox_ft_span_t span;
+
+	xbox_ft_span_begin( &span );
+	R_StudioSetupLighting( plight );
+	nv2a_ft_st_light_ticks += xbox_ft_span_ticks_since( &span );
 }
 
 qboolean R_StudioFillAPI( engine_studio_api_t *api, r_studio_interface_t *pDefaultDraw )
@@ -4053,8 +4446,8 @@ qboolean R_StudioFillAPI( engine_studio_api_t *api, r_studio_interface_t *pDefau
 	api->StudioSetupModel        = R_StudioSetupModel;
 	api->StudioCheckBBox         = R_StudioCheckBBox;
 	api->StudioDynamicLight      = pfnStudioDynamicLight;
-	api->StudioEntityLight       = R_StudioEntityLight;
-	api->StudioSetupLighting     = R_StudioSetupLighting;
+	api->StudioEntityLight       = pfnStudioEntityLight;
+	api->StudioSetupLighting     = pfnStudioSetupLighting;
 	api->StudioDrawPoints        = R_StudioDrawPoints;
 	api->StudioDrawHulls         = R_StudioDrawHulls;
 	api->StudioDrawAbsBBox       = R_StudioDrawAbsBBox;

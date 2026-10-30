@@ -21,7 +21,10 @@ stage:
      loads a map, and 91-frametime.cfg, which sets another label) to
      .off;
   4. writes valve/userconfig.d/90-route-bmi.cfg (label, recorder on, the
-     --cfg lines, map c0a0) and valve/maps/c0a0e_load.cfg (the end point).
+     --cfg lines, map c0a0) and valve/maps/c0a0e_load.cfg (the end point);
+     --map-cfg MAP=LINE adds LINE to maps/MAP_load.cfg, which the server
+     runs at that map's load (sv_init.c) - a setting per map, e.g. an
+     anti-aliasing mode each, compared in one run.
   Every step can be re-run: a stage interrupted half way is finished by
   running the same command again.
 
@@ -46,6 +49,7 @@ GAME = "/HDD0-E/Games/R3D-X9K"
 CFGDIR = GAME + "/valve/userconfig.d"
 MAPDIR = GAME + "/valve/maps"
 ROUTE_CFG = "90-route-bmi.cfg"
+MAPLIST = "90-route-bmi.maps"  # the maps/*_load.cfg --map-cfg wrote (not a .cfg: never executed)
 END_CFG = "c0a0e_load.cfg"
 SHA_FILE = "default.xbe.sha256"  # the sha256 of the last default.xbe this script uploaded
 DISABLE = ["00-c1a0.cfg", "91-frametime.cfg"]
@@ -96,6 +100,26 @@ def put_text(f, path, lines):
     say("wrote %s:" % path)
     for l in lines:
         say("    " + l)
+
+
+def map_cfgs(a):
+    """--map-cfg MAP=LINE, grouped: {map: [lines]}"""
+    out = {}
+    for item in a.map_cfg or []:
+        m, sep, line = item.partition("=")
+        if not sep or not m or not line:
+            sys.exit("--map-cfg wants MAP=LINE, not %r" % item)
+        out.setdefault(m, []).append(line)
+    return out
+
+
+def read_maplist(f):
+    """The maps whose MAP_load.cfg a stage wrote (90-route-bmi.maps), [] without one"""
+    if MAPLIST not in listing(f, CFGDIR):
+        return []
+    held = []
+    f.retrlines("RETR " + CFGDIR + "/" + MAPLIST, held.append)
+    return [l[3:].strip() for l in held if l.startswith("// ") and l[3:].strip()]
 
 
 def status(f, a):
@@ -160,13 +184,44 @@ def stage(f, a):
              ["// tools/xbox-ftp-route-bmi.py (%s): remove after the run" % a.label,
               'host_frametime_label "%s"' % a.label,
               "host_frametime_analysis %d" % (1 if a.no_overlay else 2)] + list(a.cfg) + ["map c0a0"])
+    per_map = map_cfgs(a)
+    wanted = sorted(m for m in per_map if m + "_load.cfg" != END_CFG)
+    # Every file this script may own: the ones an earlier stage listed (a
+    # stage cut short, or a rerun) and the ones asked for now. Anything
+    # else already there is not ours - checked for every map before a
+    # single file is written.
+    owned = set(read_maplist(f))
+    maps_there = listing(f, MAPDIR)
+    for m in wanted:
+        if m + "_load.cfg" in maps_there and m not in owned:
+            sys.exit("maps/%s_load.cfg already exists on the console; it is not this script's - sort it out by hand" % m)
+    # The list first, so restore finds every file even if an upload below fails
+    put_text(f, CFGDIR + "/" + MAPLIST, ["// " + m for m in sorted(owned | set(wanted))])
+    for m in wanted:
+        put_text(f, MAPDIR + "/" + m + "_load.cfg", ["// tools/xbox-ftp-route-bmi.py (%s): remove after the run" % a.label] + per_map[m])
+    # Listed by an earlier stage but not asked for now: theirs no longer
+    for m in sorted(owned - set(wanted)):
+        if m + "_load.cfg" in maps_there:
+            f.delete(MAPDIR + "/" + m + "_load.cfg")
+            say("removed maps/%s_load.cfg (an earlier stage's)" % m)
+    if owned - set(wanted):
+        put_text(f, CFGDIR + "/" + MAPLIST, ["// " + m for m in wanted])
     # --stay: the route opens the tram and hands over; the recording runs on until the game quits
-    put_text(f, MAPDIR + "/" + END_CFG, END_LINES[:END_LINES.index("ent_fire barnwalk3 use") + 1] + ["echo route-bmi: done, play on"] if a.stay else END_LINES)
+    end = END_LINES[:END_LINES.index("ent_fire barnwalk3 use") + 1] + ["echo route-bmi: done, play on"] if a.stay else END_LINES
+    put_text(f, MAPDIR + "/" + END_CFG, end[:1] + per_map.get(END_CFG[:-len("_load.cfg")], []) + end[1:])
     say("staged %s. Boot the game; it ends on c0a0e after about 7 minutes%s." % (a.label, "" if a.stay else " and quits"))
 
 
 def restore(f, a):
     cfgs = listing(f, CFGDIR)
+    if MAPLIST in cfgs:
+        maps_there = listing(f, MAPDIR)
+        for m in read_maplist(f):
+            n = m + "_load.cfg"
+            if n in maps_there:
+                f.delete(MAPDIR + "/" + n)
+                say("removed maps/" + n)
+        f.delete(CFGDIR + "/" + MAPLIST)
     if ROUTE_CFG in cfgs:
         f.delete(CFGDIR + "/" + ROUTE_CFG)
         say("removed " + ROUTE_CFG)
@@ -198,6 +253,7 @@ def main():
     p.add_argument("--timeout", type=float, default=60.0)
     p.add_argument("--label", help="stage: the recording's label")
     p.add_argument("--xbe", help="stage: the XBE to run")
+    p.add_argument("--map-cfg", action="append", help="stage: MAP=LINE, a line for maps/MAP_load.cfg (repeatable)")
     p.add_argument("--cfg", action="append", default=[], help="stage: an extra cfg line (repeatable)")
     p.add_argument("--no-overlay", action="store_true", help="stage: record without drawing the overlay (host_frametime_analysis 1)")
     p.add_argument("--stay", action="store_true", help="stage: at the end point hand over and keep recording (quit from the menu to close it)")
