@@ -5,6 +5,37 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - Packager: a Console settings tab, and uploads that ask before replacing
+
+`tools/packager` has a second tab that reads the settings a console install
+runs with (the video output, anti-aliasing, anisotropy, the FPS counter, the
+frame-time recorder and its label, the memory report, audio, a start map),
+shows which file each value comes from and what overrides it, and writes them
+to one file of its own, `userconfig.d/50-packager.cfg`. It switches the user's
+own cfgs on and off by renaming them to `.off`. It reads and writes an install
+on the console over FTP or an exported folder on the PC.
+
+An upload to an install already on the console now says what it would replace
+and asks first: the console's `default.xbe` is kept as
+`default.xbe.before-packager`, and `config.cfg`, `rt.cfg`, `custom.hpk`,
+`userconfig.d` and `save` are left as they are (the command line needs
+`--overwrite`).
+
+### Added - Packager: bakes the Xbox data from the user's own game files
+
+A packaged build started with a black world, models only, and an unfinished
+menu: the console draws the world from per-map `.mpak` archives, the menu
+background from baked tiles, and needs `r_refdll "nv2a"` and the menu's
+control images. `tools/packager` now runs `tools/asset-studio` on the user's
+install (maps in parallel, the menu art, the skies as DXT1, the music at both
+rates), keeps the
+result in a cache, leaves the retail `.bsp` of every baked map off the disc
+(a loose `.bsp` is loaded in place of its archive), writes `video.cfg` and
+adds the control images from `xash-extras`. `tools/packager/build_baker.py`
+builds the baker for the host; `UiPacker.h` gains the `<cstdint>` include GCC
+needs. Checked in xemu: the packaged disc boots to the full menu, and with a
+map loaded draws the lit world exactly as the console's own install does.
+
 ### Changed - Xbox: cheaper bone setup in the client library
 
 The client library takes a bone's sine and cosine from one `fsincos` per angle instead of separate calls, and

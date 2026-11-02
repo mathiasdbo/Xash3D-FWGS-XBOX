@@ -1,6 +1,7 @@
 #ifndef UIPACKER_H
 #define UIPACKER_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 

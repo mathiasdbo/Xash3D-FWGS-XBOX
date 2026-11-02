@@ -13,39 +13,68 @@ Two things make this port different from a straight recompile:
   of time into `.mpak` archives with per-map texture atlases, DXT compression
   and packed lightmaps, so the engine never parses a WAD on the console.
 
-**Status: early.** The tree is upstream Xash3D-FWGS plus the baker. Nothing is
-ported yet. See [`docs/r3d/fork-plan.md`](docs/r3d/fork-plan.md) for the
-phased plan and [`docs/r3d/divergences.md`](docs/r3d/divergences.md) for every
-deliberate deviation from upstream.
+**Status: Half-Life runs on a real Original Xbox.** The engine, the NV2A
+renderer (`ref/nv2a`), the menu, saves, hardware audio on the console's audio
+chip and the offline asset pipeline are working, and the first campaign maps
+play on hardware. It is still work in progress: frame times are measured, not
+yet where we want them (see [`docs/r3d/frametime-recorder.md`](docs/r3d/frametime-recorder.md)),
+and Opposing Force and Blue Shift are not packaged yet. The changelog
+([`CHANGELOG.md`](CHANGELOG.md)) lists what changed and what was measured. See
+[`docs/r3d/fork-plan.md`](docs/r3d/fork-plan.md) for the phased plan and
+[`docs/r3d/divergences.md`](docs/r3d/divergences.md) for every deliberate
+deviation from upstream.
 
 ## Targets
 
 | Target | Renderer | Status |
 |---|---|---|
-| Original Xbox (NV2A) | `ref/nv2a` — pushbuffer, register combiners, VP20 | Not started |
+| Original Xbox (NV2A) | `ref/nv2a` - pushbuffer, register combiners, VP20 | Half-Life plays on hardware; performance work ongoing |
 | PC | `ref/vulkan` | Not started |
-| PC | `ref/gl` (upstream) | Works — kept as the reference build |
+| PC | `ref/gl` (upstream) | Works - kept as the reference build |
 
 `ref/gl` stays alive until Vulkan matches it. It is the only thing that tells
 us what correct looks like.
 
+## Putting Half-Life on your Xbox
+
+You need your own copy of Half-Life (Steam). The **Resonance3D Packager**
+(`tools/packager/`) combines your game files with the stable Xbox build and
+writes either a `Half-Life` folder (copy it to the console by FTP) or an XISO
+disc image. It finds your Steam install by itself on Windows (registry) and
+asks for the folder otherwise, and checks that the install has what the engine
+needs. Windows: run the `.exe` from the latest
+[release](../../releases). Anywhere else: unzip the portable package and run
+`python3 r3d_packager.py` (Python 3 with Tk). Details in
+[`tools/packager/README.md`](tools/packager/README.md). Nothing from the game
+is included in the download.
+
 ## Building
 
-Nothing Xbox-specific builds yet. For the PC reference build, follow
-upstream's instructions — the build system is unchanged
-(`./waf configure -T release && ./waf build`).
+For the PC reference build, follow upstream's instructions - the build system
+is unchanged (`./waf configure -T release && ./waf build`).
 
-The Xbox target will use upstream's existing static-linking support
-(`scripts/waifulib/xshlib.py`, `--static-linking`), since nxdk has no dynamic
-library loading:
-
-```
-./waf configure --xbox --static-linking=filesystem_stdio,ref_nv2a,menu,server,client
-```
+The Xbox build uses the toolchain in `deps/nxdk` and the scripts in `tools/`:
+`tools/xbox-sweep.sh` compiles the engine, `tools/xbox-game-link-check.sh hl
+--include-client --include-freevgui --xbe <path>` links the Half-Life
+`default.xbe`, and `tools/xbox-xiso.sh` packs a disc from it. The nxdk has no
+dynamic library loading, so everything is linked statically into the XBE.
+Conventions and gates are in [`AGENTS.md`](AGENTS.md).
 
 The asset baker is a separate CMake project in
 [`tools/asset-studio/`](tools/asset-studio/) and builds for the host, not the
 console.
+
+## Related repositories
+
+This repository pulls in forks that carry this port's changes:
+
+| Repository | What it holds |
+|---|---|
+| [mathiasdbo/halflife-updated-xash3d](https://github.com/mathiasdbo/halflife-updated-xash3d) | Half-Life game DLLs (`deps/hlsdk`), with the Xbox changes |
+| [mathiasdbo/halflife-op4-updated](https://github.com/mathiasdbo/halflife-op4-updated) | Opposing Force game DLLs |
+| [mathiasdbo/halflife-bs-updated](https://github.com/mathiasdbo/halflife-bs-updated) | Blue Shift game DLLs |
+| [mathiasdbo/mainui_cpp](https://github.com/mathiasdbo/mainui_cpp) | The menu, `3rdparty/mainui` |
+| [mathiasdbo/nxdk-ex](https://github.com/mathiasdbo/nxdk-ex) | Audio (APU) and other Xbox extensions on top of nxdk |
 
 ## Credits
 
