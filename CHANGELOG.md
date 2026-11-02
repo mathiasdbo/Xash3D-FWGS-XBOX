@@ -5,6 +5,15 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: cheaper bone setup in the client library
+
+The client library takes a bone's sine and cosine from one `fsincos` per angle instead of separate calls, and
+remembers a bone's quaternion by its angles, since most calls repeat one already computed (94% on the Office
+Complex route). On a console, per bone: 5.35 us before, 4.09 us now. Over the route, bone setup went from 0.754
+to 0.699 ms a frame and the client's studio total from 1.26 to 1.18 ms (two runs of the same route, so read
+those coarsely). The memo is 128 KiB of static data in the client. The two changes are pull requests #3 and #4
+of the SDK fork; both are merged, and `deps/hlsdk` is pinned to the merge (divergences #213, #214).
+
 ### Changed - Xbox: faster frames in Office Complex, cheaper hardware audio
 
 Measured over the same 45-minute route at 720p on a console:
