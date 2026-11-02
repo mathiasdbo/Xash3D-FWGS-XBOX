@@ -5,6 +5,15 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - Xbox: the dashboard shows the game's name and picture
+
+The console's memory screen lists a game from `TitleMeta.xbx` and
+`TitleImage.xbx` in its `E:\UDATA\<title id>\` folder, and nxdk builds write
+neither, so the game's folder showed with no name. On first start the engine
+now writes `TitleMeta.xbx` ("Half-Life") and copies `TitleImage.xbx` from the
+`titleimage.xbx` the packager puts beside the XBE. Files already in the
+folder are left as they are. Not yet run on the console.
+
 ### Added - Packager: a Console settings tab, and uploads that ask before replacing
 
 `tools/packager` has a second tab that reads the settings a console install

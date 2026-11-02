@@ -115,6 +115,7 @@ qboolean Xbox_NetLogInit( void );
 void Xbox_NetLogPrint( const char *pMsg );
 qboolean Xbox_NanoSleep( int nsec );
 void Xbox_IGR_Poll( void ); // xbox_igr.c, divergence #179
+void Xbox_WriteTitleMeta( const char *title_dir ); // xbox_title_meta.c, divergence #215
 #endif
 
 #if XASH_NSWITCH

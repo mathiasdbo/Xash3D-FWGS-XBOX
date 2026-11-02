@@ -364,6 +364,7 @@ static qboolean FS_DetermineRootDirectory( char *out, size_t size )
 				Sys_Error( "couldn't create %s - error %lu", title_dir, GetLastError( ));
 				return false;
 			}
+			Xbox_WriteTitleMeta( title_dir ); // divergences.md #215: the dashboard's name and picture
 		}
 		if( !CreateDirectoryA( xbox_rootdir, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS )
 		{
