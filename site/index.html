@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xash3D-FWGS-XBOX - Half-Life on the original Xbox</title>
+<meta name="description" content="Half-Life on the original Xbox, through a port of Xash3D FWGS built with nxdk.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html" aria-current="page">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="build.html">Building</a><a href="recorder.html">Frame-time recorder</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>Xash3D-FWGS-XBOX</h1>
+<p class="lede">Half-Life on a real original Xbox (2001), through a port of the GoldSrc-compatible
+Xash3D FWGS engine built against the open-source nxdk homebrew SDK.</p>
+
+<div class="note"><strong>Status.</strong> Half-Life plays on hardware: the engine, the NV2A renderer,
+the menu, saves, hardware audio and the offline asset pipeline work, and the first campaign maps run on a
+console. It is work in progress. Frame times are measured, not yet where we want them, and Opposing Force and
+Blue Shift are not packaged yet.</div>
+
+<div class="cards">
+<div class="card"><h3><a href="install.html">Put it on your Xbox</a></h3>
+<p>The packager turns your own Half-Life files and the Xbox build into a folder, a disc image or an FTP upload.</p></div>
+<div class="card"><h3><a href="settings.html">Console settings</a></h3>
+<p>720p, anti-aliasing, anisotropic filtering, the FPS counter and more, edited from your PC.</p></div>
+<div class="card"><h3><a href="build.html">Build it</a></h3>
+<p>The PC reference build, the Xbox toolchain and the asset baker.</p></div>
+<div class="card"><h3><a href="recorder.html">Measure it</a></h3>
+<p>The frame-time recorder: every frame to a file on the console, and a report.</p></div>
+<div class="card"><h3><a href="differences.html">How it differs</a></h3>
+<p>What was added to Xash3D FWGS, and what was left alone.</p></div>
+<div class="card"><h3><a href="about.html">About</a></h3>
+<p>Credits, licence, and how the project was written.</p></div>
+</div>
+
+<h2>What makes this port different from a recompile</h2>
+<ul>
+<li><strong>A 64 MB budget shared with the GPU.</strong> The memory ceiling is enforced offline, by the asset
+baker, not discovered at runtime. A map that does not fit breaks the build, not the console.</li>
+<li><strong>An offline asset pipeline.</strong> Maps, textures and sounds are compiled ahead of time into
+<code>.mpak</code> archives with per-map texture atlases, DXT compression and packed lightmaps, so the engine
+never parses a WAD on the console.</li>
+<li><strong>The console's own hardware.</strong> A renderer for the NV2A GPU (pushbuffer, register combiners,
+vertex programs) and audio on the console's audio chip.</li>
+</ul>
+
+<h2>You need your own game</h2>
+<p>This project contains no Valve assets. Running Half-Life needs your own legally obtained copy (Steam). The
+baker reads your install and produces the archives locally; they are not redistributable.</p>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>

@@ -86,7 +86,7 @@ arrows) from `xash-extras`, which the options screens need.
 
 The first export takes about two minutes on a modern machine (the maps are
 baked in parallel). The result is kept in your cache folder
-(`%LOCALAPPDATA%\Xash3D-FWGS-XBOX Packagerake` on Windows, `~/.cache/xash3d-fwgs-xbox-packager/bake`
+(`%LOCALAPPDATA%\Xash3D-FWGS-XBOX Packager\bake` on Windows, `~/.cache/xash3d-fwgs-xbox-packager/bake`
 elsewhere) and reused until the baker or your game files change.
 `--no-bake` skips it (for tests only: the world will not draw). `--baker` and
 `--bake-cache` say where the baker and the cache are.

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it differs - Xash3D-FWGS-XBOX</title>
+<meta name="description" content="What the Xbox port adds to Xash3D FWGS and what it leaves alone.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="build.html">Building</a><a href="recorder.html">Frame-time recorder</a><a href="differences.html" aria-current="page">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>How it differs from Xash3D FWGS</h1>
+<p class="lede">The engine core is still Xash3D FWGS. The port adds a platform layer, a renderer, an asset pipeline and
+tools around it.</p>
+
+<h2>Still upstream</h2>
+<p>The client and server, networking, physics, the console, save and load, and the GoldSrc compatibility layer.
+The version is upstream's (0.21), and other targets keep upstream's name.</p>
+
+<h2>Added or replaced for the Xbox</h2>
+<table>
+<tr><th>Part</th><th>Where</th><th>What</th></tr>
+<tr><td>NV2A renderer</td><td><code>ref/nv2a</code></td><td>Pushbuffer submission, register combiners and vertex programs for the console's GPU.</td></tr>
+<tr><td>Platform layer</td><td><code>engine/platform/xbox</code></td><td>Entry point, video modes, input, storage, memory reporting, the frame-time recorder, hardware audio.</td></tr>
+<tr><td>Archives</td><td><code>filesystem/mpak*</code></td><td>The <code>.mpak</code> per-map archive and its loader; the console never reads a WAD.</td></tr>
+<tr><td>Asset baker</td><td><code>tools/asset-studio</code></td><td>Offline compiler from a retail install to archives, enforcing the memory budget.</td></tr>
+<tr><td>Packager</td><td><code>tools/packager</code></td><td>Folder, XISO or FTP output, plus remote console settings.</td></tr>
+<tr><td>Game and menu</td><td>forks of the Half-Life SDK and the menu</td><td>Carry the Xbox changes; see the repository's related-repositories table.</td></tr>
+</table>
+<p>The Xbox build reports itself as <code>Xash3D FWGS-XBOX 0.21 (xbox-i386 build N)</code>. The OS reads
+<code>xbox</code> because nxdk targets i386-pc-win32 and would otherwise say <code>win32</code>.</p>
+
+<h2>The divergence ledger</h2>
+<p>Every deliberate deviation from upstream is recorded the same day it is written, with what changed, why, in
+what form (a new file, an <code>#ifdef</code>, a replacement), the merge risk, and what it would take to remove
+it. The point is that merging upstream stays possible. The ledger is
+<code>docs/r3d/divergences.md</code>; the plan behind the work is <code>docs/r3d/fork-plan.md</code>.</p>
+<p>Preferred forms, cheapest to most expensive to maintain: a new file in our own directory; a new file inside an
+upstream directory; <code>#ifdef XASH_XBOX</code> around upstream code; rewriting an upstream function (needs
+explicit justification). Changing behaviour with no <code>#ifdef</code> is forbidden unless it is a genuine
+upstream bug, in which case the patch goes upstream first.</p>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>

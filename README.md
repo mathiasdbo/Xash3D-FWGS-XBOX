@@ -27,6 +27,25 @@ and Opposing Force and Blue Shift are not packaged yet. The changelog
 [`docs/r3d/divergences.md`](docs/r3d/divergences.md) for every deliberate
 deviation from upstream.
 
+## Documentation
+
+The guides are a small static site in [`site/`](site/) (open `site/index.html`;
+it publishes to GitHub Pages with the *Pages* workflow once Pages is enabled).
+
+| Read | For |
+|---|---|
+| [Install](site/install.html) | Putting Half-Life on your Xbox with the packager |
+| [Console settings](site/settings.html) | 720p, anti-aliasing, anisotropy, overlays, from your PC |
+| [Building](site/build.html) | The PC build, the Xbox toolchain, the baker |
+| [Frame-time recorder](site/recorder.html) | Measuring frames on the console |
+| [How it differs](site/differences.html) | What was added to Xash3D FWGS |
+| [About](site/about.html) | Credits, licence, AI disclosure |
+
+The engineering record is in [`docs/r3d/`](docs/r3d/README.md): the
+[divergence ledger](docs/r3d/divergences.md), the
+[fork plan](docs/r3d/fork-plan.md) and the
+[frame-time recorder reference](docs/r3d/frametime-recorder.md).
+
 ## Name and version
 
 The console build reports itself as `Xash3D FWGS-XBOX 0.21 (xbox-i386 build N)`:

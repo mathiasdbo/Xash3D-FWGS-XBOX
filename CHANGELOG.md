@@ -5,6 +5,14 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - a documentation site
+
+`site/` holds guides as static pages: install with the packager, the console
+settings, building, the frame-time recorder, how the port differs from Xash3D
+FWGS, and credits. A manual *Pages* workflow publishes it once GitHub Pages is
+enabled for the repository. The README now links the guides and `docs/r3d/`.
+The packager README's cache path lost a stray control character.
+
 ### Changed - the project is named Xash3D-FWGS-XBOX
 
 The project, formerly Resonance3D, is now Xash3D-FWGS-XBOX, and its packager the

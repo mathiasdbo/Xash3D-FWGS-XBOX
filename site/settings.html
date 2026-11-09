@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Console settings - Xash3D-FWGS-XBOX</title>
+<meta name="description" content="Edit the Xbox build's video, graphics and diagnostic settings from the packager.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html" aria-current="page">Console settings</a><a href="build.html">Building</a><a href="recorder.html">Frame-time recorder</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>Console settings</h1>
+<p class="lede">The packager's second tab reads and changes what an install runs with, on the console over FTP or
+in an exported folder on your PC.</p>
+
+<h2>How it works</h2>
+<p>The engine runs <code>config.cfg</code> (the in-game menu's) and then every
+<code>userconfig.d/*.cfg</code> in name order; later files win. The tab writes one file of its own,
+<code>userconfig.d/50-packager.cfg</code>, so it overrides the menu only for what it sets. A setting left on
+"(don't set)" is not written and the menu keeps deciding it.</p>
+<ul>
+<li><strong>Find my Xbox</strong> fills in the address, looks through the games folders for installs of this
+game and reads the one it finds.</li>
+<li><strong>What the console runs with</strong> shows each setting's value and the file it comes from, and
+warns when a later file overrides yours or loads a map on every start.</li>
+<li>Each <code>userconfig.d</code> file has a tick: it renames the file to or from <code>.off</code>, which is
+how the engine skips it. Nothing is overwritten; saving an edited file keeps the old one as
+<code>.before-packager</code>.</li>
+<li>Presets: <strong>Sharp</strong> (720p, 8x anisotropy), <strong>Measure</strong> (recorder on, label, memory
+report) and <strong>Clear all</strong>.</li>
+</ul>
+
+<h2>Settings</h2>
+<table>
+<tr><th>Setting</th><th>Values</th><th>What it does</th></tr>
+<tr><td><code>r3d_vid_mode</code></td><td>0, 1</td><td>Output: 480p or 720p. Read at boot.</td></tr>
+<tr><td><code>r3d_vid_aspect</code></td><td></td><td>Aspect of the output.</td></tr>
+<tr><td><code>nv2a_r_aa</code></td><td>0 to 3</td><td>Anti-aliasing level.</td></tr>
+<tr><td><code>nv2a_r_anisotropy</code></td><td>1, 2, 4, 8</td><td>Anisotropic filtering (default 2).</td></tr>
+<tr><td><code>nv2a_r_texturenearest</code></td><td>0, 1</td><td>Nearest-neighbour texture filtering.</td></tr>
+<tr><td><code>nv2a_r_lodbias</code></td><td></td><td>Texture level-of-detail bias.</td></tr>
+<tr><td><code>cl_showfps</code></td><td>0, 1, 2</td><td>FPS counter.</td></tr>
+<tr><td><code>host_frametime_analysis</code></td><td>0, 1, 2</td><td>Frame-time recorder: off, record, record plus overlay.
+See <a href="recorder.html">the recorder</a>.</td></tr>
+<tr><td><code>host_frametime_label</code></td><td>up to 22 characters</td><td>Names a recording session; letters, digits,
+<code>-</code> and <code>_</code> only.</td></tr>
+<tr><td><code>r3d_memreport</code></td><td></td><td>Memory report written beside the recording.</td></tr>
+<tr><td><code>r3d_snd_meter</code></td><td></td><td>On-screen sound meter.</td></tr>
+<tr><td><code>net_graph</code></td><td></td><td>Network graph overlay.</td></tr>
+</table>
+<p>Audio options (backend, rate, hardware audio) and developer switches (GPU skinning, culling) are in the tab
+too; developer settings are behind a tick. Video output, sound backend, rate and hardware audio are read at
+boot, so a change shows at the next start of the game.</p>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>

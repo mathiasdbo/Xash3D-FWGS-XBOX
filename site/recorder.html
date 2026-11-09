@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frame-time recorder - Xash3D-FWGS-XBOX</title>
+<meta name="description" content="How to record and read frame times on the Xbox build.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="build.html">Building</a><a href="recorder.html" aria-current="page">Frame-time recorder</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>Frame-time recorder</h1>
+<p class="lede">Every frame's time, split into CPU work and waiting, plus what the renderer did in that frame,
+written to a file on the console's drive and turned into an HTML report on your PC.</p>
+
+<h2>Turn it on</h2>
+<p>Use the <a href="settings.html">Console settings</a> tab (the <strong>Measure</strong> preset), or put one line
+in a file in <code>valve/userconfig.d/</code> on the console:</p>
+<pre><code>host_frametime_analysis 2</code></pre>
+<p><code>0</code> is off (the default), <code>1</code> records only, <code>2</code> records and draws a frame-time
+graph and the work counters over the HUD. The setting is not saved to <code>config.cfg</code> on purpose:
+delete the line and the next boot records nothing.</p>
+<p>Give the session a label that says what you are measuring:</p>
+<pre><code>host_frametime_label "office-run"</code></pre>
+<p>It goes into the header and the file name, cleaned to letters, digits, <code>-</code> and <code>_</code> and cut to
+22 characters.</p>
+
+<h2>What it records</h2>
+<ul>
+<li>Each frame goes into a ring in memory and is written to the drive every 5 seconds and at each map start. A
+power-off loses at most the last 5 seconds.</li>
+<li>A session is written as segments: a new file at each map start, and when one reaches 8 MiB (about 3.3
+minutes at 60 fps).</li>
+<li>The header names the build; its "xbe" field is the XBE's link timestamp in hexadecimal, so a recording can
+always be matched to the build that made it.</li>
+</ul>
+
+<h2>Read the recordings</h2>
+<p><code>tools/frametime-report.py</code> fetches the recordings from the console over FTP, prints a summary or
+lists sessions, and writes the HTML report. Load one session at a time: a whole folder of long recordings can
+exhaust memory.</p>
+
+<h2>Reading the numbers</h2>
+<p>An average frame rate hides the frames that hurt. Look at how many frames take longer than 33 ms (a dropped
+frame at 30 fps), the worst frames, and any stall over a quarter of a second. A session of half an hour at
+roughly 58 fps average with well under 2% of frames over 33 ms on most maps is a smooth one.</p>
+<p>The full reference is <code>docs/r3d/frametime-recorder.md</code> in the repository.</p>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>

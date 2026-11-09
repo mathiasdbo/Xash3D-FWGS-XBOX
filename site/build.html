@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building - Xash3D-FWGS-XBOX</title>
+<meta name="description" content="How to build the Xbox port, the PC reference build and the asset baker.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="build.html" aria-current="page">Building</a><a href="recorder.html">Frame-time recorder</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>Building</h1>
+<p class="lede">The PC reference build is upstream's. The Xbox build uses the nxdk toolchain and the scripts in
+<code>tools/</code>.</p>
+
+<h2>PC reference build</h2>
+<p>The build system is unchanged from Xash3D FWGS:</p>
+<pre><code>./waf configure -T release
+./waf build</code></pre>
+<p><code>ref/gl</code> stays alive until the Vulkan renderer matches it; it is the only thing that tells us what
+correct looks like.</p>
+
+<h2>Xbox build</h2>
+<p>The toolchain is in <code>deps/nxdk</code>. nxdk has no dynamic library loading, so everything is linked
+statically into the XBE.</p>
+<table>
+<tr><th>Script</th><th>What it does</th></tr>
+<tr><td><code>tools/xbox-sweep.sh engine</code></td><td>Compiles every engine C file for the Xbox and summarises the failures.</td></tr>
+<tr><td><code>tools/xbox-game-link-check.sh hl --include-client --include-freevgui --xbe &lt;path&gt;</code></td>
+<td>Links the Half-Life <code>default.xbe</code>.</td></tr>
+<tr><td><code>tools/xbox-xiso.sh</code></td><td>Packs a disc from it.</td></tr>
+</table>
+<p>Conventions, gates and the rules for contributions are in <code>AGENTS.md</code> in the repository.</p>
+
+<h2>The asset baker</h2>
+<p><code>tools/asset-studio</code> is a separate CMake project that builds for the host, not the console. It
+reads a retail install and writes the <code>.mpak</code> archives, the DXT1 skies and the music files. The
+packager runs it for you; the Windows exe carries a copy. On Linux, build it first with cmake and g++:</p>
+<pre><code>python3 tools/packager/build_baker.py</code></pre>
+
+<h2>The packager</h2>
+<pre><code>python tools/packager/build_baker.py                              # builds bin/AssetStudio
+python tools/packager/make_payload.py --xbe &lt;clean main build&gt;   # builds payload/
+python tools/packager/release.py --xbe &lt;build&gt; --version vX.Y   # builds, does not publish
+python -m unittest discover -s tools/packager/tests              # tests</code></pre>
+<p><code>release.py</code> needs PyInstaller. The Windows exe is built on Windows; Linux users get the portable zip.
+A release carries the stable Xbox build: a clean build of <code>main</code>, and the release notes name its commit.</p>
+
+<h2>Testing in an emulator</h2>
+<p>The scripts <code>tools/xemu-*.sh</code> run builds in <a href="https://github.com/xemu-project/xemu">xemu</a>,
+the Xbox emulator used for development. An emulator does not replace the console for performance numbers.</p>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>
