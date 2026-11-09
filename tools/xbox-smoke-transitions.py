@@ -55,9 +55,11 @@ STATE = "90-smoke.state"  # the label and options of the last stage
 DISABLE = ["00-c1a0.cfg", "91-frametime.cfg"]  # would load another map / set another label
 CONFLICT = "90-route-bmi.cfg"  # the Black Mesa route: its own `map`, never run both
 SPAWN_WAIT = 90  # waits (0.75 s) before ent_fire: the client has spawned
-# `wait N` counted about 120 a second on the console at 60 fps (the pilot of 2026-11-09: a 10 s dwell, 600 waits,
-# gave 4.9 s in play; the command buffer runs more than once a frame), so the dwell is converted at that rate.
-WAIT_PER_SEC = 120
+# `wait N` counts commands-buffer runs, not seconds. The pilot and the first full run (no ent_fire in the cfgs) counted
+# about 2 a frame (120 a second at 60 fps); the second full run, whose cfgs run ent_fire, counted 1 a frame (3647
+# frames for 3692 waits). The dwell is converted at the rate of the cfgs as they are now; a slow map (30 fps) takes
+# twice as long in seconds, as the dwell is in frames.
+WAIT_PER_SEC = 60
 
 
 def say(*a):

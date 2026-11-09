@@ -99,3 +99,10 @@ Each attempt has its own label, so recordings do not mix.
 - A crash back to the dashboard and a freeze look the same in the recording. The
   on-screen error text is not captured.
 - Nothing watches the console live; a hang only shows when you notice the screen.
+
+## Recording a normal play session
+
+`tools/xbox-play-record.py` stages the recorder alone (`90-playthrough.cfg`: a label, `host_frametime_analysis 1`,
+`cl_showfps 1`), with no map load, so you play from the menu and every map is measured. `fetch` then `report` give
+the per-map table and an HTML report. `restore` deletes the cfg. It refuses to stage while a smoke-test chain is
+staged, since the game would run the chain instead.
