@@ -403,3 +403,7 @@ build-test/
 
 # The documentation site has an install page; INSTALL.* above is for build output
 !site/install.html
+
+# Built by tools/site/build.py at deploy time
+site/mocks/
+site/performance/reports/
