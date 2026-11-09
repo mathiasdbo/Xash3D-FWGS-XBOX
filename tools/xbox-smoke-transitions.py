@@ -202,6 +202,15 @@ def game_dir(f, a):
     die("no game folder found (tried %s): pass --game" % ", ".join(GAME_CANDIDATES))
 
 
+def read_state(f, cfgdir):
+    """What the last stage wrote into 90-smoke.state, or {}"""
+    held = get_text(f, cfgdir + "/" + STATE)
+    try:
+        return json.loads(held[0][3:]) if held else {}
+    except ValueError:
+        return {}
+
+
 def put_text(f, path, lines, quiet=False):
     f.storbinary("STOR " + path, io.BytesIO(("\n".join(lines) + "\n").encode()))
     if not quiet:
@@ -233,12 +242,16 @@ def stage(f, a):
         n = m + "_load.cfg"
         if n in maps_there and m not in owned_before:
             die("maps/%s already exists on the console and is not this script's: sort it out by hand" % n)
+    # Only what this script itself renames is ever renamed back: a cfg that was already .off stays off
+    renamed = list(read_state(f, cfgdir).get("renamed", []))
     for n in DISABLE:
         if n in cfgs:
             if n + ".off" in cfgs:
                 die("%s and %s.off both exist; sort them out by hand" % (n, n))
             f.rename(cfgdir + "/" + n, cfgdir + "/" + n + ".off")
             say("renamed %s -> %s.off" % (n, n))
+            if n not in renamed:
+                renamed.append(n)
     dwell_frames = int(a.dwell * WAIT_PER_SEC)
     end_label = label + "-end"
     # The list of files first, so restore finds every one even if an upload below fails
@@ -256,7 +269,7 @@ def stage(f, a):
               'host_frametime_label "%s"' % label, "host_frametime_analysis 1", "sv_cheats 1",
               'map "%s"' % chain[0][0]])
     put_text(f, cfgdir + "/" + STATE, ["// " + json.dumps(dict(label=label, dwell=a.dwell, first=chain[0][0],
-                                                                last=chain[-1][0], maps=[c[0] for c in chain],
+                                                                last=chain[-1][0], maps=[c[0] for c in chain], renamed=renamed,
                                                                 list=os.path.basename(a.list)))], quiet=True)
     mins = len(chain) * (a.dwell + 8) / 60  # the wait, a load of a few seconds, the god/notarget wait on a plain load
     say("staged %s: %d maps from %s to %s, %g s each, about %.0f minutes." % (
@@ -284,6 +297,7 @@ def restore(f, a):
     cfgdir, mapdir = game + "/valve/userconfig.d", game + "/valve/maps"
     cfgs = listing(f, cfgdir)
     there = listing(f, mapdir)
+    renamed = read_state(f, cfgdir).get("renamed", [])
     for l in (get_text(f, cfgdir + "/" + OWNED) or []):
         m = l[3:].strip() if l.startswith("// ") else ""
         if m and m + "_load.cfg" in there:
@@ -293,7 +307,7 @@ def restore(f, a):
         if n in cfgs:
             f.delete(cfgdir + "/" + n)
             say("removed " + n)
-    for n in DISABLE:
+    for n in renamed:  # only the ones a stage set aside; one that was .off before stays .off
         if n + ".off" in cfgs and n not in cfgs:
             f.rename(cfgdir + "/" + n + ".off", cfgdir + "/" + n)
             say("renamed %s.off -> %s" % (n, n))

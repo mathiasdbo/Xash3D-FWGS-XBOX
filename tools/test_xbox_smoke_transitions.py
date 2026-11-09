@@ -122,5 +122,72 @@ class BspEntities(unittest.TestCase):
         self.assertEqual(maplist.walk(g, "a"), [("a", "b", "x"), ("b", "c", "-")])
 
 
+class FakeFtp:
+    """Just enough of ftplib.FTP for stage and restore: files in a dict keyed by full path."""
+
+    def __init__(self, files):
+        self.files = dict(files)
+
+    def nlst(self, d):
+        d = d.rstrip("/") + "/"
+        return [p for p in self.files if p.startswith(d) and "/" not in p[len(d):]]
+
+    def retrlines(self, cmd, callback):
+        path = cmd.split(" ", 1)[1]
+        if path not in self.files:
+            import ftplib
+            raise ftplib.error_perm("550 no such file")
+        for line in self.files[path].decode().splitlines():
+            callback(line)
+
+    def storbinary(self, cmd, fp, *a, **k):
+        self.files[cmd.split(" ", 1)[1]] = fp.read()
+
+    def rename(self, a, b):
+        self.files[b] = self.files.pop(a)
+
+    def delete(self, path):
+        del self.files[path]
+
+
+class StageRestore(unittest.TestCase):
+    G = "/HDD0-F/Games/Half-Life"
+    CFG = G + "/valve/userconfig.d/"
+
+    def args(self):
+        import argparse
+        return argparse.Namespace(list=smoke.DEFAULT_LIST, count=2, dwell=10, from_map=None, label="smk-t",
+                                  game=self.G)
+
+    def run_cycle(self, files):
+        f = FakeFtp(files)
+        f.files[self.G + "/default.xbe"] = b"x"
+        before = dict(f.files)
+        smoke.stage(f, self.args())
+        staged = dict(f.files)
+        smoke.restore(f, self.args())
+        return before, staged, f.files
+
+    def test_a_cfg_that_was_already_off_stays_off(self):
+        before, staged, after = self.run_cycle({self.CFG + "00-c1a0.cfg.off": b"map c1a0\n",
+                                                self.CFG + "91-frametime.cfg.off": b"x\n"})
+        self.assertIn(self.CFG + "90-smoke.cfg", staged)
+        self.assertEqual(after, before)  # restore leaves the console as it found it
+
+    def test_a_cfg_the_stage_set_aside_comes_back(self):
+        before, staged, after = self.run_cycle({self.CFG + "00-c1a0.cfg": b"map c1a0\n"})
+        self.assertIn(self.CFG + "00-c1a0.cfg.off", staged)
+        self.assertNotIn(self.CFG + "00-c1a0.cfg", staged)
+        self.assertEqual(after, before)
+
+    def test_a_second_stage_keeps_the_first_ones_renames(self):
+        f = FakeFtp({self.CFG + "00-c1a0.cfg": b"map c1a0\n", self.G + "/default.xbe": b"x"})
+        smoke.stage(f, self.args())
+        smoke.stage(f, self.args())  # e.g. stage --from after a crash: 00-c1a0.cfg is .off by now
+        smoke.restore(f, self.args())
+        self.assertIn(self.CFG + "00-c1a0.cfg", f.files)
+        self.assertNotIn(self.CFG + "00-c1a0.cfg.off", f.files)
+
+
 if __name__ == "__main__":
     unittest.main()
