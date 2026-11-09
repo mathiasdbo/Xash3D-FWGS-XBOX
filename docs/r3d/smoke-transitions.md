@@ -5,9 +5,11 @@ stays 30 s on each map with the frame-time recorder running, and says from the
 recording which map the game died or hung on. It catches crashes on load and on
 transition early, before a release, without a person playing through.
 
-Status: written and tested on the PC (unit tests, and the verdict logic against a
-real console recording). Not yet run on the console: the first pilot run decides
-whether the `_load.cfg` chain, `god` and `notarget` behave as assumed.
+Status: piloted on the console on 2026-11-09 (3 maps, 10 s each, label `smk-pilot1`): the
+`_load.cfg` chain ran c0a0 -> c0a0a -> c0a0b with `changelevel2` and landmarks, the end marker
+was recorded and the game quit cleanly. `wait N` counts about 120 a second at 60 fps there (the
+command buffer runs more than once a frame), so the dwell is converted at that rate. The full
+campaign run has not been done yet.
 
 ## Files
 

@@ -54,8 +54,10 @@ OWNED = "90-smoke.maps"  # lists the maps/*_load.cfg a stage wrote (not a .cfg: 
 STATE = "90-smoke.state"  # the label and options of the last stage
 DISABLE = ["00-c1a0.cfg", "91-frametime.cfg"]  # would load another map / set another label
 CONFLICT = "90-route-bmi.cfg"  # the Black Mesa route: its own `map`, never run both
-ARRIVE_WAIT = 240  # frames before god/notarget after a plain `map` load (the player has spawned)
-FPS = 60
+ARRIVE_WAIT = 240  # waits (2 s) before god/notarget after a plain `map` load (the player has spawned)
+# `wait N` counted about 120 a second on the console at 60 fps (the pilot of 2026-11-09: a 10 s dwell, 600 waits,
+# gave 4.9 s in play; the command buffer runs more than once a frame), so the dwell is converted at that rate.
+WAIT_PER_SEC = 120
 
 
 def say(*a):
@@ -237,7 +239,7 @@ def stage(f, a):
                 die("%s and %s.off both exist; sort them out by hand" % (n, n))
             f.rename(cfgdir + "/" + n, cfgdir + "/" + n + ".off")
             say("renamed %s -> %s.off" % (n, n))
-    dwell_frames = int(a.dwell * FPS)
+    dwell_frames = int(a.dwell * WAIT_PER_SEC)
     end_label = label + "-end"
     # The list of files first, so restore finds every one even if an upload below fails
     put_text(f, cfgdir + "/" + OWNED, ["// " + m for m in sorted(owned_before | set(c[0] for c in chain))], quiet=True)
