@@ -53,7 +53,7 @@ cosmetic: it is what decides whether the fork can be kept current at all.
 ## Remotes
 
 ```
-origin    git@github.com:mathiasdbo/Resonance3D.git
+origin    git@github.com:mathiasdbo/Xash3D-FWGS-XBOX.git
 upstream  https://github.com/FWGS/xash3d-fwgs.git   (fetch)
 upstream  no-push                                    (push disabled on purpose)
 ```
