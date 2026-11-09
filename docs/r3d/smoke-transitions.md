@@ -88,8 +88,12 @@ Each attempt has its own label, so recordings do not mix.
 
 ## Limits
 
-- The player never walks to the trigger, so it arrives offset from the landmark.
-  This tests loading and the transition and restore code, not gameplay.
+- The player never walks to the trigger. A transition places it in the next map at its offset
+  from the landmark here, so in the first full run (2026-11-09) it arrived floating outside the
+  world. Before each `changelevel2` the chain now moves the landmark to about 100 units in front
+  of the player (`ent_fire "<landmark>" movehere`), so the player arrives next to the next
+  map's landmark. That change is untested on the console. It tests loading and the transition
+  and restore code, not gameplay.
 - The recorder flushes every 5 s, so the last seconds before a crash can be
   missing. Segments start at each map start, so the failing map is still named.
 - A crash back to the dashboard and a freeze look the same in the recording. The

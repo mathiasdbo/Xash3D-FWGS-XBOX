@@ -77,7 +77,7 @@ class Cfgs(unittest.TestCase):
 
     def test_a_transition_waits_then_changes_level_without_toggles(self):
         l = self.lines(("b", "transition", 'changelevel2 "c" "lm"'))
-        self.assertEqual(l[-2:], ["wait 1800", 'changelevel2 "c" "lm"'])
+        self.assertEqual(l[-4:], ["wait 1800", 'ent_fire "lm" movehere', "wait 2", 'changelevel2 "c" "lm"'])
         self.assertNotIn("god", l)  # god toggles: the player carried over already has it
 
     def test_a_fresh_map_gets_god_and_notarget_once(self):
@@ -86,6 +86,15 @@ class Cfgs(unittest.TestCase):
             self.assertEqual(l.count("god"), 1)
             self.assertEqual(l.count("notarget"), 1)
             self.assertLess(l.index("god"), l.index("wait 1800"))
+
+    def test_a_plain_map_load_has_no_landmark_to_move(self):
+        l = self.lines(("b", "transition", 'map "c"'))
+        self.assertEqual(l[-2:], ["wait 1800", 'map "c"'])
+        self.assertFalse(any("movehere" in x for x in l))
+
+    def test_landmark_of(self):
+        self.assertEqual(smoke.landmark_of('changelevel2 "c" "c1a4/x y"'), "c1a4/x y")
+        self.assertIsNone(smoke.landmark_of('map "c"'))
 
     def test_every_map_neutralises_its_own_level_change_triggers_before_the_dwell(self):
         for how in ("start", "transition", "direct"):

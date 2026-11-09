@@ -124,6 +124,12 @@ def plan(start, steps, from_map=None, count=None):
     return chain
 
 
+def landmark_of(cmd):
+    """the landmark of a `changelevel2 "<map>" "<landmark>"` command, None for a plain `map`"""
+    w = cmd.split('"')
+    return w[3] if cmd.startswith("changelevel2") and len(w) >= 5 else None
+
+
 def cfg_lines(label, dwell_frames, chain, entry, end_label):
     m, how, nxt = entry
     lines = ["// tools/xbox-smoke-transitions.py (%s): remove after the run" % label,
@@ -137,6 +143,13 @@ def cfg_lines(label, dwell_frames, chain, entry, end_label):
         lines += ["god", "notarget"]  # god and notarget toggle: only on a fresh map
     lines.append("wait %d" % dwell_frames)
     if nxt:
+        lm = landmark_of(nxt)
+        if lm:
+            # The player is placed in the next map at (its offset from the landmark here) from the next map's
+            # landmark. It never walked to the trigger, so that offset is the whole map: it arrived floating in
+            # the void. movehere puts the landmark about 100 units in front of the player, so it arrives next to
+            # the other landmark, in the corridor.
+            lines += ['ent_fire "%s" movehere' % lm, "wait 2"]
         lines.append(nxt)
     else:
         lines += ["host_frametime_analysis 0", "wait 10",
