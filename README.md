@@ -36,6 +36,8 @@ it publishes to GitHub Pages with the *Pages* workflow once Pages is enabled).
 |---|---|
 | [Install](site/install.html) | Putting Half-Life on your Xbox with the packager |
 | [Console settings](site/settings.html) | 720p, anti-aliasing, anisotropy, overlays, from your PC |
+| [Menus](site/menus.html) | The controller-first menus, screens and what is still to do |
+| [Progress](site/progress.html) | The 720p, 60 fps target, measured frame times, optimisations |
 | [Building](site/build.html) | The PC build, the Xbox toolchain, the baker |
 | [Frame-time recorder](site/recorder.html) | Measuring frames on the console |
 | [How it differs](site/differences.html) | What was added to Xash3D FWGS |

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Menus - Xash3D-FWGS-XBOX</title>
+<meta name="description" content="The Xbox build's menus: controller navigation, screens, widescreen and 720p, and what is still to do.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="menus.html" aria-current="page">Menus</a><a href="progress.html">Progress</a><a href="recorder.html">Frame-time recorder</a><a href="build.html">Building</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>The menus</h1>
+<p class="lede">The menu is built for a controller on a television: no mouse, a legend of button glyphs on every
+screen, and layouts that follow the console's 4:3, 16:9 and 720p outputs.</p>
+
+<h2>What it is made of</h2>
+<ul>
+<li><strong>The main menu</strong> is the <code>mainui_cpp</code> menu (our fork, in <code>3rdparty/mainui</code>).
+It already moves a single cursor with a gamepad; the fork adds the Xbox screens, the legend bar and the fonts.</li>
+<li><strong>The console and the HUD</strong> are drawn by the engine itself. All menu layers draw through the same
+2D primitives of the NV2A renderer, so the renderer's 2D pass is what makes any menu appear.</li>
+<li><strong>FreeVGUI</strong>, a reimplementation of Half-Life's GUI library, is a separate layer. Single-player
+Half-Life does not need it. It is planned for multiplayer panels (scoreboard, message of the day, team menus).</li>
+</ul>
+
+<h2>Screens</h2>
+<table>
+<tr><th>Screen</th><th>What is on it</th></tr>
+<tr><td>Main</td><td>Resume (in game), New Game, Training Room, Load Game, Save Game (in game), Options. Console,
+multiplayer, custom game and quit are hidden on the console.</td></tr>
+<tr><td>Pause</td><td>Opened with Start in single-player. The game freezes and dims behind it, and the chapter and
+difficulty are shown. Resume, Save, Load, Options, Quit.</td></tr>
+<tr><td>Options</td><td>Controller, Display, Audio, Game.</td></tr>
+<tr><td>Controller</td><td>Standard, Southpaw or Legacy layout, and button customisation. The pause button cannot be reassigned.</td></tr>
+<tr><td>Display</td><td>Brightness, texture filtering, 720p, aspect (dashboard, 4:3, 16:9), anti-aliasing and anisotropic
+filtering, and the current resolution and refresh rate.</td></tr>
+<tr><td>Audio</td><td>Sound, music and HEV-suit sliders, <em>Hardware audio</em> and <em>Voices volume</em>. Hardware
+audio takes effect at the next start.</td></tr>
+<tr><td>Game</td><td>Auto-aim, crosshair, fast weapon switch.</td></tr>
+<tr><td>Load and Save</td><td>With a screenshot preview of each save.</td></tr>
+</table>
+
+<h2>Why this is more than a port of the menu</h2>
+<ul>
+<li><strong>Navigation without a mouse.</strong> The cursor skips items that are greyed out or mouse-only, and the
+order the controls are registered in is the order the pad visits them, so each screen is checked against that.
+Two screens had it wrong and were fixed. A button legend (A, B, X, Y glyphs and what they do) is drawn at the
+bottom of every screen.</li>
+<li><strong>Widescreen and 720p.</strong> When the output is 16:9 the engine reports 854x480, so the field of view,
+the HUD and the menu all widen instead of stretching. The menu scales to the screen's height and the HUD anchors to
+its edges. <code>r3d_vid_aspect</code> forces 4:3 or 16:9 and <code>r3d_vid_mode 1</code> selects 1280x720, which needs
+an HDTV pack with 720p allowed in the dashboard.</li>
+<li><strong>Memory.</strong> The menu releases its fonts and background while you play and loads them back when
+the menu opens. The backgrounds are baked offline into tiles, with a compressed variant that cuts the menu's textures
+to about a third.</li>
+<li><strong>Fonts and text.</strong> Fira Sans Condensed, because the design's first choice lacked Cyrillic and some
+Central European letters. Strings are looked up by their English text, and a German translation ships as a proof.</li>
+<li><strong>Look.</strong> An amber palette from the menu design, shipped as a data file; a focused button glows.</li>
+<li><strong>Testing without a console.</strong> Scripts drive the menus in the emulator with a virtual controller
+(<code>tools/xemu-pad.py</code> and friends).</li>
+<li><strong>Leaving the game.</strong> Start, Back and both triggers together return to the dashboard.</li>
+</ul>
+
+<h2>Still to do</h2>
+<ul>
+<li>An on-screen keyboard (the hook exists; the window is not written).</li>
+<li>The FreeVGUI backend and gamepad navigation by widget position, for multiplayer panels.</li>
+<li>Multiplayer screens, and VGUI2 for games that need it (not before Half-Life runs well on hardware).</li>
+<li>A speaker-output row (stereo, mono, surround) once the console's setting layout is understood.</li>
+<li>A font with a licence that covers the small help text.</li>
+</ul>
+<p>The design notes are <code>docs/r3d/ui-architecture.md</code>, and each change is in
+<code>CHANGELOG.md</code> and the divergence ledger.</p>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>

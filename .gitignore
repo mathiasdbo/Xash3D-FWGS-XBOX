@@ -400,3 +400,6 @@ build-test/
 .mpak-diff/
 .mpak-run/
 .test-bevels/
+
+# The documentation site has an install page; INSTALL.* above is for build output
+!site/install.html

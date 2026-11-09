@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install - Xash3D-FWGS-XBOX</title>
+<meta name="description" content="How to put Half-Life on an original Xbox with the packager.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html">Home</a><a href="install.html" aria-current="page">Install</a><a href="settings.html">Console settings</a><a href="menus.html">Menus</a><a href="progress.html">Progress</a><a href="recorder.html">Frame-time recorder</a><a href="build.html">Building</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>Put Half-Life on your Xbox</h1>
+<p class="lede">The Xash3D-FWGS-XBOX Packager combines your own Half-Life files with the Xbox build and writes
+a folder, an XISO disc image, or uploads straight to the console over FTP.</p>
+
+<h2>What you need</h2>
+<ul>
+<li>Half-Life from Steam, installed on the PC you run the packager on (it finds the install by itself on Windows).</li>
+<li>An original Xbox with a way to run homebrew and an FTP server (the packager was developed against
+PrometheOS).</li>
+<li>Windows for the one-file exe. Elsewhere, Python 3 with Tk (on Debian or Ubuntu:
+<code>sudo apt install python3-tk</code>).</li>
+</ul>
+
+<h2>Run the packager</h2>
+<p>Windows: run <code>Xash3D-FWGS-XBOX-Packager-&lt;version&gt;-windows.exe</code> from the
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/releases">releases page</a>. Anywhere else: unzip the portable package and run</p>
+<pre><code>python3 r3d_packager.py</code></pre>
+<ol>
+<li>Pick the game. Half-Life is available; Opposing Force and Blue Shift are listed and will follow.</li>
+<li>Check the folder it found. The engine needs <code>delta.lst</code> (Half-Life 1.1.0.0 or later) and
+<code>resource/gameui_english.txt</code>; the window says what is missing.</li>
+<li>Choose <strong>Folder</strong> (copy it to the console yourself), <strong>XISO</strong>, or <strong>Xbox over
+FTP</strong>, and where to save or send.</li>
+<li>Build. The first export takes about two minutes on a modern machine, because the maps are baked.</li>
+</ol>
+<p>Without a window:</p>
+<pre><code>python3 r3d_packager.py --cli --steam "&lt;Half-Life folder&gt;" --format folder|xiso --out &lt;folder&gt;</code></pre>
+
+<h2>What ends up on the console</h2>
+<ul>
+<li>Your <code>valve</code> folder, plus <code>default.xbe</code> titled "Half-Life", the menu font, colours,
+button art and translations.</li>
+<li>One <code>.mpak</code> per map, baked from your files. The retail <code>.bsp</code> of a baked map is left
+off, because a loose <code>.bsp</code> beside its archive is loaded instead and the world then draws black.</li>
+<li>The menu background tiles, the 19 skies as DXT1 <code>.dds</code>, and the music as ADPCM
+<code>.xwav</code>.</li>
+<li><code>video.cfg</code> with <code>r_refdll "nv2a"</code>, and the menu's control images.</li>
+</ul>
+<p>The result is cached (<code>%LOCALAPPDATA%\Xash3D-FWGS-XBOX Packager\bake</code> on Windows) and reused until the
+baker or your game files change.</p>
+
+<h2>Uploading over FTP safely</h2>
+<p>"Find my Xbox" scans the network for the console and its games folders. Before it changes an existing
+install, the packager surveys it and asks. It never replaces your saves or settings, and it moves the old
+<code>default.xbe</code> aside as <code>default.xbe.before-packager</code> instead of overwriting it.</p>
+<p>Next: <a href="settings.html">change the console's settings</a> from the second tab.</p>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>
