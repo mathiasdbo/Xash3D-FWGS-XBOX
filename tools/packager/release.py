@@ -10,8 +10,8 @@ With --publish the tag is created on the current commit of the repo and the
 files are attached to a new GitHub release.
 
 Files:
-  Resonance3D-Packager-<ver>-windows.exe   one file, no Python needed
-  Resonance3D-Packager-<ver>-portable.zip  any OS with Python 3 and Tk:
+  Xash3D-FWGS-XBOX-Packager-<ver>-windows.exe   one file, no Python needed
+  Xash3D-FWGS-XBOX-Packager-<ver>-portable.zip  any OS with Python 3 and Tk:
                                            python3 r3d_packager.py
   SHA256SUMS.txt
 
@@ -69,7 +69,7 @@ def main():
     run([sys.executable, os.path.join(HERE, "build_baker.py")])
 
     ver = a.version
-    exe_name = "Resonance3D-Packager-%s-windows.exe" % ver
+    exe_name = "Xash3D-FWGS-XBOX-Packager-%s-windows.exe" % ver
     if sys.platform == "win32":
         sep = ";"
         run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed",
@@ -83,9 +83,9 @@ def main():
     else:
         print("Not on Windows: skipping the .exe.")
 
-    zname = "Resonance3D-Packager-%s-portable.zip" % ver
+    zname = "Xash3D-FWGS-XBOX-Packager-%s-portable.zip" % ver
     with zipfile.ZipFile(os.path.join(DIST, zname), "w", zipfile.ZIP_DEFLATED) as z:
-        top = "Resonance3D-Packager"
+        top = "Xash3D-FWGS-XBOX-Packager"
         z.write(os.path.join(HERE, "r3d_packager.py"), top + "/r3d_packager.py")
         z.write(os.path.join(HERE, "build_baker.py"), top + "/build_baker.py")
         # the baker built here only runs on this OS; elsewhere build_baker.py makes one from the repo
@@ -106,7 +106,7 @@ def main():
         build = json.load(f)["titles"]["hl"]["build"]
     notes = os.path.join(DIST, "NOTES.md")
     with open(notes, "w") as f:
-        f.write("Resonance3D Packager %s\n\n"
+        f.write("Xash3D-FWGS-XBOX Packager %s\n\n"
                 "Packs your own Half-Life files with the Xbox build into a console-ready folder or XISO.\n\n"
                 "- Windows: run the .exe.\n"
                 "- Linux / other: unzip the portable zip and run `python3 r3d_packager.py` "
@@ -118,7 +118,7 @@ def main():
                 "Xbox build inside: commit %s (%s), XBE source sha256 %s.\n"
                 % (ver, build["commit"][:10], build["branch"], build["xbe_source_sha256"]))
 
-    cmd = ["gh", "release", "create", ver, "--title", "Resonance3D Packager " + ver,
+    cmd = ["gh", "release", "create", ver, "--title", "Xash3D-FWGS-XBOX Packager " + ver,
            "--notes-file", notes] + [os.path.join(DIST, n) for n in files]
     if not a.publish:
         print("\nBuilt, not published. To publish:\n  " + " ".join(cmd))

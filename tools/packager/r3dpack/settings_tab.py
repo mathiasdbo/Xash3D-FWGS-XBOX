@@ -306,7 +306,7 @@ def build(tab, ui):
             say("Nothing to change.")
             return
         where = "the console" if where_var.get() == "xbox" else install_var.get()
-        if not messagebox.askyesno("Resonance3D Packager", "Write to %s?\n\n%s\n\nOnly %s and the files you ticked "
+        if not messagebox.askyesno("Xash3D-FWGS-XBOX Packager", "Write to %s?\n\n%s\n\nOnly %s and the files you ticked "
                                    "change; the file it replaces is kept as .before-packager."
                                    % (where, "\n".join(lines[:20]), consolecfg.MANAGED_NAME)):
             return

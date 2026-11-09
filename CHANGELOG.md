@@ -5,6 +5,16 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - the project is named Xash3D-FWGS-XBOX
+
+The project, formerly Resonance3D, is now Xash3D-FWGS-XBOX, and its packager the
+Xash3D-FWGS-XBOX Packager (window, exe and zip names, `%LOCALAPPDATA%` bake
+cache folder; an existing cache under the old name is moved, not rebuilt). The
+recorder header, the link-check XBE titles and the tool banners follow. Left
+under the old name: the `// Resonance3D (#NN)` markers and copyright lines in
+the source, past changelog entries, the `r3d_` cvars, and the `resonance3d`
+branch of the forked submodules.
+
 ### Changed - Xbox: the build string says "xbox", not "win32"
 
 The console banner, the log header, the crash text, the `host_ver` cvar and the

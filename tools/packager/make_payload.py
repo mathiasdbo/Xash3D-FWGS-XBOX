@@ -57,7 +57,7 @@ SHELL_CONTROLS = (
 )
 
 # The retail video.cfg leaves r_refdll empty; the console needs the nv2a renderer.
-VIDEO_CFG = b'// written by the Resonance3D packager\r\nr_refdll "nv2a"\r\n'
+VIDEO_CFG = b'// written by the Xash3D-FWGS-XBOX packager\r\nr_refdll "nv2a"\r\n'
 
 
 def main():

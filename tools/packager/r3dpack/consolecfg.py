@@ -14,7 +14,7 @@ how the user's own cfgs are switched on and off.
 import re
 
 MANAGED_NAME = "50-packager.cfg"
-MANAGED_HEADER = ("// Managed by the Resonance3D packager (Console settings). Edit it there;\n"
+MANAGED_HEADER = ("// Managed by the Xash3D-FWGS-XBOX packager (Console settings). Edit it there;\n"
                   "// a setting the packager does not set is decided by the in-game menu.\n")
 LABEL_OK = re.compile(r"^[A-Za-z0-9_-]{0,22}$")  # what host_frametime_label keeps (xbox_ft_label_sanitise)
 

@@ -1,4 +1,4 @@
-# Resonance3D — fork of Xash3D-FWGS
+# Xash3D-FWGS-XBOX (formerly Resonance3D) — fork of Xash3D-FWGS
 
 This repository **is** Xash3D-FWGS, with a bounded set of changes to bring it
 to the Original Xbox (2001) without losing the PC build.

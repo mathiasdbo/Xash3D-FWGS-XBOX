@@ -1,15 +1,15 @@
-# Resonance3D Packager
+# Xash3D-FWGS-XBOX Packager
 
-Packs **your own** Half-Life files together with the Resonance3D Xbox build
+Packs **your own** Half-Life files together with the Xash3D-FWGS-XBOX Xbox build
 into something the console can run: a `Half-Life` folder, or an XISO disc
 image. Nothing of the game ships with this tool.
 
 ## Using it
 
-Windows: run `Resonance3D-Packager-<version>-windows.exe` from the
+Windows: run `Xash3D-FWGS-XBOX-Packager-<version>-windows.exe` from the
 [release](../../../../releases).
 
-Anywhere else: unzip `Resonance3D-Packager-<version>-portable.zip` and run
+Anywhere else: unzip `Xash3D-FWGS-XBOX-Packager-<version>-portable.zip` and run
 
     python3 r3d_packager.py
 
@@ -86,7 +86,7 @@ arrows) from `xash-extras`, which the options screens need.
 
 The first export takes about two minutes on a modern machine (the maps are
 baked in parallel). The result is kept in your cache folder
-(`%LOCALAPPDATA%\Resonance3D Packagerake` on Windows, `~/.cache/resonance3d-packager/bake`
+(`%LOCALAPPDATA%\Xash3D-FWGS-XBOX Packagerake` on Windows, `~/.cache/xash3d-fwgs-xbox-packager/bake`
 elsewhere) and reused until the baker or your game files change.
 `--no-bake` skips it (for tests only: the world will not draw). `--baker` and
 `--bake-cache` say where the baker and the cache are.

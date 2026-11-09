@@ -1,4 +1,4 @@
-# Project rules — Resonance3D (fork of Xash3D-FWGS)
+# Project rules — Xash3D-FWGS-XBOX (fork of Xash3D-FWGS, formerly Resonance3D)
 
 This repository **is** Xash3D-FWGS. Start with `docs/r3d/epics.md` for the
 top-level plan and `docs/r3d/README.md` for context. **Read

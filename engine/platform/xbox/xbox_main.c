@@ -38,7 +38,7 @@ int main( void )
 {
 	while( 1 )
 	{
-		debugPrint( "Resonance3D: X1 entry point reached. Host_Main is not called yet - see docs/r3d/fork-plan.md's X2 section.\n" );
+		debugPrint( "Xash3D-FWGS-XBOX: X1 entry point reached. Host_Main is not called yet - see docs/r3d/fork-plan.md's X2 section.\n" );
 		Sleep( 2000 );
 	}
 

@@ -91,7 +91,7 @@ to SV_LoadProgs/Sys_Error - not by reading one function again.
  * naming what this actually is, and no-ops for the other two. */
 static const char *Stub_GetGameDescription( void )
 {
-	return "Resonance3D stub_game - not a real game, see stub_game/README.md";
+	return "Xash3D-FWGS-XBOX stub_game - not a real game, see stub_game/README.md";
 }
 
 static void Stub_GameInit( void )

@@ -1,6 +1,6 @@
 # UI architecture: replacing VGUI and VGUI2
 
-How Resonance3D draws panels without the proprietary `vgui.dll`, and what a
+How Xash3D-FWGS-XBOX draws panels without the proprietary `vgui.dll`, and what a
 VGUI2 replacement would take.
 
 Everything here was measured in this tree. Line numbers are citations, not

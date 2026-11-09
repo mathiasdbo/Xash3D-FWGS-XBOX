@@ -1,4 +1,4 @@
-You are reviewing the Resonance3D repository, a fork of Xash3D-FWGS being
+You are reviewing the Xash3D-FWGS-XBOX repository, a fork of Xash3D-FWGS being
 ported to the Original Xbox with nxdk (`deps/nxdk`). This is the standing
 focus text for `tools/codex-review.sh`, which appends the exact diff range
 to inspect after this text. Weight everything below heavily; it encodes

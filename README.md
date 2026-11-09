@@ -1,4 +1,7 @@
-# Resonance3D
+# Xash3D-FWGS-XBOX
+
+*Formerly named Resonance3D. Older changelog entries, the divergence ledger and
+the `// Resonance3D (#NN)` markers in the source keep the old name.*
 
 An Original Xbox (2001) port of **Xash3D-FWGS**, a GoldSrc-compatible engine,
 built against the open-source **nxdk** homebrew SDK — with a modern Vulkan
@@ -45,7 +48,7 @@ us what correct looks like.
 
 ## Putting Half-Life on your Xbox
 
-You need your own copy of Half-Life (Steam). The **Resonance3D Packager**
+You need your own copy of Half-Life (Steam). The **Xash3D-FWGS-XBOX Packager**
 (`tools/packager/`) combines your game files with the stable Xbox build and
 writes either a `Half-Life` folder (copy it to the console by FTP) or an XISO
 disc image. It finds your Steam install by itself on Windows (registry) and

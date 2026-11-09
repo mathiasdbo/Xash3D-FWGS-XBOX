@@ -48,12 +48,26 @@ def find_baker(explicit=None):
                     "or pass --baker <path>." % BAKER_NAME)
 
 
+def _adopt_old_cache(old, new):
+    """The product was renamed; a bake kept under the old name is moved, not redone."""
+    try:
+        if os.path.isdir(old) and not os.path.exists(new):
+            os.makedirs(os.path.dirname(new), exist_ok=True)
+            os.rename(old, new)
+    except OSError:
+        pass
+
+
 def default_cache_root():
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "Resonance3D Packager", "bake")
+        root = os.path.join(base, "Xash3D-FWGS-XBOX Packager", "bake")
+        _adopt_old_cache(os.path.join(base, "Resonance3D Packager", "bake"), root)
+        return root
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-    return os.path.join(base, "resonance3d-packager", "bake")
+    root = os.path.join(base, "xash3d-fwgs-xbox-packager", "bake")
+    _adopt_old_cache(os.path.join(base, "resonance3d-packager", "bake"), root)
+    return root
 
 
 def _sha(path):

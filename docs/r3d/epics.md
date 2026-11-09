@@ -1,4 +1,4 @@
-# Resonance3D — epic plan
+# Xash3D-FWGS-XBOX — epic plan
 
 A modern GoldSrc engine that performs on retro consoles. This document is the
 top level: epics, sequencing, and an honest read of what the scope costs.

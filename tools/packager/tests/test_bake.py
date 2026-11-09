@@ -113,5 +113,19 @@ class Bake(unittest.TestCase):
         self.assertIn("build_baker.py", str(cm.exception))
 
 
+class RenamedCache(unittest.TestCase):
+    def test_a_bake_under_the_old_name_is_moved_not_redone(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = os.path.join(d, "Resonance3D Packager", "bake")
+            os.makedirs(old)
+            with open(os.path.join(old, "keep"), "w") as f:
+                f.write("x")
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": d, "XDG_CACHE_HOME": d}),                     mock.patch.object(bake.os, "name", "nt"):
+                root = bake.default_cache_root()
+            self.assertTrue(root.endswith(os.path.join("Xash3D-FWGS-XBOX Packager", "bake")))
+            self.assertTrue(os.path.exists(os.path.join(root, "keep")))
+            self.assertFalse(os.path.exists(old))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -586,7 +586,7 @@ static qboolean FT_Start( int mode )
 	FT_MemoryPages( &ft.last_free_pages, &total_pages );
 
 	/* The XBE header's link timestamp identifies the build on the disc. */
-	Q_snprintf( ft.build, sizeof( ft.build ), "Resonance3D " XASH_VERSION " xbe %08lX",
+	Q_snprintf( ft.build, sizeof( ft.build ), "Xash3D-FWGS-XBOX " XASH_VERSION " xbe %08lX",
 		(unsigned long)CURRENT_XBE_HEADER->TimeDateStamp );
 
 	/* The session: its label, read once (a change mid-session names the

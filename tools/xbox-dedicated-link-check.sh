@@ -291,7 +291,7 @@ if [ -n "$XBE_OUT" ]; then
 		echo "  Point NXDK_DIR at a built nxdk (tools/xbox-env.sh), or build it there." >&2
 		exit 1
 	fi
-	if ! "$CXBE" -OUT:"$XBE_OUT" -TITLE:"Resonance3D Dedicated" "$LINK_OUT" > "$SCRATCH/cxbe.txt" 2>&1; then
+	if ! "$CXBE" -OUT:"$XBE_OUT" -TITLE:"Xash3D-FWGS-XBOX Dedicated" "$LINK_OUT" > "$SCRATCH/cxbe.txt" 2>&1; then
 		echo "xbox-dedicated-link-check: cxbe conversion failed. See $SCRATCH/cxbe.txt" >&2
 		tail -n 20 "$SCRATCH/cxbe.txt" >&2
 		exit 1

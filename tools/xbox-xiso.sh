@@ -810,7 +810,7 @@ if [ ${#r3d_translations[@]} -gt 0 ]; then
 			exit 1
 		fi
 	done
-	echo "xbox-xiso: staged ${#r3d_translations[@]} Resonance3D translation file(s)." >&2
+	echo "xbox-xiso: staged ${#r3d_translations[@]} Xash3D-FWGS-XBOX translation file(s)." >&2
 fi
 
 # --ui-language writes the gamedir's vfs.cfg, which is where the engine

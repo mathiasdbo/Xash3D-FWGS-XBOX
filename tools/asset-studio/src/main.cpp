@@ -282,7 +282,7 @@ bool packSprites(const std::string& manifestPath, formats::VfsIndexer& vfs, Asse
 
 int main(int argc, char *argv[]) {
     std::cout << "===============================================\n";
-    std::cout << "  Resonance3D Asset Studio - Retail VFS Compiler\n";
+    std::cout << "  Xash3D-FWGS-XBOX Asset Studio - Retail VFS Compiler\n";
     std::cout << "===============================================\n";
 
     std::string gameDir = ".";

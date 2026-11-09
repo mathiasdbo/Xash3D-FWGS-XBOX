@@ -2255,7 +2255,7 @@ footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--rule);padd
 <body>
 <div class="wrap">
 <header>
-  <div class="eyebrow">Resonance3D &middot; frame-time recorder &middot; __SOURCE__</div>
+  <div class="eyebrow">Xash3D-FWGS-XBOX &middot; frame-time recorder &middot; __SOURCE__</div>
   <h1>__TITLE__</h1>
   <p class="lede">__LEDE__</p>
   <div class="stats" id="stats"></div>

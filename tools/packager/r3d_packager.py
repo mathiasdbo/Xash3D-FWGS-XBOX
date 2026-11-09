@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resonance3D packager: your Half-Life files + the Xbox build -> a folder or XISO.
+"""Xash3D-FWGS-XBOX packager: your Half-Life files + the Xbox build -> a folder or XISO.
 
     python r3d_packager.py                      window
     python r3d_packager.py --cli --title hl --steam <Half-Life folder> \
@@ -166,7 +166,7 @@ def gui():
 
     C = PALETTE
     win = tk.Tk()
-    win.title("Resonance3D Packager")
+    win.title("Xash3D-FWGS-XBOX Packager")
     win.geometry("800x860")
     win.minsize(740, 720)
     win.configure(bg=C["bg"])
@@ -242,7 +242,7 @@ def gui():
     # ---- header ----
     head = tk.Frame(win, bg=C["header"], padx=20, pady=12)
     head.pack(fill="x")
-    label(head, "RESONANCE3D  PACKAGER", C["accent"], ("Segoe UI", 15, "bold"), anchor="w").pack(anchor="w")
+    label(head, "XASH3D-FWGS-XBOX  PACKAGER", C["accent"], ("Segoe UI", 15, "bold"), anchor="w").pack(anchor="w")
     label(head, "Half-Life for the original Xbox, built from your own copy of the game", C["muted"], anchor="w").pack(anchor="w")
 
     nb = ttk.Notebook(win, style="Dark.TNotebook")
@@ -473,7 +473,7 @@ def gui():
         ftp = None
         if fmt_var.get() == "ftp":
             if not host_var.get() or not rdir_var.get():
-                messagebox.showerror("Resonance3D Packager", "Enter the Xbox address and the Games folder first.")
+                messagebox.showerror("Xash3D-FWGS-XBOX Packager", "Enter the Xbox address and the Games folder first.")
                 return
             ftp = {"host": host_var.get(), "dir": rdir_var.get(), "user": user_var.get(), "password": pass_var.get(),
                    "confirm": ask}
@@ -500,7 +500,7 @@ def gui():
                     val()
                 elif kind == "ask":
                     text, resp = val
-                    resp.put(messagebox.askyesno("Resonance3D Packager", text, icon="warning", default="no"))
+                    resp.put(messagebox.askyesno("Xash3D-FWGS-XBOX Packager", text, icon="warning", default="no"))
                 elif kind == "hosts":
                     busy["scan"] = False
                     apply_mode()
@@ -536,13 +536,13 @@ def gui():
                     state_lbl.configure(text="Done.")
                     show_log("Done: %s" % val)
                     apply_mode()
-                    messagebox.showinfo("Resonance3D Packager", "Done:\n%s" % val)
+                    messagebox.showinfo("Xash3D-FWGS-XBOX Packager", "Done:\n%s" % val)
                 elif kind == "fail":
                     busy["build"] = False
                     state_lbl.configure(text="Failed.")
                     show_log("Failed: %s" % val)
                     apply_mode()
-                    messagebox.showerror("Resonance3D Packager", val)
+                    messagebox.showerror("Xash3D-FWGS-XBOX Packager", val)
         except queue.Empty:
             pass
         win.after(100, pump)
