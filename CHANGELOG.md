@@ -5,6 +5,13 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - Xbox: the build string says "xbox", not "win32"
+
+The console banner, the log header, the crash text, the `host_ver` cvar and the
+master-server query named the operating system `win32`, because the Xbox build
+targets i386-pc-win32. They now say `xbox` (divergence #216). The engine's name in those strings, the
+console title and the HTTP user agent is "Xash3D FWGS-XBOX" on the console build.
+
 ### Added - Xbox: the dashboard shows the game's name and picture
 
 The console's memory screen lists a game from `TitleMeta.xbx` and

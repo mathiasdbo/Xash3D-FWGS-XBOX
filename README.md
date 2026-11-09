@@ -24,6 +24,14 @@ and Opposing Force and Blue Shift are not packaged yet. The changelog
 [`docs/r3d/divergences.md`](docs/r3d/divergences.md) for every deliberate
 deviation from upstream.
 
+## Name and version
+
+The console build reports itself as `Xash3D FWGS-XBOX 0.21 (xbox-i386 build N)`:
+the engine is Xash3D FWGS, the version is upstream's, and the OS is `xbox`
+because nxdk targets i386-pc-win32 and would otherwise say `win32`. Read it
+with the `host_ver` console command. Other targets keep upstream's name
+(divergence #216 in [`docs/r3d/divergences.md`](docs/r3d/divergences.md)).
+
 ## Targets
 
 | Target | Renderer | Status |

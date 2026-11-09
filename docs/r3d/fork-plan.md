@@ -3152,6 +3152,11 @@ toggle has no setting behind it (item 8).
    from the engine's own build-platform code, not `mainui`, and this
    row's scope stayed inside `Main.cpp`; a small follow-up.
 
+   **Follow-up done, 2026-11-09:** `Q_buildos()` is `"xbox"` under `#if XASH_XBOX`
+   (`engine/common/common.h`) and the engine's name is "Xash3D FWGS-XBOX" under
+   `NXDK` (`engine/common/com_strings.h`); divergence #216. The banner reads
+   `Xash3D FWGS-XBOX 0.21 (xbox-i386 build N)`.
+
    **DONE, 2026-09-17.** Implemented and verified live on both discs.
    **A real infrastructure bug found first, blocking**: every `#if
    XASH_XBOX` written into this file compiled clean but took the WRONG

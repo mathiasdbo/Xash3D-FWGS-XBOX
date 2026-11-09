@@ -32,6 +32,13 @@ GNU General Public License for more details.
 #include "backends.h"
 #include "defaults.h"
 #include "library_suffix.h"
+
+#if XASH_XBOX
+// Resonance3D (#216): nxdk targets i386-pc-win32, so library_suffix names the
+// OS "win32". Every build string, the host_ver cvar and the master query say
+// "xbox" instead.
+#define Q_buildos() "xbox"
+#endif
 #include "enginefeatures.h"
 #include "system.h"
 #include "com_model.h"

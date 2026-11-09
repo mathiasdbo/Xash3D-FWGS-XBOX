@@ -74,7 +74,12 @@ GNU General Public License for more details.
 
 #define DEFAULT_UPDATE_PAGE "https://github.com/FWGS/xash3d-fwgs/releases/latest"
 
+#if defined( NXDK )
+// Resonance3D (#216): the Xbox build names itself apart from upstream
+#define XASH_ENGINE_NAME "Xash3D FWGS-XBOX"
+#else
 #define XASH_ENGINE_NAME "Xash3D FWGS"
+#endif
 #define XASH_DEDICATED_SERVER_NAME "XashDS"
 #define XASH_VERSION        "0.21" // engine current version
 #define XASH_COMPAT_VERSION "0.99" // version we are based on
