@@ -10,7 +10,7 @@
 <body>
 <header class="site"><div class="bar">
 <a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
-<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="build.html">Building</a><a href="recorder.html">Frame-time recorder</a><a href="differences.html" aria-current="page">How it differs</a><a href="about.html">About</a></nav>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="menus.html">Menus</a><a href="progress.html">Progress</a><a href="recorder.html">Frame-time recorder</a><a href="build.html">Building</a><a href="differences.html" aria-current="page">How it differs</a><a href="about.html">About</a></nav>
 </div></header>
 <main>
 <h1>How it differs from Xash3D FWGS</h1>
@@ -29,7 +29,10 @@ The version is upstream's (0.21), and other targets keep upstream's name.</p>
 <tr><td>Archives</td><td><code>filesystem/mpak*</code></td><td>The <code>.mpak</code> per-map archive and its loader; the console never reads a WAD.</td></tr>
 <tr><td>Asset baker</td><td><code>tools/asset-studio</code></td><td>Offline compiler from a retail install to archives, enforcing the memory budget.</td></tr>
 <tr><td>Packager</td><td><code>tools/packager</code></td><td>Folder, XISO or FTP output, plus remote console settings.</td></tr>
-<tr><td>Game and menu</td><td>forks of the Half-Life SDK and the menu</td><td>Carry the Xbox changes; see the repository's related-repositories table.</td></tr>
+<tr><td>Menus</td><td><code>3rdparty/mainui</code></td><td>Controller-first screens, pause menu, button legend, widescreen and 720p layouts, baked backgrounds,
+fonts and translations. See <a href="menus.html">the menus</a>.</td></tr>
+<tr><td>Frame-time recorder</td><td><code>engine/platform/xbox</code>, <code>tools/frametime-report.py</code></td><td>Per-frame CPU, GPU-wait and subsystem timings recorded on the console. See <a href="recorder.html">the recorder</a>.</td></tr>
+<tr><td>Game libraries</td><td>forks of the Half-Life SDK</td><td>Carry the Xbox changes; see the repository's related-repositories table.</td></tr>
 </table>
 <p>The Xbox build reports itself as <code>Xash3D FWGS-XBOX 0.21 (xbox-i386 build N)</code>. The OS reads
 <code>xbox</code> because nxdk targets i386-pc-win32 and would otherwise say <code>win32</code>.</p>

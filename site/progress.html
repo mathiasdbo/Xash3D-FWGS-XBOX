@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Progress - Xash3D-FWGS-XBOX</title>
+<meta name="description" content="The 720p and 60 fps target, measured frame times, the optimisations that landed and what is next.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="menus.html">Menus</a><a href="progress.html" aria-current="page">Progress</a><a href="recorder.html">Frame-time recorder</a><a href="build.html">Building</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>Progress</h1>
+<p class="lede">Where the performance work stands: the target, what has been measured and on what, what has landed,
+and what is still open.</p>
+
+<h2>The target: 720p at 60 fps</h2>
+<p>The goal is Half-Life at 1280x720 and 60 frames per second, which gives each frame 16.7 ms for the CPU and the GPU
+together. The recorder draws the 16.7 ms and 33.3 ms lines and reports the share of frames over each.</p>
+<ul>
+<li>720p is a real output mode today: <code>r3d_vid_mode 1</code>, or the Display menu, with anisotropic filtering and
+anti-aliasing. 4x anti-aliasing at 720p was judged out for memory (about 25 MiB more).</li>
+<li>No per-map frame-rate goals are written down yet. The performance review asks for exit criteria with a number for
+each phase, which is the next thing to settle.</li>
+</ul>
+
+<div class="note"><strong>Read the numbers with care.</strong> Console figures are from a real Xbox. Figures marked
+<em>emulator</em> come from xemu on a PC: good for comparing one change against another, not a Pentium III timing.
+The performance review itself says most per-change numbers have not been repeated on the console.</div>
+
+<h2>Where it stands on the console</h2>
+<ul>
+<li><strong>Original baseline:</strong> the owner's route averaged 44 fps on a real console, with four maps near 30.
+The same route in the emulator held 60 on almost every map, because the emulator is not the console.</li>
+<li><strong>720p, 45-minute Office Complex route:</strong> frames over 33 ms went from about 5% to 1-3% on c1a2, and from
+4.5% to 1% on c1a2a.</li>
+<li><strong>Still open:</strong> the Office Complex still has 1-3% of frames over 33 ms. The slowest maps found are
+c1a1b (water), c1a0c and c1a0e (beams). Level-load stalls remain, and many changes below still say "console numbers to
+be recorded".</li>
+</ul>
+
+<h2>How frames are measured</h2>
+<p>The <a href="recorder.html">frame-time recorder</a> has grown with the work. It began as a ring of frame times
+written to the drive, an overlay and a report. Since then it gained 20 per-frame renderer counters, a flag for load
+frames and a stalls table, then CPU spans per subsystem (scene, particles, beams, mixer, network, server game, player
+movement, client entities, saves, menu, music, load stages), labelled segments per map, and report commands to
+compare two sessions or fetch them from the console or the emulator. The recorder cannot time the GPU itself (the
+SDK has no GPU timestamp), so it records how long the CPU waited for it.</p>
+<p>Stalls found this way: one 350-1000 ms spike per map turned out to be mostly level changes, and six longer ones were
+autosaves.</p>
+
+<h2>Optimisations that landed</h2>
+<p>Numbers are the change's own measurement; <em>emu</em> marks the emulator.</p>
+<table>
+<tr><th>Area</th><th>Change</th><th>Measured</th></tr>
+<tr><td>Libraries</td><td>Fast <code>memcpy</code>, <code>memset</code>, <code>strlen</code> and friends; nxdk libraries rebuilt at -O2</td>
+<td>c1a0e CPU 12.3 to 7.6 ms; then 7.55 to 6.83 ms (emu)</td></tr>
+<tr><td>Models</td><td>Characters skinned and lit on the GPU; vertex programs kept resident; chrome meshes on the GPU</td>
+<td>Studio CPU 2.64 to 0.50 ms in a firefight; chrome 0.95 to 0.32 ms (emu)</td></tr>
+<tr><td>Models</td><td>Cheaper bone setup in the game library; each model's light result cached</td>
+<td>Bone setup 5.35 to 4.09 us per bone (console); cached light callbacks 0.47-0.57 ms per frame at 720p</td></tr>
+<tr><td>World</td><td>Face walk limited to the player's area; adjacent faces of a brush entity merged; water warp on the GPU</td>
+<td>c1a1b world walk 1.52 to 0.21 ms; water 1.31 to 0.04 ms (emu)</td></tr>
+<tr><td>Frame pacing</td><td>The CPU no longer waits for the GPU at the end of a frame</td>
+<td>A frame costs about the larger of the two</td></tr>
+<tr><td>Effects</td><td>Cheaper beams, particles and decal lookups</td>
+<td>Beams c1a0c 2.16 to 1.41 ms; static decals 95 to 53 ms (emu)</td></tr>
+<tr><td>Audio</td><td>Integer mixer stepping, hardware audio, baked ADPCM music with read-ahead, speech streaming, 48 kHz mix</td>
+<td>Hardware audio about 0.30 ms per frame, down from 0.45 (console)</td></tr>
+<tr><td>Network and server</td><td>Unchanged entities not re-sent; bounds tested first in clipping; finer entity grid; smaller snapshots</td>
+<td>Server send 0.60 to 0.28 ms (emu); 5-6 ms per frame saved in the offices</td></tr>
+<tr><td>Loading</td><td>Entity lump parsed once, directory cache, fewer file calls, a dropped-frame fix</td>
+<td>Route loads 10.7 to 8.7 s (emu); the bug cost 70-900 ms per level change (console)</td></tr>
+<tr><td>Menu</td><td>Glyph atlas fast path; fonts and backgrounds released during play</td>
+<td>Font rebuild 84-88 to 23-26 ms (emu)</td></tr>
+</table>
+
+<h2>Next</h2>
+<ul>
+<li>Repeat the emulator-only results on the console and write down the numbers.</li>
+<li>Skinning limit: about 50 bones fit in the GPU's vertex-program registers, and the game allows up to 128.</li>
+<li>The baker's next phase: draw lists per cluster and material, bone partitioning, 16-bit lightmaps, ordering that
+suits the GPU's vertex cache.</li>
+<li>Lightstyles: the baker bakes style 0 only, so switching and flickering lights are not baked yet.</li>
+<li>Threaded save and load I/O. SSE only once a profile on hardware says it pays.</li>
+<li>Per-map frame-rate goals, then the 60 fps work on the maps that miss them.</li>
+</ul>
+<p>The detail is in <code>docs/r3d/xbox-performance-review.md</code>, <code>CHANGELOG.md</code> and
+<code>docs/r3d/frametime-recorder.md</code>.</p>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>

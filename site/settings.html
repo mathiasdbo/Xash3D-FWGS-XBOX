@@ -10,7 +10,7 @@
 <body>
 <header class="site"><div class="bar">
 <a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
-<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html" aria-current="page">Console settings</a><a href="build.html">Building</a><a href="recorder.html">Frame-time recorder</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html" aria-current="page">Console settings</a><a href="menus.html">Menus</a><a href="progress.html">Progress</a><a href="recorder.html">Frame-time recorder</a><a href="build.html">Building</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
 </div></header>
 <main>
 <h1>Console settings</h1>
@@ -39,7 +39,9 @@ report) and <strong>Clear all</strong>.</li>
 <tr><th>Setting</th><th>Values</th><th>What it does</th></tr>
 <tr><td><code>r3d_vid_mode</code></td><td>0, 1</td><td>Output: 480p or 720p. Read at boot.</td></tr>
 <tr><td><code>r3d_vid_aspect</code></td><td></td><td>Aspect of the output.</td></tr>
-<tr><td><code>nv2a_r_aa</code></td><td>0 to 3</td><td>Anti-aliasing level.</td></tr>
+<tr><td><code>nv2a_r_aa</code></td><td>0, 1, 2, 3</td><td>Anti-aliasing of the 3D view: <code>0</code> off, <code>1</code> 2x MSAA,
+<code>2</code> Quincunx (QAA), <code>3</code> 4x MSAA. Saved with the menu's settings and changes live. Details
+<a href="#aa">below</a>.</td></tr>
 <tr><td><code>nv2a_r_anisotropy</code></td><td>1, 2, 4, 8</td><td>Anisotropic filtering (default 2).</td></tr>
 <tr><td><code>nv2a_r_texturenearest</code></td><td>0, 1</td><td>Nearest-neighbour texture filtering.</td></tr>
 <tr><td><code>nv2a_r_lodbias</code></td><td></td><td>Texture level-of-detail bias.</td></tr>
@@ -52,6 +54,29 @@ See <a href="recorder.html">the recorder</a>.</td></tr>
 <tr><td><code>r3d_snd_meter</code></td><td></td><td>On-screen sound meter.</td></tr>
 <tr><td><code>net_graph</code></td><td></td><td>Network graph overlay.</td></tr>
 </table>
+<h2 id="aa">Anti-aliasing (<code>nv2a_r_aa</code>)</h2>
+<p>This is the GPU's own multisampling. The 3D view is drawn into a larger surface and scaled down to the screen in
+one pass; the HUD, console and menus are drawn afterwards at the screen's own resolution, so they stay sharp. In the
+menu the same choice is Options, Display, Anti-aliasing (Off, 2x, Quincunx, 4x).</p>
+<table>
+<tr><th>Value</th><th>Menu name</th><th>What it is</th><th>Extra memory at 480p</th></tr>
+<tr><td><code>0</code></td><td>Off</td><td>The 3D view is drawn straight into the screen. The default.</td><td>none</td></tr>
+<tr><td><code>1</code></td><td>2x</td><td>2x MSAA: two samples per pixel, resolved with a bilinear filter between them.</td><td>about 2.3 MiB for each of the two surfaces (colour and depth)</td></tr>
+<tr><td><code>2</code></td><td>Quincunx</td><td>QAA: the same two samples as 2x, resolved with the GPU's Quincunx filter, which
+blends in neighbouring pixels as well. Softer than 2x, at the same cost.</td><td>the same as 2x</td></tr>
+<tr><td><code>3</code></td><td>4x</td><td>4x MSAA: a 2x2 block of samples per pixel, resolved at the block's centre.
+The smoothest edges, and the most memory and fill cost.</td><td>about 4.7 MiB for each of the two surfaces</td></tr>
+</table>
+<ul>
+<li>Memory is taken between frames and given back before a map's own buffers are made. At 720p the surfaces are
+larger: 4x there needs about 25 MiB more, which is why it was judged out as a default.</li>
+<li>If the surfaces cannot be had, the engine keeps drawing without anti-aliasing, and does not ask again until you
+change the setting or the map.</li>
+<li>Quincunx on the console is not yet confirmed by a hardware check: the emulator draws that filter as a plain
+blur, so judge it on a console.</li>
+<li>Transparent edges (decals, sprites) alias more than solid edges under MSAA.</li>
+</ul>
+
 <p>Audio options (backend, rate, hardware audio) and developer switches (GPU skinning, culling) are in the tab
 too; developer settings are behind a tick. Video output, sound backend, rate and hardware audio are read at
 boot, so a change shows at the next start of the game.</p>
