@@ -1,6 +1,6 @@
 [submodule "mainui"]
 	path = 3rdparty/mainui
-	url = git@github.com:mathiasdbo/mainui_cpp.git
+	url = https://github.com/mathiasdbo/mainui_cpp.git
 	branch = resonance3d
 [submodule "ref_gl/nanogl"]
 	path = 3rdparty/nanogl
@@ -49,7 +49,7 @@
 	url = https://github.com/FWGS/mbedtls-releases.git
 [submodule "deps/hlsdk"]
 	path = deps/hlsdk
-	url = git@github.com:mathiasdbo/halflife-updated-xash3d.git
+	url = https://github.com/mathiasdbo/halflife-updated-xash3d.git
 	branch = resonance3d
 [submodule "deps/hlsdk-opfor"]
 	path = deps/hlsdk-opfor
