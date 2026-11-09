@@ -25,6 +25,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+      # The design mocks are one 9 MB bundle kept under docs/; copy it in at
+      # deploy time instead of committing a second copy under site/.
+      - name: Add the menu design mocks
+        run: |
+          mkdir -p site/mocks
+          cp "docs/r3d/design/xbox menu/Half-Life Xbox Menu.html" site/mocks/half-life-xbox-menu.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

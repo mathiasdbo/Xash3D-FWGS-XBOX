@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Menus - Xash3D-FWGS-XBOX</title>
-<meta name="description" content="The Xbox build's menus: controller navigation, screens, widescreen and 720p, and what is still to do.">
+<meta name="description" content="The Xbox build's menus: controller navigation, screens, design mocks, widescreen and 720p, and what is still to do.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -43,6 +43,51 @@ audio takes effect at the next start.</td></tr>
 <tr><td>Game</td><td>Auto-aim, crosshair, fast weapon switch.</td></tr>
 <tr><td>Load and Save</td><td>With a screenshot preview of each save.</td></tr>
 </table>
+
+<h2 id="mocks">The design mocks</h2>
+<p>The screens were designed first, as interactive HTML boards at 1280x960 (4:3), and the menu was built to match.
+Pick a screen below. The board has 21 screens, and not all of them exist in the engine yet: Main, Pause, Options,
+Controller, Display, Audio, Game, Load and the new-game difficulty are built; Multiplayer, System Link, Host Game,
+Direct Connect, Split Screen, Player Profile, Internet Games, Master Servers and the on-screen keyboard are designs
+for later work. The mocks use the amber palette, and the in-game menu draws the same layout with the engine's own
+fonts.</p>
+<div class="mockbar">
+<label for="mockscreen">Screen</label>
+<select id="mockscreen" disabled>
+<option>Main menu</option><option>New Game - difficulty</option><option>Load Game</option><option>Settings</option>
+<option>Options</option><option>Controller - scheme select</option><option>Customize Controls</option>
+<option>Audio</option><option>Display</option><option>Game</option><option>Multiplayer</option>
+<option>System Link - server browser</option><option>Host Game</option><option>Direct Connect - IP entry</option>
+<option>Split Screen - 2 players</option><option>Player Profile</option><option>Internet Games - master server browser</option>
+<option>Master Servers - add / edit</option><option>On-screen keyboard (shared)</option><option>Pause - single player</option>
+<option>Game menu - multiplayer</option>
+</select>
+<button type="button" id="mockload">Load the mocks (9 MB)</button>
+</div>
+<div class="mockframe" id="mockframe"><iframe id="mockiframe" scrolling="no" title="Half-Life Xbox menu design mocks" loading="lazy"></iframe></div>
+<p class="mocklinks"><a href="mocks/half-life-xbox-menu.html">Open the whole board in its own page</a> &middot;
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/blob/main/docs/r3d/design/xbox%20menu/Half-Life%20Xbox%20Menu.html">The source file in the repository</a></p>
+<script>
+(function(){
+var sel=document.getElementById('mockscreen'),btn=document.getElementById('mockload'),
+    box=document.getElementById('mockframe'),fr=document.getElementById('mockiframe');
+function fit(){var s=box.clientWidth/1320;fr.style.transform='scale('+s+')';box.style.height=(990*s)+'px';}
+function show(){
+  try{
+    var d=fr.contentDocument,b=d.querySelectorAll('.board');
+    var y=b.length>sel.selectedIndex?b[sel.selectedIndex].offsetTop:48+sel.selectedIndex*1038;
+    fr.contentWindow.scrollTo(0,y);
+  }catch(e){}
+}
+btn.addEventListener('click',function(){
+  btn.disabled=true;btn.textContent='Loading...';
+  fr.addEventListener('load',function(){sel.disabled=false;btn.style.display='none';fit();setTimeout(show,1500);setTimeout(show,4000);});
+  fr.src='mocks/half-life-xbox-menu.html';box.classList.add('on');fit();
+});
+sel.addEventListener('change',show);
+window.addEventListener('resize',fit);
+})();
+</script>
 
 <h2>Why this is more than a port of the menu</h2>
 <ul>
