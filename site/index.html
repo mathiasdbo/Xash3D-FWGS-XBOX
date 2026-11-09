@@ -20,8 +20,26 @@ Xash3D FWGS engine built against the open-source nxdk homebrew SDK.</p>
 <div class="note"><strong>Status.</strong> Half-Life plays on hardware: the engine, the NV2A renderer,
 the menu, saves, hardware audio and the offline asset pipeline work, and the first campaign maps run on a
 console. It is work in progress. Frame times are measured, not yet where we want them, and Opposing Force and
-Blue Shift are not packaged yet. Next: the whole campaign at 720p, multiplayer, split screen, Opposing Force and Blue Shift
-(<a href="progress.html#milestones">milestones</a>).</div>
+Blue Shift are not packaged yet.</div>
+
+<h2 id="milestones">Roadmap</h2>
+<ol class="milestones">
+<li class="now"><strong>The whole campaign playable at 720p</strong> <span class="tag">We are here</span><br>
+Today the first campaign maps run on a console, and a 45-minute Office Complex route has been recorded at 720p.
+The milestone is Half-Life from start to finish at 720p, which is what the <a href="progress.html">60 fps work</a>
+is for.</li>
+<li><strong>Multiplayer.</strong> The Xbox build is compiled without networking today (no sockets), so this starts
+with the network layer, then the multiplayer screens already drawn in the <a href="menus.html#mocks">design mocks</a>
+(system link, internet games, host game, direct connect, player profile) and the on-screen keyboard they share.</li>
+<li><strong>Split screen.</strong> Two players on one console. The menu design has the screen, but the engine has no
+second local client at all: it would need a second client state, a second view, input from a second controller port and a
+listen server hosting both, on a 733 MHz CPU. The project plan keeps it out of the multiplayer milestone until a second
+viewport has been measured.</li>
+<li><strong>Opposing Force.</strong> Its game libraries have a fork and the packager lists it, but it is not packaged
+yet.</li>
+<li><strong>Blue Shift.</strong> The same: a game-library fork exists and the packager lists it, but it is not
+packaged yet.</li>
+</ol>
 
 <div class="cards">
 <div class="card"><h3><a href="install.html">Put it on your Xbox</a></h3>
