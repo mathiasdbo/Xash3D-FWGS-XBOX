@@ -85,3 +85,15 @@ th { color: var(--muted); font-weight: 600; }
 .card p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.95rem; }
 footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
 footer div { max-width: 62rem; margin: 0 auto; padding: 1.2rem 1rem; }
+.mockbar { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin: 1rem 0 0.6rem; }
+.mockbar select, .mockbar button {
+  font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.4rem 0.7rem;
+}
+.mockbar button { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); cursor: pointer; }
+.mockbar button:disabled { opacity: 0.6; cursor: default; }
+.mockbar select:disabled { opacity: 0.5; }
+.mockframe { width: 100%; max-width: 62rem; height: 20rem; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.mockframe iframe { width: 1320px; height: 990px; border: 0; display: none; transform-origin: 0 0; background: #f5f4ef; }
+.mockframe.on iframe { display: block; }
+.mocklinks { font-size: 0.95rem; color: var(--muted); }
