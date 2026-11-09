@@ -641,11 +641,11 @@ def performance_body(reports):
         items.append("""<section class="report" id="r%d">
 <h3>%s%s</h3>
 <p>%s</p>
-<p class="mocklinks"><button type="button" class="showreport" data-src="%s">Show it here (%d KB)</button>
+<p class="mocklinks"><button type="button" class="showreport" data-src="%s">Show it here</button>
 <a href="%s">Open it in its own page</a> &middot;
 <a href="%s/blob/main/docs/r3d/reports/%s">Source file</a></p>
 <div class="reportframe"><iframe title="%s" loading="lazy"></iframe></div>
-</section>""" % (i, tag, html.escape(r["title"]), html.escape(r["lede"]), src, r["size"] // 1024,
+</section>""" % (i, tag, html.escape(r["title"]), html.escape(r["lede"]), src,
                  src, REPO, r["file"], html.escape(r["title"])))
     if not items:
         items.append("<p>No reports are published yet.</p>")
