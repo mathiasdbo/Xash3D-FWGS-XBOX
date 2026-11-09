@@ -87,6 +87,13 @@ class Cfgs(unittest.TestCase):
             self.assertEqual(l.count("notarget"), 1)
             self.assertLess(l.index("god"), l.index("wait 1800"))
 
+    def test_every_map_neutralises_its_own_level_change_triggers_before_the_dwell(self):
+        for how in ("start", "transition", "direct"):
+            l = self.lines(("b", how, 'map "c"'))
+            self.assertIn("ent_fire trigger_changelevel solid 0", l)
+            self.assertLess(l.index("ent_fire trigger_changelevel solid 0"), l.index("wait 1800"))
+            self.assertLess(l.index("wait %d" % smoke.SPAWN_WAIT), l.index("ent_fire trigger_changelevel solid 0"))
+
     def test_only_the_last_map_ends_the_run(self):
         mid = self.lines(("b", "transition", 'map "c"'))
         last = self.lines(("c", "transition", None))
@@ -187,6 +194,14 @@ class StageRestore(unittest.TestCase):
         smoke.restore(f, self.args())
         self.assertIn(self.CFG + "00-c1a0.cfg", f.files)
         self.assertNotIn(self.CFG + "00-c1a0.cfg.off", f.files)
+
+    def test_a_foreign_map_cfg_is_set_aside_and_put_back(self):
+        mine = self.G + "/valve/maps/c0a0_load.cfg"
+        theirs = {mine: b"echo theirs" + chr(10).encode(), self.G + "/valve/maps/c0a0e_load.cfg": b"wait 2700" + chr(10).encode()}
+        before, staged, after = self.run_cycle(theirs)
+        self.assertIn(self.G + "/valve/maps/c0a0_load.cfg.off", staged)  # theirs, set aside
+        self.assertIn(b"changelevel2", staged[mine])  # ours is written in its place
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

@@ -59,7 +59,13 @@ time, so everything is decided from the recording afterwards.
 waits the dwell in frames, then runs `changelevel2 "<next>" "<landmark>"` (or
 `map "<next>"`). A map reached by a plain load also gets `god` and `notarget`
 after a short wait, since those commands toggle and the player carried through a
-real transition already has them. The last map stops the recorder, records a
+real transition already has them. Every map also runs `ent_fire trigger_changelevel solid 0`
+three-quarters of a second after it loads: a level change the chain did not ask for (the tram
+on `c0a0a` carries the player into its trigger by itself) leaves the earlier map's pending timer
+behind, and two timers then alternate for the rest of the run. That was the first full run
+(2026-11-09): every map from `c0a0b` on was visited twice. `ent_fire` changes at most
+`sv_enttools_maxfire` (5) entities, so `c1a4b` (6 triggers) and `c3a2c` (7) can still bounce;
+`check` reports a map played twice. The last map stops the recorder, records a
 short second session `<label>-end`, and quits. `00-c1a0.cfg` and
 `91-frametime.cfg` (which would load a map or set another label) are renamed to
 `.off` for the run; `90-route-bmi.cfg` present is refused.

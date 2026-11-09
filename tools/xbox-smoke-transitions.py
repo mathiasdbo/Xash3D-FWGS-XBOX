@@ -54,7 +54,7 @@ OWNED = "90-smoke.maps"  # lists the maps/*_load.cfg a stage wrote (not a .cfg: 
 STATE = "90-smoke.state"  # the label and options of the last stage
 DISABLE = ["00-c1a0.cfg", "91-frametime.cfg"]  # would load another map / set another label
 CONFLICT = "90-route-bmi.cfg"  # the Black Mesa route: its own `map`, never run both
-ARRIVE_WAIT = 240  # waits (2 s) before god/notarget after a plain `map` load (the player has spawned)
+SPAWN_WAIT = 90  # waits (0.75 s) before ent_fire: the client has spawned
 # `wait N` counted about 120 a second on the console at 60 fps (the pilot of 2026-11-09: a 10 s dwell, 600 waits,
 # gave 4.9 s in play; the command buffer runs more than once a frame), so the dwell is converted at that rate.
 WAIT_PER_SEC = 120
@@ -128,8 +128,13 @@ def cfg_lines(label, dwell_frames, chain, entry, end_label):
     m, how, nxt = entry
     lines = ["// tools/xbox-smoke-transitions.py (%s): remove after the run" % label,
              'echo "smoke: %s loaded (%s)"' % (m, how)]
+    # The map's own level-change triggers must not fire by themselves (a tram carries the player into one): a
+    # level change the chain did not ask for leaves the earlier map's pending timer behind, and two timers then
+    # alternate for the rest of the run. SOLID_NOT: SV_TouchLinks skips a trigger that is not SOLID_TRIGGER.
+    # ent_fire needs the client spawned, and fires at most sv_enttools_maxfire (5) entities.
+    lines += ["wait %d" % SPAWN_WAIT, "ent_fire trigger_changelevel solid 0"]
     if how in ("start", "direct"):
-        lines += ["wait %d" % ARRIVE_WAIT, "god", "notarget"]  # god and notarget toggle: only on a fresh map
+        lines += ["god", "notarget"]  # god and notarget toggle: only on a fresh map
     lines.append("wait %d" % dwell_frames)
     if nxt:
         lines.append(nxt)
@@ -238,10 +243,19 @@ def stage(f, a):
     if CONFLICT in cfgs:
         die("%s is staged (the Black Mesa route loads its own map): run tools/xbox-ftp-route-bmi.py restore first" % CONFLICT)
     owned_before = set(l[3:].strip() for l in (get_text(f, cfgdir + "/" + OWNED) or []) if l.startswith("// "))
+    # A maps/<map>_load.cfg that is not ours (the Black Mesa route's end point, say) would be overwritten, or
+    # would run inside the chain: set it aside as .off for the run, and put it back at restore
+    aside = list(read_state(f, cfgdir).get("set_aside", []))
     for m, _, nxt in chain:
         n = m + "_load.cfg"
         if n in maps_there and m not in owned_before:
-            die("maps/%s already exists on the console and is not this script's: sort it out by hand" % n)
+            if n + ".off" in maps_there:
+                die("maps/%s and maps/%s.off both exist; sort them out by hand" % (n, n))
+            f.rename(mapdir + "/" + n, mapdir + "/" + n + ".off")
+            maps_there.discard(n)
+            say("set aside maps/%s -> maps/%s.off (not this script's; restore puts it back)" % (n, n))
+            if n not in aside:
+                aside.append(n)
     # Only what this script itself renames is ever renamed back: a cfg that was already .off stays off
     renamed = list(read_state(f, cfgdir).get("renamed", []))
     for n in DISABLE:
@@ -266,12 +280,12 @@ def stage(f, a):
     put_text(f, cfgdir + "/" + OWNED, ["// " + m[0] for m in chain], quiet=True)
     put_text(f, cfgdir + "/" + CFG_NAME,
              ["// tools/xbox-smoke-transitions.py (%s): remove after the run" % label,
-              'host_frametime_label "%s"' % label, "host_frametime_analysis 1", "sv_cheats 1",
+              'host_frametime_label "%s"' % label, "host_frametime_analysis 1", "sv_cheats 1", "sv_enttools_enable 1",
               'map "%s"' % chain[0][0]])
     put_text(f, cfgdir + "/" + STATE, ["// " + json.dumps(dict(label=label, dwell=a.dwell, first=chain[0][0],
-                                                                last=chain[-1][0], maps=[c[0] for c in chain], renamed=renamed,
+                                                                last=chain[-1][0], maps=[c[0] for c in chain], renamed=renamed, set_aside=aside,
                                                                 list=os.path.basename(a.list)))], quiet=True)
-    mins = len(chain) * (a.dwell + 8) / 60  # the wait, a load of a few seconds, the god/notarget wait on a plain load
+    mins = len(chain) * (a.dwell + 4) / 60  # the dwell, a load of a few seconds, the spawn wait
     say("staged %s: %d maps from %s to %s, %g s each, about %.0f minutes." % (
         label, len(chain), chain[0][0], chain[-1][0], a.dwell, max(1, mins)))
     say("Boot the game from the dashboard. It quits to the dashboard when the chain is done. If it stops "
@@ -297,12 +311,18 @@ def restore(f, a):
     cfgdir, mapdir = game + "/valve/userconfig.d", game + "/valve/maps"
     cfgs = listing(f, cfgdir)
     there = listing(f, mapdir)
-    renamed = read_state(f, cfgdir).get("renamed", [])
+    state = read_state(f, cfgdir)
+    renamed = state.get("renamed", [])
     for l in (get_text(f, cfgdir + "/" + OWNED) or []):
         m = l[3:].strip() if l.startswith("// ") else ""
         if m and m + "_load.cfg" in there:
             f.delete(mapdir + "/" + m + "_load.cfg")
     say("removed the staged maps/*_load.cfg")
+    there = listing(f, mapdir)
+    for n in state.get("set_aside", []):  # the files a stage set aside come back
+        if n + ".off" in there and n not in there:
+            f.rename(mapdir + "/" + n + ".off", mapdir + "/" + n)
+            say("renamed maps/%s.off -> maps/%s" % (n, n))
     for n in (OWNED, CFG_NAME, STATE):
         if n in cfgs:
             f.delete(cfgdir + "/" + n)
@@ -429,6 +449,11 @@ def analyse(a):
         problems.append("the game stopped on %s %s: crashed, hung, or was reset (the recording has no END chunk)" % died)
     elif not order:
         problems.append("the recording has no map at all")
+    again = [m for i, m in enumerate(order) if m in order[:i]]
+    if again:
+        problems.append("%s was played again: a level change the chain did not ask for (a trigger_changelevel that "
+                        "fired by itself, or a pending timer from an earlier map). From there the walk is no longer "
+                        "the planned one" % ", ".join(sorted(set(again))))
     if order != expected[:len(order)]:
         problems.append("maps played %s, expected %s" % (" -> ".join(order[:8]) + (" ..." if len(order) > 8 else ""),
                                                           " -> ".join(expected[:8]) + " ..."))
