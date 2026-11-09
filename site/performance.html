@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Performance - Xash3D-FWGS-XBOX</title>
+<meta name="description" content="Frame-time reports from the Xbox build: real-console and emulator recordings, step by step.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="bar">
+<a class="name" href="index.html">Xash3D-<b>FWGS</b>-XBOX</a>
+<nav><a href="index.html">Home</a><a href="install.html">Install</a><a href="settings.html">Console settings</a><a href="menus.html">Menus</a><a href="progress.html">Progress</a><a href="performance.html" aria-current="page">Performance</a><a href="recorder.html">Frame-time recorder</a><a href="build.html">Building</a><a href="differences.html">How it differs</a><a href="about.html">About</a></nav>
+</div></header>
+<main>
+<h1>Performance</h1>
+<p class="lede">Frame-time recordings from the Xbox build, as full interactive reports: per-map frame rate, where the
+CPU time goes, and how each optimisation moved the numbers. The target and the list of changes are on the
+<a href="progress.html">Progress</a> page.</p>
+
+<div class="note"><strong>Real console or emulator.</strong> A report says which one it is. Console reports are from a
+retail Xbox (733 MHz Pentium III). Emulator reports time xemu on a PC: the work counters in them are exact, the times
+are not the console's.</div>
+
+<h2>Reports</h2>
+<section class="report" id="r0">
+<h3><span class="tag">Real console</span> Black Mesa on the Xbox</h3>
+<p>Every optimisation step was played on the same console and recorded frame by frame. Three kinds of run: the route from Black Mesa Inbound into Unforeseen Consequences as a new game, and runs that start on c1a0c or c1a1b with the suit and every weapon. All numbers on this page are from the console, not the emulator.</p>
+<p class="mocklinks"><button type="button" class="showreport" data-src="performance/reports/x9-item12-xbox-frametimes.html">Show it here</button>
+<a href="performance/reports/x9-item12-xbox-frametimes.html">Open it in its own page</a> &middot;
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/blob/main/docs/r3d/reports/x9-item12-xbox-frametimes.html">Source file</a></p>
+<div class="reportframe"><iframe title="Black Mesa on the Xbox" loading="lazy"></iframe></div>
+</section>
+<section class="report" id="r1">
+<h3><span class="tag">Emulator (xemu)</span> Black Mesa on xemu</h3>
+<p>One hand-played session on the Xbox build with every retail map archive on the disc. Every frame&#x27;s time was recorded by a probe in the renderer, and free memory was sampled at each level change.</p>
+<p class="mocklinks"><button type="button" class="showreport" data-src="performance/reports/x9-item12-blackmesa-frametimes.html">Show it here</button>
+<a href="performance/reports/x9-item12-blackmesa-frametimes.html">Open it in its own page</a> &middot;
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/blob/main/docs/r3d/reports/x9-item12-blackmesa-frametimes.html">Source file</a></p>
+<div class="reportframe"><iframe title="Black Mesa on xemu" loading="lazy"></iframe></div>
+</section>
+<section class="report" id="r2">
+<h3><span class="tag">Emulator (xemu)</span> Frame-time recorder: scripted route in xemu</h3>
+<p>A scripted run with the version-2 recorder: host_frametime_analysis 1, then map c1a0 and changelevel to c1a0e, c1a0d and c1a0a, about 20 s each, no input (the view stays at each map&#x27;s spawn). 2,247 frames, four map changes, and per frame the renderer&#x27;s work counters. The times are xemu&#x27;s; the counters are what the...</p>
+<p class="mocklinks"><button type="button" class="showreport" data-src="performance/reports/x9-step13-xemu-route-frametimes.html">Show it here</button>
+<a href="performance/reports/x9-step13-xemu-route-frametimes.html">Open it in its own page</a> &middot;
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/blob/main/docs/r3d/reports/x9-step13-xemu-route-frametimes.html">Source file</a></p>
+<div class="reportframe"><iframe title="Frame-time recorder: scripted route in xemu" loading="lazy"></iframe></div>
+</section>
+
+<h2>Adding a report</h2>
+<p>This page lists whatever is in <code>docs/r3d/reports/</code> when the site is built, so a new measurement is
+published without editing the site:</p>
+<ol>
+<li>Record on the console with the <a href="recorder.html">frame-time recorder</a> and fetch the files:
+<code>python tools/frametime-report.py fetch --host &lt;console IP&gt; --out recordings/ --label &lt;name&gt;</code></li>
+<li>Build the report: <code>python tools/frametime-report.py report recordings/ --label &lt;name&gt; -o docs/r3d/reports/&lt;name&gt;.html</code></li>
+<li>Commit it, and run the Pages workflow. The report appears here with its title and summary taken from the file.</li>
+</ol>
+<p>The step-by-step console report combines many recordings, so it is updated by editing its own file; a report made
+by <code>frametime-report.py</code> needs nothing beyond the three steps.</p>
+<script>
+(function(){
+var btns=document.querySelectorAll('.showreport');
+for(var i=0;i<btns.length;i++){btns[i].addEventListener('click',function(){
+  var sec=this.closest('.report'),box=sec.querySelector('.reportframe'),fr=box.querySelector('iframe');
+  fr.src=this.getAttribute('data-src');box.classList.add('on');this.style.display='none';
+});}
+})();
+</script>
+</main>
+<footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>
+</body>
+</html>
