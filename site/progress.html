@@ -17,6 +17,24 @@
 <p class="lede">Where the performance work stands: the target, what has been measured and on what, what has landed,
 and what is still open.</p>
 
+<h2 id="milestones">Next milestones</h2>
+<ol>
+<li><strong>The whole campaign playable at 720p.</strong> Today the first campaign maps run on a console, and a
+45-minute Office Complex route has been recorded at 720p. The milestone is Half-Life from start to finish at 720p,
+which is what the 60 fps work below is for.</li>
+<li><strong>Multiplayer.</strong> The Xbox build is compiled without networking today (no sockets), so this starts
+with the network layer, then the multiplayer screens already drawn in the <a href="menus.html#mocks">design mocks</a>
+(system link, internet games, host game, direct connect, player profile) and the on-screen keyboard they share.</li>
+<li><strong>Split screen.</strong> Two players on one console. The menu design has the screen, but the engine has no
+second local client at all: it would need a second client state, a second view, input from a second controller port and a
+listen server hosting both, on a 733 MHz CPU. The project plan keeps it out of the multiplayer milestone until a second
+viewport has been measured.</li>
+<li><strong>Opposing Force.</strong> Its game libraries have a fork and the packager lists it, but it is not packaged
+yet.</li>
+<li><strong>Blue Shift.</strong> The same: a game-library fork exists and the packager lists it, but it is not
+packaged yet.</li>
+</ol>
+
 <h2>The target: 720p at 60 fps</h2>
 <p>The goal is Half-Life at 1280x720 and 60 frames per second, which gives each frame 16.7 ms for the CPU and the GPU
 together. The recorder draws the 16.7 ms and 33.3 ms lines and reports the share of frames over each.</p>
