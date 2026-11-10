@@ -127,5 +127,24 @@ class RenamedCache(unittest.TestCase):
             self.assertFalse(os.path.exists(old))
 
 
+class NoConsoleWindows(unittest.TestCase):
+    """The windowed packager starts the baker many times; none of them may open a console window."""
+
+    @unittest.skipUnless(os.name == "nt", "console windows are a Windows matter")
+    def test_every_baker_start_hides_its_window(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(bake.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+                self.assertEqual(bake._run("AssetStudio.exe", ["--map", "x.bsp"], os.path.join(d, "x.log")), 0)
+        kw = run.call_args.kwargs
+        self.assertTrue(kw["creationflags"] & subprocess.CREATE_NO_WINDOW)
+        self.assertTrue(kw["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW)
+        self.assertEqual(kw["startupinfo"].wShowWindow, 0)
+
+    @unittest.skipIf(os.name == "nt", "off Windows there is nothing to hide")
+    def test_other_systems_pass_no_extra_options(self):
+        self.assertEqual(bake._no_window(), {})
+
+
 if __name__ == "__main__":
     unittest.main()
