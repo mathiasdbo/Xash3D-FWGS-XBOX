@@ -5,6 +5,14 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - a level-transition smoke test for the console
+
+`tools/xbox-smoke-transitions.py` walks the Half-Life campaign in game order with
+`changelevel2` and the landmark of each `trigger_changelevel`, 30 s on each map, with the
+frame-time recorder on, and names the map the game died or hung on from the recording.
+`tools/smoke/make-map-list.py` writes the lists from the retail maps. Written and tested
+on the PC; the first console run is the pilot. See `docs/r3d/smoke-transitions.md`.
+
 ### Added - a documentation site
 
 `site/` holds guides as static pages: install with the packager, the console
