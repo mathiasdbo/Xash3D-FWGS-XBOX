@@ -104,9 +104,22 @@ def cache_key(baker, gamedir_path):
     return h.hexdigest()[:24]
 
 
+def _no_window():
+    """subprocess options that keep a child console program from opening a console window.
+
+    The packager is a windowed program with no console of its own, so on Windows every baker it starts
+    (one per map, several at a time, then the menu, the skies and the music) would open its own."""
+    if os.name != "nt":
+        return {}
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0  # SW_HIDE
+    return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": startup}
+
+
 def _run(baker, args, log_path):
     with open(log_path, "wb") as lf:
-        r = subprocess.run([baker] + args, stdout=lf, stderr=subprocess.STDOUT)
+        r = subprocess.run([baker] + args, stdout=lf, stderr=subprocess.STDOUT, **_no_window())
     return r.returncode
 
 

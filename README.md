@@ -75,8 +75,10 @@ You need your own copy of Half-Life (Steam). The **Xash3D-FWGS-XBOX Packager**
 writes either a `Half-Life` folder (copy it to the console by FTP) or an XISO
 disc image. It finds your Steam install by itself on Windows (registry) and
 asks for the folder otherwise, and checks that the install has what the engine
-needs. Windows: run the `.exe` from the latest
-[release](../../releases). Anywhere else: unzip the portable package and run
+needs. Windows: unzip the windows zip from the latest
+[release](../../releases) and run the `.exe` (keep the `payload` folder beside
+it; the exe is not signed yet, see the code signing policy on the project
+site). Anywhere else: unzip the portable package and run
 `python3 r3d_packager.py` (Python 3 with Tk). Details in
 [`tools/packager/README.md`](tools/packager/README.md). Nothing from the game
 is included in the download.

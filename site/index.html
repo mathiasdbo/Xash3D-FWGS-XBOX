@@ -78,6 +78,23 @@ a report on your PC. See <a href="progress.html">progress</a>.</li>
 <h2>You need your own game</h2>
 <p>This project contains no Valve assets. Running Half-Life needs your own legally obtained copy (Steam). The
 baker reads your install and produces the archives locally; they are not redistributable.</p>
+
+<h2 id="code-signing-policy">Code signing policy</h2>
+<p>Free code signing provided by <a href="https://about.signpath.io/">SignPath.io</a>, certificate by
+<a href="https://signpath.org/">SignPath Foundation</a>.</p>
+<p><strong>Status:</strong> the Windows packager is not signed yet. The application to SignPath Foundation is in progress,
+and until it is approved Windows will warn about an unknown publisher: check the file against
+<code>SHA256SUMS.txt</code> in the release.</p>
+<ul>
+<li><strong>What is signed:</strong> the Windows packager exe of each release (the packager and the asset baker). It is built by
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/blob/main/.github/workflows/packager-windows.yml">a GitHub Actions workflow</a> from this repository's
+source, and nothing else is signed. The Xbox build (<code>default.xbe</code>) is data beside the exe, not a Windows program.</li>
+<li><strong>Roles:</strong> committers and reviewers: <a href="https://github.com/mathiasdbo">mathiasdbo</a>, the project owner,
+who also approves every signing request. Members use multi-factor authentication on GitHub and SignPath.</li>
+<li><strong>Privacy policy:</strong> this program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it. The packager connects only to the Xbox whose
+address you give it, or finds one when you press <em>Find my Xbox</em>, which scans your own network.</li>
+</ul>
 </main>
 <footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
 <a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>

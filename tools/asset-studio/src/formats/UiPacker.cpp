@@ -876,11 +876,16 @@ bool UiPacker::bakeBackgroundArt(const std::string& gameDir, const std::string& 
 
     std::string outResourceDir = outDir + "/resource";
     std::string outBgDir = outResourceDir + "/background";
-#if defined(_WIN32)
-    system(("mkdir \"" + outBgDir + "\" 2>nul").c_str());
-#else
-    system(("mkdir -p \"" + outBgDir + "\"").c_str());
-#endif
+    {
+        // not system("mkdir"): on Windows that starts cmd.exe, and a console window with it when the
+        // packager (a windowed program) runs the baker
+        std::error_code mkec;
+        std::filesystem::create_directories(outBgDir, mkec);
+        if (mkec) {
+            std::cerr << "bakeBackgroundArt: could not create " << outBgDir << ": " << mkec.message() << "\n";
+            return false;
+        }
+    }
 
     std::ofstream layoutOut(outResourceDir + "/BackgroundLayout.txt");
     if (!layoutOut.is_open()) {

@@ -21,6 +21,23 @@ NAV = [("index.html", "Home"), ("install.html", "Install"), ("settings.html", "C
        ("differences.html", "How it differs"), ("about.html", "About")]
 
 
+SIGNING = """<h2 id="code-signing-policy">Code signing policy</h2>
+<p>Free code signing provided by <a href="https://about.signpath.io/">SignPath.io</a>, certificate by
+<a href="https://signpath.org/">SignPath Foundation</a>.</p>
+<p><strong>Status:</strong> the Windows packager is not signed yet. The application to SignPath Foundation is in progress,
+and until it is approved Windows will warn about an unknown publisher: check the file against
+<code>SHA256SUMS.txt</code> in the release.</p>
+<ul>
+<li><strong>What is signed:</strong> the Windows packager exe of each release (the packager and the asset baker). It is built by
+<a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/blob/main/.github/workflows/packager-windows.yml">a GitHub Actions workflow</a> from this repository's
+source, and nothing else is signed. The Xbox build (<code>default.xbe</code>) is data beside the exe, not a Windows program.</li>
+<li><strong>Roles:</strong> committers and reviewers: <a href="https://github.com/mathiasdbo">mathiasdbo</a>, the project owner,
+who also approves every signing request. Members use multi-factor authentication on GitHub and SignPath.</li>
+<li><strong>Privacy policy:</strong> this program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it. The packager connects only to the Xbox whose
+address you give it, or finds one when you press <em>Find my Xbox</em>, which scans your own network.</li>
+</ul>"""
+
 MILESTONES = """<ol class="milestones">
 <li class="now"><strong>The whole campaign playable at 720p</strong> <span class="tag">We are here</span><br>
 Today the first campaign maps run on a console, and a 45-minute Office Complex route has been recorded at 720p.
@@ -40,7 +57,7 @@ packaged yet.</li>
 </ol>"""
 
 def page(fname, title, body, desc):
-    body = body.replace("@@MILESTONES@@", MILESTONES)
+    body = body.replace("@@MILESTONES@@", MILESTONES).replace("@@SIGNING@@", SIGNING)
     nav = "".join('<a href="%s"%s>%s</a>' % (h, ' aria-current="page"' if h == fname else "", t) for h, t in NAV)
     html = """<!doctype html>
 <html lang="en">
@@ -118,6 +135,8 @@ a report on your PC. See <a href="progress.html">progress</a>.</li>
 <h2>You need your own game</h2>
 <p>This project contains no Valve assets. Running Half-Life needs your own legally obtained copy (Steam). The
 baker reads your install and produces the archives locally; they are not redistributable.</p>
+
+@@SIGNING@@
 """, "Half-Life on the original Xbox, through a port of Xash3D FWGS built with nxdk.")
 
 page("install.html", "Install - Xash3D-FWGS-XBOX", """
@@ -135,8 +154,11 @@ PrometheOS).</li>
 </ul>
 
 <h2>Run the packager</h2>
-<p>Windows: run <code>Xash3D-FWGS-XBOX-Packager-&lt;version&gt;-windows.exe</code> from the
-<a href="%(repo)s/releases">releases page</a>. Anywhere else: unzip the portable package and run</p>
+<p>Windows: download <code>Xash3D-FWGS-XBOX-Packager-&lt;version&gt;-windows.zip</code> from the
+<a href="%(repo)s/releases">releases page</a>, unzip it and run the exe. Keep the <code>payload</code> folder next to it: it
+holds the Xbox build. The exe is not signed yet, so Windows says <em>Windows protected your PC</em>: check the zip against
+<code>SHA256SUMS.txt</code>, then choose <em>More info</em> and <em>Run anyway</em>
+(<a href="#code-signing-policy">code signing policy</a>). Anywhere else: unzip the portable package and run</p>
 <pre><code>python3 r3d_packager.py</code></pre>
 <ol>
 <li>Pick the game. Half-Life is available; Opposing Force and Blue Shift are listed and will follow.</li>
@@ -167,6 +189,8 @@ baker or your game files change.</p>
 install, the packager surveys it and asks. It never replaces your saves or settings, and it moves the old
 <code>default.xbe</code> aside as <code>default.xbe.before-packager</code> instead of overwriting it.</p>
 <p>Next: <a href="settings.html">change the console's settings</a> from the second tab.</p>
+
+@@SIGNING@@
 """ % {"repo": REPO}, "How to put Half-Life on an original Xbox with the packager.")
 
 page("settings.html", "Console settings - Xash3D-FWGS-XBOX", """
