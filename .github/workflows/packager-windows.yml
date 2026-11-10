@@ -1,0 +1,117 @@
+# Builds the Windows packager exe from this repository on a GitHub-hosted runner, has it signed when signing is
+# set up (free code signing by SignPath.io, certificate by SignPath Foundation), and assembles the release files.
+# Manual only.
+#
+# Not signed yet: the signing step runs only when the repository variable SIGNPATH_ORGANIZATION_ID is set (with
+# SIGNPATH_PROJECT_SLUG and SIGNPATH_SIGNING_POLICY_SLUG, and the secret SIGNPATH_API_TOKEN). Until then the
+# release files carry an unsigned exe and the notes say so.
+#
+# The exe holds only what this repository builds (the packager and the asset baker). The Xbox build is data
+# beside it, and the one input that is not built here: pass the URL and the sha256 of a clean build of main.
+name: Packager (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. v0.1.1"
+        required: true
+      xbe_url:
+        description: "URL of the raw default.xbe (a clean build of main)"
+        required: true
+      xbe_sha256:
+        description: "sha256 of that default.xbe"
+        required: true
+      publish:
+        description: "Create the GitHub release with the files"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write # used only to publish the release
+    env:
+      VERSION: ${{ inputs.version }}
+      XBE_URL: ${{ inputs.xbe_url }}
+      XBE_SHA256: ${{ inputs.xbe_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: The one submodule the payload reads
+        run: git submodule update --init -- 3rdparty/extras/xash-extras
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pyinstaller
+      - uses: msys2/setup-msys2@v2
+        id: msys
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+      - name: MinGW toolchain on PATH (the baker builds with gcc and ninja)
+        run: |
+          "$($env:MSYS2_LOCATION)\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        env:
+          MSYS2_LOCATION: ${{ steps.msys.outputs.msys2-location }}
+      - name: Build the exe
+        run: python tools/packager/ci_build.py exe --version "$env:VERSION" --out dist-exe
+      - name: Upload the unsigned exe
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-exe
+          path: dist-exe/Xash3D-FWGS-XBOX-Packager.exe
+      - name: Product version for the signing request
+        id: ver
+        run: |
+          "product=$($env:VERSION.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Submit the signing request
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800 # a person approves the request in SignPath
+          output-artifact-directory: dist-signed
+          parameters: |
+            version: "${{ steps.ver.outputs.product }}"
+      - name: Fetch the XBE
+        run: Invoke-WebRequest -Uri $env:XBE_URL -OutFile default.xbe
+      - name: Assemble the release files
+        run: |
+          $exe = "dist-exe\Xash3D-FWGS-XBOX-Packager.exe"
+          $flag = @()
+          if (Test-Path "dist-signed\Xash3D-FWGS-XBOX-Packager.exe") {
+            $exe = "dist-signed\Xash3D-FWGS-XBOX-Packager.exe"
+            $flag = @("--signed")
+          }
+          python tools/packager/ci_build.py assemble --version "$env:VERSION" --exe $exe `
+            --xbe default.xbe --xbe-sha256 "$env:XBE_SHA256" @flag --out dist
+      - name: Upload the release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist/
+      - name: Publish the release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem dist -File | Where-Object { $_.Name -ne "NOTES.md" } | ForEach-Object { $_.FullName }
+          gh release create "$env:VERSION" --target "$env:GITHUB_SHA" --title "Xash3D-FWGS-XBOX Packager $env:VERSION" `
+            --notes-file dist/NOTES.md @files

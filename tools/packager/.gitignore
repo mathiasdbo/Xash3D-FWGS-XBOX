@@ -4,3 +4,5 @@ dist/
 build/
 bin/
 build-baker/
+dist-exe/
+dist-signed/
