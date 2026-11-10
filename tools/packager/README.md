@@ -6,8 +6,9 @@ image. Nothing of the game ships with this tool.
 
 ## Using it
 
-Windows: run `Xash3D-FWGS-XBOX-Packager-<version>-windows.exe` from the
-[release](../../../../releases).
+Windows: unzip `Xash3D-FWGS-XBOX-Packager-<version>-windows.zip` from the
+[release](../../../../releases) and run the exe in it. Keep the `payload`
+folder beside the exe: it holds the Xbox build. The exe is not signed yet.
 
 Anywhere else: unzip `Xash3D-FWGS-XBOX-Packager-<version>-portable.zip` and run
 

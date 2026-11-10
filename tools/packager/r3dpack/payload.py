@@ -17,6 +17,14 @@ class PayloadError(Exception):
 
 
 def default_dir():
+    """The payload folder: the Xbox build and the files that go with it.
+
+    A frozen exe looks beside itself first. The signed Windows release is the exe built by CI plus a payload
+    folder next to it, so the Xbox build is data the exe reads, not something baked into the signed file."""
+    if getattr(sys, "frozen", False):
+        beside = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "payload")
+        if os.path.isdir(beside):
+            return beside
     base = getattr(sys, "_MEIPASS", None)
     if base:
         return os.path.join(base, "payload")

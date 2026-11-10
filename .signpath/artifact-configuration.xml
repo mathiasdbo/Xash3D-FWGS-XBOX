@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for the Windows packager (free code signing by SignPath.io,
+  certificate by SignPath Foundation). Paste it into the project's artifact configuration in SignPath;
+  it is kept here so changes to it are reviewed like the rest of the build.
+
+  The artifact is the zip that .github/workflows/packager-windows.yml uploads: the exe at its root.
+  SignPath refuses a request whose exe does not carry this product name and the release's version,
+  which tools/packager/r3dpack/versioninfo.py writes into the exe's version resource.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" />
+  </parameters>
+  <zip-file>
+    <pe-file path="Xash3D-FWGS-XBOX-Packager.exe" product-name="Xash3D-FWGS-XBOX" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

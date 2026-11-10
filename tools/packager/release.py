@@ -10,13 +10,16 @@ With --publish the tag is created on the current commit of the repo and the
 files are attached to a new GitHub release.
 
 Files:
-  Xash3D-FWGS-XBOX-Packager-<ver>-windows.exe   one file, no Python needed
+  Xash3D-FWGS-XBOX-Packager-<ver>-windows.zip   the exe (no Python needed) and the payload folder beside it,
+                                           which holds the Xbox build: keep them together
   Xash3D-FWGS-XBOX-Packager-<ver>-portable.zip  any OS with Python 3 and Tk:
                                            python3 r3d_packager.py
   SHA256SUMS.txt
 
-The Windows exe is built here; a binary for Linux can only be built on Linux,
-so the portable zip is the Linux release.
+The exe contains only what the repository builds (the packager and the asset baker); the Xbox build is
+data beside it. That split is what lets CI build the exe and have it signed (tools/packager/ci_build.py,
+.github/workflows/packager-windows.yml). The Windows exe can only be built on Windows; a binary for Linux
+only on Linux, so the portable zip is the Linux release.
 """
 
 import argparse
@@ -31,6 +34,11 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 DIST = os.path.join(HERE, "dist")
+sys.path.insert(0, HERE)
+from r3dpack import versioninfo  # noqa: E402
+
+EXE = "Xash3D-FWGS-XBOX-Packager.exe"  # inside the windows zip, always this name: SignPath's configuration names it
+TOP = "Xash3D-FWGS-XBOX-Packager"
 
 
 def run(cmd, **kw):
@@ -50,6 +58,98 @@ def git(*a):
     return subprocess.run(["git", "-C", REPO] + list(a), capture_output=True, text=True).stdout.strip()
 
 
+def make_payload(xbe):
+    """tools/packager/payload from the repo's files and a built XBE (the one input that is not built from source here)"""
+    run([sys.executable, os.path.join(HERE, "make_payload.py"), "--xbe", xbe])
+
+
+def build_baker():
+    """the asset baker the packager runs on the user's own files (tools/asset-studio, built for this OS)"""
+    shutil.rmtree(os.path.join(HERE, "bin"), ignore_errors=True)
+    run([sys.executable, os.path.join(HERE, "build_baker.py")])
+
+
+def build_exe(ver, out_dir):
+    """The one-file Windows exe: the packager, its assets and the baker. No payload: the Xbox build sits beside it."""
+    if sys.platform != "win32":
+        raise SystemExit("The Windows exe can only be built on Windows.")
+    os.makedirs(out_dir, exist_ok=True)
+    work = os.path.join(HERE, "build")
+    os.makedirs(work, exist_ok=True)
+    vfile = os.path.join(work, "version-info.txt")
+    with open(vfile, "w", encoding="utf-8") as f:
+        f.write(versioninfo.render(ver, EXE))
+    run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed",
+         "--name", EXE[:-4], "--icon", os.path.join(HERE, "assets", "icon-xash.ico"),
+         "--version-file", vfile,
+         "--add-data", os.path.join(HERE, "assets") + ";assets",
+         "--add-binary", os.path.join(HERE, "bin", "AssetStudio.exe") + ";bin",
+         "--distpath", out_dir, "--workpath", work, "--specpath", work,
+         os.path.join(HERE, "r3d_packager.py")])
+    return os.path.join(out_dir, EXE)
+
+
+def _add_tree(z, base, top):
+    for dp, dn, fn in os.walk(os.path.join(HERE, base)):
+        dn[:] = sorted(d for d in dn if d != "__pycache__")
+        for n in sorted(fn):
+            full = os.path.join(dp, n)
+            z.write(full, top + "/" + os.path.relpath(full, HERE).replace(os.sep, "/"))
+
+
+def windows_zip(ver, exe, dist):
+    """the exe, with the payload folder beside it"""
+    path = os.path.join(dist, "Xash3D-FWGS-XBOX-Packager-%s-windows.zip" % ver)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(exe, TOP + "/" + EXE)
+        _add_tree(z, "payload", TOP)
+        z.writestr(TOP + "/README.txt",
+                   "Xash3D-FWGS-XBOX Packager %s\r\n\r\nRun %s. Keep the payload folder next to it: it holds the\r\n"
+                   "Xbox build the packager puts on your console.\r\n" % (ver, EXE))
+    return path
+
+
+def portable_zip(ver, dist):
+    path = os.path.join(dist, "Xash3D-FWGS-XBOX-Packager-%s-portable.zip" % ver)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(os.path.join(HERE, "r3d_packager.py"), TOP + "/r3d_packager.py")
+        z.write(os.path.join(HERE, "build_baker.py"), TOP + "/build_baker.py")
+        # the baker built here only runs on this OS; elsewhere build_baker.py makes one from the repo
+        for base in ("r3dpack", "payload", "assets", "bin"):
+            _add_tree(z, base, TOP)
+    return path
+
+
+def finish(ver, dist, signed=False):
+    """SHA256SUMS.txt and NOTES.md for what is in dist; the list of files to attach"""
+    files = sorted(n for n in os.listdir(dist) if os.path.isfile(os.path.join(dist, n))
+                   and n not in ("SHA256SUMS.txt", "NOTES.md"))
+    with open(os.path.join(dist, "SHA256SUMS.txt"), "w") as f:
+        for n in files:
+            f.write("%s  %s\n" % (sha(os.path.join(dist, n)), n))
+    files.append("SHA256SUMS.txt")
+
+    with open(os.path.join(HERE, "payload", "manifest.json")) as f:
+        build = json.load(f)["titles"]["hl"]["build"]
+    with open(os.path.join(dist, "NOTES.md"), "w") as f:
+        f.write("Xash3D-FWGS-XBOX Packager %s\n\n"
+                "Packs your own Half-Life files with the Xbox build into a console-ready folder or XISO.\n\n"
+                "- Windows: unzip the windows zip and run the .exe; keep the payload folder next to it. %s\n"
+                "- Linux / other: unzip the portable zip and run `python3 r3d_packager.py` "
+                "(needs Python 3 with Tk, e.g. `python3-tk`). The zip's baker is the Windows one; "
+                "on Linux run `python3 build_baker.py` from a checkout of the repository first "
+                "(needs cmake and g++).\n"
+                "- The first export bakes the Xbox data from your own game files (a few minutes) and "
+                "keeps the result for next time.\n\n"
+                "Xbox build inside: commit %s (%s), XBE source sha256 %s.\n"
+                % (ver,
+                   "The exe is signed: free code signing by SignPath.io, certificate by SignPath Foundation."
+                   if signed else "The exe is not signed: Windows will warn about an unknown publisher.",
+                   build["commit"][:10], build["branch"], build["xbe_source_sha256"]))
+    files.append("NOTES.md")
+    return files
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--xbe", required=True, help="the XBE to ship (a clean build of main)")
@@ -63,63 +163,20 @@ def main():
 
     shutil.rmtree(DIST, ignore_errors=True)
     os.makedirs(DIST)
-    run([sys.executable, os.path.join(HERE, "make_payload.py"), "--xbe", a.xbe])
-    # the asset baker the packager runs on the user's own files (tools/asset-studio, built for this OS)
-    shutil.rmtree(os.path.join(HERE, "bin"), ignore_errors=True)
-    run([sys.executable, os.path.join(HERE, "build_baker.py")])
+    make_payload(a.xbe)
+    build_baker()
 
     ver = a.version
-    exe_name = "Xash3D-FWGS-XBOX-Packager-%s-windows.exe" % ver
     if sys.platform == "win32":
-        sep = ";"
-        run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed",
-             "--name", exe_name[:-4], "--icon", os.path.join(HERE, "assets", "icon-xash.ico"),
-             "--add-data", os.path.join(HERE, "payload") + sep + "payload",
-             "--add-data", os.path.join(HERE, "assets") + sep + "assets",
-             "--add-binary", os.path.join(HERE, "bin", "AssetStudio.exe") + sep + "bin",
-             "--distpath", DIST, "--workpath", os.path.join(HERE, "build"),
-             "--specpath", os.path.join(HERE, "build"),
-             os.path.join(HERE, "r3d_packager.py")])
+        exe = build_exe(ver, os.path.join(HERE, "dist-exe"))
+        windows_zip(ver, exe, DIST)
     else:
         print("Not on Windows: skipping the .exe.")
-
-    zname = "Xash3D-FWGS-XBOX-Packager-%s-portable.zip" % ver
-    with zipfile.ZipFile(os.path.join(DIST, zname), "w", zipfile.ZIP_DEFLATED) as z:
-        top = "Xash3D-FWGS-XBOX-Packager"
-        z.write(os.path.join(HERE, "r3d_packager.py"), top + "/r3d_packager.py")
-        z.write(os.path.join(HERE, "build_baker.py"), top + "/build_baker.py")
-        # the baker built here only runs on this OS; elsewhere build_baker.py makes one from the repo
-        for base in ("r3dpack", "payload", "assets", "bin"):
-            for dp, dn, fn in os.walk(os.path.join(HERE, base)):
-                dn[:] = [d for d in dn if d != "__pycache__"]
-                for n in fn:
-                    full = os.path.join(dp, n)
-                    z.write(full, top + "/" + os.path.relpath(full, HERE).replace(os.sep, "/"))
-
-    files = sorted(n for n in os.listdir(DIST) if os.path.isfile(os.path.join(DIST, n)))
-    with open(os.path.join(DIST, "SHA256SUMS.txt"), "w") as f:
-        for n in files:
-            f.write("%s  %s\n" % (sha(os.path.join(DIST, n)), n))
-    files.append("SHA256SUMS.txt")
-
-    with open(os.path.join(HERE, "payload", "manifest.json")) as f:
-        build = json.load(f)["titles"]["hl"]["build"]
-    notes = os.path.join(DIST, "NOTES.md")
-    with open(notes, "w") as f:
-        f.write("Xash3D-FWGS-XBOX Packager %s\n\n"
-                "Packs your own Half-Life files with the Xbox build into a console-ready folder or XISO.\n\n"
-                "- Windows: run the .exe.\n"
-                "- Linux / other: unzip the portable zip and run `python3 r3d_packager.py` "
-                "(needs Python 3 with Tk, e.g. `python3-tk`). The zip's baker is the Windows one; "
-                "on Linux run `python3 build_baker.py` from a checkout of the repository first "
-                "(needs cmake and g++).\n"
-                "- The first export bakes the Xbox data from your own game files (a few minutes) and "
-                "keeps the result for next time.\n\n"
-                "Xbox build inside: commit %s (%s), XBE source sha256 %s.\n"
-                % (ver, build["commit"][:10], build["branch"], build["xbe_source_sha256"]))
+    portable_zip(ver, DIST)
+    files = finish(ver, DIST)
 
     cmd = ["gh", "release", "create", ver, "--title", "Xash3D-FWGS-XBOX Packager " + ver,
-           "--notes-file", notes] + [os.path.join(DIST, n) for n in files]
+           "--notes-file", os.path.join(DIST, "NOTES.md")] + [os.path.join(DIST, n) for n in files if n != "NOTES.md"]
     if not a.publish:
         print("\nBuilt, not published. To publish:\n  " + " ".join(cmd))
         return
