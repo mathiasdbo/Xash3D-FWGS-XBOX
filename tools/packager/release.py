@@ -58,9 +58,14 @@ def git(*a):
     return subprocess.run(["git", "-C", REPO] + list(a), capture_output=True, text=True).stdout.strip()
 
 
-def make_payload(xbe):
+def make_payload(xbe, xbe_commit=None, prepatched=False):
     """tools/packager/payload from the repo's files and a built XBE (the one input that is not built from source here)"""
-    run([sys.executable, os.path.join(HERE, "make_payload.py"), "--xbe", xbe])
+    cmd = [sys.executable, os.path.join(HERE, "make_payload.py"), "--xbe", xbe]
+    if xbe_commit:
+        cmd += ["--xbe-commit", xbe_commit]
+    if prepatched:
+        cmd += ["--prepatched"]
+    run(cmd)
 
 
 def build_baker():
@@ -141,11 +146,13 @@ def finish(ver, dist, signed=False):
                 "(needs cmake and g++).\n"
                 "- The first export bakes the Xbox data from your own game files (a few minutes) and "
                 "keeps the result for next time.\n\n"
-                "Xbox build inside: commit %s (%s), XBE source sha256 %s.\n"
+                "Xbox build inside: commit %s (%s), XBE source sha256 %s.%s\n"
                 % (ver,
                    "The exe is signed: free code signing by SignPath.io, certificate by SignPath Foundation."
                    if signed else "The exe is not signed: Windows will warn about an unknown publisher.",
-                   build["commit"][:10], build["branch"], build["xbe_source_sha256"]))
+                   build["commit"][:10], build["branch"], build["xbe_source_sha256"],
+                   " It is the build already shipped in an earlier release, unchanged."
+                   if build.get("xbe_prepatched") else ""))
     files.append("NOTES.md")
     return files
 

@@ -22,6 +22,14 @@ on:
       xbe_sha256:
         description: "sha256 of that default.xbe"
         required: true
+      xbe_commit:
+        description: "The commit the XBE was built from (default: this commit)"
+        required: false
+        default: ""
+      xbe_prepatched:
+        description: "The XBE is the default.xbe of an earlier release (already titled, with its images)"
+        type: boolean
+        default: false
       publish:
         description: "Create the GitHub release with the files"
         type: boolean
@@ -40,6 +48,8 @@ jobs:
       VERSION: ${{ inputs.version }}
       XBE_URL: ${{ inputs.xbe_url }}
       XBE_SHA256: ${{ inputs.xbe_sha256 }}
+      XBE_COMMIT: ${{ inputs.xbe_commit }}
+      XBE_PREPATCHED: ${{ inputs.xbe_prepatched }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,8 +108,10 @@ jobs:
           $flag = @()
           if (Test-Path "dist-signed\Xash3D-FWGS-XBOX-Packager.exe") {
             $exe = "dist-signed\Xash3D-FWGS-XBOX-Packager.exe"
-            $flag = @("--signed")
+            $flag += "--signed"
           }
+          if ($env:XBE_COMMIT) { $flag += @("--xbe-commit", $env:XBE_COMMIT) }
+          if ($env:XBE_PREPATCHED -eq "true") { $flag += "--xbe-prepatched" }
           python tools/packager/ci_build.py assemble --version "$env:VERSION" --exe $exe `
             --xbe default.xbe --xbe-sha256 "$env:XBE_SHA256" @flag --out dist
       - name: Upload the release files
