@@ -11,7 +11,7 @@ The Controller Settings screen has four sliders, one per stick axis (look left-r
 forward-back), 0 to 16000 with the value shown, for the engine's `joy_*_deadzone` (divergences.md #218). At start the
 engine also puts a saved dead zone below 4096 back to the Xbox default (8689) once, then never again (#217): a console
 that ran the PC's `config.cfg` copied by the old export saved zero dead zones, and an original Xbox pad's resting offset
-turned the view, or walked the player, by itself. Needs a new XBE build.
+turned the view, or walked the player, by itself. Leaving the screen with B now saves, as Done does: before, B dropped every change made there. Needs a new XBE build.
 
 ### Added - a Troubleshooting page, and a clearer stick-drift warning
 
