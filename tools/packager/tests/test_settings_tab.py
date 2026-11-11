@@ -133,6 +133,12 @@ class Tab(unittest.TestCase):
         self.api["preset"]("Defaults")
         self.assertEqual(self.api["vars"]["r3d_vid_mode"].get(), self.st.UNSET)
 
+    def test_the_fix_stick_drift_preset_fills_the_four_dead_zones(self):
+        self.api["preset"]("Fix stick drift")
+        for k in ("joy_yaw_deadzone", "joy_pitch_deadzone", "joy_side_deadzone", "joy_forward_deadzone"):
+            self.assertTrue(self.api["vars"][k].get().startswith("8689"), k)
+        self.assertEqual(self.api["vars"]["r3d_vid_mode"].get(), self.st.UNSET)  # nothing else is touched
+
     def test_reading_a_missing_folder_says_so(self):
         self.api["install"].set(os.path.join(self.tmp.name, "nope"))
         self.api["status"].set("")

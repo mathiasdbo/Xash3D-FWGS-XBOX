@@ -5,6 +5,14 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - the packager can fix stick drift on an install
+
+The Console settings tab has a Controller group with the four stick dead zones (`joy_yaw_deadzone`, `joy_pitch_deadzone`,
+`joy_side_deadzone`, `joy_forward_deadzone`) and a "Fix stick drift" preset that sets them to the Xbox default, 8689. It
+writes them to `userconfig.d/50-packager.cfg`, which runs after the console's saved `config.cfg`, so it repairs a console
+that saved the PC's zero dead zones. "What the console runs with" warns when a dead zone is under 4096. Pairs with the
+export no longer copying the PC's `config.cfg`.
+
 ### Fixed - the packager no longer copies the PC's controller settings to the console
 
 The export copied the whole `valve` folder, so PC Half-Life's `config.cfg` (every `joy_*_deadzone` set to 0,
