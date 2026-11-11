@@ -5,6 +5,14 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - a Troubleshooting page, and a clearer stick-drift warning
+
+`site/troubleshooting.html`: the view turning by itself (what causes it, the Fix stick drift preset with screenshots, the
+by-hand file, and starting the settings again), the Windows warning for the unsigned exe, FTP problems, and a black world.
+In the Console settings tab the stick-drift warning now comes first in "What the console runs with" (the box is short and
+the values used to push it out of sight), is one grouped line, and updates when the preset is chosen.
+`tools/packager/capture_screenshots.py` also captures the two drift states.
+
 ### Added - the packager can fix stick drift on an install
 
 The Console settings tab has a Controller group with the four stick dead zones (`joy_yaw_deadzone`, `joy_pitch_deadzone`,

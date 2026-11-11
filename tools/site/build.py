@@ -15,7 +15,7 @@ import shutil
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, "site")
 REPO = "https://github.com/mathiasdbo/Xash3D-FWGS-XBOX"
-NAV = [("index.html", "Home"), ("install.html", "Install"), ("settings.html", "Console settings"),
+NAV = [("index.html", "Home"), ("install.html", "Install"), ("settings.html", "Console settings"), ("troubleshooting.html", "Troubleshooting"),
        ("menus.html", "Menus"), ("progress.html", "Progress"), ("performance.html", "Performance"),
        ("recorder.html", "Frame-time recorder"), ("build.html", "Building"),
        ("differences.html", "How it differs"), ("about.html", "About")]
@@ -309,7 +309,8 @@ v0.1.2 copied it to the console, where it ran on the first start and was then sa
 <p>If that happened to your install, the <strong>Console settings</strong> tab says so under <em>What the console runs with</em>
 (<em>too small for an Xbox pad</em>). Read the install, press the <strong>Fix stick drift</strong> preset, and
 <strong>Write settings</strong>: it writes the four dead zones as 8689 to <code>userconfig.d/50-packager.cfg</code>, which runs
-after the saved <code>config.cfg</code> on every start. The <em>Controller</em> group lets you choose other values.</p>
+after the saved <code>config.cfg</code> on every start. The <em>Controller</em> group lets you choose other values.
+Screenshots, and two other ways to fix it, are on the <a href="troubleshooting.html#drift">Troubleshooting</a> page.</p>
 
 <p>Audio options (backend, rate, hardware audio) and developer switches (GPU skinning, culling) are in the tab
 too; developer settings are behind a tick. Video output, sound backend, rate and hardware audio are read at
@@ -669,6 +670,87 @@ suits the GPU's vertex cache.</li>
 <p>The detail is in <code>docs/r3d/xbox-performance-review.md</code>, <code>CHANGELOG.md</code> and
 <code>docs/r3d/frametime-recorder.md</code>.</p>
 """, "The 720p and 60 fps target, measured frame times, the optimisations that landed and what is next.")
+
+
+page("troubleshooting.html", "Troubleshooting - Xash3D-FWGS-XBOX", """
+<h1>Troubleshooting</h1>
+<p class="lede">Problems people have run into, and what to do about each.</p>
+
+<h2 id="drift">The view turns by itself</h2>
+<p>With nobody touching the controller, the camera slowly turns, usually to the left. This is <strong>stick drift</strong>.
+Original Xbox pads rest well off centre: an untouched right stick can read about a fifth of the way over. The engine
+ignores a stick inside its <em>dead zone</em>, and the Xbox build's default is 8689, which is wide enough. A dead zone of 0
+lets the resting offset turn the view.</p>
+<p>Where the 0 came from: before v0.1.2 the packager copied PC Half-Life's <code>config.cfg</code> to the console, and that
+file sets all four stick dead zones to 0. On the console's first start it ran, and the console then saved those zeros as its
+own settings, so they stayed. From v0.1.2 the export leaves the PC's settings behind. A console that already ran the old
+export still has them; here is how to fix it.</p>
+
+<h3>Fix it from the packager (v0.1.2 or later)</h3>
+<ol>
+<li>Put the console on the dashboard (the game must not be running: FTP does not work inside the game).</li>
+<li>Open the packager, go to <strong>Console settings</strong>, press <strong>Find my Xbox</strong> and <strong>Find installs</strong>,
+choose the Half-Life install and press <strong>Read</strong>.</li>
+<li>If a saved dead zone is too small, <em>What the console runs with</em> says so first, in orange.</li>
+<li>Press the <strong>Fix stick drift</strong> preset. The four <em>Controller</em> rows fill in with 8689 and the warning goes.</li>
+<li>Press <strong>Write settings</strong>, then start the game. The fix is written to <code>userconfig.d/50-packager.cfg</code>, which
+runs after the console's saved settings on every start.</li>
+</ol>
+<p>The <em>Controller</em> group also lets you pick another value: lower makes the stick more sensitive near the centre,
+but under about 8000 a pad that rests off centre will drift again.</p>
+<div class="shots">
+<figure>
+<a href="media/packager-drift-warning.png"><img src="media/packager-drift-warning.png" loading="lazy" width="802" height="892"
+alt="The Console settings tab after reading an install: the Controller group of four stick dead zones, the Fix stick drift preset button, and under What the console runs with a warning that the dead zones are 0 and the view can turn by itself."></a>
+<figcaption><strong>After Read.</strong> The warning names the settings and where they come from. The address and
+folder shown are examples.</figcaption>
+</figure>
+<figure>
+<a href="media/packager-drift-fixed.png"><img src="media/packager-drift-fixed.png" loading="lazy" width="802" height="892"
+alt="The same tab after pressing Fix stick drift: the Controller rows show 8689 and the warning is gone; the status line says to press Write settings to apply it."></a>
+<figcaption><strong>After Fix stick drift.</strong> The rows read 8689. Nothing is changed on the console until you press
+Write settings.</figcaption>
+</figure>
+</div>
+
+<h3>Or by hand, without the packager</h3>
+<p>Create a file called <code>60-deadzone.cfg</code> in the console's <strong>game folder</strong> (not in
+<code>UDATA</code>), in <code>valve/userconfig.d/</code> next to <code>50-packager.cfg</code>. Make the folder if it is not
+there. For example <code>/F/Games/Half-Life/valve/userconfig.d/60-deadzone.cfg</code> (some FTP servers show the drive as
+<code>/HDD0-F/</code>). Put these four lines in it:</p>
+<pre><code>joy_forward_deadzone "8689"
+joy_side_deadzone "8689"
+joy_pitch_deadzone "8689"
+joy_yaw_deadzone "8689"</code></pre>
+
+<h3>Or start the settings again</h3>
+<p>Delete <strong>both</strong> copies of <code>config.cfg</code>: the one in the game folder (<code>Games/Half-Life/valve/</code>,
+which the old export put there) and the one the console saved (<code>E:&#92;UDATA&#92;FFFF0002&#92;valve&#92;valve&#92;</code>). Deleting only
+the saved one is not enough: the console then falls back to the game-folder copy and saves the zeros again. The game starts
+with the Xbox defaults, but everything saved in the menu (volume, display, game options, changed controls) is lost. Settings
+written by the packager's Console settings tab survive, because they live in <code>userconfig.d</code>.</p>
+
+<h2 id="smartscreen">Windows says "Windows protected your PC"</h2>
+<p>The packager's exe is not signed yet, so Windows does not know the publisher. Check the zip against
+<code>SHA256SUMS.txt</code> on the release page, then choose <em>More info</em> and <em>Run anyway</em>.
+See the <a href="install.html#code-signing-policy">code signing policy</a> for where signing stands.</p>
+
+<h2 id="ftp">The packager cannot reach the console, or the upload stops</h2>
+<ul>
+<li><strong>The game must not be running.</strong> The console's FTP server is part of the dashboard; it is not there while
+a game is up. Go back to the dashboard first.</li>
+<li><strong>One connection at a time.</strong> Close any other FTP program that is connected to the console.</li>
+<li><strong>"421 Too many users".</strong> Seen with the UnleashX dashboard: a program that died in the middle of a transfer can
+keep its login slot for about half an hour, and every new login is refused. Restarting the console clears it.</li>
+<li>Press <strong>Find my Xbox</strong> again if the console's address changed: it is usually handed out by your router and can
+differ from one day to the next.</li>
+</ul>
+
+<h2 id="black-world">The world draws black and only models show</h2>
+<p>A loose <code>.bsp</code> sitting beside a baked <code>.mpak</code> is loaded instead of the archive, and the Xbox renderer
+then has no world to draw. The packager leaves the <code>.bsp</code> of every baked map off the console. If you copied files
+across by hand, remove the retail <code>.bsp</code> of each map that has an <code>.mpak</code>.</p>
+""", "Fixes for the view turning by itself, the Windows warning, FTP problems and a black world.")
 
 
 # ---- Performance: one entry per report in docs/r3d/reports/*.html ------------------------------

@@ -256,9 +256,12 @@ class Effective:
         out = []
         low = self.drift(managed_values)
         if low:
-            out.append("%s: too small for an Xbox pad, which rests off centre, so the view can turn by itself "
-                       "(a PC's config.cfg sets them to 0). The 'Fix stick drift' preset sets them to %s."
-                       % (", ".join("%s is %s (%s)" % x for x in low), DEAD_ZONE_XBOX))
+            groups = {}
+            for k, v, src in low:  # one clause per (value, file), so four zeros from one config.cfg read as one
+                groups.setdefault((v, src), []).append(k)
+            said = "; ".join("%s = %s (%s)" % (", ".join(ks), v, src) for (v, src), ks in groups.items())
+            out.append("Stick drift: an Xbox pad rests off centre, so with a dead zone this small the view can turn "
+                       "by itself. %s. The 'Fix stick drift' preset sets them to %s." % (said, DEAD_ZONE_XBOX))
         for k, mine, src, v in self.overridden(managed_values):
             out.append("%s: %s sets it to %s after this tool does, so %s wins." % (k, src, v, v))
         others = [(s, m) for s, m in self.loads_map if s != MANAGED_NAME]

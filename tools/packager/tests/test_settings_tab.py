@@ -139,6 +139,19 @@ class Tab(unittest.TestCase):
             self.assertTrue(self.api["vars"][k].get().startswith("8689"), k)
         self.assertEqual(self.api["vars"]["r3d_vid_mode"].get(), self.st.UNSET)  # nothing else is touched
 
+    def test_the_drift_warning_comes_first_and_clears_when_the_preset_is_chosen(self):
+        from r3dpack import target
+        zeros = b"".join(b'joy_%s_deadzone "0"\r\n' % a for a in (b"yaw", b"pitch", b"side", b"forward"))
+        with mock.patch.object(target.FolderTarget, "read_live_config", return_value=zeros):
+            self.read()
+        root.update()
+        shown = self.api["now"].get("1.0", "end")
+        self.assertTrue(shown.startswith("! Stick drift"), shown)  # the box is short: the warning is not left to scroll
+        self.assertIn("joy_yaw_deadzone = 0", shown)  # the values are still listed, after it
+        self.api["preset"]("Fix stick drift")
+        root.update()
+        self.assertNotIn("Stick drift", self.api["now"].get("1.0", "end"))  # about to be written: nothing to warn about
+
     def test_reading_a_missing_folder_says_so(self):
         self.api["install"].set(os.path.join(self.tmp.name, "nope"))
         self.api["status"].set("")

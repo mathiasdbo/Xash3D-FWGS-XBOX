@@ -126,7 +126,7 @@ def build(tab, ui):
 
     # ---- what the console has now ----
     now = ui.card(tab, "What the console runs with")
-    now_text = tk.Text(now, height=4, wrap="word", font=("Consolas", 9), bg=C["header"], fg=C["muted"], bd=0,
+    now_text = tk.Text(now, height=5, wrap="word", font=("Consolas", 9), bg=C["header"], fg=C["muted"], bd=0,
                        padx=8, pady=6, state="disabled")
     now_text.pack(fill="x")
     now_text.tag_configure("warn", foreground=C["accent"])
@@ -229,15 +229,15 @@ def build(tab, ui):
         eff = st["effective"]
         now_text.configure(state="normal")
         now_text.delete("1.0", "end")
+        cur_values, cur_startup = collect()
+        for n in eff.notes(cur_values, cur_startup):  # first: the box is short, and these are what to act on
+            now_text.insert("end", "! " + n + "\n", "warn")
         if not eff.value:
             now_text.insert("end", "No setting from this tool's list is set anywhere on the install.\n")
         for k in sorted(eff.value):
             v, src = eff.value[k]
             now_text.insert("end", "%s = %s" % (k, v), "val")
             now_text.insert("end", "   (%s)\n" % src)
-        cur_values, cur_startup = collect()
-        for n in eff.notes(cur_values, cur_startup):
-            now_text.insert("end", "! " + n + "\n", "warn")
         now_text.configure(state="disabled")
 
     def show_files(files):
@@ -326,6 +326,8 @@ def build(tab, ui):
     def do_preset(name):
         values, startup = consolecfg.preset(name)
         put(values, startup)
+        if state["loaded"]:
+            show_now(state["loaded"])  # the warnings depend on what is about to be written
         say("%s: filled in; Write settings to apply it." % name)
     for name, b in preset_btns.items():
         b.configure(command=lambda n=name: do_preset(n))
