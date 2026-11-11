@@ -44,6 +44,40 @@ FTP</strong>, and where to save or send.</li>
 <p>Without a window:</p>
 <pre><code>python3 r3d_packager.py --cli --steam "&lt;Half-Life folder&gt;" --format folder|xiso --out &lt;folder&gt;</code></pre>
 
+<h2 id="see-it">See it work</h2>
+<p>A 27-second recording of the packager (no sound): choose the game, pick <em>Send to the Xbox over FTP</em>, find the
+console and send. It ends while the first export is under way, which is the slow step: the packager bakes the Xbox data from
+your own game files, as the log says.</p>
+<figure class="shot">
+<video controls preload="metadata" playsinline poster="media/packager-demo-poster.jpg">
+<source src="media/packager-demo.mp4" type="video/mp4">
+<a href="media/packager-demo.mp4">Download the video</a>
+</video>
+<figcaption>The packager sending Half-Life to an Xbox over FTP.</figcaption>
+</figure>
+<div class="shots">
+<figure>
+<a href="media/packager-package.png"><img src="media/packager-package.png" loading="lazy" width="802" height="892"
+alt="The Package tab: the game, the Half-Life folder it found, three export choices (a folder, an XISO disc image, or send to the Xbox over FTP), and a Build the folder button."></a>
+<figcaption><strong>Package.</strong> The game, the install it found, and how to export.</figcaption>
+</figure>
+<figure>
+<a href="media/packager-ftp.png"><img src="media/packager-ftp.png" loading="lazy" width="802" height="892"
+alt="The Package tab with Send to the Xbox over FTP chosen: the Xbox address, login and games folder fields are active, with Find my Xbox and Look for it buttons."></a>
+<figcaption><strong>Send over FTP.</strong> Find the console, pick its games folder, send. The address shown is an example.</figcaption>
+</figure>
+<figure>
+<a href="media/packager-working.png"><img src="media/packager-working.png" loading="lazy" width="976" height="1080"
+alt="The packager at 7 percent while working: the progress bar, and a log reading that it found an Xbox and is baking the Xbox data from the game files for 125 maps, the menu art, the skies and the music."></a>
+<figcaption><strong>Working.</strong> The first export bakes the Xbox data and keeps it for next time.</figcaption>
+</figure>
+<figure>
+<a href="media/packager-console-settings.png"><img src="media/packager-console-settings.png" loading="lazy" width="802" height="892"
+alt="The Console settings tab: an install on the Xbox or a folder on the PC, then the display settings such as output, aspect, anti-aliasing and anisotropic filtering, presets, and the files in userconfig.d."></a>
+<figcaption><strong>Console settings.</strong> <a href="settings.html">Change what the console runs with</a>, from your PC.</figcaption>
+</figure>
+</div>
+
 <h2>What ends up on the console</h2>
 <ul>
 <li>Your <code>valve</code> folder, plus <code>default.xbe</code> titled "Half-Life", the menu font, colours,
