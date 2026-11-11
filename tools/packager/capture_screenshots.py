@@ -10,14 +10,19 @@ the mouse alone. Needs Pillow.
   packager-package.png           the Package tab as it opens (the Steam install it finds, a folder export)
   packager-ftp.png               "Send to the Xbox over FTP" chosen, with an example address
   packager-console-settings.png  the Console settings tab
+  packager-drift-warning.png     the Controller group and the stick-drift warning, for a console whose saved
+                                 config.cfg has the PC's zero dead zones
+  packager-drift-fixed.png       the same after the "Fix stick drift" preset
 
 Two fields would show something personal and are set to examples instead: the folder the export is saved
-to (it defaults to your home folder) and the Xbox's address.
+to (it defaults to your home folder) and the Xbox's address. The two drift captures read a demo install, not a
+console: a stand-in target whose saved config.cfg is the PC's four zero dead zones (what PC Half-Life writes).
 """
 import argparse
 import ctypes
 import os
 import sys
+import tempfile
 import time
 import tkinter as tk
 from ctypes import wintypes
@@ -28,6 +33,9 @@ sys.path.insert(0, HERE)
 
 EXAMPLE_FOLDER = r"C:\Users\you\Documents\Xbox"
 EXAMPLE_ADDRESS = "192.168.1.50"
+EXAMPLE_INSTALL = "/F/Games/Half-Life"
+# The dead zones PC Half-Life's config.cfg holds, as the console would have saved them after running it
+DEMO_CONFIG = "".join('joy_%s_deadzone "0"\r\n' % axis for axis in ("forward", "pitch", "side", "yaw")).encode()
 
 
 def frame_rect(win):
@@ -94,11 +102,49 @@ def run(out):
         nb = [w for w in walk(win) if isinstance(w, ttk.Notebook)][0]
         nb.select(nb.tabs()[1])
         shot("packager-console-settings.png")
+
+        # the stick-drift case: read a demo install whose saved config.cfg has the PC's zero dead zones
+        api = holder["api"]
+        api["install"].set(EXAMPLE_INSTALL)
+        api["status"].set("")
+        api["read"]()
+        for _ in range(500):
+            win.update()
+            time.sleep(0.02)
+            if api["status"].get().startswith("Read."):
+                break
+        else:
+            raise SystemExit("reading the demo install did not finish: %s" % api["status"].get())
+        for c in (w for w in walk(win) if isinstance(w, tk.Canvas)):
+            c.yview_moveto(0.22)  # the Controller group
+        shot("packager-drift-warning.png")
+        api["preset"]("Fix stick drift")
+        shot("packager-drift-fixed.png")
         win.destroy()
+
+    from r3dpack import settings_tab, target
+    holder = {}
+    demo = tempfile.TemporaryDirectory()
+    os.makedirs(os.path.join(demo.name, "valve", "userconfig.d"))
+
+    class DemoXbox(target.FolderTarget):
+        """stands in for the console: a folder, with a saved config.cfg like the one the old export led to"""
+
+        def read_live_config(self, gamedir):
+            return DEMO_CONFIG
+
+    target.FtpTarget = lambda host, install, user=None, password=None, port=21: DemoXbox(demo.name)
+    real_build = settings_tab.build
+
+    def build(tab, ui):
+        holder["api"] = real_build(tab, ui)
+        return holder["api"]
+    settings_tab.build = build
 
     tk.Tk.mainloop = lambda self, n=0: capture(self)
     import r3d_packager
     r3d_packager.gui()
+    demo.cleanup()
 
 
 def main():
