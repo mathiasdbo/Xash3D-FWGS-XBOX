@@ -272,6 +272,10 @@ See <a href="recorder.html">the recorder</a>.</td></tr>
 <code>-</code> and <code>_</code> only.</td></tr>
 <tr><td><code>r3d_memreport</code></td><td></td><td>Memory report written beside the recording.</td></tr>
 <tr><td><code>r3d_snd_meter</code></td><td></td><td>On-screen sound meter.</td></tr>
+<tr><td><code>joy_yaw_deadzone</code>, <code>joy_pitch_deadzone</code></td><td>0 to 16000</td><td>Dead zone of the look stick
+(left-right, up-down). The Xbox default is 8689. See <a href="#drift">stick drift</a>.</td></tr>
+<tr><td><code>joy_side_deadzone</code>, <code>joy_forward_deadzone</code></td><td>0 to 16000</td><td>Dead zone of the move stick
+(sideways, forward-back).</td></tr>
 <tr><td><code>net_graph</code></td><td></td><td>Network graph overlay.</td></tr>
 </table>
 <h2 id="aa">Anti-aliasing (<code>nv2a_r_aa</code>)</h2>
@@ -296,6 +300,16 @@ change the setting or the map.</li>
 blur, so judge it on a console.</li>
 <li>Transparent edges (decals, sprites) alias more than solid edges under MSAA.</li>
 </ul>
+
+<h2 id="drift">Stick drift: the view turns by itself</h2>
+<p>Original Xbox pads rest well off centre: a right stick that nobody is touching can read about a fifth of the way
+over. Below its dead zone the engine takes that for input and the view turns on its own. The Xbox build's default dead zone
+is 8689 for this reason. PC Half-Life's <code>config.cfg</code> sets all four dead zones to 0, and the packager before
+v0.1.2 copied it to the console, where it ran on the first start and was then saved.</p>
+<p>If that happened to your install, the <strong>Console settings</strong> tab says so under <em>What the console runs with</em>
+(<em>too small for an Xbox pad</em>). Read the install, press the <strong>Fix stick drift</strong> preset, and
+<strong>Write settings</strong>: it writes the four dead zones as 8689 to <code>userconfig.d/50-packager.cfg</code>, which runs
+after the saved <code>config.cfg</code> on every start. The <em>Controller</em> group lets you choose other values.</p>
 
 <p>Audio options (backend, rate, hardware audio) and developer switches (GPU skinning, culling) are in the tab
 too; developer settings are behind a tick. Video output, sound backend, rate and hardware audio are read at

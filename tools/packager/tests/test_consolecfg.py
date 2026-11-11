@@ -53,6 +53,55 @@ class Render(unittest.TestCase):
             c.render(values, startup)
 
 
+class DeadZones(unittest.TestCase):
+    ZEROS = ("config.cfg (menu)", "joy_yaw_deadzone \"0\"\njoy_pitch_deadzone \"0\"\n"
+                                  "joy_side_deadzone \"0\"\njoy_forward_deadzone \"0\"\n")
+
+    def test_the_four_dead_zones_are_settings_with_the_xbox_default(self):
+        got = [s for s in c.SETTINGS if s["group"] == "Controller"]
+        self.assertEqual(sorted(s["key"] for s in got), sorted(c.DEAD_ZONE_KEYS))
+        for s in got:
+            self.assertEqual(s["default"], c.DEAD_ZONE_XBOX)
+            self.assertIn(c.DEAD_ZONE_XBOX, [v for v, _ in s["choices"]])
+
+    def test_the_default_is_the_engines_xbox_default(self):
+        import re
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        with open(os.path.join(repo, "common", "defaults.h"), encoding="utf-8") as f:
+            m = re.search(r'#if XASH_XBOX && !defined\( DEFAULT_JOY_DEADZONE \).*?#define DEFAULT_JOY_DEADZONE "(\d+)"',
+                          f.read(), re.S)
+        self.assertIsNotNone(m, "common/defaults.h no longer defines the Xbox dead zone the way this test reads it")
+        self.assertEqual(c.DEAD_ZONE_XBOX, m.group(1))
+
+    def test_the_fix_preset_writes_all_four_and_nothing_else(self):
+        values, startup = c.preset("Fix stick drift")
+        self.assertEqual(values, {k: "8689" for k in c.DEAD_ZONE_KEYS})
+        text = c.render(values, startup)
+        for k in c.DEAD_ZONE_KEYS:
+            self.assertIn('%s "8689"' % k, text)
+        self.assertEqual(c.read_managed(text)[0], values)  # what is written reads back
+
+    def test_a_pcs_zero_dead_zones_are_flagged(self):
+        notes = c.Effective([self.ZEROS]).notes({}, {})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Fix stick drift", notes[0])
+        for k in c.DEAD_ZONE_KEYS:
+            self.assertIn(k, notes[0])
+
+    def test_the_warning_goes_once_the_fix_is_on_screen_or_written(self):
+        eff = c.Effective([self.ZEROS])
+        self.assertEqual(eff.notes(c.preset("Fix stick drift")[0], {}), [])  # chosen, not yet written
+        later = c.Effective([self.ZEROS, ("50-packager.cfg", c.render(c.preset("Fix stick drift")[0]))])
+        self.assertEqual(later.notes({}, {}), [])  # written: userconfig.d runs after config.cfg
+
+    def test_a_dead_zone_the_user_chose_is_left_alone(self):
+        ok = c.Effective([("config.cfg (menu)", "joy_yaw_deadzone \"10000\"\njoy_pitch_deadzone \"8689\"\n")])
+        self.assertEqual(ok.notes({}, {}), [])
+        some = c.Effective([("config.cfg (menu)", "joy_yaw_deadzone \"0\"\njoy_pitch_deadzone \"8689\"\n")])
+        self.assertEqual([k for k, _, _ in some.drift({})], ["joy_yaw_deadzone"])
+        self.assertEqual(c.Effective([]).notes({}, {}), [])  # nothing set anywhere: the engine default applies
+
+
 class Parse(unittest.TestCase):
     def test_forms_and_comments(self):
         got = c.parse_assignments('r3d_vid_mode "1"\nnv2a_r_aa 3 // x\nseta cl_showfps 2\nbind w "+forward"\n// map c9\n')

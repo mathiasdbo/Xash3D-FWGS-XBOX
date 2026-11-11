@@ -20,6 +20,15 @@ LABEL_OK = re.compile(r"^[A-Za-z0-9_-]{0,22}$")  # what host_frametime_label kee
 
 ON_OFF = [("1", "on"), ("0", "off")]
 
+# Original Xbox pads rest well off centre (the right stick reads -5888..-7424 untouched), and below the dead zone
+# the view turns by itself (docs/r3d/divergences.md #104). 8689 is the engine's own Xbox default
+# (common/defaults.h). A PC's config.cfg, which an earlier packager copied to the console, sets all four to 0.
+DEAD_ZONE_KEYS = ("joy_yaw_deadzone", "joy_pitch_deadzone", "joy_side_deadzone", "joy_forward_deadzone")
+DEAD_ZONE_XBOX = "8689"
+DRIFT_BELOW = 4096  # a dead zone under the PC default cannot hold an Xbox pad still
+DEAD_ZONE_CHOICES = [("0", "0 (none)"), ("2048", "2048"), ("4096", "4096 (the PC's)"), ("6000", "6000"),
+                     ("8689", "8689"), ("10000", "10000"), ("12000", "12000"), ("16000", "16000")]
+
 # group -> [setting]. kind: choice | text. "default" is the engine's own, shown as a hint.
 SETTINGS = [
     # ---- Display ----
@@ -40,6 +49,16 @@ SETTINGS = [
     dict(key="nv2a_r_lodbias", group="Display", label="Mip LOD bias", kind="choice", default="0",
          choices=[(v, v) for v in ("-3", "-2", "-1", "0", "1", "2", "3")],
          help="Negative is sharper, and switches to smaller levels later."),
+    # ---- Controller ----
+    dict(key="joy_yaw_deadzone", group="Controller", label="Look stick, left-right", kind="choice",
+         default=DEAD_ZONE_XBOX, choices=DEAD_ZONE_CHOICES,
+         help="Below about 8000 an Xbox pad can turn the view by itself. 8689 is the Xbox default."),
+    dict(key="joy_pitch_deadzone", group="Controller", label="Look stick, up-down", kind="choice",
+         default=DEAD_ZONE_XBOX, choices=DEAD_ZONE_CHOICES, help="The same, for looking up and down."),
+    dict(key="joy_side_deadzone", group="Controller", label="Move stick, sideways", kind="choice",
+         default=DEAD_ZONE_XBOX, choices=DEAD_ZONE_CHOICES, help="The left stick: strafing."),
+    dict(key="joy_forward_deadzone", group="Controller", label="Move stick, forward-back", kind="choice",
+         default=DEAD_ZONE_XBOX, choices=DEAD_ZONE_CHOICES, help="The left stick: walking."),
     # ---- Performance and measuring ----
     dict(key="cl_showfps", group="Performance", label="Show FPS", kind="choice", default="0",
          choices=[("0", "off"), ("1", "current"), ("2", "min / current / max")], help="On-screen frames per second."),
@@ -90,6 +109,8 @@ STARTUP_KEYS = ("map", "cheats", "give_suit")
 PRESETS = {
     "Sharp": {"r3d_vid_mode": "1", "nv2a_r_anisotropy": "8"},
     "Measure": {"host_frametime_analysis": "1", "host_frametime_label": "test", "r3d_memreport": "2"},
+    # for a console whose saved config.cfg has the PC's zero dead zones: userconfig.d runs after it
+    "Fix stick drift": {k: DEAD_ZONE_XBOX for k in DEAD_ZONE_KEYS},
     "Defaults": {},
 }
 
@@ -98,6 +119,13 @@ _LINE = re.compile(r'^\s*(?:seta?\s+)?([A-Za-z0-9_]+)\s+(?:"([^"]*)"|(\S+))')
 
 class ConfigError(Exception):
     pass
+
+
+def _number(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return float("inf")  # not a number: not this module's to call drifting
 
 
 def _strip_comment(line):
@@ -209,9 +237,28 @@ class Effective:
                 out.append((k, mine, src, v))
         return out
 
+    def drift(self, managed_values):
+        """[(key, value, source)] of dead zones too small for an Xbox pad that nothing here is about to fix."""
+        out = []
+        for k in DEAD_ZONE_KEYS:
+            if k not in self.value:
+                continue
+            v, src = self.value[k]
+            mine = managed_values.get(k)
+            if mine is not None and _number(mine) >= DRIFT_BELOW:
+                continue  # the settings on screen replace it
+            if _number(v) < DRIFT_BELOW:
+                out.append((k, v, src))
+        return out
+
     def notes(self, managed_values, managed_startup):
         """Short warnings for the screen."""
         out = []
+        low = self.drift(managed_values)
+        if low:
+            out.append("%s: too small for an Xbox pad, which rests off centre, so the view can turn by itself "
+                       "(a PC's config.cfg sets them to 0). The 'Fix stick drift' preset sets them to %s."
+                       % (", ".join("%s is %s (%s)" % x for x in low), DEAD_ZONE_XBOX))
         for k, mine, src, v in self.overridden(managed_values):
             out.append("%s: %s sets it to %s after this tool does, so %s wins." % (k, src, v, v))
         others = [(s, m) for s, m in self.loads_map if s != MANAGED_NAME]
