@@ -111,3 +111,12 @@ The release notes name its commit.
 `release.py` needs PyInstaller (`pip install pyinstaller`). The Windows exe is
 built on Windows; a Linux binary can only be built on Linux, so Linux users
 get the portable zip. Tests: `python -m unittest discover -s tools/packager/tests`.
+
+## What is and is not copied from your game folder
+
+Everything in the game's `valve` folder goes onto the console except PC Half-Life's own settings and Steam Input's files:
+`config.cfg`, `autoexec.cfg`, `controller.cfg`, `joystick.cfg`, `userconfig.cfg`, `steam_autocloud.vdf` and `controller_configs/`.
+The Xbox gets its own instead, from `assets/config`: a `valve.rc` (which loads `xbox_config.cfg`, which loads
+`xbox_controller.cfg` and `xbox_sound.cfg`). They run before `config.cfg`, which the console saves, so a setting changed in
+the menu overrides them. `r3dpack/stage.py` has the list; `tests/test_pc_settings.py` checks it, and that the controller file
+keeps the Xbox dead zone from `common/defaults.h`.

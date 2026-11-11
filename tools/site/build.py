@@ -209,6 +209,11 @@ alt="The Console settings tab: an install on the Xbox or a folder on the PC, the
 <ul>
 <li>Your <code>valve</code> folder, plus <code>default.xbe</code> titled "Half-Life", the menu font, colours,
 button art and translations.</li>
+<li>Not your PC's settings: <code>config.cfg</code>, <code>autoexec.cfg</code>, <code>controller.cfg</code> and the Steam
+Input files stay behind. A PC <code>config.cfg</code> sets every stick dead zone to 0, and original Xbox pads rest off
+centre, so the view would turn by itself. The console gets its own <code>xbox_config.cfg</code>,
+<code>xbox_controller.cfg</code> and <code>xbox_sound.cfg</code> (run from <code>valve.rc</code>, before the settings the console
+saves, which override them).</li>
 <li>One <code>.mpak</code> per map, baked from your files. The retail <code>.bsp</code> of a baked map is left
 off, because a loose <code>.bsp</code> beside its archive is loaded instead and the world then draws black.</li>
 <li>The menu background tiles, the 19 skies as DXT1 <code>.dds</code>, and the music as ADPCM

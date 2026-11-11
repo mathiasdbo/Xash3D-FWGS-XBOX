@@ -23,6 +23,20 @@ def _walk(root, prefix):
             yield rel, full, os.path.getsize(full)
 
 
+# PC Half-Life's own settings, and Steam Input's: not the Xbox's. A PC config.cfg sets every joystick dead zone to 0,
+# and original Xbox pads rest well off centre, so the view turns by itself (divergences.md #104); its unbindall wipes
+# the gamepad binds; controller.cfg and autoexec.cfg are for a PC joystick. The Xbox gets xbox_*.cfg and a valve.rc
+# of its own from the payload instead (assets/config). Top-level names inside each game folder.
+PC_ONLY_FILES = ("config.cfg", "autoexec.cfg", "controller.cfg", "joystick.cfg", "userconfig.cfg",
+                 "steam_autocloud.vdf")
+PC_ONLY_DIRS = ("controller_configs",)
+
+
+def _is_pc_only(inner):
+    """inner: a path inside a game folder, lower case, '/'-separated"""
+    return inner in PC_ONLY_FILES or inner.split("/")[0] in PC_ONLY_DIRS and "/" in inner
+
+
 _FLAGS = ("animated_title", "hd_background")
 
 
@@ -60,9 +74,16 @@ def plan(steam_root, title, payload_dir=None, log=print, baked=None):
     build, extra = payload_mod.load(title, payload_dir)
 
     files = {}
+    left_out = set()
     for gd in dict.fromkeys([t["gamedir"], t["basedir"]]):
         for rel, src, size in _walk(os.path.join(steam_root, gd), gd):
+            inner = rel.lower()[len(gd) + 1:]
+            if _is_pc_only(inner):
+                left_out.add(inner.split("/")[0] + ("/" if "/" in inner else ""))
+                continue
             files[rel.lower()] = (rel, src, size)
+    if left_out:
+        log("Left out PC settings (%s): the Xbox has its own, xbox_*.cfg." % ", ".join(sorted(left_out)))
 
     # gameinfo.txt: add the two flags the Steam copy leaves out
     for gd in dict.fromkeys([t["gamedir"], t["basedir"]]):
