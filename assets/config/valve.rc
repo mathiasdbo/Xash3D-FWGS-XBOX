@@ -1,0 +1,12 @@
+// Xash3D-FWGS-XBOX: replaces PC Half-Life's valve.rc, which loads the PC's joystick.cfg, controller.cfg and
+// autoexec.cfg. The Xbox defaults are in the xbox_*.cfg files. config.cfg, which the console saves, runs after
+// this file and overrides them, so whatever is chosen in the menu stays chosen.
+exec xbox_config.cfg
+
+// load the language configuration
+exec language.cfg
+
+//
+// stuff command line statements
+//
+stuffcmds

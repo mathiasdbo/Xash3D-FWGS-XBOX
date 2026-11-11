@@ -40,6 +40,11 @@ def repo_files(gamedir):
         gamedir + "/gfx/shell/colors.lst": "assets/gfx/shell/colors.lst",
         gamedir + "/gfx/shell/legend_button.tga": "assets/gfx/shell/legend_button.tga",
         gamedir + "/gfx/shell/duke.tga": "assets/gfx/shell/duke.tga",
+        # the Xbox's own startup and defaults, in place of the PC files stage.PC_ONLY leaves off the disc
+        gamedir + "/" + gamedir + ".rc": "assets/config/valve.rc",
+        gamedir + "/xbox_config.cfg": "assets/config/xbox_config.cfg",
+        gamedir + "/xbox_controller.cfg": "assets/config/xbox_controller.cfg",
+        gamedir + "/xbox_sound.cfg": "assets/config/xbox_sound.cfg",
     }
     rdir = os.path.join(REPO, "assets", "resource")
     for n in sorted(os.listdir(rdir)):

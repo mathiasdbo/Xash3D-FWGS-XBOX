@@ -5,6 +5,16 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - the packager no longer copies the PC's controller settings to the console
+
+The export copied the whole `valve` folder, so PC Half-Life's `config.cfg` (every `joy_*_deadzone` set to 0,
+plus its `unbindall`), `autoexec.cfg`, `controller.cfg` and Steam Input's `controller_configs/` reached the console.
+On a console with no saved config the engine ran that `config.cfg`, and original Xbox pads rest off centre
+(divergences.md #104): the view turned by itself. The packager now leaves those files off and ships Xbox ones in
+their place: a `valve.rc`, and `xbox_config.cfg`, `xbox_controller.cfg` (the 8689 dead zone) and `xbox_sound.cfg`,
+run before `config.cfg` so the console's own saved settings still win. Consoles that already saved zero dead zones
+keep them until the engine resets them or the setting is changed.
+
 ### Added - a documentation site
 
 `site/` holds guides as static pages: install with the packager, the console
