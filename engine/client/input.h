@@ -178,6 +178,9 @@ void Joy_GyroEvent( vec3_t data );
 void Joy_FinalizeMove( float *fw, float *side, float *dpitch, float *dyaw );
 void Joy_DrawDebug( void );
 void Joy_Init( void );
+#if XASH_XBOX
+void Joy_ResetTinyDeadzones( void );
+#endif
 void Joy_Shutdown( void );
 
 #endif//INPUT_H

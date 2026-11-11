@@ -5,6 +5,14 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - stick dead zones in the Controller Settings menu, and a one-time repair of the PC's zeros
+
+The Controller Settings screen has four sliders, one per stick axis (look left-right and up-down, move sideways and
+forward-back), 0 to 16000 with the value shown, for the engine's `joy_*_deadzone` (divergences.md #218). At start the
+engine also puts a saved dead zone below 4096 back to the Xbox default (8689) once, then never again (#217): a console
+that ran the PC's `config.cfg` copied by the old export saved zero dead zones, and an original Xbox pad's resting offset
+turned the view, or walked the player, by itself. Needs a new XBE build.
+
 ### Added - a Troubleshooting page, and a clearer stick-drift warning
 
 `site/troubleshooting.html`: the view turning by itself (what causes it, the Fix stick drift preset with screenshots, the

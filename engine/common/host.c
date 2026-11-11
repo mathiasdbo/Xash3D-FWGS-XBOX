@@ -1395,6 +1395,10 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 		// per config, after config.cfg and before userconfig.d can override
 		// it. docs/r3d/divergences.md #53.
 		Key_SeedGamepadDefaults();
+		// Same moment, same reason: a PC config.cfg also sets every stick dead
+		// zone to 0, which an Xbox pad's resting offset gets through. Once per
+		// config. docs/r3d/divergences.md #217.
+		Joy_ResetTinyDeadzones();
 #endif
 
 		// exec all files from userconfig.d

@@ -60,6 +60,10 @@ static CVAR_DEFINE_AUTO( joy_yaw_deadzone, DEFAULT_JOY_DEADZONE, FCVAR_ARCHIVE |
 static CVAR_DEFINE_AUTO( joy_axis_binding, "sfpyrl", FCVAR_ARCHIVE | FCVAR_FILTERABLE, "axis hardware id to engine inner axis binding, "
 	"s - side, f - forward, y - yaw, p - pitch, r - left trigger, l - right trigger" );
 CVAR_DEFINE_AUTO( joy_enable, "1", FCVAR_ARCHIVE | FCVAR_FILTERABLE, "enable joystick" );
+#if XASH_XBOX
+// Set once Joy_ResetTinyDeadzones has looked at the saved stick dead zones (docs/r3d/divergences.md #217).
+static CVAR_DEFINE_AUTO( joy_deadzones_checked, "0", FCVAR_ARCHIVE | FCVAR_FILTERABLE, "the saved stick dead zones were checked for values too small for an Xbox pad (set once)" );
+#endif
 static CVAR_DEFINE_AUTO( joy_have_gyro, "0", FCVAR_READ_ONLY, "tells whether current active gamepad has gyroscope or not" );
 static CVAR_DEFINE_AUTO( joy_calibrated, "0", FCVAR_READ_ONLY, "tells whether current active gamepad gyroscope has been calibrated or not" );
 static CVAR_DEFINE_AUTO( joy_gyro_pitch, "1.0", FCVAR_ARCHIVE | FCVAR_FILTERABLE, "gyroscope sensitivity for looking up and down" );
@@ -615,6 +619,42 @@ static void Joy_CalibrateGyro_f( void )
 	Platform_CalibrateGamepadGyro();
 }
 
+#if XASH_XBOX
+// The PC default (upstream's DEFAULT_JOY_DEADZONE). Below it a stick cannot hold an Xbox pad still: they rest
+// at -5888..-7424 untouched (divergences.md #104), so the view turns, or the player walks, by itself.
+#define JOY_DEADZONE_FLOOR 4096.0f
+
+/*
+=============
+Joy_ResetTinyDeadzones
+
+Once per config, after config.cfg ran: a saved stick dead zone under JOY_DEADZONE_FLOOR is put back to the
+Xbox default (8689), then the archived cvar joy_deadzones_checked is set so it never runs again - a dead
+zone the player lowers on purpose later is left alone.
+
+Why: the packager before v0.1.2 copied PC Half-Life's config.cfg to the console, and that file sets all
+four joy_*_deadzone to 0. The console ran it on its first start and saved the zeros as its own settings,
+where they override the Xbox default for good (the cvars are archived). A console with a fresh config is
+untouched: its values are the default already, only the flag is set.
+=============
+*/
+void Joy_ResetTinyDeadzones( void )
+{
+	convar_t *zones[] = { &joy_side_deadzone, &joy_forward_deadzone, &joy_pitch_deadzone, &joy_yaw_deadzone };
+
+	if( joy_deadzones_checked.value != 0.0f )
+		return;
+
+	for( int i = 0; i < ARRAYSIZE( zones ); i++ )
+	{
+		if( zones[i]->value < JOY_DEADZONE_FLOOR )
+			Cvar_DirectSet( zones[i], DEFAULT_JOY_DEADZONE );
+	}
+
+	Cvar_DirectSetValue( &joy_deadzones_checked, 1.0f );
+}
+#endif // XASH_XBOX
+
 /*
 =============
 Joy_Init
@@ -643,6 +683,9 @@ void Joy_Init( void )
 	Cvar_RegisterVariable( &joy_forward_deadzone );
 	Cvar_RegisterVariable( &joy_pitch_deadzone );
 	Cvar_RegisterVariable( &joy_yaw_deadzone );
+#if XASH_XBOX
+	Cvar_RegisterVariable( &joy_deadzones_checked );
+#endif
 
 	Cvar_RegisterVariable( &joy_axis_binding );
 
