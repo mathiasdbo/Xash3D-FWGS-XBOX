@@ -686,6 +686,12 @@ file sets all four stick dead zones to 0. On the console's first start it ran, a
 own settings, so they stayed. From v0.1.2 the export leaves the PC's settings behind. A console that already ran the old
 export still has them; here is how to fix it.</p>
 
+<div class="note"><strong>Quick manual fix, no packager needed.</strong> In the console's game folder make the file
+<code>valve/userconfig.d/60-deadzone.cfg</code> (over FTP, for example
+<code>/F/Games/Half-Life/valve/userconfig.d/60-deadzone.cfg</code>) containing these four lines, then start the game:
+<code>joy_forward_deadzone "8689"</code>, <code>joy_side_deadzone "8689"</code>, <code>joy_pitch_deadzone "8689"</code>,
+<code>joy_yaw_deadzone "8689"</code>. <a href="#by-hand">The details are below</a>.</div>
+
 <h3>Fix it from the packager (v0.1.2 or later)</h3>
 <ol>
 <li>Put the console on the dashboard (the game must not be running: FTP does not work inside the game).</li>
@@ -713,7 +719,7 @@ Write settings.</figcaption>
 </figure>
 </div>
 
-<h3>Or by hand, without the packager</h3>
+<h3 id="by-hand">Or by hand, without the packager</h3>
 <p>Create a file called <code>60-deadzone.cfg</code> in the console's <strong>game folder</strong> (not in
 <code>UDATA</code>), in <code>valve/userconfig.d/</code> next to <code>50-packager.cfg</code>. Make the folder if it is not
 there. For example <code>/F/Games/Half-Life/valve/userconfig.d/60-deadzone.cfg</code> (some FTP servers show the drive as
