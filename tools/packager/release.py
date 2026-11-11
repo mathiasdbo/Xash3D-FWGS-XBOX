@@ -129,14 +129,14 @@ def finish(ver, dist, signed=False):
     """SHA256SUMS.txt and NOTES.md for what is in dist; the list of files to attach"""
     files = sorted(n for n in os.listdir(dist) if os.path.isfile(os.path.join(dist, n))
                    and n not in ("SHA256SUMS.txt", "NOTES.md"))
-    with open(os.path.join(dist, "SHA256SUMS.txt"), "w") as f:
+    with open(os.path.join(dist, "SHA256SUMS.txt"), "w", newline="\n") as f:
         for n in files:
             f.write("%s  %s\n" % (sha(os.path.join(dist, n)), n))
     files.append("SHA256SUMS.txt")
 
     with open(os.path.join(HERE, "payload", "manifest.json")) as f:
         build = json.load(f)["titles"]["hl"]["build"]
-    with open(os.path.join(dist, "NOTES.md"), "w") as f:
+    with open(os.path.join(dist, "NOTES.md"), "w", newline="\n") as f:
         f.write("Xash3D-FWGS-XBOX Packager %s\n\n"
                 "Packs your own Half-Life files with the Xbox build into a console-ready folder or XISO.\n\n"
                 "- Windows: unzip the windows zip and run the .exe; keep the payload folder next to it. %s\n"

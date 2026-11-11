@@ -54,6 +54,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+          fetch-depth: 0 # the build record checks that the XBE's commit is on main
       - name: The submodules the build reads (the payload's menu images; build.h for the baker)
         run: git submodule update --init -- 3rdparty/extras/xash-extras 3rdparty/library_suffix
       - uses: actions/setup-python@v5
