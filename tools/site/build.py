@@ -692,6 +692,23 @@ export still has them; here is how to fix it.</p>
 <code>joy_forward_deadzone "8689"</code>, <code>joy_side_deadzone "8689"</code>, <code>joy_pitch_deadzone "8689"</code>,
 <code>joy_yaw_deadzone "8689"</code>. <a href="#by-hand">The details are below</a>.</div>
 
+<h3>Fix it in the game (v0.1.3 or later)</h3>
+<ol>
+<li>Open <strong>Options</strong>, then <strong>Controller</strong>, then <strong>Settings</strong>.</li>
+<li>The right-hand column, <em>Stick dead zones</em>, has four sliders: look left-right, look up-down, move sideways and
+move forward-back. The number is in each slider's label.</li>
+<li>Raise the slider of the stick that moves until it stops. The Xbox default is 8689. A worn stick can need more, up to
+the end of the slider at 16000.</li>
+<li>Leave the screen with <strong>B</strong> or <strong>Done</strong>: both save. (Before v0.1.3, B closed the screen and
+dropped the change.)</li>
+</ol>
+<p>The first start of v0.1.3 also sets any saved dead zone under 4096 back to 8689, once, so a console that ran the PC's
+settings is repaired without touching anything. A value you set afterwards is left alone.</p>
+<div class="note"><strong>If the packager has set the dead zones, the menu's change will not stick.</strong> The packager's
+<em>Console settings</em> write them to <code>userconfig.d/50-packager.cfg</code>, which runs after the console's saved settings
+at every start, so it puts them back each time. Set the four <em>Controller</em> rows to "(don't set)" there and press Write
+settings, or delete those four lines from the file, and the menu's values will hold.</div>
+
 <h3>Fix it from the packager (v0.1.2 or later)</h3>
 <ol>
 <li>Put the console on the dashboard (the game must not be running: FTP does not work inside the game).</li>
