@@ -57,6 +57,20 @@ class PcFilesStayOff(unittest.TestCase):
         self.assertTrue(any("Left out PC settings" in l and "config.cfg" in l and "controller_configs/" in l
                             for l in logs), logs)
 
+    def test_the_pc_saved_games_are_left_off(self):
+        for n in ("SAVE/quick.sav", "SAVE/quick.bmp", "SAVE/c1a0.HL1", "save/autosave.sav"):
+            p = os.path.join(self.tmp.name, "valve", *n.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(b"pc save")
+        got, logs = self.plan()
+        self.assertEqual([r for r in got if r.lower().startswith("valve/save/")], [])
+        self.assertTrue(any("saved games" in l for l in logs), logs)
+        self.assertTrue(stage._is_pc_save("save/quick.sav"))
+        self.assertFalse(stage._is_pc_save("save"))  # a plain file of that name is not the folder
+        self.assertFalse(stage._is_pc_save("maps/save/x.bsp"))  # only the top level of a game folder
+        self.assertFalse(stage._is_pc_save("savegame.cfg"))
+
     def test_everything_else_in_the_game_folder_is_kept(self):
         got, _ = self.plan()
         for n in self.KEEP:
