@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - a release guard for saved games (XS.0)
+
+Saves store a function pointer as an offset from `GameDLLInit`, so a build that moves the server code makes saves written by an earlier build load against the wrong functions. `tools/save_layout_check.py` compares an XBE's server export table, the SDK's dispatch table and the first 32 bytes of each of the server's roughly 3,000 functions with `tools/save-layout-baseline.txt`, made from the v0.2.0 build (bytes that differ between the three public builds are masked, since they hold addresses). `tools/packager/make_payload.py` refuses an XBE that differs, before it writes anything, and has no option to name another baseline. Both `release.py` and the packager workflow go through `make_payload.py`, so a release cannot ship such a build. The three public builds pass; a moved export, a moved `GameDLLInit`, a moved dispatch entry, a changed callback and two callbacks trading places each fail. The baseline can only be made from the three public builds (their hashes and the file's own digest are pinned in the tool), so regenerating it to fit a new build fails until those are changed on purpose; the few functions it cannot fingerprint are listed in it. Names in saves and reading the old saves through a table are the next steps (XS.1 to XS.3 in `docs/r3d/fork-plan.md`).
+
 ### Fixed - Packager: the PC's saved games no longer go to the console
 
 The packager copied the `SAVE` folder of the PC's Half-Life install into the game folder with everything else. Those saves were written by the PC game and are not the console's; it now leaves the folder out and says so in the log. The console's own saves, in `UDATA`, were never touched and still are not.

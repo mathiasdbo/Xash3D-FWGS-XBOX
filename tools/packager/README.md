@@ -119,6 +119,14 @@ The release notes name its commit.
     python tools/packager/release.py --xbe <build> --version v0.21   # builds, does not publish
     python tools/packager/release.py --xbe <build> --version v0.21 --publish
 
+The XBE must keep the layout the saves already on players' consoles were written
+against: `make_payload.py` runs `tools/save_layout_check.py` on it first and stops
+if the server code has moved, with nothing written. There is no switch for that;
+the way past it is the engine work in `docs/r3d/fork-plan.md` (XS.2 and XS.3).
+To check a build by hand: `python tools/save_layout_check.py check default.xbe`.
+The baseline is `tools/save-layout-baseline.txt`; its header in
+`tools/save_layout_check.py` says how it is made.
+
 `release.py` needs PyInstaller (`pip install pyinstaller`). The Windows exe is
 built on Windows; a Linux binary can only be built on Linux, so Linux users
 get the portable zip. Tests: `python -m unittest discover -s tools/packager/tests`.
