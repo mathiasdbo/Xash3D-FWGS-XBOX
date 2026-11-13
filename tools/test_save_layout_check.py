@@ -275,6 +275,34 @@ class BaselineFile(unittest.TestCase):
         self.assertIn(b["gamedllinit"], fn_offsets)  # GameDLLInit itself is checked
         self.assertTrue(all(sum(1 for i in range(0, len(p), 2) if p[i:i + 2] != "??") >= slc.MIN_STABLE
                             for o, p, n in b["functions"]))
+        # nothing is left out silently: every server symbol is either checked or listed as skipped, and they add up
+        self.assertEqual(b["symbols"], len(b["functions"]) + len(b["skipped"]))
+        self.assertEqual(b["symbols"], 2998)
+        self.assertLess(len(b["skipped"]), 20)
+        self.assertFalse({o for o, _ in b["skipped"]} & fn_offsets)
+
+    def test_no_skipped_function_is_ever_a_saved_callback(self):
+        """the functions the baseline cannot fingerprint must not be think/touch/use/blocked/move-done targets"""
+        import re
+        repo = os.path.dirname(HERE)
+        dlls = next((d for d in (os.path.join(repo, "deps", "hlsdk", "dlls"),) if os.path.isdir(d)
+                     and os.listdir(d)), None)
+        if dlls is None:
+            self.skipTest("needs the deps/hlsdk submodule")
+        pat = re.compile(r"Set(?:Think|Touch|Use|Blocked|MoveDone)\s*\(\s*&?\s*(?:\w+\s*::\s*)?(\w+)")
+        assigned = set()
+        for dp, _, files in os.walk(dlls):
+            for fn in files:
+                if fn.endswith((".cpp", ".h")):
+                    with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
+                        assigned.update(m.group(1) for m in pat.finditer(f.read()))
+        self.assertGreater(len(assigned), 150)  # the scan itself works
+        with open(slc.BASELINE, encoding="utf-8") as f:
+            b = slc.parse_baseline(f.read())
+        for _, name in b["skipped"]:
+            m = re.match(r"sv_\?(\w+)@", name)
+            bare = m.group(1) if m else name
+            self.assertNotIn(bare, assigned, name)
 
     def test_a_bad_baseline_is_refused(self):
         good = "build x 0\nanchor a\ngamedllinit 4\ndispatch " + " ".join(str(4 + i) for i in range(25)) + \
@@ -294,18 +322,18 @@ class BaselineFile(unittest.TestCase):
             path = os.path.join(tmp, "b.txt")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(baseline_text())
-            slc.require(data, path)  # passes
+            slc.require(data, path, None)  # passes
             ex = {n: ANCHOR_OFFSET + 0x40 * i for i, n in enumerate(NAMES)}
             ex["monster_05"] += 16
             moved, _ = build_xbe(exports=ex)
             with self.assertRaises(SystemExit) as cm:
-                slc.require(moved, path)
+                slc.require(moved, path, None)
             self.assertIn("monster_05 +16", str(cm.exception))
             self.assertIn("no build may ever make an existing save unloadable", str(cm.exception))
             with self.assertRaises(SystemExit):
-                slc.require(b"not an xbe", path)
+                slc.require(b"not an xbe", path, None)
             with self.assertRaises(SystemExit):
-                slc.require(data, os.path.join(tmp, "missing.txt"))  # no baseline is a failure, not a pass
+                slc.require(data, os.path.join(tmp, "missing.txt"), None)  # no baseline is a failure, not a pass
 
     def test_gameinit_from_a_link_map(self):
         m = (" 0001:0003eef0       sv_?GameDLLInit@@YAXXZ     000000000002fef0     deps_hlsdk_dlls_game.obj\n"
@@ -321,6 +349,83 @@ class BaselineFile(unittest.TestCase):
              " 0001:0003eef8       cl_?C@@YAXXZ     000000000002fef8     c.obj\n"
              " 0002:00000010       sv_?D@@YAXXZ     0000000000999999     data.obj\n")
         self.assertEqual(slc.server_symbols_from_map(m), {0x2fef0: "sv_?A@@YAXXZ"})  # one name per address, code only
+
+
+class Provenance(unittest.TestCase):
+    """the baseline is the policy, so what makes it the policy is checked: its digest, and the builds it came from"""
+
+    def committed(self):
+        with open(slc.BASELINE, encoding="utf-8") as f:
+            return f.read()
+
+    def test_the_committed_baseline_is_the_pinned_one(self):
+        text = self.committed()
+        self.assertEqual(slc.provenance_problems(slc.parse_baseline(text), text, slc.BASELINE_SHA256), [])
+        self.assertEqual(slc.text_digest(text), slc.BASELINE_SHA256)
+
+    def test_the_digest_ignores_line_endings(self):
+        text = self.committed()
+        self.assertEqual(slc.text_digest(text.replace("\n", "\r\n")), slc.text_digest(text))
+
+    def test_an_edited_baseline_is_refused(self):
+        text = self.committed()
+        base = slc.parse_baseline(text)
+        first_fn = [l for l in text.splitlines() if l.startswith("fn ")][0]
+        nl = chr(10)
+        for edited in (text + "# a comment" + nl,
+                       text.replace("export monster_flyer_flock 16", "export monster_flyer_flock 32"),
+                       text.replace(first_fn + nl, "")):
+            self.assertNotEqual(edited, text)
+            p = slc.provenance_problems(base, edited, slc.BASELINE_SHA256)
+            self.assertTrue(any("pinned digest" in x for x in p), p)
+
+    def test_a_baseline_regenerated_to_match_a_candidate_is_refused(self):
+        # the candidate moves an export; a baseline made from the candidate would pass it on its own terms
+        ex = {n: ANCHOR_OFFSET + 0x40 * i for i, n in enumerate(NAMES)}
+        ex["monster_07"] += 16
+        moved, gi = build_xbe(exports=ex)
+        own = slc.make_baseline(slc.Xbe(moved), "xbe-cdd64653", slc.PUBLIC_BUILDS["xbe-cdd64653"], gi)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "own.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(own)
+            slc.require(moved, path, None)  # on its own terms it passes: that is the hole being closed
+            with self.assertRaises(SystemExit) as cm:
+                slc.require(moved, path)  # the default policy pins the digest
+            self.assertIn("pinned digest", str(cm.exception))
+
+    def test_a_baseline_from_some_other_xbe_is_refused(self):
+        text = self.committed().replace(slc.PUBLIC_BUILDS["xbe-cdd64653"], "0" * 64, 1)
+        p = slc.provenance_problems(slc.parse_baseline(text), text, None)
+        self.assertTrue(any("not a pinned public build" in x for x in p), p)
+
+    def test_masks_must_come_from_the_other_public_builds(self):
+        text = self.committed()
+        first = [l for l in text.splitlines() if l.startswith("masks ")][0]
+        p = slc.provenance_problems(slc.parse_baseline(text.replace(first, "masks xbe-1f4eedc1 " + "0" * 64)), text, None)
+        self.assertTrue(any("masks were not made" in x for x in p), p)
+
+    def test_the_baseline_command_takes_only_the_public_build(self):
+        import subprocess
+        data, gi = build_xbe()
+        with tempfile.TemporaryDirectory() as tmp:
+            xbe = os.path.join(tmp, "a.xbe")
+            with open(xbe, "wb") as f:
+                f.write(data)
+            mp = os.path.join(tmp, "a.map")
+            with open(mp, "w") as f:
+                f.write(" 0001:00000000 sv_?GameDLLInit@@YAXXZ %016x x.obj\n" % gi)
+            r = subprocess.run([sys.executable, os.path.join(HERE, "save_layout_check.py"), "baseline", xbe, "--map", mp,
+                                "--label", "xbe-cdd64653", "--also-xbe", xbe, "--out", os.path.join(tmp, "o.txt")],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("is made from the public xbe-cdd64653 XBE", r.stdout)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "o.txt")))
+
+    def test_the_symbol_count_must_add_up(self):
+        text = self.committed().replace("symbols 2998", "symbols 2999")
+        with self.assertRaises(slc.XbeError):
+            slc.parse_baseline(text)
 
 
 class PublicBuilds(unittest.TestCase):

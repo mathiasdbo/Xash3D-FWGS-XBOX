@@ -1,6 +1,8 @@
 # Save layout baseline (docs/r3d/fork-plan.md, XS.0). Written by tools/save_layout_check.py baseline.
 # Every offset is in bytes from the anchor (the lowest-addressed server export).
 build xbe-cdd64653 77f9f341ca43bb5bff58a045972b4b1dc24963f424621ebfba46be9b94854dcf
+masks xbe-1f4eedc1 ab8131b09c9013d00b5c970c591dd1290704d87f55a617f6ed3e44d8395041bd
+masks xbe-88862388 24694acc4c17a2e22ad1275be859213c38253f5279d6e17595c8fbdc9c66d564
 anchor monster_flyer
 gamedllinit 210256
 dispatch 210256 83488 84112 84048 83952 84192 83872 84240 84624 85696 86160 86240 692096 692272 692336 88416 88448 88944 89040 90800 91888 92512 92480 92736 92768 94208 92800 92816 95824 95872 95952 95984 96016 95856 742896 743120 720000 96048 99792 96224 97376 99344 99408 100688 100768 100832 100848 100880 101008 101088
@@ -255,6 +257,7 @@ export xen_spore_medium 699168
 export xen_spore_large 699264
 export xen_hull 699360
 export monster_zombie 701472
+symbols 2998
 fn -1297488 ??????????????????????????????????????????cccccccccccccccccccccc sv_?Classify@CBaseEntity@@UAEHXZ
 fn -1297472 ??????????cccccccccccccccccccccc???????????????????????????????? sv_?TakeDamage@CXenSpore@@UAE_NPAUentvars_s@@0MH@Z
 fn -880 833d??????00007401c36a0368????4800ff15??????0083c408a3??????006a sv_?LinkUserMessages@@YAXXZ
@@ -3241,3 +3244,15 @@ fn 743520 6a1068????4b00ff74240ce8b0d1060083c40c85c0740331c0c36a016a0068?? sv_?S
 fn 743568 c3662e0f1f8400000000000f1f4400008b44240485c0740f68????4b0050e8?? sv_?Sys_UnloadModule@@YAXPAVCSysModule@@@Z
 fn 743584 8b44240485c0740f68????4b0050e8????d9ff83c408c331c0c3660f1f440000 sv_?Sys_GetFactory@@YAP6APAXPBDPAH@ZPAVCSysModule@@@Z
 fn 743616 b8????3300c3cccccccccccccccccccc5689cee858020000c706????4b0089f0 sv_?Sys_GetFactoryThis@@YAP6APAXPBDPAH@ZXZ
+skip -1299840 sv_?Activate@CBaseEntity@@UAEXXZ
+skip -1299712 sv_?IsTriggered@CBaseEntity@@UAE_NPAV1@@Z
+skip -1298512 sv_?AddPoints@CBaseEntity@@UAEXH_N@Z
+skip -1297968 sv_?DeathNotice@CBaseEntity@@UAEXPAUentvars_s@@@Z
+skip -1297504 sv_?CheckRangeAttack1@CBloater@@UAE_NMM@Z
+skip -1297376 sv_?AddPlayerItem@CBaseEntity@@UAE_NPAVCBasePlayerItem@@@Z
+skip -627488 sv_?ObjectCaps@CBaseEntity@@UAEHXZ
+skip -627472 sv_?IsAllowedToSpeak@CBaseButton@@UAE_NXZ
+skip -620928 sv_?GetStoppedActivity@CBaseMonster@@UAE?AW4Activity@@XZ
+skip -620848 sv_?ShouldAutoAim@CGameRules@@UAE_NPAVCBasePlayer@@PAUedict_s@@@Z
+skip -620752 sv_?__empty_global_delete@@YAXPAXI@Z
+skip -571456 sv_?iItemSlot@CCrossbow@@UAEHXZ

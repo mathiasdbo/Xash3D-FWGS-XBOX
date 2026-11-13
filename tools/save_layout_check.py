@@ -26,6 +26,14 @@ What it checks, from the XBE alone (no link map is needed):
 Extra exports are fine (a new entity appends to the table). Anything else fails, and a failure means: do not
 publish this XBE until XS.2 and XS.3 (names in saves, and the old offsets read through a table) are in.
 
+Where the policy comes from. The baseline is made from the three public builds only (their SHA-256s are pinned in
+PUBLIC_BUILDS; `baseline` refuses any other XBE), its own digest is pinned in BASELINE_SHA256, and the release path
+checks both, so regenerating the file against a candidate, or editing it, fails until someone changes the pinned
+values in this file too: a deliberate act that shows in a review, not an accident. (Anyone who can edit this file can
+edit anything; the check against saves that really load, XS.4, is the independent one.) The functions the baseline
+leaves out (fewer than 8 stable bytes, or no code at that offset) are listed in it as `skip` lines, counted, and a test
+checks that none is ever assigned as a think, touch, use, blocked or move-done callback in the SDK.
+
 What it still cannot see: two functions with identical beginnings trading places, and a function the link map
 did not name. XS.1 (the legacy table: every callback a save can hold, checked against the map) closes the gap;
 until then this is the guard against the thing known to move offsets, the server code moving or changing size.
@@ -44,6 +52,15 @@ BASELINE = os.path.join(HERE, "save-layout-baseline.txt")
 MARKER = "worldspawn"
 MIN_EXPORTS = 40  # a run of (name, function) pairs shorter than this is not the table
 DISPATCH_MIN = 20  # the dispatch table is at least this many code pointers in a row
+# The builds the saves in the wild were written by, and the file that says what they have in common. A baseline is
+# made from exactly these; changing any of this is the act of accepting a new layout (docs/r3d/fork-plan.md, XS).
+PUBLIC_BUILDS = {
+    "xbe-88862388": "24694acc4c17a2e22ad1275be859213c38253f5279d6e17595c8fbdc9c66d564",  # v0.1.2
+    "xbe-1f4eedc1": "ab8131b09c9013d00b5c970c591dd1290704d87f55a617f6ed3e44d8395041bd",  # v0.1.3
+    "xbe-cdd64653": "77f9f341ca43bb5bff58a045972b4b1dc24963f424621ebfba46be9b94854dcf",  # v0.2.0
+}
+BASELINE_BUILD = "xbe-cdd64653"  # the build the baseline's exports, dispatch table and map symbols come from
+BASELINE_SHA256 = "5a89dc4b4303470504baec6bd66f1bd419a8250022de9e909bb9e3811127de55"  # of the baseline file (LF)
 WINDOW = 32  # bytes of each server function that are compared
 MIN_STABLE = 8  # a function with fewer unmasked bytes than this is left out: it would prove nothing
 
@@ -217,12 +234,23 @@ def derive_functions(builds, offsets_names):
     return out
 
 
+def skipped_functions(offsets_names, kept):
+    """the (offset, name) pairs derive_functions left out"""
+    have = {off for off, _, _ in kept}
+    return [(off, name) for off, name in offsets_names if off not in have]
+
+
+def text_digest(text):
+    """SHA-256 of a baseline's text with line endings normalised, so a CRLF checkout hashes as the committed LF file"""
+    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
 def pattern_matches(pattern, data):
     return len(data) == WINDOW and all(
         pattern[2 * i:2 * i + 2] == "??" or data[i] == int(pattern[2 * i:2 * i + 2], 16) for i in range(WINDOW))
 
 
-def make_baseline(xbe, label, sha256, gameinit_va, functions=()):
+def make_baseline(xbe, label, sha256, gameinit_va, functions=(), skipped=(), masks=()):
     exports = server_exports(xbe)
     anchor = min(exports, key=lambda n: (exports[n], n))
     anchor_va = exports[anchor]
@@ -231,14 +259,19 @@ def make_baseline(xbe, label, sha256, gameinit_va, functions=()):
         "# Save layout baseline (docs/r3d/fork-plan.md, XS.0). Written by tools/save_layout_check.py baseline.",
         "# Every offset is in bytes from the anchor (the lowest-addressed server export).",
         "build %s %s" % (label, sha256),
+    ] + ["masks %s %s" % m for m in masks] + [
         "anchor %s" % anchor,
         "gamedllinit %d" % (gameinit_va - anchor_va),
         "dispatch " + " ".join(str(o) for o in offsets),
     ]
     for n in sorted(exports, key=lambda n: (exports[n], n)):
         lines.append("export %s %d" % (n, exports[n] - anchor_va))
+    if functions or skipped:
+        lines.append("symbols %d" % (len(functions) + len(skipped)))
     for off, name, pattern in sorted(functions):
         lines.append("fn %d %s %s" % (off, pattern, name))
+    for off, name in sorted(skipped):
+        lines.append("skip %d %s" % (off, name))
     return "\n".join(lines) + "\n"
 
 
@@ -247,7 +280,8 @@ def _is_hex(x):
 
 
 def parse_baseline(text):
-    b = {"build": None, "anchor": None, "gamedllinit": None, "dispatch": None, "exports": {}, "functions": []}
+    b = {"build": None, "masks": [], "anchor": None, "gamedllinit": None, "dispatch": None, "exports": {},
+         "functions": [], "skipped": [], "symbols": None}
     for ln, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -264,6 +298,12 @@ def parse_baseline(text):
                 b["dispatch"] = [int(x) for x in f[1:]]
             elif f[0] == "export":
                 b["exports"][f[1]] = int(f[2])
+            elif f[0] == "masks":
+                b["masks"].append((f[1], f[2]))
+            elif f[0] == "symbols":
+                b["symbols"] = int(f[1])
+            elif f[0] == "skip":
+                b["skipped"].append((int(f[1]), f[2]))
             elif f[0] == "fn":
                 pat = f[2]
                 if len(pat) != 2 * WINDOW or any(pat[i:i + 2] != "??" and not _is_hex(pat[i:i + 2])
@@ -282,7 +322,31 @@ def parse_baseline(text):
         raise XbeError("the baseline's anchor must be an export at offset 0")
     if len(b["dispatch"]) < DISPATCH_MIN:
         raise XbeError("the baseline's dispatch table has %d entries" % len(b["dispatch"]))
+    if b["functions"] or b["skipped"]:
+        if b["symbols"] != len(b["functions"]) + len(b["skipped"]):
+            raise XbeError("the baseline says %s server functions but lists %d checked and %d skipped"
+                           % (b["symbols"], len(b["functions"]), len(b["skipped"])))
     return b
+
+
+def provenance_problems(baseline, text, expected_sha256=None):
+    """What is wrong with where a baseline came from: it must be the committed one (its digest is pinned) and made from
+    the public builds (their hashes are pinned)."""
+    problems = []
+    if expected_sha256 is not None and text_digest(text) != expected_sha256:
+        problems.append("the baseline file is not the one the pinned digest names (%s, expected %s): it was edited or "
+                        "regenerated; accepting a new layout means changing BASELINE_SHA256 in save_layout_check.py "
+                        "too, on purpose" % (text_digest(text)[:12], expected_sha256[:12]))
+    label, sha = baseline["build"]
+    if PUBLIC_BUILDS.get(label) != sha:
+        problems.append("the baseline says it was made from %s %s, which is not a pinned public build" % (label, sha[:12]))
+    elif label != BASELINE_BUILD:
+        problems.append("the baseline was made from %s, not %s" % (label, BASELINE_BUILD))
+    others = sorted(v for k, v in PUBLIC_BUILDS.items() if k != BASELINE_BUILD)
+    masks = sorted(sha for _, sha in baseline["masks"])
+    if masks != others:
+        problems.append("the baseline's function masks were not made from the other public builds")
+    return problems
 
 
 def check(xbe, baseline):
@@ -319,17 +383,26 @@ def check(xbe, baseline):
 
 def check_file(path, baseline_path=BASELINE):
     with open(baseline_path, encoding="utf-8") as f:
-        baseline = parse_baseline(f.read())
+        text = f.read()
+    baseline = parse_baseline(text)
+    problems = []
+    if baseline_path == BASELINE:
+        problems += provenance_problems(baseline, text, BASELINE_SHA256)
     with open(path, "rb") as f:
-        return check(Xbe(f.read()), baseline), baseline
+        return problems + check(Xbe(f.read()), baseline), baseline
 
 
-def require(data, baseline_path=BASELINE):
-    """For the release path: raise SystemExit with the reason unless the XBE keeps the saves' layout."""
+def require(data, baseline_path=BASELINE, expected_sha256=BASELINE_SHA256):
+    """For the release path: raise SystemExit with the reason unless the XBE keeps the saves' layout. The baseline must
+    be the committed one made from the public builds; expected_sha256=None skips that, for tests only."""
     try:
         with open(baseline_path, encoding="utf-8") as f:
-            baseline = parse_baseline(f.read())
-        problems = check(Xbe(data), baseline)
+            text = f.read()
+        baseline = parse_baseline(text)
+        problems = []
+        if expected_sha256 is not None:
+            problems += provenance_problems(baseline, text, expected_sha256)
+        problems += check(Xbe(data), baseline)
     except (XbeError, OSError) as e:
         problems = [str(e)]
     if problems:
@@ -372,15 +445,31 @@ def main():
             gameinit = gameinit_from_map(f.read())
         with open(a.map, encoding="utf-8", errors="replace") as f:
             symbols = server_symbols_from_map(f.read())
+        main_sha = hashlib.sha256(raw).hexdigest()
+        if a.label != BASELINE_BUILD or PUBLIC_BUILDS.get(a.label) != main_sha:
+            raise XbeError("a baseline is made from the public %s XBE (sha256 %s) and no other; this one is %s"
+                           % (BASELINE_BUILD, PUBLIC_BUILDS[BASELINE_BUILD][:12], main_sha[:12]))
         main_xbe = Xbe(raw)
         main_anchor = min(server_exports(main_xbe).values())
         builds = [(main_xbe, main_anchor)]
+        masks = []
         for path in a.also_xbe:
             with open(path, "rb") as f:
-                other = Xbe(f.read())
-            builds.append((other, min(server_exports(other).values())))
-        functions = derive_functions(builds, [(va - main_anchor, nm) for va, nm in sorted(symbols.items())])
-        text = make_baseline(main_xbe, a.label, hashlib.sha256(raw).hexdigest(), gameinit, functions)
+                other_raw = f.read()
+            masks.append(("", hashlib.sha256(other_raw).hexdigest()))
+            builds.append((Xbe(other_raw), min(server_exports(Xbe(other_raw)).values())))
+        want = sorted(v for k, v in PUBLIC_BUILDS.items() if k != BASELINE_BUILD)
+        if sorted(m[1] for m in masks) != want:
+            raise XbeError("the masks must come from the other two public builds (sha256 %s)"
+                           % ", ".join(w[:12] for w in want))
+        masks = [({v: k for k, v in PUBLIC_BUILDS.items()}[m[1]], m[1]) for m in masks]
+        offsets_names = [(va - main_anchor, nm) for va, nm in sorted(symbols.items())]
+        functions = derive_functions(builds, offsets_names)
+        skipped = skipped_functions(offsets_names, functions)
+        print("%d server functions: %d checked, %d skipped" % (len(offsets_names), len(functions), len(skipped)))
+        for off, nm in skipped:
+            print("  skipped %+d %s" % (off, nm))
+        text = make_baseline(main_xbe, a.label, main_sha, gameinit, functions, skipped, masks)
         # the baseline must pass against the very XBE it came from, or it is wrong
         problems = check(Xbe(raw), parse_baseline(text))
         if problems:
@@ -388,7 +477,7 @@ def main():
             return 1
         with open(a.out, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        print("wrote %s" % a.out)
+        print("wrote %s; BASELINE_SHA256 for it is %s" % (a.out, text_digest(text)))
         return 0
     except XbeError as e:
         print("error: %s" % e)

@@ -10454,9 +10454,25 @@ pulled from a console, the scripts - is kept outside the repository):
   runs it before it writes anything, and both `release.py` and the CI
   workflow go through `make_payload.py`. The command line has no option to
   name another baseline (a candidate could bring its own); only the tests
-  hand one in. **Not seen:** two functions with identical beginnings
-  trading places, and a function the map did not name; XS.1 closes both
-  (the legacy table lists every callback a save can hold).
+  hand one in.
+
+  **Where the policy comes from.** The baseline can only be made from the
+  three public builds: their SHA-256s are pinned in `PUBLIC_BUILDS`,
+  `baseline` refuses any other XBE or other mask builds, the file's own
+  digest is pinned in `BASELINE_SHA256`, and the release path checks both.
+  Regenerating or editing the file therefore fails until the pinned values
+  are changed too, which is a deliberate act that shows in review rather
+  than an accident (whoever can edit the tool can edit anything; XS.4,
+  which loads real saves, is the independent check). The 12 functions the
+  baseline cannot fingerprint (virtual functions and a global `delete`,
+  folded with client code far outside the block) are listed in it as
+  `skip` lines, counted against the 2,998 map symbols, and a test checks
+  none of them is ever assigned to a think, touch, use, blocked or
+  move-done pointer in the SDK source.
+
+  **Not seen:** two functions with identical beginnings trading places,
+  and a function the map did not name; XS.1 closes both (the legacy table
+  lists every callback a save can hold, from the objects).
   **Status (2026-11-13): built.** Passes on the three public XBEs (50
   dispatch entries, `GameDLLInit` at +210256, the value the saves' offsets
   imply). On the real v0.2.0 XBE a moved export, a moved `GameDLLInit`

@@ -36,7 +36,8 @@ class PrepatchedPayload(unittest.TestCase):
         self.refused = None
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"] + list(extra), layout_baseline=baseline)
+                make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"] + list(extra), layout_baseline=baseline,
+                                  layout_sha256=None)
         except SystemExit as e:
             self.refused = str(e.code)
             return xbe, out, None
@@ -88,12 +89,29 @@ class PrepatchedPayload(unittest.TestCase):
             self.assertEqual(r.returncode, 2)
             self.assertIn("unrecognized arguments: --layout-baseline", r.stderr)
 
-    def test_the_committed_baseline_is_the_default(self):
+    def test_the_committed_baseline_and_its_digest_are_the_default(self):
         import inspect
         import save_layout_check
-        default = inspect.signature(make_payload.main).parameters["layout_baseline"].default
-        self.assertEqual(default, save_layout_check.BASELINE)
-        self.assertEqual(os.path.basename(default), "save-layout-baseline.txt")
+        params = inspect.signature(make_payload.main).parameters
+        self.assertEqual(params["layout_baseline"].default, save_layout_check.BASELINE)
+        self.assertEqual(os.path.basename(params["layout_baseline"].default), "save-layout-baseline.txt")
+        self.assertEqual(params["layout_sha256"].default, save_layout_check.BASELINE_SHA256)
+        self.assertEqual(len(save_layout_check.BASELINE_SHA256), 64)
+
+    def test_the_default_policy_refuses_a_baseline_that_is_not_the_pinned_one(self):
+        # what a release does: nothing is injected. A baseline made from the candidate itself must not pass.
+        with tempfile.TemporaryDirectory() as tmp:
+            data, gi = small_xbe.build_xbe()
+            own = os.path.join(tmp, "own.txt")
+            with open(own, "w", encoding="utf-8") as f:
+                f.write(small_xbe.baseline_text())
+            xbe = os.path.join(tmp, "in.xbe")
+            with open(xbe, "wb") as f:
+                f.write(data)
+            with self.assertRaises(SystemExit) as cm:
+                make_payload.main(["--xbe", xbe, "--out", os.path.join(tmp, "o"), "--prepatched"], layout_baseline=own)
+            self.assertIn("pinned digest", str(cm.exception.code))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "o")))
 
     def test_the_build_commit_can_differ_from_the_checkouts_head(self):
         head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()

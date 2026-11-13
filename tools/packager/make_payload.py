@@ -87,9 +87,10 @@ def build_record(xbe_commit, xbe_sha256, prepatched):
 VIDEO_CFG = b'// written by the Xash3D-FWGS-XBOX packager\r\nr_refdll "nv2a"\r\n'
 
 
-def main(argv=None, layout_baseline=save_layout_check.BASELINE):
-    """layout_baseline is for the tests, which hand it a baseline made from their own small XBE. The command line has
-    no way to name one: the committed baseline is the policy, and a candidate must not be able to bring its own."""
+def main(argv=None, layout_baseline=save_layout_check.BASELINE, layout_sha256=save_layout_check.BASELINE_SHA256):
+    """layout_baseline and layout_sha256 are for the tests, which hand in a baseline made from their own small XBE (and
+    None for the digest). The command line has no way to name either: the committed baseline, pinned by its digest
+    and made from the public builds, is the policy, and a candidate must not be able to bring its own."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--xbe", required=True)
     ap.add_argument("--title", default="hl")
@@ -104,7 +105,7 @@ def main(argv=None, layout_baseline=save_layout_check.BASELINE):
     with open(a.xbe, "rb") as f:
         raw = f.read()
     # before anything is written, so a refused XBE leaves the last payload as it was
-    save_layout_check.require(raw, layout_baseline)
+    save_layout_check.require(raw, layout_baseline, layout_sha256)
     shutil.rmtree(tdir, ignore_errors=True)
     files = {}
 
