@@ -40,6 +40,17 @@ and HD background flags that `liblist.gam` sets and the Steam copy omits.
 These are the same steps as `tools/xbox-xiso.sh`; the packager's own XISO
 writer needs no nxdk (checked against `extract-xiso`, byte for byte).
 
+## Saved games
+
+The PC's saved games (the `SAVE` folder of the Half-Life install) are left out
+of an export. They are not supported on the console: a PC save may load, but
+it can come up broken (no inventory, and other faults). Versions up to v0.2.0
+copied them; this one does not, and it does not remove the ones an earlier
+export put in the game folder.
+
+The console's own saves are in `UDATA/<title id>/valve/valve/save`. The
+packager does not write there.
+
 ## Console settings
 
 The second tab reads and changes the settings an install runs with: the video

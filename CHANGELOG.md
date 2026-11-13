@@ -9,6 +9,8 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 The packager copied the `SAVE` folder of the PC's Half-Life install into the game folder with everything else. Those saves were written by the PC game and are not the console's; it now leaves the folder out and says so in the log. The console's own saves, in `UDATA`, were never touched and still are not.
 
+PC saves are not supported on the console: one may load and come up broken (no inventory, and other faults). The site's Troubleshooting page and the packager's README say so. The packager does not remove PC saves an earlier export already copied.
+
 ### Changed - the site on v0.2.0 and sound in emulators
 
 The install page has a Playing in an emulator section (xemu and xbased, v0.2.0 or later for sound), the Troubleshooting page has No sound, or only music, in xemu or xbased, and the Building page names xbased beside xemu.

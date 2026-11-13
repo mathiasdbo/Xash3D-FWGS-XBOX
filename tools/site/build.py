@@ -687,6 +687,18 @@ page("troubleshooting.html", "Troubleshooting - Xash3D-FWGS-XBOX", """
 <h1>Troubleshooting</h1>
 <p class="lede">Problems people have run into, and what to do about each.</p>
 
+<h2 id="pcsaves">A saved game from the PC has no weapons, or behaves wrong</h2>
+<p><strong>Saved games from the PC are not supported.</strong> A save made by Half-Life on a PC (Steam's, or a PC build of
+Xash3D) was written for that game's own code. On the console it may load, but it can come up broken: no inventory,
+things in the level that do not react, and other faults that show only later.</p>
+<p>Packager versions up to v0.2.0 copied the PC's <code>SAVE</code> folder into the game folder along with the rest of the
+game files, so those saves can appear in the console's Load Game list.</p>
+<p><strong>What to do:</strong> do not load them. Start a new game, or load a save made on the console.
+From <a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/releases">v0.2.1</a> the packager leaves the PC's saves
+out of an export. It does not remove the ones an earlier export already put on the console.</p>
+<p>Saves made on the console are not affected. They are kept apart from the game folder, in the console's own save
+area, and no packager version writes there.</p>
+
 <h2 id="emusound">No sound, or only music, in xemu or xbased</h2>
 <p>In v0.1.x neither emulator played the game's effects or speech: with Hardware audio off there was no sound at all, and
 with it on only the music. Both emulators give the chip's AC97 output no sound, and the sound settings
