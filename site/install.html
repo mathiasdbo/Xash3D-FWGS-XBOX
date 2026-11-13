@@ -96,6 +96,14 @@ off, because a loose <code>.bsp</code> beside its archive is loaded instead and 
 <p>The result is cached (<code>%LOCALAPPDATA%\Xash3D-FWGS-XBOX Packager\bake</code> on Windows) and reused until the
 baker or your game files change.</p>
 
+<h2>Playing in an emulator</h2>
+<p>The same folder or disc image runs in <a href="https://github.com/xemu-project/xemu">xemu</a> and in
+<a href="https://github.com/crazyriddler/xbased">xbased</a>. Use <strong>v0.2.0 or later</strong> for sound: in v0.1.x neither
+emulator played the effects or speech, and without the Hardware audio setting nothing at all. The game now notices an emulator
+when it starts and plays through the console's audio processor, which both emulators play. It needs no setting, and a real
+console is not affected. An emulator is for trying the game, not for judging speed: the frame rates in the
+<a href="performance.html">performance reports</a> are from a console.</p>
+
 <h2>Uploading over FTP safely</h2>
 <p>"Find my Xbox" scans the network for the console and its games folders. Before it changes an existing
 install, the packager surveys it and asks. It never replaces your saves or settings, and it moves the old
