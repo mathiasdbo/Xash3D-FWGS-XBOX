@@ -52,7 +52,10 @@ A release carries the stable Xbox build: a clean build of <code>main</code>, and
 
 <h2>Testing in an emulator</h2>
 <p>The scripts <code>tools/xemu-*.sh</code> run builds in <a href="https://github.com/xemu-project/xemu">xemu</a>,
-the Xbox emulator used for development. An emulator does not replace the console for performance numbers.</p>
+the Xbox emulator used for development. An emulator does not replace the console for performance numbers. From v0.2.0 the
+game also plays sound in <a href="https://github.com/crazyriddler/xbased">xbased</a> and in xemu: it detects the emulator
+through the audio chip's S/PDIF engine and uses the APU's voices (divergence 219). To measure what an emulator plays, record the
+system's audio output while the game runs.</p>
 </main>
 <footer><div>Xash3D-FWGS-XBOX, formerly Resonance3D. GPL-3.0-or-later. Contains no Valve assets.
 <a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX">Source on GitHub</a>.</div></footer>

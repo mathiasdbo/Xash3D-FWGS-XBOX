@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Changed - the site on v0.2.0 and sound in emulators
+
+The install page has a Playing in an emulator section (xemu and xbased, v0.2.0 or later for sound), the Troubleshooting page has No sound, or only music, in xemu or xbased, and the Building page names xbased beside xemu.
+
 ### Fixed - no sound in xemu and xbased
 
 With Hardware audio off there was no sound in either emulator, and with it on only the music played: no effects, no speech. Both emulators give the AC97 chip no audio output and never run its S/PDIF engine, and an Xbox plays the SDL backend and the audio processor's output through exactly that. The game now finds out at start (it plays two silent buffers and watches the S/PDIF engine) and on an emulator uses OpenAL on the audio processor with the room effect and the sounds in the CPU mix, which both emulators play. A console is unchanged. The audio driver also no longer stalls after two callbacks when S/PDIF never moves, so the frame-time recorder's mixer spans mean something in xemu. `sndbackend.txt` has an `emulator:` line.

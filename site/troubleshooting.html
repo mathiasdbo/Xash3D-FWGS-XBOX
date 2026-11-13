@@ -16,6 +16,15 @@
 <h1>Troubleshooting</h1>
 <p class="lede">Problems people have run into, and what to do about each.</p>
 
+<h2 id="emusound">No sound, or only music, in xemu or xbased</h2>
+<p>In v0.1.x neither emulator played the game's effects or speech: with Hardware audio off there was no sound at all, and
+with it on only the music. Both emulators give the chip's AC97 output no sound, and the sound settings
+that use it (the default output, and the room effect and sounds on voices of Hardware audio) go through it.</p>
+<p><strong>Fix:</strong> use the packager from <a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/releases">v0.2.0 or later</a> and export again. The game finds
+out at start whether it runs on an emulator (the audio chip's S/PDIF output never plays there) and uses the output the
+emulators do play. Nothing needs changing in the menus. A console keeps its own settings; the file <code>sndbackend.txt</code> in
+the game's save folder says <code>emulator: yes</code> or <code>emulator: no</code>.</p>
+
 <h2 id="drift">The view turns by itself</h2>
 <p>With nobody touching the controller, the camera slowly turns, usually to the left. This is <strong>stick drift</strong>.
 Original Xbox pads rest well off centre: an untouched right stick can read about a fifth of the way over. The engine

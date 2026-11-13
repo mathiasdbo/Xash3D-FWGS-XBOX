@@ -223,6 +223,14 @@ off, because a loose <code>.bsp</code> beside its archive is loaded instead and 
 <p>The result is cached (<code>%%LOCALAPPDATA%%\\Xash3D-FWGS-XBOX Packager\\bake</code> on Windows) and reused until the
 baker or your game files change.</p>
 
+<h2>Playing in an emulator</h2>
+<p>The same folder or disc image runs in <a href="https://github.com/xemu-project/xemu">xemu</a> and in
+<a href="https://github.com/crazyriddler/xbased">xbased</a>. Use <strong>v0.2.0 or later</strong> for sound: in v0.1.x neither
+emulator played the effects or speech, and without the Hardware audio setting nothing at all. The game now notices an emulator
+when it starts and plays through the console's audio processor, which both emulators play. It needs no setting, and a real
+console is not affected. An emulator is for trying the game, not for judging speed: the frame rates in the
+<a href="performance.html">performance reports</a> are from a console.</p>
+
 <h2>Uploading over FTP safely</h2>
 <p>"Find my Xbox" scans the network for the console and its games folders. Before it changes an existing
 install, the packager surveys it and asks. It never replaces your saves or settings, and it moves the old
@@ -357,7 +365,10 @@ A release carries the stable Xbox build: a clean build of <code>main</code>, and
 
 <h2>Testing in an emulator</h2>
 <p>The scripts <code>tools/xemu-*.sh</code> run builds in <a href="https://github.com/xemu-project/xemu">xemu</a>,
-the Xbox emulator used for development. An emulator does not replace the console for performance numbers.</p>
+the Xbox emulator used for development. An emulator does not replace the console for performance numbers. From v0.2.0 the
+game also plays sound in <a href="https://github.com/crazyriddler/xbased">xbased</a> and in xemu: it detects the emulator
+through the audio chip's S/PDIF engine and uses the APU's voices (divergence 219). To measure what an emulator plays, record the
+system's audio output while the game runs.</p>
 """, "How to build the Xbox port, the PC reference build and the asset baker.")
 
 page("recorder.html", "Frame-time recorder - Xash3D-FWGS-XBOX", """
@@ -675,6 +686,15 @@ suits the GPU's vertex cache.</li>
 page("troubleshooting.html", "Troubleshooting - Xash3D-FWGS-XBOX", """
 <h1>Troubleshooting</h1>
 <p class="lede">Problems people have run into, and what to do about each.</p>
+
+<h2 id="emusound">No sound, or only music, in xemu or xbased</h2>
+<p>In v0.1.x neither emulator played the game's effects or speech: with Hardware audio off there was no sound at all, and
+with it on only the music. Both emulators give the chip's AC97 output no sound, and the sound settings
+that use it (the default output, and the room effect and sounds on voices of Hardware audio) go through it.</p>
+<p><strong>Fix:</strong> use the packager from <a href="https://github.com/mathiasdbo/Xash3D-FWGS-XBOX/releases">v0.2.0 or later</a> and export again. The game finds
+out at start whether it runs on an emulator (the audio chip's S/PDIF output never plays there) and uses the output the
+emulators do play. Nothing needs changing in the menus. A console keeps its own settings; the file <code>sndbackend.txt</code> in
+the game's save folder says <code>emulator: yes</code> or <code>emulator: no</code>.</p>
 
 <h2 id="drift">The view turns by itself</h2>
 <p>With nobody touching the controller, the camera slowly turns, usually to the left. This is <strong>stick drift</strong>.
