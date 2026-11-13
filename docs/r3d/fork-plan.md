@@ -7105,7 +7105,10 @@ own `startmap`.
   valid for the exact XBE that wrote it and no other. lld's default ICF
   (no `-opt:` from `nxdk-link`) folds identical `Think` bodies to one
   address, which is harmless under offset saves. A name-based scheme is
-  its own item before any release.
+  its own item before any release. **Owned by XS since 2026-11-13: three
+  builds were released without it. They measured compatible with each
+  other, and the folding is not harmless once names replace offsets (XS,
+  "Folding").**
 - **Three `pm_shared`s, three sets of engine expectations**: the engine's
   `SV_InitClientMove` hull loop and `pmove` function table are per-link;
   no cross-title sharing, and nothing to get subtly wrong as long as a
@@ -10374,6 +10377,232 @@ Console figures come from the #193 route recording (`route-pr193`). Sound work w
         - **Status (x9-audio-gp-room, divergence #180):** built, behind `r3d_snd_gproom 1`. The host test runs the kernel against `s_dsp.c` sample for sample (every preset of both tables, room changes, water, the master volume). The probe (`bmi-gp-a`, 2026-10-18) found a stereo send reaching the kernel unchanged except a voice's first block, fixed in nxdk-ex #48.
         - **Console (2026-10-18, xbe 6AD570B3, `bmi-gproom-a` against `bmi-gp-a`, the CPU room on xbe 6AD52149):** both play the six maps to a clean end, 19,894/19,893 frames, 59.9 fps, 0 underruns. `k_snd_dsp` is 0.002 ms on both: the tram's rooms cost the CPU nothing, so this route shows only what the second stream costs. Per in-play frame, the device lock 0.047-0.048 -> 0.065-0.068 ms, the output thread 0.035-0.038 -> 0.040-0.043, `k_snd_extra` +0.015-0.022; frame CPU +0.03-0.09 ms on every map (c0a0 6.43 -> 6.50), the 1% low 0.1-0.2 fps lower. `c1a0c-gproom-a` (played by hand, 13.3 min, 45,568 frames, c1a0c to c1a1f, clean end, 0 underruns): `k_snd_dsp` 0.002 ms where the CPU room cost about 0.1 ms (no CPU recording of this route on a current build to set beside it); device lock 0.069-0.075 ms, output thread 0.042-0.045. `c1a0c-cpu-a` (2026-10-19, the same xbe with `r3d_snd_gproom 0`, played by hand, 31.4 min, 110,604 frames, c1a0c to c1a1c, 0 underruns) is the A/B against it, per in-play frame on the maps both played with rooms (CPU -> GP): `k_snd_dsp` c1a0c 0.136 -> 0.002, c1a1 0.188 -> 0.002, c1a1c 0.207 -> 0.002 ms; `k_snd_extra` 0.449 -> 0.327, 0.511 -> 0.361, 0.491 -> 0.300; the device lock 0.052 -> 0.072-0.075 and the output thread 0.039-0.041 -> 0.043-0.045 (the second stream, as on `bmi`). Net about 0.11-0.17 ms a frame saved where a room plays, about 0.02-0.03 ms lost where none does (c1a1a: `k_snd_dsp` 0.002 on both, the lock +0.02). Frame CPU and fps are not compared: two free plays of different length and paths. Still open: a listening check of the rooms on the GP against the CPU.
    - **Estimated saving:** 0.35-0.5 ms a frame for 5b, measured before #171-#173 (music and the 48 kHz path have since taken part of it); the GP port about 0.1 ms more. Hardware HRTF and 5.1 come later.
+
+## XS — Saves never break (owner rule, 2026-11-13; ahead of everything else)
+
+**The rule:** no build may ever make an existing save unloadable. It covers
+the saves already on players' consoles (v0.1.2, v0.1.3, v0.2.0) and every
+save written from now on. "Saves from older builds will not load" is not an
+acceptable release note.
+
+**Why it is at risk.** The Xbox image is static, so `COM_NameForFunction`
+(`engine/platform/misc/lib_static.c:62`) writes every saved function pointer
+(`m_pfnThink`, `m_pfnTouch`, `m_pfnUse`, `m_pfnBlocked`,
+`m_pfnCallWhenMoveDone`) as `ofs:N`, a byte offset from `pfnGameInit`
+(`engine/common/lib_common.c:78`), and `COM_FunctionFromName_SR` (`:41`)
+adds it back. Any link that moves server code makes an old save resolve to
+the wrong address. X7's risk list named this and gave it no owner.
+
+**Measured, 2026-11-13** (the evidence - the release link map, 60 save files
+pulled from a console, the scripts - is kept outside the repository):
+
+- The three public XBEs (`xbe-88862388`, `xbe-1f4eedc1`, `xbe-cdd64653`) are
+  save-compatible with each other. Their 251 exported server functions moved
+  by one constant (+1456, then +576 bytes), and the code at that shift
+  matches over a 0.73 MiB block that holds the whole server module. The SDK
+  pins differ between the first two (`35246eaf`, `e958ca4e`) with identical
+  content.
+- `pfnGameInit` is `GameDLLInit`: 0x2af700, 0x2afcb0 and 0x2afef0 in the
+  three builds.
+- The link map of `xbe-cdd64653` exists (its XBE's sha256 `77f9f341...`
+  equals the published file). It was an untracked build output; a copy is
+  with the evidence. No map exists for the other two, and none is needed:
+  one table serves all three.
+- 24 `.sav` files from a console hold 92 distinct offsets (42-70 a save,
+  393-3,699 references). Every one resolves to a server function in that
+  map, at the same offset in all three builds.
+- Offsets below `GameDLLInit` are written as their unsigned wrap (`%zu`:
+  `ofs:4294950224` for -17072) and read back through `Q_atoi`'s overflow.
+- Saves are not compressed; the `ofs:` strings are plain text in the file.
+- The `.sav` is already written as `.tmp`, renamed `.new`, then put in place
+  (`sv_save.c`, the async save), so a power cut does not leave a half file.
+- **Folding.** The link passes no `-opt:` flag, and lld folds functions with
+  identical code: 132 server addresses carry more than one symbol, some
+  shared with client code outside the block. One saved offset is two
+  functions, `CBaseMonster::CallMonsterThink` (`basemonster.h:146`, only
+  ever a think) and `CFuncPlat::CallHitBottom` (`plats.cpp:237`, only ever a
+  move-done callback). Of the 1,180 server member functions with a
+  think/touch/use/blocked signature, 103 sit outside the block; none of the
+  221 a source scan matched to a `SetThink`/`SetTouch`/`SetUse`/
+  `SetBlocked`/`SetMoveDone` call is among them. The scan did not match
+  inherited spellings (`CApache::SUB_Remove`), so XS.1 has to close this.
+
+**Until XS.4 is merged, no XBE is published whose server block differs from
+`xbe-cdd64653`'s.** XS.0 is the check that enforces it.
+
+**Steps** (in order; each ends in a check a script can fail):
+
+- **XS.0 - the layout check, first.** `tools/save-layout-check.py <xbe>`:
+  reads the XBE's embedded server export table and its code, and fails
+  unless every exported function and `GameDLLInit` keep the baseline's
+  offsets and the block's code matches at that shift. The baseline (251
+  names and offsets, the block's extent, the build id) is a checked-in
+  text file. `tools/packager/release.py` runs it and refuses to publish on
+  a failure. **Exit:** passes on the three public XBEs; fails on an XBE
+  linked with one server function changed.
+- **XS.1 - the legacy table, frozen.** Generated once from the
+  `xbe-cdd64653` map and checked in: offset, function name, and which
+  fields may hold it. Before it is frozen, the folding audit: every server
+  function that game code can assign to a saved pointer (from the compiled
+  objects' relocations against the five fields' setters, not from a source
+  regex), each fold set listed, each set with two assignable members given
+  a rule or the phase stops. Known rule: offset -210368 is
+  `CallMonsterThink` in `m_pfnThink` and `CallHitBottom` in
+  `m_pfnCallWhenMoveDone`. **Exit:** a table that names every assignable
+  function, with zero unexplained fold sets and zero assignable functions
+  outside the block (or, for each one found there, its offset recovered
+  for all three builds).
+- **XS.2 - new saves write names.** `COM_NameForFunction` on the Xbox
+  returns a name from a generated address-to-name table (X7.2's generator
+  already writes name-to-address from the objects), in the form upstream's
+  Windows build writes after `COM_GetPlatformNeutralName`
+  (`lib_common.c:435`), so a save does not depend on the link at all.
+  The image links with folding off for the server objects (`-opt:noicf`,
+  or the whole image if lld cannot scope it; the `.text` growth is
+  measured against X3's budget). The build fails if two names in the table
+  share an address. The `ofs:` write path is removed from the Xbox build.
+  Whether a PC save then loads on the console, and the reverse, is checked
+  here rather than assumed. **Exit:** a save written by the new build
+  contains no `ofs:` string, and loads in a second build linked in a
+  different object order.
+- **XS.3 - old saves read for ever.** An `ofs:N` string goes through the
+  XS.1 table to a name and from the name to the current address. The
+  reader parses the unsigned-wrapped negatives itself instead of relying
+  on overflow. The folded offset is resolved by field name in the SDK's
+  restore (`dlls/util.cpp`, `FIELD_FUNCTION`), an SDK-fork change. An
+  offset the table does not hold refuses the load with a message on
+  screen and leaves the file as it is; it never returns an address.
+  A divergence entry for each side. **Exit:** all 24 fixture saves load in
+  the XS.2 build and in a build with a server function added, each
+  resolved pointer naming the function the map says it was.
+- **XS.4 - the fixture gate.** The fixtures stay outside the repository;
+  the gate takes their folder from `R3D_SAVE_FIXTURES`. What is checked in
+  is derived and holds nothing personal: per fixture, its hash and the
+  function names its pointers must resolve to. Two levels: a host test
+  (every pointer string of every fixture resolves to the expected name),
+  and a live one (xemu boots the candidate XBE, loads each `.sav`, and
+  reaches play for N frames with no error). A release with the variable
+  unset or the folder missing is refused, not skipped. A fixture is added
+  for every released build and, over time, one per chapter. **Exit:** the
+  gate fails on a build with XS.3's table removed.
+- **XS.5 - the other ways a save can break**, each a written rule and a
+  check in the same gate. None is verified yet:
+  - the title id (`FFFF0002`) and the path under it (`valve/valve/save`):
+    saves live in `E:\UDATA\<title id>`, so a changed id orphans every
+    save. Where the build sets it is to be found; `release.py` then reads
+    it from the XBE certificate and compares;
+  - limits are never lowered (edicts, 900 today; models, sounds,
+    lightstyles, decals): a checked-in list compared at build time;
+  - `SAVEGAME_VERSION` 0x71 and `CLIENT_SAVEGAME_VERSION` 0x67 stay;
+  - the baker: a save names brush models by index (`*N`) and entities by
+    position in the map's own tables. Whether an `.mpak` can renumber
+    either against the retail `.bsp` is to be measured over the corpus;
+    if it can, the bake fails on a difference;
+  - the SDK's field tables: fields are matched by name, so additions are
+    safe. A removed, renamed or retyped saved field loses state silently.
+    A dump of every `TYPEDESCRIPTION` table is checked in and a diff that
+    is not an addition fails;
+  - disk full: a failed write must leave the previous `.sav` in place
+    (the `.tmp` path should already do it; tested with a full partition).
+- **XS.6 - the packager's net.** Before an upload replaces a build, the
+  packager copies the console's `save/` folder to the PC (dated, with the
+  id of the build that was installed) and offers to put the previous build
+  and its saves back. It identifies the installed build by a hash of its
+  code, since the certificate is patched per install, and warns before
+  replacing a build no legacy table covers. A new save does not load in an
+  XBE older than XS.2; the restore is the answer to a downgrade.
+- **XS.7 - release discipline.** Every `xbe-*` release publishes its link
+  map and the id of the save baseline it was checked against; `release.py`
+  refuses without XS.0 and XS.4 green.
+
+**Exit:** the 24 fixture saves and one save from each public build load in
+a build whose server code has changed; the gate and the layout check are
+part of every release; the rule is in `AGENTS.md`.
+
+## XH — Hardware validation backlog (proposed 2026-11-13)
+
+One list for everything the plan marks "xemu only" or "not yet run on the
+console", so one console session can clear it. Each row closes with a
+recording or a written result in its own section, and is struck here.
+
+- XG.1: the two `c0a0` yaw fixes, on hardware.
+- The dashboard's `TitleMeta.xbx` / `TitleImage.xbx` (#190).
+- The transition smoke test's first pilot (`--count 3 --dwell 10`).
+- X12 item 4 Stage A: `bmi-vox-a/b`, `route-vox-a/b`.
+- X12 5b: `r3d_snd_voices` 1 against 0 on c1a0c; the 69 timed starts
+  refused a hold; the listening check of the GP room against the CPU room.
+- X11: frame times at -O2 on the route.
+- X9: `crossfire` starting 2.5 MiB lower on its second load, attributed.
+- **Plan sync, no console needed:** X9-Y still reads "not started" although
+  720p, widescreen and an anti-aliasing setting have shipped; X8 is
+  superseded by X12; `docs/r3d/README.md` still says "Nothing ported yet";
+  the DXT1 swizzle note (`UiPacker.cpp:379`) is confirmed fixed or moot
+  since X9-K.
+
+**Exit:** no row left without a result.
+
+## X10.1 — The campaign by script, then by hand (proposed 2026-11-13)
+
+X10's exit is one sentence. This makes it a sequence.
+
+1. Merge the transition smoke test and run its pilot (XH).
+2. The full chain, 96 maps from `c0a0`, resuming with `--from` past each
+   failure. Each crash or hang becomes an XG row with the map and the stage
+   the recorder names.
+3. A save at the start of each chapter during that run goes to the XS.4
+   fixtures.
+4. A played run, start to finish, on a console, on the build the chain
+   passed.
+
+**Exit:** X10's.
+
+## XR — Release (proposed 2026-11-13)
+
+Nothing after X12 covers shipping, and three builds are already public.
+
+- A release checklist in the repository: XS.0 and XS.4 green, the map
+  published, the changelog section closed, the site updated
+  (`tools/site/build.py`, then the Pages workflow), the known issues taken
+  from XG's open rows.
+- X11's exit document (frame budget and peak memory on hardware), written
+  from the existing route recordings. Its four unowned rows (the
+  transient-buffer audit, threaded save and load I/O, `R_CullSurface`
+  measured both ways, memory after repeated `changelevel`) each marked
+  done, measured or dropped.
+- nxdk's prebuilt libraries at -O2 (X11's "next step"), behind XS.0: it
+  must not move the server block before XS.4 is in.
+- The audio default: after XH's 5b rows, `r3d_snd_hw 1` becomes the Xbox
+  default or stays optional, and the decision is written in X12.
+
+**Exit:** a release cut from the checklist alone.
+
+## XK — USB keyboard and mouse (proposed 2026-11-13, optional)
+
+Read from the tree, not prototyped. The engine side exists: upstream's SDL
+code turns key and mouse events into input (`engine/platform/sdl2/
+host_sdl2.c`, `in_sdl2.c`), and the Xbox build already uses that path for
+the pad. nxdk has a USB host stack with a HID driver
+(`lib/usb/libusbohci/src_hid`, behind `NXDK_USB_ENABLE_HID`, which
+`tools/xbox-build-nxdk.sh` does not set), but its SDL port's Xbox event
+pump (`SDL_xbevents.c`) is an empty stub.
+
+1. nxdk built with HID; the pad still works beside it.
+2. A reader for boot-protocol devices in nxdk-ex's SDL event pump (the
+   8-byte keyboard report diffed into key events; the mouse report into
+   motion, buttons and wheel), so the engine does not change.
+3. Hot-plug, and reports crossing from the USB thread to the main one.
+4. A sensitivity setting and a bindings screen; the menu stays pad-shaped
+   (arrows and Enter work; no pointer at first).
+5. A console with a controller-port adapter; xemu's passthrough is not
+   validation.
+
+**Risk:** devices that do not honour boot protocol (many gaming mice,
+keyboards with hubs) need report-descriptor parsing, which is most of the
+work again. It must not move the server block before XS.4 (it should not:
+nxdk and engine code only).
+
+**Exit:** a keyboard and a mouse play a map on a console, with the pad
+still connected.
 
 ## Out of scope
 
