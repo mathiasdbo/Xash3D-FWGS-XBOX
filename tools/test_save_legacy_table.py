@@ -74,43 +74,65 @@ class Objects(unittest.TestCase):
 
 class Building(unittest.TestCase):
     GI = 0x2AFEF0
+    THINK = "?Think@CFoo@@QAEXXZ"
+    TOUCH = "?Touch@CFoo@@QAEXPAVCBaseEntity@@@Z"
+    USE = "?Use@CFoo@@QAEXPAVCBaseEntity@@0W4USE_TYPE@@M@Z"
 
     def build(self, uses, symbols):
         return slt.build_table(uses, symbols, self.GI)
 
-    def test_rows_are_offsets_from_gamedllinit(self):
-        rows = self.build({"f": [(True, 20)], "g": [(True, 24)]}, {"f": self.GI - 0x40, "g": self.GI + 0x10})
-        self.assertEqual(rows, [(-0x40, "think", "f"), (0x10, "touch", "g")])
+    def test_rows_are_offsets_from_gamedllinit_with_the_field_the_store_names(self):
+        rows = self.build({self.THINK: [(True, 20)], self.TOUCH: [(True, 24)]},
+                          {self.THINK: self.GI - 0x40, self.TOUCH: self.GI + 0x10})
+        self.assertEqual(rows, [(-0x40, "think", self.THINK), (0x10, "touch", self.TOUCH)])
+
+    def test_a_member_whose_address_went_through_a_register_is_listed_by_its_shape(self):
+        rows = self.build({self.THINK: [(True, None)], self.USE: [(True, None)], self.TOUCH: [(False, None)]},
+                          {self.THINK: self.GI, self.USE: self.GI + 16, self.TOUCH: self.GI + 32})
+        self.assertEqual([(f, n) for _, f, n in rows], [("~think,movedone", self.THINK), ("~use", self.USE),
+                                                        ("~touch,blocked", self.TOUCH)])
+
+    def test_things_that_are_not_callbacks_are_left_out(self):
+        # exports, dispatch functions, initialisers, virtuals with no store: their address is taken, they are not callbacks
+        names = ["_PM_Move", "_CreateInterface", "?GameDLLInit@@YAXXZ", "?DispatchThink@@YAXPAUedict_s@@@Z",
+                 "??__Fg_MapsToLoad@@YAXXZ", "__GLOBAL__sub_I_client.cpp", "?Spawn@CFoo@@UAEXXZ",
+                 "?Static@CFoo@@SAXXZ", "?Other@CFoo@@QAEHXZ", "?Pair@CFoo@@QAEXHH@Z"]
+        uses = {n: [(True, None)] for n in names}
+        self.assertEqual(self.build(uses, {n: self.GI + 8 * i for i, n in enumerate(names)}), [])
 
     def test_a_name_the_map_does_not_have_is_a_variable_not_a_function(self):
-        self.assertEqual(self.build({"v": [(True, None)]}, {}), [])
+        self.assertEqual(self.build({self.THINK: [(True, None)]}, {}), [])
 
     def test_a_fold_set_told_apart_by_field_is_accepted(self):
-        rows = self.build({"a": [(True, 20)], "b": [(True, 204)]}, {"a": self.GI - 8, "b": self.GI - 8})
-        self.assertEqual(rows, [(-8, "movedone", "b"), (-8, "think", "a")])
+        a, b = "?A@CFoo@@QAEXXZ", "?B@CBar@@QAEXXZ"
+        rows = self.build({a: [(True, 20)], b: [(True, 204)]}, {a: self.GI - 8, b: self.GI - 8})
+        self.assertEqual(rows, [(-8, "movedone", b), (-8, "think", a)])
 
     def test_a_fold_set_with_the_same_field_stops_the_generator(self):
+        a, b = "?A@CFoo@@QAEXXZ", "?B@CBar@@QAEXXZ"
         with self.assertRaises(slt.TableError) as cm:
-            self.build({"a": [(True, 20)], "b": [(True, 20)]}, {"a": self.GI - 8, "b": self.GI - 8})
+            self.build({a: [(True, 20)], b: [(True, 20)]}, {a: self.GI - 8, b: self.GI - 8})
         self.assertIn("fold set", str(cm.exception))
 
-    def test_a_fold_set_with_an_unknown_field_stops_the_generator(self):
+    def test_a_fold_set_with_a_field_known_for_only_one_member_stops_the_generator(self):
+        a, b = "?A@CFoo@@QAEXXZ", "?B@CBar@@QAEXXZ"
         with self.assertRaises(slt.TableError):
-            self.build({"a": [(True, 20)], "b": [(True, None)]}, {"a": self.GI - 8, "b": self.GI - 8})
+            self.build({a: [(True, 20)], b: [(True, None)]}, {a: self.GI - 8, b: self.GI - 8})
 
     def test_a_field_offset_nobody_named_stops_the_generator(self):
         with self.assertRaises(slt.TableError) as cm:
-            self.build({"a": [(True, 36)]}, {"a": self.GI})
+            self.build({self.THINK: [(True, 36)]}, {self.THINK: self.GI})
         self.assertIn("unrecognised field offset", str(cm.exception))
+
+    def test_a_store_into_a_field_the_shape_cannot_fit_stops_the_generator(self):
+        with self.assertRaises(slt.TableError) as cm:
+            self.build({self.THINK: [(True, 28)]}, {self.THINK: self.GI})  # a void() member stored as a use callback
+        self.assertIn("not a member function of that shape", str(cm.exception))
 
     def test_a_callback_outside_the_server_block_stops_the_generator(self):
         with self.assertRaises(slt.TableError) as cm:
-            self.build({"?Think@CFoo@@QAEXXZ": [(True, 20)]}, {"?Think@CFoo@@QAEXXZ": 0x13F420})
+            self.build({self.THINK: [(True, 20)]}, {self.THINK: 0x13F420})
         self.assertIn("outside the server block", str(cm.exception))
-
-    def test_a_compiler_made_static_init_stub_outside_the_block_is_not_a_callback(self):
-        rows = self.build({"??__Fg_Dir@@YAXXZ": [(True, None)]}, {"??__Fg_Dir@@YAXXZ": 0x373FC0})
-        self.assertEqual(len(rows), 1)
 
 
 class Committed(unittest.TestCase):
@@ -129,7 +151,7 @@ class Committed(unittest.TestCase):
         t = slt.load_table()
         self.assertEqual(t["build"], (slt.SOURCE_BUILD, slt.SOURCE_XBE_SHA256))
         self.assertEqual(t["count"], len(t["rows"]))
-        self.assertGreater(len(t["rows"]), 250)
+        self.assertGreater(len(t["rows"]), 200)
 
     def test_the_known_fold_set_is_told_apart_by_field(self):
         t = slt.load_table()
@@ -141,6 +163,28 @@ class Committed(unittest.TestCase):
         t = slt.load_table()
         self.assertEqual(slt.resolve(t, (1 << 32) - 210368, "think"), slt.resolve(t, -210368, "think"))
         self.assertEqual(slt.resolve(t, 4294950224), slt.resolve(t, -17072))
+
+    def test_a_function_resolves_only_for_a_field_it_can_hold(self):
+        t = slt.load_table()
+        think = [(o, n) for o, f, n in t["rows"] if f == "think"][0]
+        self.assertEqual(slt.resolve(t, think[0], "think"), [think[1]])
+        self.assertEqual(slt.resolve(t, think[0], "use"), [])
+        self.assertEqual(slt.resolve(t, think[0], "touch"), [])
+
+    def test_exports_and_initialisers_are_not_in_the_table(self):
+        names = {n for _, _, n in slt.load_table()["rows"]}
+        for n in ("_PM_Move", "_PM_Init", "_CreateInterface", "?GameDLLInit@@YAXXZ", "?DispatchThink@@YAXPAUedict_s@@@Z",
+                  "??__Fg_GameDirectory@@YAXXZ", "__GLOBAL__sub_I_filesystem_utils.cpp"):
+            self.assertNotIn(n, names)
+        self.assertFalse([n for n in names if not n.startswith("?") or n.startswith("??")])
+
+    def test_an_exports_offset_resolves_to_nothing_in_any_field(self):
+        # PM_Move / CreateInterface / the initialisers sit at offsets the table does not hold (checked against the map
+        # of the build the table is made from, whose addresses are outside the repository, so by name above, and here
+        # by shape: every row is a member function of a callback shape)
+        for _, f, n in slt.load_table()["rows"]:
+            self.assertTrue(slt.MEMBER.match(n), n)
+            self.assertIn(slt.MEMBER.match(n).group("sig"), slt.SIGNATURES, n)
 
     def test_an_offset_the_table_does_not_hold_resolves_to_nothing(self):
         self.assertEqual(slt.resolve(slt.load_table(), 12345), [])
@@ -154,7 +198,8 @@ class Committed(unittest.TestCase):
         t = self.text()
         line = [l for l in t.splitlines() if l.startswith("fn ")][0]
         _, off, field, _name = line.split()
-        edited = t.replace("functions 299", "functions 300") + "fn %s %s ?Other@@YAXXZ\n" % (off, field)
+        n = slt.load_table()["count"]
+        edited = t.replace("functions %d" % n, "functions %d" % (n + 1)) + "fn %s %s ?Other@CFoo@@QAEXXZ\n" % (off, field)
         self.assertTrue(any("cannot be told apart" in p for p in slt.table_problems(edited, None)))
 
     def test_a_table_from_another_build_is_refused(self):

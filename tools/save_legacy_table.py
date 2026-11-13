@@ -10,10 +10,14 @@ it is stored in.
 How the set of functions is found - from the compiled objects, not from the source text. A function can be assigned to
 a saved pointer only if its address is taken, and in a COFF object taking an address is an absolute (DIR32)
 relocation against the function's symbol. A virtual function's address appears in a vtable (.rdata) and is never what
-SetThink and friends store, so the set is every function with a DIR32 relocation in code (.text) or in .data. The
-field comes from the store itself: `mov [reg+disp], imm32` with the relocation as imm32; disp 20, 24, 28, 32 and 204
-are m_pfnThink, m_pfnTouch, m_pfnUse, m_pfnBlocked (CBaseEntity) and m_pfnCallWhenMoveDone (CBaseToggle). When the
-store is not that shape (the address goes through a register) the field is `-`: unknown.
+SetThink and friends store. The field comes from the store itself: `mov [reg+disp], imm32` with the relocation as
+imm32; disp 20, 24, 28, 32 and 204 are m_pfnThink, m_pfnTouch, m_pfnUse, m_pfnBlocked (CBaseEntity) and
+m_pfnCallWhenMoveDone (CBaseToggle). A function is in the table if its address is stored into one of those (the field
+is then written as seen, e.g. `think`), or, when the address went through a register and no field can be read, if it is
+a non-virtual member function of one of the three shapes the fields hold (`~think,movedone` for void(), `~touch,blocked`
+for void(CBaseEntity*), `~use` for the use signature): the pointers are typed, so nothing else can be assigned. Exports,
+the dispatch functions, static initialisers and everything else whose address is merely taken are not in it, and an
+offset that is not in it resolves to nothing. A function resolves only for a field it can hold.
 
 Folding. lld folds functions with identical code, so one offset can be several functions. The generator lists every
 such offset; each must be resolvable by field (the names at it store into pairwise different known fields) or
@@ -37,13 +41,19 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TABLE = os.path.join(HERE, "save-legacy-table.txt")
-TABLE_SHA256 = "15393b166262142be891fdbfe11ab94112c0aad82b8f4e14751b1b89cd886363"  # of the checked-in table (LF)
+TABLE_SHA256 = "d67ce4129e15f58fa3dcca0779fc75657dca4c5064d64099d1f81b460aa4b7a2"  # of the checked-in table (LF)
 
 # The one build the table is made from: its link map gives the offsets, its objects give the functions.
 SOURCE_BUILD = "xbe-cdd64653"
 SOURCE_XBE_SHA256 = "77f9f341ca43bb5bff58a045972b4b1dc24963f424621ebfba46be9b94854dcf"
 SDK_COMMIT = "e958ca4eff31f06671eec81981e9ae2a8c43a992"  # deps/hlsdk at that build
 FIELDS = {20: "think", 24: "touch", 28: "use", 32: "blocked", 204: "movedone"}
+# The member-function signatures the five fields hold (void(), void(CBaseEntity*), use(...)), as they appear in a
+# mangled name, and the fields each fits. A function that is neither stored into a field we can see nor a non-virtual
+# member of one of these shapes cannot be a saved callback (SetThink and friends are typed), so it is not in the table.
+SIGNATURES = {"XXZ": ("think", "movedone"), "XPAVCBaseEntity@@@Z": ("touch", "blocked"),
+              "XPAVCBaseEntity@@0W4USE_TYPE@@M@Z": ("use",)}
+MEMBER = re.compile(r"^\?[^?@]+@[^?]+@@[QAI]AE(?P<sig>.+)$")
 DIR32 = 6
 BLOCK = (0x27C000, 0x338000)  # the server code block of xbe-cdd64653
 GAMEDLLINIT = "?GameDLLInit@@YAXXZ"
@@ -129,28 +139,38 @@ def map_symbols(text):
 def build_table(uses, symbols, gameinit):
     """uses: {name: [(in_code, disp)]}; symbols: {name: address}. -> [(offset, fields, name)] sorted, or TableError"""
     rows = []
+    problems = []
     for name, lst in uses.items():
         addr = symbols.get(name)
         if addr is None:
             continue  # a variable, a constant: not a function the map names
-        fields = sorted({FIELDS.get(d, "disp%d" % d) for c, d in lst if c and d is not None})
-        rows.append((addr - gameinit, fields, name, addr))
-    problems = []
+        stored = sorted({FIELDS.get(d, "disp%d" % d) for c, d in lst if c and d is not None})
+        m = MEMBER.match(name)
+        sig = SIGNATURES.get(m.group("sig")) if m else None
+        if stored:
+            if any(f.startswith("disp") for f in stored):
+                problems.append("%s is stored at an unrecognised field offset %s" % (name, stored))
+            elif sig is None or any(f not in sig for f in stored):
+                problems.append("%s is stored into %s but is not a member function of that shape" % (name, stored))
+            fields = ",".join(stored)  # seen: the field the store names
+        elif sig is not None:
+            fields = "~" + ",".join(sig)  # by shape only: a register carried the address
+        else:
+            continue  # not stored into a callback field and not shaped like a callback: an export, an initialiser, ...
+        if not (BLOCK[0] <= addr < BLOCK[1]):
+            problems.append("%s is at %#x, outside the server block" % (name, addr))
+        rows.append((addr - gameinit, fields, name))
     by = collections.defaultdict(list)
-    for off, fields, name, addr in rows:
+    for off, fields, name in rows:
         by[off].append((fields, name))
-        if not (BLOCK[0] <= addr < BLOCK[1]) and not GENERATED.match(name):
-            problems.append("%s is at %#x, outside the server block, and is not a compiler-generated stub" % (name, addr))
-        if any(f.startswith("disp") for f in fields):
-            problems.append("%s is stored at an unrecognised field offset %s" % (name, fields))
     for off, group in by.items():
         if len(group) > 1:
-            known = [tuple(f) for f, _ in group]
-            if any(not f for f in known) or len(set(known)) != len(known) or any(len(f) != 1 for f in known):
+            known = [f for f, _ in group]
+            if any(f.startswith("~") or "," in f for f in known) or len(set(known)) != len(known):
                 problems.append("fold set at %+d is not resolvable by field: %s" % (off, sorted(group)))
     if problems:
         raise TableError("; ".join(problems))
-    return sorted((off, ",".join(f) or "-", name) for off, f, name, _ in rows)
+    return sorted(rows)
 
 
 def make_text(rows, xbe_sha256):
@@ -181,7 +201,7 @@ def parse_table(text):
             elif f[0] == "functions":
                 t["count"] = int(f[1])
             elif f[0] == "fn":
-                t["rows"].append((int(f[1]), [] if f[2] == "-" else f[2].split(","), f[3]))
+                t["rows"].append((int(f[1]), f[2], f[3]))
             else:
                 raise TableError("line %d: unknown record %r" % (n, f[0]))
         except (IndexError, ValueError):
@@ -209,11 +229,13 @@ def table_problems(text, expected_sha256=TABLE_SHA256):
         seen[name] = off
     by = collections.defaultdict(list)
     for off, fields, name in t["rows"]:
-        by[off].append((tuple(fields), name))
+        by[off].append((fields, name))
+        if fields.lstrip("~") == "" or any(f not in FIELDS.values() for f in fields.lstrip("~").split(",")):
+            problems.append("%s has no valid field set: %r" % (name, fields))
     for off, group in by.items():
         if len(group) > 1:
             known = [f for f, _ in group]
-            if any(len(f) != 1 for f in known) or len(set(known)) != len(known):
+            if any(f.startswith("~") or "," in f for f in known) or len(set(known)) != len(known):
                 problems.append("offset %+d holds %d functions that cannot be told apart by field" % (off, len(group)))
     return problems
 
@@ -223,8 +245,7 @@ def resolve(table, offset, field=None):
     offset = offset - (1 << 32) if offset >= 1 << 31 else offset  # saves write the unsigned wrap of a negative offset
     hits = [(f, n) for o, f, n in table["rows"] if o == offset]
     if field is not None:
-        narrowed = [(f, n) for f, n in hits if field in f]
-        hits = narrowed or [(f, n) for f, n in hits if not f]  # a function whose field is unknown fits any field
+        hits = [(f, n) for f, n in hits if field in f.lstrip("~").split(",")]  # only a field the function can hold
     return sorted(n for f, n in hits)
 
 
