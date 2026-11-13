@@ -55,6 +55,7 @@ SIGNATURES = {"XXZ": ("think", "movedone"), "XPAVCBaseEntity@@@Z": ("touch", "bl
               "XPAVCBaseEntity@@0W4USE_TYPE@@M@Z": ("use",)}
 MEMBER = re.compile(r"^\?[^?@]+@[^?]+@@[QAI]AE(?P<sig>.+)$")
 DIR32 = 6
+MIN_SERVER_OBJECTS = 100  # the v0.2.0 map names 104
 BLOCK = (0x27C000, 0x338000)  # the server code block of xbe-cdd64653
 GAMEDLLINIT = "?GameDLLInit@@YAXXZ"
 MAP_LINE = re.compile(r"\s*0001:[0-9a-f]{8}\s+(\S+)\s+([0-9a-f]{16})\s+(?:f\s+)?(?:i\s+)?(\S+)")
@@ -132,6 +133,23 @@ def map_symbols(text):
             name = m.group(1)
             out[name[3:] if name.startswith("sv_") else name] = int(m.group(2), 16)
     return out
+
+
+def server_objects(map_text):
+    """The objects of the server module: those the link renamed a symbol of (the isolation prefix `sv_`)."""
+    out = set()
+    for line in map_text.splitlines():
+        m = MAP_LINE.match(line)
+        if m and m.group(1).startswith("sv_"):
+            out.add(m.group(3))
+    return out
+
+
+def census_problems(expected, present):
+    """every object the link took server code from must have been scanned, or the table would silently lack callbacks"""
+    missing = sorted(set(expected) - set(present))
+    return ["%d of the %d server objects the link map names were not scanned (%s)"
+            % (len(missing), len(expected), ", ".join(missing[:4]) + (" ..." if len(missing) > 4 else ""))] if missing else []
 
 
 # --- the table ----------------------------------------------------------------------------------------------
@@ -283,6 +301,13 @@ def main(argv=None):
             paths = sorted(glob.glob(os.path.join(a.objdir, "*.obj")))
             if not paths:
                 raise TableError("no objects in %s" % a.objdir)
+            with open(a.map, encoding="utf-8", errors="replace") as f:
+                expected = server_objects(f.read())
+            if len(expected) < MIN_SERVER_OBJECTS:
+                raise TableError("the map names only %d server objects" % len(expected))
+            problems = census_problems(expected, [os.path.basename(p) for p in paths])
+            if problems:
+                raise TableError(problems[0])
             for p in paths:
                 with open(p, "rb") as f:
                     for name, code, disp in address_taken(f.read()):

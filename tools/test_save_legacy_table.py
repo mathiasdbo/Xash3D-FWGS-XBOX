@@ -135,6 +135,64 @@ class Building(unittest.TestCase):
         self.assertIn("outside the server block", str(cm.exception))
 
 
+class Census(unittest.TestCase):
+    MAP = "\n".join(["0001:00000000 sv_?A@CFoo@@QAEXXZ 0000000000300000 f a.obj",
+                     "0001:00000010 sv_?B@CFoo@@QAEXXZ 0000000000300010 f b.obj",
+                     "0001:00000020 _PM_Move 0000000000300020 f c.obj",
+                     "0001:00000030 sv_?A2@CBar@@QAEXXZ 0000000000300030 f a.obj"]) + "\n"
+
+    def test_the_server_objects_are_the_ones_with_renamed_symbols(self):
+        self.assertEqual(slt.server_objects(self.MAP), {"a.obj", "b.obj"})
+
+    def test_a_complete_set_passes_and_extra_objects_are_fine(self):
+        self.assertEqual(slt.census_problems({"a.obj", "b.obj"}, ["a.obj", "b.obj", "tempmonster.obj"]), [])
+
+    def test_removing_one_object_makes_generation_fail(self):
+        p = slt.census_problems({"a.obj", "b.obj"}, ["a.obj"])
+        self.assertEqual(len(p), 1)
+        self.assertIn("b.obj", p[0])
+
+    def run_generate(self, objects):
+        """runs `generate` over a directory holding the named objects; returns (exit code, stderr, output file exists)"""
+        import contextlib
+        import hashlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            obj = coff([(".text", CODE, store(20), [(3, 0, slt.DIR32)])], ["?Think@CFoo@@QAEXXZ"])
+            os.makedirs(os.path.join(tmp, "objs"))
+            for name in objects:
+                with open(os.path.join(tmp, "objs", name), "wb") as f:
+                    f.write(obj)
+            mp = os.path.join(tmp, "m.map")
+            with open(mp, "w") as f:
+                f.write(self.MAP + "0001:00000040 ?GameDLLInit@@YAXXZ 0000000000300040 f a.obj\n")
+            xbe = os.path.join(tmp, "x.xbe")
+            with open(xbe, "wb") as f:
+                f.write(b"x")
+            saved = slt.SOURCE_XBE_SHA256, slt.MIN_SERVER_OBJECTS
+            slt.SOURCE_XBE_SHA256, slt.MIN_SERVER_OBJECTS = hashlib.sha256(b"x").hexdigest(), 2
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    code = slt.main(["generate", os.path.join(tmp, "objs"), "--map", mp, "--xbe", xbe, "--out",
+                                     os.path.join(tmp, "o.txt")])
+            finally:
+                slt.SOURCE_XBE_SHA256, slt.MIN_SERVER_OBJECTS = saved
+            return code, err.getvalue(), os.path.exists(os.path.join(tmp, "o.txt"))
+
+    def test_generation_refuses_an_object_directory_with_one_object_removed(self):
+        code, err, wrote = self.run_generate(["a.obj"])
+        self.assertEqual(code, 1)
+        self.assertIn("b.obj", err)
+        self.assertIn("not scanned", err)
+        self.assertFalse(wrote)
+
+    def test_generation_with_every_object_present_goes_through(self):
+        code, err, wrote = self.run_generate(["a.obj", "b.obj"])
+        self.assertEqual((code, err, wrote), (0, "", True))
+
+
 class Committed(unittest.TestCase):
     def text(self):
         with open(slt.TABLE, encoding="utf-8") as f:
