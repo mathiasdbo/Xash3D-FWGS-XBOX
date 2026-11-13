@@ -10433,26 +10433,37 @@ pulled from a console, the scripts - is kept outside the repository):
 **Steps** (in order; each ends in a check a script can fail):
 
 - **XS.0 - the layout check, first.** `tools/save_layout_check.py check
-  <xbe>` reads the XBE's server export table (entity name to function, 251
-  entries) and the SDK's dispatch table (`gFunctionTable`: `GameDLLInit`
-  first, 50 code pointers), and fails unless every baseline export is
-  present at the same distance from the first export and the dispatch
-  table sits at the same distances, entry by entry. Extra exports are
-  allowed. The baseline, `tools/save-layout-baseline.txt`, is generated
-  from the `xbe-cdd64653` XBE and its link map (the map names
-  `GameDLLInit`; the check itself needs no map). `tools/packager/
-  make_payload.py` runs it before it writes anything, and both
-  `release.py` and the CI workflow go through `make_payload.py`; there is
-  no switch to skip it. **Not seen by it:** a saved target that is neither
-  exported nor in the dispatch table (XS.1 closes that), and a change
-  inside a function that keeps every offset (harmless to offsets).
+  <xbe>` compares three things with `tools/save-layout-baseline.txt`, all
+  measured from the first server export (`monster_flyer`):
+  - the server export table (entity name to function, 251 entries): every
+    baseline name present at the same distance (extra exports are allowed);
+  - the SDK's dispatch table (`gFunctionTable`: `GameDLLInit` first, 50 code
+    pointers), entry by entry;
+  - the first 32 bytes of every server function the link map names (2,986
+    of 2,998 kept), with the bytes that differed between the three public
+    builds masked, because they hold addresses that move with the image.
+    This is the part that sees a saved callback: on the real v0.2.0 XBE not
+    one of the 92 saved targets is an export or a dispatch entry (they are
+    member functions), so the first two checks alone protect them only
+    through the block moving as a whole; the third covers all 92. Found in
+    review, not by the author.
+
+  The baseline is generated from the `xbe-cdd64653` XBE, its link map (it
+  names `GameDLLInit` and the functions) and the two older XBEs (for the
+  masks); the check itself needs no map. `tools/packager/make_payload.py`
+  runs it before it writes anything, and both `release.py` and the CI
+  workflow go through `make_payload.py`. The command line has no option to
+  name another baseline (a candidate could bring its own); only the tests
+  hand one in. **Not seen:** two functions with identical beginnings
+  trading places, and a function the map did not name; XS.1 closes both
+  (the legacy table lists every callback a save can hold).
   **Status (2026-11-13): built.** Passes on the three public XBEs (50
-  dispatch entries, `GameDLLInit` at +210256 from `monster_flyer`, the
-  value the saves' offsets imply); on the real v0.2.0 XBE a moved export,
-  a moved `GameDLLInit` pointer and a moved later dispatch entry each
-  fail it, and `make_payload.py` exits 1 and writes nothing. Retired by
-  XS.4: once old saves are read through a table, the layout may change and
-  the baseline is rebuilt.
+  dispatch entries, `GameDLLInit` at +210256, the value the saves' offsets
+  imply). On the real v0.2.0 XBE a moved export, a moved `GameDLLInit`
+  pointer, a moved later dispatch entry, one callback body changed, and
+  two callbacks trading places each fail it, and `make_payload.py` exits 1
+  and writes nothing. Retired by XS.4: once old saves are read through a
+  table, the layout may change and the baseline is rebuilt.
 - **XS.1 - the legacy table, frozen.** Generated once from the
   `xbe-cdd64653` map and checked in: offset, function name, and which
   fields may hold it. Before it is frozen, the folding audit: every server

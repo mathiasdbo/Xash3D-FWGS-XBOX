@@ -124,6 +124,8 @@ against: `make_payload.py` runs `tools/save_layout_check.py` on it first and sto
 if the server code has moved, with nothing written. There is no switch for that;
 the way past it is the engine work in `docs/r3d/fork-plan.md` (XS.2 and XS.3).
 To check a build by hand: `python tools/save_layout_check.py check default.xbe`.
+The baseline is `tools/save-layout-baseline.txt`; its header in
+`tools/save_layout_check.py` says how it is made.
 
 `release.py` needs PyInstaller (`pip install pyinstaller`). The Windows exe is
 built on Windows; a Linux binary can only be built on Linux, so Linux users

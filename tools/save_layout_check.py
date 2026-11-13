@@ -3,7 +3,7 @@
 
     python tools/save_layout_check.py check <default.xbe>
     python tools/save_layout_check.py baseline <default.xbe> --map <default.map> --label xbe-cdd64653 \
-        --out tools/save-layout-baseline.txt
+        --also-xbe <older default.xbe> --also-xbe <older default.xbe> --out tools/save-layout-baseline.txt
 
 Why it exists. The Xbox build writes a saved function pointer (a think, touch, use, blocked or move-done callback)
 as `ofs:N`, N being the byte offset of the function from `GameDLLInit` (engine/common/lib_common.c). A save is
@@ -17,14 +17,18 @@ What it checks, from the XBE alone (no link map is needed):
     one at the same distance from the first export;
   * the SDK's dispatch table (`gFunctionTable`: GameDLLInit, DispatchSpawn, DispatchThink, ... 50 code pointers
     in a row) is where the baseline says, relative to the same anchor, entry by entry. Its first word is
-    GameDLLInit itself, the point every saved offset is measured from.
+    GameDLLInit itself, the point every saved offset is measured from;
+  * the code at the offset of every server function (about 3,000, from the link map the baseline was made with):
+    its first 32 bytes, with the bytes that differed between the three public builds masked, because those hold
+    addresses that move with the rest of the image. A saved callback that is neither exported nor in the dispatch
+    table is one of these, so a function that moved, changed or swapped places with another shows here.
 
 Extra exports are fine (a new entity appends to the table). Anything else fails, and a failure means: do not
 publish this XBE until XS.2 and XS.3 (names in saves, and the old offsets read through a table) are in.
 
-The check cannot see a saved target that is neither exported nor in the dispatch table. XS.1 (the legacy table,
-checked against the link map) closes that; until then this is the guard against the one thing known to move
-offsets, which is the server block itself moving or changing size.
+What it still cannot see: two functions with identical beginnings trading places, and a function the link map
+did not name. XS.1 (the legacy table: every callback a save can hold, checked against the map) closes the gap;
+until then this is the guard against the thing known to move offsets, the server code moving or changing size.
 """
 
 import argparse
@@ -40,6 +44,8 @@ BASELINE = os.path.join(HERE, "save-layout-baseline.txt")
 MARKER = "worldspawn"
 MIN_EXPORTS = 40  # a run of (name, function) pairs shorter than this is not the table
 DISPATCH_MIN = 20  # the dispatch table is at least this many code pointers in a row
+WINDOW = 32  # bytes of each server function that are compared
+MIN_STABLE = 8  # a function with fewer unmasked bytes than this is left out: it would prove nothing
 
 
 class XbeError(Exception):
@@ -177,7 +183,46 @@ def gameinit_from_map(text):
     return server[0]
 
 
-def make_baseline(xbe, label, sha256, gameinit_va):
+def server_symbols_from_map(text):
+    """{address: first symbol} of the server module's functions in a link map (the `sv_` symbols of the code section)."""
+    out = {}
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) >= 3 and f[0].startswith("0001:") and f[1].startswith("sv_"):
+            out.setdefault(int(f[2], 16), f[1])
+    return out
+
+
+def window(xbe, va):
+    o = xbe.offset(va)
+    if o is None or o + WINDOW > len(xbe.data):
+        return None
+    return xbe.data[o:o + WINDOW]
+
+
+def derive_functions(builds, offsets_names):
+    """builds: [(Xbe, anchor address)], at least two, each a build the saves were written against. offsets_names:
+    [(offset from the anchor, name)]. A function's pattern is its first WINDOW bytes with the positions that differ
+    between the builds masked ('??'); it is kept when MIN_STABLE bytes or more remain."""
+    if len(builds) < 2:
+        raise XbeError("masks come from the differences between builds: give at least two")
+    out = []
+    for off, name in offsets_names:
+        ws = [window(x, a + off) for x, a in builds]
+        if None in ws:
+            continue
+        stable = [all(w[i] == ws[0][i] for w in ws) for i in range(WINDOW)]
+        if sum(stable) >= MIN_STABLE:
+            out.append((off, name, "".join("%02x" % ws[0][i] if stable[i] else "??" for i in range(WINDOW))))
+    return out
+
+
+def pattern_matches(pattern, data):
+    return len(data) == WINDOW and all(
+        pattern[2 * i:2 * i + 2] == "??" or data[i] == int(pattern[2 * i:2 * i + 2], 16) for i in range(WINDOW))
+
+
+def make_baseline(xbe, label, sha256, gameinit_va, functions=()):
     exports = server_exports(xbe)
     anchor = min(exports, key=lambda n: (exports[n], n))
     anchor_va = exports[anchor]
@@ -192,11 +237,17 @@ def make_baseline(xbe, label, sha256, gameinit_va):
     ]
     for n in sorted(exports, key=lambda n: (exports[n], n)):
         lines.append("export %s %d" % (n, exports[n] - anchor_va))
+    for off, name, pattern in sorted(functions):
+        lines.append("fn %d %s %s" % (off, pattern, name))
     return "\n".join(lines) + "\n"
 
 
+def _is_hex(x):
+    return len(x) == 2 and all(c in "0123456789abcdef" for c in x)
+
+
 def parse_baseline(text):
-    b = {"build": None, "anchor": None, "gamedllinit": None, "dispatch": None, "exports": {}}
+    b = {"build": None, "anchor": None, "gamedllinit": None, "dispatch": None, "exports": {}, "functions": []}
     for ln, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -213,6 +264,12 @@ def parse_baseline(text):
                 b["dispatch"] = [int(x) for x in f[1:]]
             elif f[0] == "export":
                 b["exports"][f[1]] = int(f[2])
+            elif f[0] == "fn":
+                pat = f[2]
+                if len(pat) != 2 * WINDOW or any(pat[i:i + 2] != "??" and not _is_hex(pat[i:i + 2])
+                                                 for i in range(0, 2 * WINDOW, 2)):
+                    raise ValueError("pattern")
+                b["functions"].append((int(f[1]), pat, f[3] if len(f) > 3 else "?"))
             else:
                 raise ValueError(f[0])
         except (IndexError, ValueError):
@@ -251,6 +308,12 @@ def check(xbe, baseline):
     if dispatch_table(xbe, anchor_va, baseline["dispatch"]) is None:
         problems.append("the SDK's dispatch table (GameDLLInit first) is not where the baseline has it, relative to %s"
                         % anchor)
+    differ = [(off, name) for off, pattern, name in baseline["functions"]
+              if not pattern_matches(pattern, window(xbe, anchor_va + off) or b"")]
+    if differ:
+        problems.append("%d of %d server function(s) do not start with the baseline's bytes at their offset from %s: %s"
+                        % (len(differ), len(baseline["functions"]), anchor,
+                           ", ".join("%+d %s" % (o, n) for o, n in differ[:6])))
     return problems
 
 
@@ -285,7 +348,11 @@ def main():
     b = sub.add_parser("baseline")
     b.add_argument("xbe")
     b.add_argument("--label", required=True, help="the release this XBE is, e.g. xbe-cdd64653")
-    b.add_argument("--map", required=True, help="that build's link map (it names GameDLLInit's address)")
+    b.add_argument("--map", required=True,
+                   help="that build's link map (it names GameDLLInit and every server function)")
+    b.add_argument("--also-xbe", action="append", default=[], required=True,
+                   help="another build the saves were written against (repeat it; the public builds are three): "
+                        "the bytes that differ between them are masked")
     b.add_argument("--out", required=True)
     a = ap.parse_args()
     try:
@@ -303,7 +370,17 @@ def main():
             raw = f.read()
         with open(a.map, encoding="utf-8", errors="replace") as f:
             gameinit = gameinit_from_map(f.read())
-        text = make_baseline(Xbe(raw), a.label, hashlib.sha256(raw).hexdigest(), gameinit)
+        with open(a.map, encoding="utf-8", errors="replace") as f:
+            symbols = server_symbols_from_map(f.read())
+        main_xbe = Xbe(raw)
+        main_anchor = min(server_exports(main_xbe).values())
+        builds = [(main_xbe, main_anchor)]
+        for path in a.also_xbe:
+            with open(path, "rb") as f:
+                other = Xbe(f.read())
+            builds.append((other, min(server_exports(other).values())))
+        functions = derive_functions(builds, [(va - main_anchor, nm) for va, nm in sorted(symbols.items())])
+        text = make_baseline(main_xbe, a.label, hashlib.sha256(raw).hexdigest(), gameinit, functions)
         # the baseline must pass against the very XBE it came from, or it is wrong
         problems = check(Xbe(raw), parse_baseline(text))
         if problems:

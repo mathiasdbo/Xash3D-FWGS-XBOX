@@ -87,7 +87,9 @@ def build_record(xbe_commit, xbe_sha256, prepatched):
 VIDEO_CFG = b'// written by the Xash3D-FWGS-XBOX packager\r\nr_refdll "nv2a"\r\n'
 
 
-def main():
+def main(argv=None, layout_baseline=save_layout_check.BASELINE):
+    """layout_baseline is for the tests, which hand it a baseline made from their own small XBE. The command line has
+    no way to name one: the committed baseline is the policy, and a candidate must not be able to bring its own."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--xbe", required=True)
     ap.add_argument("--title", default="hl")
@@ -96,16 +98,13 @@ def main():
     ap.add_argument("--prepatched", action="store_true",
                     help="the XBE already carries the title, logo and dashboard images (the default.xbe of an earlier "
                          "payload): ship it as it is, patching it again would add the image sections twice")
-    ap.add_argument("--layout-baseline", default=save_layout_check.BASELINE,
-                    help="the save layout the XBE must keep (tools/save-layout-baseline.txt); there is no way to "
-                         "skip the check: a build that moves the server code makes players' saves unloadable")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     t = TITLES[a.title]
     tdir = os.path.join(a.out, a.title)
     with open(a.xbe, "rb") as f:
         raw = f.read()
     # before anything is written, so a refused XBE leaves the last payload as it was
-    save_layout_check.require(raw, a.layout_baseline)
+    save_layout_check.require(raw, layout_baseline)
     shutil.rmtree(tdir, ignore_errors=True)
     files = {}
 
