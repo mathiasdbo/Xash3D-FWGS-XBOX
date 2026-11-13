@@ -31,10 +31,19 @@ PC_ONLY_FILES = ("config.cfg", "autoexec.cfg", "controller.cfg", "joystick.cfg",
                  "steam_autocloud.vdf")
 PC_ONLY_DIRS = ("controller_configs",)
 
+# The PC's saved games. They were written by PC Half-Life (or a PC Xash) for that build's game code; the console's
+# saves are its own, in UDATA/<title id>/<gamedir>/<gamedir>/save, and nothing from the PC goes beside or over them.
+PC_SAVE_DIRS = ("save",)
+
 
 def _is_pc_only(inner):
     """inner: a path inside a game folder, lower case, '/'-separated"""
     return inner in PC_ONLY_FILES or inner.split("/")[0] in PC_ONLY_DIRS and "/" in inner
+
+
+def _is_pc_save(inner):
+    """inner: as _is_pc_only. Anything inside a game folder's SAVE folder."""
+    return "/" in inner and inner.split("/")[0] in PC_SAVE_DIRS
 
 
 _FLAGS = ("animated_title", "hd_background")
@@ -75,15 +84,21 @@ def plan(steam_root, title, payload_dir=None, log=print, baked=None):
 
     files = {}
     left_out = set()
+    saves_left = 0
     for gd in dict.fromkeys([t["gamedir"], t["basedir"]]):
         for rel, src, size in _walk(os.path.join(steam_root, gd), gd):
             inner = rel.lower()[len(gd) + 1:]
+            if _is_pc_save(inner):
+                saves_left += 1
+                continue
             if _is_pc_only(inner):
                 left_out.add(inner.split("/")[0] + ("/" if "/" in inner else ""))
                 continue
             files[rel.lower()] = (rel, src, size)
     if left_out:
         log("Left out PC settings (%s): the Xbox has its own, xbox_*.cfg." % ", ".join(sorted(left_out)))
+    if saves_left:
+        log("Left out the PC's saved games (%d files in save/): the console keeps its own." % saves_left)
 
     # gameinfo.txt: add the two flags the Steam copy leaves out
     for gd in dict.fromkeys([t["gamedir"], t["basedir"]]):

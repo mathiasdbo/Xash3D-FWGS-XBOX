@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - Packager: the PC's saved games no longer go to the console
+
+The packager copied the `SAVE` folder of the PC's Half-Life install into the game folder with everything else. Those saves were written by the PC game and are not the console's; it now leaves the folder out and says so in the log. The console's own saves, in `UDATA`, were never touched and still are not.
+
 ### Changed - the site on v0.2.0 and sound in emulators
 
 The install page has a Playing in an emulator section (xemu and xbased, v0.2.0 or later for sound), the Troubleshooting page has No sound, or only music, in xemu or xbased, and the Building page names xbased beside xemu.
