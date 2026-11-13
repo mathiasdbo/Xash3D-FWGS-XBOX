@@ -9,7 +9,9 @@ beside it; and
 the build record - repo commit, the XBE's own sha256, whether the tree was
 clean - goes into the manifest so a packaged app says which build it carries.
 The XBE should come from a clean build of main: the packager ships it as the
-stable build.
+stable build. It must also keep the save layout of the builds already in
+players' hands (tools/save_layout_check.py); a payload is not made from one that
+does not.
 """
 
 import argparse
@@ -24,6 +26,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(REPO, "tools"))
+import save_layout_check  # noqa: E402
 from r3dpack import xbepatch  # noqa: E402
 from r3dpack.titles import TITLES  # noqa: E402
 
@@ -92,9 +96,16 @@ def main():
     ap.add_argument("--prepatched", action="store_true",
                     help="the XBE already carries the title, logo and dashboard images (the default.xbe of an earlier "
                          "payload): ship it as it is, patching it again would add the image sections twice")
+    ap.add_argument("--layout-baseline", default=save_layout_check.BASELINE,
+                    help="the save layout the XBE must keep (tools/save-layout-baseline.txt); there is no way to "
+                         "skip the check: a build that moves the server code makes players' saves unloadable")
     a = ap.parse_args()
     t = TITLES[a.title]
     tdir = os.path.join(a.out, a.title)
+    with open(a.xbe, "rb") as f:
+        raw = f.read()
+    # before anything is written, so a refused XBE leaves the last payload as it was
+    save_layout_check.require(raw, a.layout_baseline)
     shutil.rmtree(tdir, ignore_errors=True)
     files = {}
 
@@ -105,8 +116,6 @@ def main():
             f.write(data)
         files[rel] = hashlib.sha256(data).hexdigest()
 
-    with open(a.xbe, "rb") as f:
-        raw = f.read()
     assets = os.path.join(HERE, "assets")
     with open(os.path.join(assets, "titleimage.xbx"), "rb") as f:
         xt = f.read()
