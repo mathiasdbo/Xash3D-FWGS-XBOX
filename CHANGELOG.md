@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - console frame-time reports for the v0.1.3 build
+
+`docs/r3d/reports/play-v013-*.html`: four play-through recordings from a retail Xbox with the v0.1.3 build, about 4.5 hours from We've Got Hostiles through Blast Pit and Power Up to c2a2, as interactive reports (frame rate per map, CPU and GPU time, memory at each load). They are listed on the Performance page. Average 59.1 to 59.7 fps in all four; the dips are in c1a3b, c2a1a and c1a4j, and Blast Pit's c1a4i is the heaviest map on the CPU (11 to 12.6 ms per frame).
+
 ### Added - stick dead zones in the Controller Settings menu, and a one-time repair of the PC's zeros
 
 The Controller Settings screen has four sliders, one per stick axis (look left-right and up-down, move sideways and
