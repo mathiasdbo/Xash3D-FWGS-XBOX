@@ -73,7 +73,15 @@ typedef struct xbox_aci_books_s
 	uint32_t retired[2];
 	uint32_t reported;
 	uint32_t rescues;     /* reports made by KICK_ALL with nothing finished to report */
+	uint32_t spdif_dead;  /* 1: the S/PDIF engine never plays (an emulator's): only PCM out is waited for */
 } xbox_aci_books_t;
+
+/* PCM out finishing this many buffers while the S/PDIF engine has finished none and sits at
+   descriptor 0: the S/PDIF engine is not playing. Both engines start together and read the same
+   buffers on the console, where this cannot happen; xemu and xbased do not run S/PDIF out, and
+   waiting for it there left the audio thread with two callbacks in a whole session (SDL keeps two
+   buffers in flight, so two is all PCM out ever finishes before the thread waits). */
+#define XBOX_ACI_SPDIF_DEAD_AFTER 2
 
 /*
 One accounting run (the DPC's): updates the books from both engines'

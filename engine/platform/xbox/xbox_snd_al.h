@@ -37,6 +37,9 @@ void SDLash_SNDDMA_Activate( qboolean active );
    nonzero asks for OpenAL. */
 extern int xbox_snd_want_al;
 
+/* Nonzero when the audio probe found an emulator (xemu, xbased): see SNDDMA_Init */
+extern int xbox_snd_emulator;
+
 /* Nonzero while OpenAL is the open output */
 int Xbox_SndAL_Active( void );
 

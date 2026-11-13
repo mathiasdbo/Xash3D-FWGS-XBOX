@@ -409,6 +409,7 @@ void XAudioInit( int sampleSizeInBits, int numChannels, XAudioCallback callback,
 	aci_submitted = 0;
 	aci_books.retired[0] = aci_books.retired[1] = 0;
 	aci_books.reported = 0;
+	aci_books.spdif_dead = 0;
 	aci_last_done[0] = aci_last_done[1] = 0;
 	aci_force = 0;
 	aci_generation++;
@@ -517,6 +518,38 @@ void XAudioProvideSamples( unsigned char *buffer, unsigned short bufferLength, i
 	pac97device->nextDescriptor = (unsigned char)(( idx + 1 ) & ( XBOX_ACI_DESCRIPTORS - 1 ));
 
 	KfLowerIrql( old_irql );
+}
+
+// Does the S/PDIF engine play? On the console it reads the same buffers as PCM out, in step. xemu and
+// xbased do not run it: its registers sit still while PCM out finishes its buffers. An emulator also
+// gives the AC97 no output of its own, so what is played through it (the SDL backend, and the GP's
+// output in hardware audio) is never heard there; the APU's voices are. Plays two silent buffers
+// through both engines for at most 150 ms, then leaves the chip as XAudioInit(NULL) does.
+// Returns 1 when S/PDIF moved (a console), also when the probe could not run.
+int XAudioR3D_SpdifRuns( void )
+{
+	static unsigned char silence[2][4096] __attribute__(( aligned( 4096 )));
+	volatile uint8_t *pb;
+	int runs = 0, ms;
+
+	XAudioInit( 16, 2, NULL, NULL );
+	if( aci_failed )
+		return 1;
+	pb = aci_regs();
+	XAudioProvideSamples( silence[0], 2048, 0 );
+	XAudioProvideSamples( silence[1], 2048, 0 );
+	XAudioPlay();
+	for( ms = 0; ms < 150 && !runs; ms++ )
+	{
+		LARGE_INTEGER interval;
+
+		interval.QuadPart = -10000; // 1 ms
+		KeDelayExecutionThread( KernelMode, FALSE, &interval );
+		runs = ( pb[ACI_BOX_SPDIF + ACI_CIV] & ( XBOX_ACI_DESCRIPTORS - 1 )) != 0;
+	}
+	XAudioPause();
+	XAudioInit( 16, 2, NULL, NULL );
+	return runs;
 }
 
 void XAudioR3D_Kick( int level )

@@ -45,6 +45,10 @@ void XAudioR3D_GetStatus( xbox_audio_hal_status_t *out );
    XAudioInit generation. */
 int XAudioR3D_Progress( uint32_t *submitted, uint32_t *generation );
 
+/* 1 when the S/PDIF engine plays (a console), 0 when it does not (xemu, xbased): see xbox_audio_hal.c.
+   Call before the audio is opened; it plays two silent buffers. */
+int XAudioR3D_SpdifRuns( void );
+
 /* Runs the buffer accounting now, from the hardware's registers, as if an
    interrupt had come, with recovery level XBOX_ACI_KICK_LAST or
    XBOX_ACI_KICK_ALL (xbox_aci_account), and restarts an engine that is

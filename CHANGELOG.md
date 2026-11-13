@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Fixed - no sound in xemu and xbased
+
+With Hardware audio off there was no sound in either emulator, and with it on only the music played: no effects, no speech. Both emulators give the AC97 chip no audio output and never run its S/PDIF engine, and an Xbox plays the SDL backend and the audio processor's output through exactly that. The game now finds out at start (it plays two silent buffers and watches the S/PDIF engine) and on an emulator uses OpenAL on the audio processor with the room effect and the sounds in the CPU mix, which both emulators play. A console is unchanged. The audio driver also no longer stalls after two callbacks when S/PDIF never moves, so the frame-time recorder's mixer spans mean something in xemu. `sndbackend.txt` has an `emulator:` line.
+
 ### Added - console frame-time reports for the v0.1.3 build
 
 `docs/r3d/reports/play-v013-*.html`: four play-through recordings from a retail Xbox with the v0.1.3 build, about 4.5 hours from We've Got Hostiles through Blast Pit and Power Up to c2a2, as interactive reports (frame rate per map, CPU and GPU time, memory at each load). They are listed on the Performance page. Average 59.1 to 59.7 fps in all four; the dips are in c1a3b, c2a1a and c1a4j, and Blast Pit's c1a4i is the heaviest map on the CPU (11 to 12.6 ms per frame).

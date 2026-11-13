@@ -104,6 +104,25 @@ static void test_account( void )
 	civ[0] = civ[1] = 7; lvi[0] = lvi[1] = 8;
 	CHECK( xbox_aci_account( &b, 9, civ, lvi, ev, XBOX_ACI_KICK_ALL ) == 2 );
 	CHECK( b.reported == 9 && b.rescues == 1 );
+
+	// an emulator's S/PDIF engine never leaves descriptor 0 (xemu, xbased): after PCM out has
+	// finished XBOX_ACI_SPDIF_DEAD_AFTER buffers it is written off, and PCM alone is waited for
+	memset( &b, 0, sizeof( b ));
+	civ[0] = 1; lvi[0] = 7; civ[1] = 0; lvi[1] = 7;
+	CHECK( xbox_aci_account( &b, 8, civ, lvi, ev, XBOX_ACI_KICK_NONE ) == 0 ); // 1 buffer: not yet
+	CHECK( !b.spdif_dead && b.retired[0] == 1 && b.reported == 0 );
+	civ[0] = 5;
+	CHECK( xbox_aci_account( &b, 8, civ, lvi, ev, XBOX_ACI_KICK_NONE ) == 5 );
+	CHECK( b.spdif_dead && b.reported == 5 );
+	civ[0] = 7;
+	CHECK( xbox_aci_account( &b, 8, civ, lvi, ev, XBOX_ACI_KICK_NONE ) == 2 );
+	CHECK( b.reported == 7 );
+
+	// the console: S/PDIF moves with PCM out, so it is never written off
+	memset( &b, 0, sizeof( b ));
+	civ[0] = 5; lvi[0] = 7; civ[1] = 1; lvi[1] = 7;
+	CHECK( xbox_aci_account( &b, 8, civ, lvi, ev, XBOX_ACI_KICK_NONE ) == 1 );
+	CHECK( !b.spdif_dead && b.retired[1] == 1 && b.reported == 1 );
 }
 
 static void test_watchdog( void )

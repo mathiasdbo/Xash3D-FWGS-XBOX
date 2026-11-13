@@ -36,6 +36,7 @@ no room audio is playing then.
 #include "platform/platform.h"
 #include "sound.h"
 #include "platform/xbox/xbox_snd_gproom.h"
+#include "platform/xbox/xbox_snd_al.h"
 #include "platform/xbox/xbox_snd_al_queue.h"
 #include "platform/xbox/xbox_snd_rate_cfg.h"
 
@@ -114,6 +115,9 @@ qboolean Xbox_SndCfg_Asked( const char *key )
 	qboolean asked = false;
 	int i;
 
+	// an emulator plays no AC97 and so nothing the GP outputs: the room, the sounds and the speech stay on the CPU mix
+	if( xbox_snd_emulator && ( !Q_strcmp( key, "r3d_snd_gproom" ) || !Q_strcmp( key, "r3d_snd_voices" ) || !Q_strcmp( key, "r3d_snd_voices_speech" )))
+		return false;
 	// the menu's "Hardware audio" asks for every step at once
 	if(( !Q_strcmp( key, "r3d_snd_gproom" ) || !Q_strcmp( key, "r3d_snd_voices" ) || !Q_strcmp( key, "r3d_snd_voices_speech" ))
 		&& Xbox_SndCfg_Hardware())
