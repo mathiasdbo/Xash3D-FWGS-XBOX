@@ -68,6 +68,12 @@ uint32_t xbox_aci_account( xbox_aci_books_t *books, uint32_t submitted, const ui
 			evidence[i] | ( force >= XBOX_ACI_KICK_LAST ? XBOX_ACI_FORCE : 0u ));
 	}
 
+	// the S/PDIF engine of an emulator never plays: waiting for it stalls the audio thread for good
+	if( !books->spdif_dead && books->retired[1] == 0 && civ[1] == 0 && books->retired[0] >= XBOX_ACI_SPDIF_DEAD_AFTER )
+		books->spdif_dead = 1;
+	if( books->spdif_dead )
+		books->retired[1] = books->retired[0];
+
 	n = xbox_aci_both_finished( books->retired[0], books->retired[1], books->reported );
 	books->reported += n;
 

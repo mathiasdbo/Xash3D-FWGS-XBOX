@@ -45,6 +45,7 @@ verified on a console.
 #include "platform/xbox/xbox_snd_feed.h"
 #include "platform/xbox/xbox_snd_music_voice.h"
 #include "platform/xbox/xbox_frametime.h"
+#include "platform/xbox/xbox_audio_hal.h" /* XAudioR3D_SpdifRuns */
 
 #include <AL/al.h>
 #include <AL/alc.h>
@@ -60,6 +61,8 @@ verified on a console.
 #define XBOX_SND_AL_POOL_BYTES ( 64 * 1024 )
 
 int xbox_snd_want_al;
+int xbox_snd_emulator;
+static int s_emulator_probed;
 
 static int s_al_active;
 static ALCdevice *s_al_device;
@@ -648,6 +651,7 @@ static void Xbox_Snd_WriteBackendNote( qboolean opened )
 
 	if( !f )
 		return;
+	FS_Printf( f, "emulator: %s\n", xbox_snd_emulator ? "yes (S/PDIF does not play)" : "no" );
 	FS_Printf( f, "asked %s\nopened %s\n", xbox_snd_want_al ? "al" : "sdl",
 		!opened ? "none" : s_al_active ? "al" : "sdl" );
 	if( xbox_snd_want_al && !s_al_active )
@@ -668,6 +672,19 @@ qboolean SNDDMA_Init( void )
 	qboolean ok;
 
 	s_al_active = false;
+	// xemu and xbased play only what the APU's voices send to the output: the AC97 (the SDL backend, and the GP's
+	// output) is silent there. The S/PDIF engine tells them from a console: it never moves. There the OpenAL
+	// backend plays the mix as one voice, and the room on the GP and the sounds on voices stay off.
+	if( !s_emulator_probed )
+	{
+		s_emulator_probed = 1;
+		if( !XAudioR3D_SpdifRuns( ))
+		{
+			xbox_snd_emulator = 1;
+			xbox_snd_want_al = 1;
+			Con_Printf( "Audio: an emulator (the S/PDIF output does not play): OpenAL on the APU, the room and the sounds on the CPU mix\n" );
+		}
+	}
 	if( xbox_snd_want_al )
 	{
 		if( XboxAL_Init( ))
