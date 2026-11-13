@@ -10492,6 +10492,26 @@ pulled from a console, the scripts - is kept outside the repository):
   function, with zero unexplained fold sets and zero assignable functions
   outside the block (or, for each one found there, its offset recovered
   for all three builds).
+
+  **Done.** `tools/save-legacy-table.txt` (230 functions, pinned digest)
+  and `tools/save_legacy_table.py`, made from the objects of a clean
+  `cdd64653` build (107 server objects, all compiled) and its link map. An
+  address-taken function is a DIR32 relocation in `.text` or `.data`
+  (`.rdata` ones are vtable entries and constant tables, never stored by
+  `SetThink` and friends). The field comes from the store's displacement
+  (20 think, 24 touch, 28 use, 32 blocked, 204 move-done; SDK
+  `cbase.h:250-253`, `subs.cpp:344`): 222 functions have a store of that
+  shape. Of the rest, 8 are non-virtual members of a callback shape
+  (`CMonsterMaker::MakerThink` and `ToggleUse`, both saved, are set through
+  a register) and are listed by shape (`~think,movedone`); the other 69
+  address-taken functions are exports, dispatch functions, static
+  initialisers and similar, are not callbacks, and are not in the table (a
+  first version that kept them was refused in review: it would have made
+  `PM_Move`'s offset resolve for any field). A function resolves only for a
+  field it can hold. Fold sets: one, -210368, resolved by field. Every row
+  is inside the server block. All 92 saved offsets resolve. The 28 unmapped
+  code-taken symbols are static locals.
+
 - **XS.2 - new saves write names.** `COM_NameForFunction` on the Xbox
   returns a name from a generated address-to-name table (X7.2's generator
   already writes name-to-address from the objects), in the form upstream's
