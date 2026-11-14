@@ -110,6 +110,11 @@ def main(argv=None, layout_baseline=save_layout_check.BASELINE, layout_sha256=sa
     # before anything is written, so a refused XBE leaves the last payload as it was
     save_layout_check.require(raw, layout_baseline, layout_sha256)
     if fixture_gate:
+        # the gate compiles this checkout's save reader, so it vouches for an XBE built from this checkout only
+        built = git("rev-parse", a.xbe_commit + "^{commit}") if a.xbe_commit else None
+        if a.xbe_commit and built != git("rev-parse", "HEAD"):
+            raise SystemExit("The save fixture gate runs this checkout's save reader, and this XBE was built from %s, not from "
+                             "this checkout's HEAD: check that commit out and package from there (XS.4)." % a.xbe_commit)
         fixture_gate()
     shutil.rmtree(tdir, ignore_errors=True)
     files = {}

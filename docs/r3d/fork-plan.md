@@ -10589,7 +10589,11 @@ pulled from a console, the scripts - is kept outside the repository):
   2026-11-13), `tools/host-tests/save_legacy_resolve.c`. `make_payload.py`
   refuses without the folder. Checked: deleting one table row from
   `save_legacy_table.inc` fails the gate. Open: the xemu load (it needs a
-  writable disk image; `xemu_hdd.py` is read-only), fixtures for the saves
+  writable disk image; `xemu_hdd.py` is read-only; it is also the only
+  check of the shared offset, which the host gate records as `BYFIELD`
+  because the SDK's field logic does not run on the host, and of the exact
+  XBE, since the host gate runs this checkout's reader: `make_payload.py`
+  refuses an XBE built from another commit), fixtures for the saves
   written since, and retiring XS.0's baseline, which waits for the live level.
 - **XS.5 - the other ways a save can break**, each a written rule and a
   check in the same gate. None is verified yet:
