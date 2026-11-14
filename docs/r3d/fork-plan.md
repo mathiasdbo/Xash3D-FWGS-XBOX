@@ -10584,6 +10584,13 @@ pulled from a console, the scripts - is kept outside the repository):
   unset or the folder missing is refused, not skipped. A fixture is added
   for every released build and, over time, one per chapter. **Exit:** the
   gate fails on a build with XS.3's table removed.
+  **Done (host level; live level open).** `tools/save_fixture_gate.py`,
+  `tools/save-fixtures-expected.txt` (36 fixtures from the console copy of
+  2026-11-13), `tools/host-tests/save_legacy_resolve.c`. `make_payload.py`
+  refuses without the folder. Checked: deleting one table row from
+  `save_legacy_table.inc` fails the gate. Open: the xemu load (it needs a
+  writable disk image; `xemu_hdd.py` is read-only), fixtures for the saves
+  written since, and retiring XS.0's baseline, which waits for the live level.
 - **XS.5 - the other ways a save can break**, each a written rule and a
   check in the same gate. None is verified yet:
   - the title id (`FFFF0002`) and the path under it (`valve/valve/save`):
