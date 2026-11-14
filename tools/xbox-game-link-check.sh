@@ -597,8 +597,10 @@ if [ -n "$XBE_OUT" ]; then
 	# already fixed for the ordinary link's $OUT_EXE (Codex round 2,
 	# see that fix's comment above). Remove both first and fail loudly
 	# if removal doesn't leave them actually gone.
-	rm -f "$XBE_EXE" "$XBE_OUT"
-	if [ -e "$XBE_EXE" ] || [ -e "$XBE_OUT" ]; then
+	# The map goes too (XS.2): the callback-address check reads it, and a stale one would certify an earlier link.
+	XBE_MAP="$SCRATCH/game-$TITLE/xbe-build.map"
+	rm -f "$XBE_EXE" "$XBE_OUT" "$XBE_MAP"
+	if [ -e "$XBE_EXE" ] || [ -e "$XBE_OUT" ] || [ -e "$XBE_MAP" ]; then
 		echo "xbox-game-link-check: could not remove stale XBE build" >&2
 		echo "  artifact(s) before building - refusing to risk reporting a" >&2
 		echo "  stale artifact." >&2
@@ -611,7 +613,6 @@ if [ -n "$XBE_OUT" ]; then
 	# (Codex review, X5: a map from a separate link of the same inputs has
 	# identical addresses but no identity a tool can check; section
 	# extents are not identity). The map lands next to the XBE below.
-	XBE_MAP="$SCRATCH/game-$TITLE/xbe-build.map"
 	"${NXDK_DIR:-deps/nxdk}/bin/nxdk-link" -errorlimit:0 -include:_automount_d_drive -force:unresolved -opt:noicf \
 		-stack:"$XBOX_STACK_SIZE" -map:"$XBE_MAP" \
 		-out:"$XBE_EXE" "@$NEW_RESPONSE" > "$SCRATCH/game-$TITLE/xbe-link.txt" 2>&1
@@ -626,6 +627,10 @@ if [ -n "$XBE_OUT" ]; then
 	fi
 
 	# XS.2: every saved-callback name has its own address in this link (nothing was folded).
+	if [ ! -s "$XBE_MAP" ]; then
+		echo "xbox-game-link-check: the XBE link wrote no map at $XBE_MAP; the callback addresses cannot be checked." >&2
+		exit 1
+	fi
 	if ! python tools/xbox-gen-callback-table.py check "$XBE_MAP" "$SERVER_EXPORTS_LIST"; then
 		echo "xbox-game-link-check: a saved-callback name shares an address with another: the link folded them." >&2
 		exit 1
