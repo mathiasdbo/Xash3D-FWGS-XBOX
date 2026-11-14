@@ -10528,11 +10528,11 @@ pulled from a console, the scripts - is kept outside the repository):
   **Done (code; live check open).** `tools/xbox-gen-callback-table.py`
   (`gen`: 230 names from the isolated objects, `neutral()` of the mangled
   name, build fails on two sharing a neutral name or an export's name, or on
-  fewer than 150 callbacks; `check`: after the XBE link, each name has its
+  fewer than 150 callbacks, or lacks any of XS.1's 230 names; `check`: after the XBE link, each name has its
   own address in the map), `tools/gen-library-tables.sh` (a name that is
   not a C identifier gets a generated one and its asm symbol),
   `lib_static.c` (`COM_NameForFunction` on the Xbox reverse-looks-up the
-  server table and never returns `ofs:`), `-opt:noicf` on both links of
+  server table; a pointer with no name stops the save with `Host_Error`, never an offset), `-opt:noicf` on both links of
   `xbox-game-link-check.sh` (whole image: lld cannot scope it; measured
   +77,824 bytes, 1.5%). Names are the **neutral** form, not the full
   mangled name: `COM_FunctionFromName_SR` turns any incoming MSVC name

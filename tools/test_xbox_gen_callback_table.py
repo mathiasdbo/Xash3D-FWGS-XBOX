@@ -108,6 +108,36 @@ class Callbacks(unittest.TestCase):
                 gen.callbacks(tmp)
 
 
+class Required(unittest.TestCase):
+    def test_the_required_names_are_xs1s_table_in_neutral_form(self):
+        req = gen.required_names()
+        self.assertEqual(len(req), 230)
+        self.assertIn("CallMonsterThink@CBaseMonster", req)
+        self.assertIn("CallHitBottom@CFuncPlat", req)
+
+    def test_a_table_that_lost_one_callback_is_refused_even_above_the_minimum(self):
+        req = gen.required_names()
+        cbs = {n: "sv_?x@@" for n in req}
+        self.assertEqual(gen.missing_required(cbs, req), [])
+        del cbs["CallMonsterThink@CBaseMonster"]
+        p = gen.missing_required(cbs, req)
+        self.assertEqual(len(p), 1)
+        self.assertIn("CallMonsterThink@CBaseMonster", p[0])
+
+    def test_generation_fails_when_an_object_set_lacks_a_required_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "a.obj"), "wb") as f:
+                f.write(obj_with([THINK], [(THINK, 20)]))
+            old = gen.MIN_CALLBACKS
+            gen.MIN_CALLBACKS = 1
+            try:
+                with self.assertRaises(gen.GenError) as cm:
+                    gen.callbacks(tmp, {"Think@CFoo", "Gone@CFoo"})
+            finally:
+                gen.MIN_CALLBACKS = old
+            self.assertIn("Gone@CFoo", str(cm.exception))
+
+
 class Exports(unittest.TestCase):
     def test_the_callbacks_follow_the_exports_in_order(self):
         text = gen.write_exports("monster_foo\nGiveFnptrsToDll _GiveFnptrsToDll@8\n", {"B@C": "sv_?B@C@@QAEXXZ", "A@C": "sv_?A@C@@QAEXXZ"})

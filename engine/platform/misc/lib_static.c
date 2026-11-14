@@ -68,7 +68,10 @@ const char *COM_NameForFunction( void *hInstance, void *function )
 	// so each has its own address. A name has an '@'; entity classnames and the API exports do not.
 	table_t *tbl = (table_t*)hInstance;
 
-	if( tbl && function )
+	if( !function )
+		return NULL; // the SDK skips empty fields before it asks, but a null pointer has no name and is not an error
+
+	if( tbl )
 	{
 		for( ; tbl->name; tbl++ )
 		{
@@ -77,8 +80,10 @@ const char *COM_NameForFunction( void *hInstance, void *function )
 		}
 	}
 
-	// Never an offset: a pointer with no name would load wrong on any other link. The SDK's save then refuses the entity.
-	Con_Printf( S_ERROR "%s: no saved name for function %p\n", __func__, function );
+	// Never an offset, and never a silent gap: a pointer with no name would load wrong, and the SDK only logs a NULL
+	// and writes the entity without it. The build refuses a table short of XS.1's names, so this is a callback no
+	// game code should have stored; stop the save (it is written as .tmp first, so the earlier file is untouched).
+	Host_Error( "%s: no saved name for function %p\n", __func__, function );
 	return NULL;
 #elif defined( XASH_ALLOW_SAVERESTORE_OFFSETS )
 	return COM_OffsetNameForFunction( function );

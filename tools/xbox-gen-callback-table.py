@@ -49,8 +49,20 @@ def defined_symbols(data):
     return {s["name"] for s in syms if s and s["sec"] > 0 and (s["typ"] >> 4) == 2}  # defined, and a function
 
 
-def callbacks(objdir):
-    """-> {callback name: linker symbol} from the objects of the directory"""
+def required_names():
+    """The neutral names of every function XS.1's frozen table lists: whatever saves already hold must stay nameable,
+    so a build that drops one (a classifier regression, an SDK change) is refused, not quietly short."""
+    return {neutral(n) for _off, _f, n in slt.load_table()["rows"]}
+
+
+def missing_required(cbs, required):
+    gone = sorted(set(required) - set(cbs))
+    return ["%d of the %d callbacks XS.1's table lists are not in this build's table (%s)"
+            % (len(gone), len(required), ", ".join(gone[:4]) + (" ..." if len(gone) > 4 else ""))] if gone else []
+
+
+def callbacks(objdir, required=()):
+    """-> {callback name: linker symbol} from the objects of the directory; `required` names must all be among them"""
     paths = sorted(glob.glob(os.path.join(objdir, "*.obj")))
     if not paths:
         raise GenError("no objects in %s" % objdir)
@@ -80,6 +92,9 @@ def callbacks(objdir):
         out[name] = sym
     if problems:
         raise GenError("; ".join(problems))
+    problems = missing_required(out, required)
+    if problems:
+        raise GenError(problems[0])
     if len(out) < MIN_CALLBACKS:
         raise GenError("only %d callbacks found in %d objects (expected at least %d): an incomplete object set"
                        % (len(out), len(paths), MIN_CALLBACKS))
@@ -137,7 +152,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         if a.cmd == "gen":
-            cbs = callbacks(a.objdir)
+            cbs = callbacks(a.objdir, required_names())
             with open(a.exports, encoding="utf-8") as f:
                 text = write_exports(f.read(), cbs)
             with open(a.out, "w", encoding="utf-8", newline="\n") as f:
@@ -151,6 +166,7 @@ def main(argv=None):
                 problems = check_map(f.read(), cbs)
             if len(cbs) < MIN_CALLBACKS:
                 problems.append("only %d callbacks in %s" % (len(cbs), a.exports))
+            problems += missing_required(cbs, required_names())
             for p in problems:
                 print("  " + p, file=sys.stderr)
             print("xbox-gen-callback-table: %d callbacks, %s" % (len(cbs), "NOT sound" if problems else "each at its own address"))
