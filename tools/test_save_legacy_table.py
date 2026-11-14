@@ -193,6 +193,41 @@ class Census(unittest.TestCase):
         self.assertEqual((code, err, wrote), (0, "", True))
 
 
+class EngineTable(unittest.TestCase):
+    """XS.3: the C table the engine reads is the frozen XS.1 table, nothing else"""
+
+    def test_the_committed_include_is_what_the_table_generates(self):
+        with open(slt.C_INC, encoding="utf-8", newline="") as f:
+            self.assertEqual(f.read().replace("\r\n", "\n"), slt.emit_c(slt.load_table()))
+
+    def test_every_offset_is_a_row_and_the_fold_is_null(self):
+        text = slt.emit_c(slt.load_table())
+        rows = [l for l in text.splitlines() if l.startswith("\t{")]
+        t = slt.load_table()
+        self.assertEqual(len(rows), len({o for o, _, _ in t["rows"]}))
+        self.assertIn("\t{ -210368, NULL },", rows)
+        self.assertEqual(sum(1 for l in rows if "NULL" in l), 1)
+
+    def test_names_are_neutral_and_agree_with_the_generators(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("g", os.path.join(HERE, "xbox-gen-callback-table.py"))
+        g = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(g)
+        for _, _, name in slt.load_table()["rows"]:
+            self.assertEqual(slt.neutral(name), g.neutral(name))
+            self.assertNotIn("?", slt.neutral(name))
+        with self.assertRaises(slt.TableError):
+            slt.neutral("_PM_Move")
+
+    def test_emit_c_check_fails_on_an_edited_include(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "x.inc")
+            with open(p, "w", newline="\n") as f:
+                f.write(slt.emit_c(slt.load_table()).replace('"', "'", 1))
+            self.assertEqual(slt.main(["emit-c", "--out", p, "--check"]), 1)
+
+
 class Committed(unittest.TestCase):
     def text(self):
         with open(slt.TABLE, encoding="utf-8") as f:

@@ -10554,6 +10554,26 @@ pulled from a console, the scripts - is kept outside the repository):
   A divergence entry for each side. **Exit:** all 24 fixture saves load in
   the XS.2 build and in a build with a server function added, each
   resolved pointer naming the function the map says it was.
+  **Done (code; live check open).** `engine/common/save_legacy.c`
+  (`SaveLegacy_ParseOffset`: a decimal, a negative read as its unsigned
+  32-bit wrap, nothing that does not fit 32 bits; `SaveLegacy_NameForOffset`:
+  binary search of `save_legacy_table.inc`, `UNKNOWN` or `BYFIELD` instead
+  of an address) with `tools/save_legacy_table.py emit-c` writing the table
+  from the frozen one and `--check` failing when they differ (a test does).
+  `COM_FunctionFromName_SR` on the Xbox resolves `ofs:` through it and
+  calls `Host_Error` for an offset not in the table, a shared one with no
+  field, or a name this build lacks; the file is not touched. The SDK
+  (`dlls/util.cpp`, `CRestore::ReadField`, SDK PR 5) maps -210368 to
+  `CallMonsterThink@CBaseMonster` for `m_pfnThink` and to
+  `CallHitBottom@CFuncPlat` for `m_pfnCallWhenMoveDone`, and leaves it for
+  any other field (the engine then refuses). Host test: 229 offsets, every
+  one resolves through its wrapped decimal; the 92 offsets of the 24
+  console saves all resolve to names the XS.2 table holds (the table
+  requires all 230). **Open:** the exit's live part (the 24 saves loading
+  in xemu in this build and in one with a server function added) is not
+  run; it needs the fixtures on a booted image and belongs with XS.4's
+  live gate.
+
 - **XS.4 - the fixture gate.** The fixtures stay outside the repository;
   the gate takes their folder from `R3D_SAVE_FIXTURES`. What is checked in
   is derived and holds nothing personal: per fixture, its hash and the

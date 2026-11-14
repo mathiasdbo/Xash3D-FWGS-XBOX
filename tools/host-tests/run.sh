@@ -473,6 +473,14 @@ gp_room_kernels() {
 }
 run_test gp_room_kernels gp_room_kernels
 
+# tools/host-tests/save_legacy_host_test.c, header.
+save_legacy() {
+	gcc $HOST_CFLAGS -Wall -std=c99 -Iengine/common \
+		tools/host-tests/save_legacy_host_test.c \
+		-o "$OUT/save_legacy_test" && "$OUT/save_legacy_test"
+}
+run_test save_legacy save_legacy
+
 if [ "$ran" -eq 0 ]; then
 	echo "host-tests: ran zero tests - that is a broken script, not a pass" >&2
 	exit 1

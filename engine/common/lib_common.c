@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #include "library.h"
 #include "filesystem.h"
 #include "server.h"
+#include "save_legacy.h"
 #include <ctype.h>
 
 static char s_szLastError[1024] = "";
@@ -40,7 +41,30 @@ void COM_PushLibraryError( const char *error )
 
 void *COM_FunctionFromName_SR( void *hInstance, const char *pName )
 {
-#ifdef XASH_ALLOW_SAVERESTORE_OFFSETS
+#if XASH_XBOX
+	// XS.3: an old save holds `ofs:N`, an offset from GameDLLInit in the link that wrote it. That layout is gone; the
+	// frozen XS.1 table says which function each offset was, and the function is found by name in this build.
+	// Never an address computed from the offset, and never a quiet NULL (the saved game would load with a callback
+	// missing): an offset the table does not hold stops the load, and the file is left as it is.
+	if( !memcmp( pName, "ofs:", 4 ))
+	{
+		const char *name;
+		int r = SaveLegacy_Resolve( pName, &name );
+		void *f = NULL;
+
+		if( r == SAVE_LEGACY_OK )
+			f = COM_FunctionFromName( hInstance, name );
+		else if( r == SAVE_LEGACY_BYFIELD )
+			Host_Error( "%s: %s is an offset two functions share and the game did not say which\n", __func__, pName );
+		else
+			Host_Error( "%s: %s is not a function any earlier version saved\n", __func__, pName );
+
+		if( !f )
+			Host_Error( "%s: %s was %s, which this version does not have\n", __func__, pName, name );
+
+		return f;
+	}
+#elif defined( XASH_ALLOW_SAVERESTORE_OFFSETS )
 	if( !memcmp( pName, "ofs:", 4 ))
 		return (byte*)svgame.dllFuncs.pfnGameInit + Q_atoi( pName + 4 );
 #endif
