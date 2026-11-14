@@ -110,10 +110,17 @@ for arg in "$@"; do
 		echo "typedef struct {const char *name;void *func;} table_t;"
 		echo
 
+		# A name that is not a C identifier (a mangled C++ name, `?Think@CFoo@@QAEXXZ`: XS.2's saved-callback
+		# entries) needs its asm symbol and gets a generated identifier; the table row still carries the name.
+		n=0
 		while IFS=' ' read -r fn asm_sym || [ -n "$fn" ]; do
 			[ -z "$fn" ] && continue
+			n=$((n + 1))
 			if [ -n "${asm_sym:-}" ]; then
-				echo "extern void ${fn}(void) asm(\"${asm_sym}\");"
+				case "$fn" in
+				*[!A-Za-z0-9_]*) echo "extern void xs_export_${n}(void) asm(\"${asm_sym}\");" ;;
+				*) echo "extern void ${fn}(void) asm(\"${asm_sym}\");" ;;
+				esac
 			else
 				echo "extern void ${fn}(void);"
 			fi
@@ -121,9 +128,14 @@ for arg in "$@"; do
 
 		echo
 		echo "table_t lib_${name}_exports[] = {"
+		n=0
 		while IFS=' ' read -r fn asm_sym || [ -n "$fn" ]; do
 			[ -z "$fn" ] && continue
-			echo "{ \"${fn}\", &${fn} },"
+			n=$((n + 1))
+			case "$fn" in
+			*[!A-Za-z0-9_]*) echo "{ \"${fn}\", &xs_export_${n} }," ;;
+			*) echo "{ \"${fn}\", &${fn} }," ;;
+			esac
 		done < "$exports_txt"
 		echo "{0,0}"
 		echo "};"
