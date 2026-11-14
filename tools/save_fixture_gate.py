@@ -129,6 +129,9 @@ def scan(folder, out):
     lines = [HEAD]
     for h, (n, d) in sorted(found.items(), key=lambda kv: kv[1][0]):
         if not refs_of(d):
+            if n.lower().endswith(".sav"):
+                raise GateError("%s holds no `ofs:N` pointer: a save in the name-based format (XS.2) cannot enter this gate "
+                                "yet, and is not silently left out" % n)
             continue
         lines.append("fixture %s %s %s\n" % (h, n.replace(" ", "_"), fmt(summarise(d, verdict))))
     with open(out, "w", encoding="utf-8", newline="\n") as f:
@@ -158,6 +161,8 @@ def problems(folder, expected_path=EXPECTED, exe=None):
         if got != want:
             out.append("%s (%s): its pointers read %s, expected %s" % (name, h[:12], fmt(got), fmt(want)))
     for h, (n, d) in found.items():
+        if h not in expected and n.lower().endswith(".sav") and not refs_of(d):
+            out.append("%s (%s) holds no `ofs:N` pointer: the host gate cannot read the name-based format (XS.2) yet" % (n, h[:12]))
         if h not in expected and refs_of(d):
             c = summarise(d, verdict)
             if c.get("UNKNOWN") or c.get("BAD"):
@@ -165,11 +170,28 @@ def problems(folder, expected_path=EXPECTED, exe=None):
     return out
 
 
+READER_FILES = ["engine/common/save_legacy.c", "engine/common/save_legacy.h", "engine/common/save_legacy_table.inc",
+                "tools/save-legacy-table.txt", "tools/host-tests/save_legacy_resolve.c", "tools/save-fixtures-expected.txt"]
+
+
+def dirty_reader_files():
+    """the files the gate compiles or compares, when this checkout has them changed from HEAD: the gate would vouch for
+    code that is not committed. Empty outside a git checkout (nothing to compare)."""
+    try:
+        r = subprocess.run(["git", "-C", REPO, "status", "--porcelain", "--ignore-submodules=all", "--"] + READER_FILES,
+                           capture_output=True, text=True)
+    except OSError:
+        return []
+    return [l[3:] for l in r.stdout.splitlines()] if r.returncode == 0 else []
+
+
 def require(folder=None, expected_path=EXPECTED):
     """For the release path: SystemExit with the reason unless every fixture reads."""
     folder = os.environ.get(ENV) if folder is None else folder
     try:
-        p = problems(folder, expected_path)
+        p = ["%s is changed in this checkout: commit it, the gate must vouch for committed code" % f
+             for f in dirty_reader_files()] if expected_path == EXPECTED else []
+        p += problems(folder, expected_path)
     except (GateError, OSError) as e:
         p = [str(e)]
     if p:

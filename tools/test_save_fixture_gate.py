@@ -73,6 +73,12 @@ class Gate(unittest.TestCase):
         write(self.saves, "new.sav", b"x" + KNOWN)
         self.assertEqual(gate.problems(self.saves, self.expected), [])
 
+    def test_a_save_without_pointers_is_not_silently_ignored(self):
+        write(self.saves, "named.sav", b"JSAV no offsets here, as a name-based save would be")
+        self.assertIn("holds no `ofs:N`", gate.problems(self.saves, self.expected)[0])
+        with self.assertRaises(gate.GateError):
+            gate.scan(self.saves, os.path.join(self.tmp.name, "out.txt"))
+
     def test_require_exits_with_the_reason(self):
         with self.assertRaises(SystemExit) as cm:
             gate.require(os.path.join(self.tmp.name, "nope"), self.expected)
