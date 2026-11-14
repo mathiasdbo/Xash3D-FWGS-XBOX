@@ -10525,6 +10525,25 @@ pulled from a console, the scripts - is kept outside the repository):
   here rather than assumed. **Exit:** a save written by the new build
   contains no `ofs:` string, and loads in a second build linked in a
   different object order.
+  **Done (code; live check open).** `tools/xbox-gen-callback-table.py`
+  (`gen`: 230 names from the isolated objects, `neutral()` of the mangled
+  name, build fails on two sharing a neutral name or an export's name, or on
+  fewer than 150 callbacks, or lacks any of XS.1's 230 names; `check`: after the XBE link, each name has its
+  own address in the map), `tools/gen-library-tables.sh` (a name that is
+  not a C identifier gets a generated one and its asm symbol),
+  `lib_static.c` (`COM_NameForFunction` on the Xbox reverse-looks-up the
+  server table; a pointer with no name stops the save with `Host_Error`, never an offset), `-opt:noicf` on both links of
+  `xbox-game-link-check.sh` (whole image: lld cannot scope it; measured
+  +77,824 bytes, 1.5%). Names are the **neutral** form, not the full
+  mangled name: `COM_FunctionFromName_SR` turns any incoming MSVC name
+  into it first (`_MSC_VER` is defined for this target), so a full name
+  would never be found. Real build: 0 undefined, 230 callbacks each at its
+  own address; the new XBE fails `save_layout_check.py` (2,963 of 2,986
+  functions moved), so it cannot be released. **Open:** a save written by
+  this XBE and loaded by a second one linked in another object order,
+  live in xemu, and whether a PC save loads (user-stated: PC saves are not
+  supported); both belong with XS.3/XS.4's live gate.
+
 - **XS.3 - old saves read for ever.** An `ofs:N` string goes through the
   XS.1 table to a name and from the name to the current address. The
   reader parses the unsigned-wrapped negatives itself instead of relying

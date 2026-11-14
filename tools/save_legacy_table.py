@@ -154,6 +154,24 @@ def census_problems(expected, present):
 
 # --- the table ----------------------------------------------------------------------------------------------
 
+def classify(name, lst):
+    """(fields, problem) for one address-taken symbol: fields is `think`, `~think,movedone` ... when it is a saved
+    callback, None when it is not one. lst: [(in_code, disp)]."""
+    stored = sorted({FIELDS.get(d, "disp%d" % d) for c, d in lst if c and d is not None})
+    m = MEMBER.match(name)
+    sig = SIGNATURES.get(m.group("sig")) if m else None
+    if stored:
+        problem = None
+        if any(f.startswith("disp") for f in stored):
+            problem = "%s is stored at an unrecognised field offset %s" % (name, stored)
+        elif sig is None or any(f not in sig for f in stored):
+            problem = "%s is stored into %s but is not a member function of that shape" % (name, stored)
+        return ",".join(stored), problem  # seen: the field the store names
+    if sig is not None:
+        return "~" + ",".join(sig), None  # by shape only: a register carried the address
+    return None, None  # not stored into a callback field and not shaped like a callback: an export, an initialiser, ...
+
+
 def build_table(uses, symbols, gameinit):
     """uses: {name: [(in_code, disp)]}; symbols: {name: address}. -> [(offset, fields, name)] sorted, or TableError"""
     rows = []
@@ -162,19 +180,11 @@ def build_table(uses, symbols, gameinit):
         addr = symbols.get(name)
         if addr is None:
             continue  # a variable, a constant: not a function the map names
-        stored = sorted({FIELDS.get(d, "disp%d" % d) for c, d in lst if c and d is not None})
-        m = MEMBER.match(name)
-        sig = SIGNATURES.get(m.group("sig")) if m else None
-        if stored:
-            if any(f.startswith("disp") for f in stored):
-                problems.append("%s is stored at an unrecognised field offset %s" % (name, stored))
-            elif sig is None or any(f not in sig for f in stored):
-                problems.append("%s is stored into %s but is not a member function of that shape" % (name, stored))
-            fields = ",".join(stored)  # seen: the field the store names
-        elif sig is not None:
-            fields = "~" + ",".join(sig)  # by shape only: a register carried the address
-        else:
-            continue  # not stored into a callback field and not shaped like a callback: an export, an initialiser, ...
+        fields, problem = classify(name, lst)
+        if problem:
+            problems.append(problem)
+        if fields is None:
+            continue
         if not (BLOCK[0] <= addr < BLOCK[1]):
             problems.append("%s is at %#x, outside the server block" % (name, addr))
         rows.append((addr - gameinit, fields, name))

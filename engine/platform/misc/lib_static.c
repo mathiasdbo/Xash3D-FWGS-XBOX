@@ -61,7 +61,31 @@ void *COM_FunctionFromName( void *hInstance, const char *pName )
 
 const char *COM_NameForFunction( void *hInstance, void *function )
 {
-#ifdef XASH_ALLOW_SAVERESTORE_OFFSETS
+#if XASH_XBOX
+	// XS.2 (docs/r3d/fork-plan.md): a saved callback is written by name, never as an offset from GameDLLInit, which is
+	// only true for the link that wrote it. The server's export table carries one `Think@CFoo` row per function game
+	// code can store in a saved pointer (tools/xbox-gen-callback-table.py); the image links without folding
+	// so each has its own address. A name has an '@'; entity classnames and the API exports do not.
+	table_t *tbl = (table_t*)hInstance;
+
+	if( !function )
+		return NULL; // the SDK skips empty fields before it asks, but a null pointer has no name and is not an error
+
+	if( tbl )
+	{
+		for( ; tbl->name; tbl++ )
+		{
+			if( tbl->pointer == function && Q_strchr( tbl->name, '@' ))
+				return tbl->name;
+		}
+	}
+
+	// Never an offset, and never a silent gap: a pointer with no name would load wrong, and the SDK only logs a NULL
+	// and writes the entity without it. The build refuses a table short of XS.1's names, so this is a callback no
+	// game code should have stored; stop the save (it is written as .tmp first, so the earlier file is untouched).
+	Host_Error( "%s: no saved name for function %p\n", __func__, function );
+	return NULL;
+#elif defined( XASH_ALLOW_SAVERESTORE_OFFSETS )
 	return COM_OffsetNameForFunction( function );
 #else
 	return NULL;
