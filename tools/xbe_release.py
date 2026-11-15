@@ -93,6 +93,7 @@ def problems(xbe_path, commit, map_path=None, identity_path=None, evidence=None,
     # the link map, bound to the XBE
     map_path = map_path or os.path.splitext(xbe_path)[0] + ".map"
     identity_path = identity_path or xbe_path + ".identity"
+    m = None
     try:
         with open(map_path, "rb") as f:
             m = f.read()
@@ -107,6 +108,19 @@ def problems(xbe_path, commit, map_path=None, identity_path=None, evidence=None,
                 identity_path, (ident.get("sha256_xbe") or "none")[:12], sha(xbe)[:12]))
         if ident.get("modules") != "server+client+freevgui":
             out.append("the build's modules are %r, not server+client+freevgui: not a bootable game build" % ident.get("modules"))
+        # the identity is what binds the XBE to its source and to its map (xbox-game-link-check.sh writes all three)
+        if not ident.get("commit"):
+            out.append("%s does not record the commit or the map: rebuild with the current tools/xbox-game-link-check.sh" % identity_path)
+        else:
+            if ident["commit"] != commit:
+                out.append("the XBE was built from %s, not from %s: its identity names the commit, and so must the release" % (
+                    ident["commit"][:10], commit[:10]))
+            if ident.get("dirty") != "0":
+                out.append("the XBE was built with tracked files changed from its commit (dirty=%s): build from a clean checkout" %
+                           ident.get("dirty"))
+            if ident.get("sha256_map") != (sha(m) if m is not None else None):
+                out.append("the map at %s is not the map of this build (the identity names %s): the published map must be the one "
+                           "the XBE was linked with" % (map_path, (ident.get("sha256_map") or "none")[:12]))
     except OSError as e:
         out.append("no build identity at %s (%s)" % (identity_path, e))
     return out

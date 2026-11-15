@@ -40,9 +40,13 @@ class Release(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def write_identity(self, sha, modules="server+client+freevgui"):
+    def write_identity(self, sha, modules="server+client+freevgui", commit=COMMIT, dirty="0", map_sha=None, old=False):
+        with open(self.map, "rb") as f:
+            msha = map_sha or rel.sha(f.read())
         with open(self.ident, "w", encoding="utf-8") as f:
             f.write("title=hl\nmodules=%s\nmainui=1\nsha256_xbe=%s\n" % (modules, sha))
+            if not old:  # an identity from before XS.7 has no commit, dirty or sha256_map
+                f.write("commit=%s\ndirty=%s\nsha256_map=%s\n" % (commit, dirty, msha))
 
     def write_evidence(self, sha, verdict="PASS", drop=None):
         with open(save_fixture_gate.EXPECTED, encoding="utf-8") as f:
@@ -106,6 +110,31 @@ class Release(unittest.TestCase):
     def test_a_build_that_is_not_the_full_game_is_refused(self):
         self.write_identity(rel.sha(self.xbe), modules="server")
         self.assertTrue(any("not a bootable game build" in x for x in self.problems()))
+
+    def test_an_xbe_built_from_another_commit_is_refused_even_with_its_own_valid_papers(self):
+        # checked out at COMMIT, but the XBE (and its identity and evidence) are from commit B
+        self.write_identity(rel.sha(self.xbe), commit="b" * 40)
+        p = self.problems()
+        self.assertTrue(any("built from bbbbbbbbbb, not from aaaaaaaaaa" in x for x in p))
+
+    def test_a_dirty_build_is_refused(self):
+        self.write_identity(rel.sha(self.xbe), dirty="1")
+        self.assertTrue(any("tracked files changed" in x for x in self.problems()))
+
+    def test_a_plausible_map_that_is_not_this_builds_is_refused(self):
+        with open(self.map, "wb") as f:
+            f.write(b" Address  Publics by Value\n" + b"0001:00000010 ?GameDLLInit@@YAXXZ\n" * 70)  # another real-looking map
+        self.assertTrue(any("not the map of this build" in x for x in self.problems()))
+
+    def test_an_identity_from_before_xs7_is_refused_with_the_way_out(self):
+        self.write_identity(rel.sha(self.xbe), old=True)
+        self.assertTrue(any("rebuild with the current tools/xbox-game-link-check.sh" in x for x in self.problems()))
+
+    def test_the_link_script_writes_what_the_release_checks(self):
+        with open(os.path.join(HERE, "xbox-game-link-check.sh"), encoding="utf-8") as f:
+            s = f.read()
+        for key in ("commit=%s", "dirty=%s", "sha256_map=%s", "sha256_xbe=%s"):
+            self.assertIn(key, s)
 
     def test_the_notes_carry_the_hashes_and_the_save_baseline(self):
         with open(self.map, "rb") as f:

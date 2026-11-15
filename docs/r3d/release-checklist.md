@@ -6,7 +6,9 @@ The gates are scripts that fail; this is the order to run them in. Fork plan sec
 ## 1. The XBE
 
 1. Build it from a commit on `origin/main` with `tools/xbox-game-link-check.sh` (it runs `tools/save_rules_check.py source`, the
-   callback table check and the `-opt:noicf` link, and writes `default.map` and `default.xbe.identity` beside the XBE).
+   callback table check and the `-opt:noicf` link, and writes `default.map` and `default.xbe.identity` beside the XBE;
+   the identity records the commit, whether the tracked tree was clean, and the hashes of the XBE and the map). Build from
+   a clean checkout of the commit you will release.
 2. Run the live save gate on exactly those bytes. It needs xemu and the fixture saves, which stay outside the repository:
 
        set R3D_SAVE_FIXTURES=<folder of the fixture saves>
