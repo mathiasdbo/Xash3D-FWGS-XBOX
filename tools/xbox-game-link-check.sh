@@ -737,8 +737,29 @@ if [ -n "$XBE_OUT" ]; then
 	# directory, and kept out of modules= so tools/xbox-xiso.sh's exact
 	# match on that line is unchanged.
 	if grep -q '3rdparty_mainui_' "$XBE_MAP"; then XBE_MAINUI=1; else XBE_MAINUI=0; fi
-	printf 'title=%s\nmodules=%s\nmainui=%s\nsha256_xbe=%s\n' \
-		"$TITLE" "$MODULE_LABEL" "$XBE_MAINUI" "$XBE_SHA_OUT" \
+	# XS.7: what tools/xbe_release.py binds a release to. The commit this XBE was built from, whether any TRACKED file differed
+	# from it (a submodule at another commit than its pin counts; a build's own patch inside a submodule does not), and the hash of the map copied beside the XBE:
+	# a release names the commit it was built from and publishes this map, and must not be able to pair them with another
+	# build's. Checked like the digest above: an empty value would compare equal to an empty value.
+	XBE_COMMIT="$(git rev-parse HEAD 2>/dev/null)"
+	if ! [[ "$XBE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+		echo "xbox-game-link-check: could not read this checkout's commit - refusing to write an identity without it." >&2
+		exit 1
+	fi
+	# --ignore-submodules=dirty: the build's own patches to a submodule's files do not count, but a submodule checked out at
+	# another commit than the pin does (that code is linked in). A git that cannot answer is not a clean tree.
+	if ! XBE_STATUS="$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>&1)"; then
+		echo "xbox-game-link-check: git status failed ($XBE_STATUS) - refusing to write an identity that says the tree is clean." >&2
+		exit 1
+	fi
+	if [ -n "$XBE_STATUS" ]; then XBE_DIRTY=1; else XBE_DIRTY=0; fi
+	XBE_MAP_SHA="$(sha256sum "${XBE_OUT%.xbe}.map" 2>/dev/null | cut -d' ' -f1)"
+	if ! [[ "$XBE_MAP_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+		echo "xbox-game-link-check: could not compute a valid sha256 of ${XBE_OUT%.xbe}.map." >&2
+		exit 1
+	fi
+	printf 'title=%s\nmodules=%s\nmainui=%s\nsha256_xbe=%s\ncommit=%s\ndirty=%s\nsha256_map=%s\n' \
+		"$TITLE" "$MODULE_LABEL" "$XBE_MAINUI" "$XBE_SHA_OUT" "$XBE_COMMIT" "$XBE_DIRTY" "$XBE_MAP_SHA" \
 		> "$XBE_OUT.identity" || exit 1
 	echo "xbox-game-link-check: menu module (mainui) linked: $XBE_MAINUI (recorded in $XBE_OUT.identity)" >&2
 fi
