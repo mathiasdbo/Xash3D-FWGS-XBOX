@@ -136,6 +136,85 @@ class Release(unittest.TestCase):
         for key in ("commit=%s", "dirty=%s", "sha256_map=%s", "sha256_xbe=%s"):
             self.assertIn(key, s)
 
+    # --- the identity block of the link script, run for real in throwaway repositories
+
+    def identity_in(self, cwd):
+        """run the script's own identity lines in cwd; (exit code, the identity's text or '')"""
+        import shutil
+        import subprocess
+        bash = shutil.which("bash")
+        if not bash or not shutil.which("git"):
+            self.skipTest("needs bash and git")
+        with open(os.path.join(HERE, "xbox-game-link-check.sh"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        i = next(n for n, l in enumerate(lines) if "XS.7: what tools/xbe_release.py binds" in l)
+        j = next(n for n in range(i, len(lines)) if lines[n].rstrip().endswith('> "$XBE_OUT.identity" || exit 1'))
+        out = os.path.join(self.tmp.name, "out")
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "default.map"), "w") as f:
+            f.write("map")
+        snippet = os.path.join(self.tmp.name, "snip.sh")
+        with open(snippet, "w", newline="\n") as f:
+            f.write("TITLE=hl; MODULE_LABEL=m; XBE_MAINUI=1; XBE_SHA_OUT=" + "a" * 64 + "\n")
+            f.write('XBE_OUT="%s/default.xbe"\n' % out.replace("\\", "/"))
+            f.write("\n".join(lines[i:j + 1]) + "\n")
+        ident = os.path.join(out, "default.xbe.identity")
+        if os.path.exists(ident):
+            os.remove(ident)
+        r = subprocess.run([bash, snippet.replace("\\", "/")], cwd=cwd, capture_output=True, text=True)
+        text = open(ident).read() if os.path.exists(ident) else ""
+        return r.returncode, text
+
+    def make_repo(self, name, files):
+        import subprocess
+        d = os.path.join(self.tmp.name, name)
+        os.makedirs(d)
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        self._env = env
+        self.run_git(d, "init", "-q")
+        for n, c in files.items():
+            with open(os.path.join(d, n), "w") as f:
+                f.write(c)
+        self.run_git(d, "add", "-A")
+        self.run_git(d, "commit", "-q", "-m", "x")
+        return d
+
+    def run_git(self, d, *a):
+        import subprocess
+        r = subprocess.run(["git", "-c", "protocol.file.allow=always", "-C", d] + list(a), capture_output=True, text=True,
+                           env=self._env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_identity_says_clean_only_for_a_clean_tree(self):
+        d = self.make_repo("clean", {"a.txt": "1"})
+        rc, text = self.identity_in(d)
+        self.assertEqual(rc, 0)
+        self.assertIn("dirty=0", text)
+        self.assertRegex(text, r"commit=[0-9a-f]{40}")
+        with open(os.path.join(d, "a.txt"), "w") as f:
+            f.write("changed")
+        self.assertIn("dirty=1", self.identity_in(d)[1])
+
+    def test_a_submodule_at_another_commit_is_dirty_but_a_patch_inside_it_is_not(self):
+        sub = self.make_repo("sub", {"s.txt": "1"})
+        main = self.make_repo("main", {"m.txt": "1"})
+        self.run_git(main, "submodule", "add", "-q", sub.replace("\\", "/"), "dep")
+        self.run_git(main, "commit", "-q", "-m", "add dep")
+        rc, text = self.identity_in(main)
+        self.assertIn("dirty=0", text)
+        with open(os.path.join(main, "dep", "s.txt"), "w") as f:
+            f.write("the build's own patch")  # a worktree change inside the submodule, as the build applies
+        self.assertIn("dirty=0", self.identity_in(main)[1])
+        self.run_git(os.path.join(main, "dep"), "commit", "-q", "-am", "another commit")  # the submodule moved off its pin
+        self.assertIn("dirty=1", self.identity_in(main)[1])
+
+    def test_a_git_that_cannot_answer_is_not_clean(self):
+        notrepo = os.path.join(self.tmp.name, "norepo")
+        os.makedirs(notrepo)
+        rc, text = self.identity_in(notrepo)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(text, "")  # no identity is written
+
     def test_the_notes_carry_the_hashes_and_the_save_baseline(self):
         with open(self.map, "rb") as f:
             m = f.read()
