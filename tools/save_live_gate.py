@@ -172,7 +172,9 @@ def run(a):
                 f.write(data)
             label = "%s_%02d" % (tag, i)
             labels.append(label)
-            lines += ['host_frametime_label "%s"' % label, "host_frametime_analysis 2", "load %s" % slot,
+            # out of any game first: a load that fails leaves the engine where it was, and the previous fixture's map
+            # (often the same one) would otherwise count as this fixture playing
+            lines += ["disconnect", "wait 120", 'host_frametime_label "%s"' % label, "host_frametime_analysis 2", "load %s" % slot,
                       "wait %d" % WAIT_FRAMES, "host_frametime_analysis 0", "wait 10"]
         lines.append("echo save-live-gate: done")
         with open(cfgpath, "w", encoding="utf-8", newline="\n") as f:
@@ -192,7 +194,7 @@ def run(a):
     pids = xemu_running()
     if not pids:
         raise LiveError("xemu did not start (see %s)" % os.path.join(a.out, "xemu.out"))
-    budget = 25 + len(items) * (WAIT_FRAMES / 60.0 + 14)
+    budget = 25 + len(items) * (WAIT_FRAMES / 60.0 + 17)
     print("save_live_gate: xemu %s loading %d saves, about %d s" % (pids, len(items), budget))
     end = time.time() + budget
     while time.time() < end and xemu_running() == pids:

@@ -161,12 +161,11 @@ def problems(folder, expected_path=EXPECTED, exe=None):
         if got != want:
             out.append("%s (%s): its pointers read %s, expected %s" % (name, h[:12], fmt(got), fmt(want)))
     for h, (n, d) in found.items():
-        if h not in expected and n.lower().endswith(".sav") and not refs_of(d):
-            out.append("%s (%s) holds no `ofs:N` pointer: the host gate cannot read the name-based format (XS.2) yet" % (n, h[:12]))
-        if h not in expected and refs_of(d):
+        if h not in expected and n.lower().endswith(".sav"):
+            # every save in the folder is a fixture the live gate must load: it takes its list from the expected file
             c = summarise(d, verdict)
-            if c.get("UNKNOWN") or c.get("BAD"):
-                out.append("%s (%s) is not in the expected file and holds pointers that do not read: %s" % (n, h[:12], fmt(c)))
+            out.append("%s (%s) is in the folder but not in the expected file (python tools/save_fixture_gate.py scan, "
+                       "review, commit)%s" % (n, h[:12], "; its pointers do not all read: " + fmt(c) if c.get("UNKNOWN") or c.get("BAD") or not refs_of(d) else ""))
     return out
 
 
@@ -176,13 +175,15 @@ READER_FILES = ["engine/common/save_legacy.c", "engine/common/save_legacy.h", "e
 
 def dirty_reader_files():
     """the files the gate compiles or compares, when this checkout has them changed from HEAD: the gate would vouch for
-    code that is not committed. Empty outside a git checkout (nothing to compare)."""
+    code that is not committed. Raises GateError when git cannot say (no git, not a checkout): that is not a clean checkout."""
     try:
         r = subprocess.run(["git", "-C", REPO, "status", "--porcelain", "--ignore-submodules=all", "--"] + READER_FILES,
                            capture_output=True, text=True)
-    except OSError:
-        return []
-    return [l[3:] for l in r.stdout.splitlines()] if r.returncode == 0 else []
+    except OSError as e:
+        raise GateError("cannot run git to see whether the save reader is committed: %s" % e)
+    if r.returncode:
+        raise GateError("git status failed, so the save reader's state is unknown: %s" % r.stderr.strip())
+    return [l[3:] for l in r.stdout.splitlines()]
 
 
 def require(folder=None, expected_path=EXPECTED):

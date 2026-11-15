@@ -63,21 +63,35 @@ class Gate(unittest.TestCase):
             f.write(text)
         self.assertTrue(gate.problems(self.saves, self.expected))
 
-    def test_a_new_fixture_with_an_offset_nobody_wrote_fails(self):
-        write(self.saves, "new.sav", b"x" + STRANGE + KNOWN)
+    def test_a_save_in_the_folder_but_not_in_the_expected_file_is_refused(self):
+        # the live gate takes its list from the expected file, so an unlisted save would never be loaded
+        write(self.saves, "new.sav", b"x" + KNOWN)
         p = gate.problems(self.saves, self.expected)
         self.assertEqual(len(p), 1)
-        self.assertIn("do not read", p[0])
+        self.assertIn("not in the expected file", p[0])
 
-    def test_a_new_fixture_that_reads_is_accepted(self):
-        write(self.saves, "new.sav", b"x" + KNOWN)
-        self.assertEqual(gate.problems(self.saves, self.expected), [])
-
-    def test_a_save_without_pointers_is_not_silently_ignored(self):
+    def test_an_unlisted_save_with_bad_pointers_says_so(self):
+        write(self.saves, "new.sav", b"x" + STRANGE + KNOWN)
+        self.assertIn("do not all read", gate.problems(self.saves, self.expected)[0])
         write(self.saves, "named.sav", b"JSAV no offsets here, as a name-based save would be")
-        self.assertIn("holds no `ofs:N`", gate.problems(self.saves, self.expected)[0])
+        self.assertTrue(any("do not all read" in x and "named.sav" in x for x in gate.problems(self.saves, self.expected)))
+
+    def test_a_save_without_pointers_cannot_be_scanned_in(self):
+        write(self.saves, "named.sav", b"JSAV no offsets here, as a name-based save would be")
         with self.assertRaises(gate.GateError):
             gate.scan(self.saves, os.path.join(self.tmp.name, "out.txt"))
+
+    def test_git_that_cannot_answer_is_not_a_clean_checkout(self):
+        import unittest.mock as mock
+        with mock.patch.object(gate.subprocess, "run", side_effect=OSError("no git")):
+            with self.assertRaises(gate.GateError):
+                gate.dirty_reader_files()
+        failed = gate.subprocess.CompletedProcess([], 128, "", "fatal: not a git repository")
+        with mock.patch.object(gate.subprocess, "run", return_value=failed):
+            with self.assertRaises(gate.GateError):
+                gate.dirty_reader_files()
+            with self.assertRaises(SystemExit):
+                gate.require(self.saves)
 
     def test_require_exits_with_the_reason(self):
         with self.assertRaises(SystemExit) as cm:
