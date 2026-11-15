@@ -78,6 +78,7 @@ and reads them.
 #include "xbox_frametime_pmove.h"
 #include "xbox_frametime_clents.h"
 #include "xbox_music_stream.h" /* Xbox_Music_Init, #171 */
+#include "xbox_diskspace.h" /* the room saved games need, and the messages when there is none */
 #include "xbox_io_stats.h" /* compat/xbox: the file layer's kernel calls, for the load notes (#162) */
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
@@ -105,6 +106,17 @@ static CVAR_DEFINE_AUTO( host_frametime_label, "", FCVAR_ARCHIVE | FCVAR_PRIVILE
    lowering it is a test setting. */
 static CVAR_DEFINE_AUTO( host_frametime_segment_mb, "8", FCVAR_FILTERABLE,
 	"frame-time recordings: start a new file when one reaches this many MiB (0: only at map starts; at least 1)" );
+
+/* A recorder left on cannot fill the drive (the 2026-11-15 incident: a leftover userconfig.d file turned it on at every boot, 1,296
+   files and 4.9 GB later E: was full, working files were cut at 64 KiB and saved games loaded without weapons or enemies that
+   thought). The per-session cap above is not enough alone, so two more: all recordings together stop at this many MiB (0: no
+   limit), and a recording is not started, or is stopped, when the drive has less than this many MiB free, which keeps the room
+   saved games need. Read when a session starts and at each segment. */
+static CVAR_DEFINE_AUTO( host_frametime_max_mb, "1024", FCVAR_FILTERABLE,
+	"frame-time recordings: stop recording when the recordings in frametime/ together reach this many MiB (0: no limit); host_frametime_clean and host_frametime_clear remove them" );
+static CVAR_DEFINE_AUTO( host_frametime_keep_free_mb, "512", FCVAR_FILTERABLE,
+	"frame-time recordings: do not record, and stop recording, when the hard drive has less than this many MiB free (saved games need the room)" );
+
 
 /* The per-subsystem CPU spans (M2): on by default whenever the recorder
    is, so a recording has them; 0 measures what they cost (the same view
@@ -334,7 +346,8 @@ static qboolean FT_Write( const void *data, size_t bytes )
 		return false;
 	if( FS_Write( ft.file, data, bytes ) != (fs_offset_t)bytes )
 	{
-		Con_Printf( S_ERROR "frametime: write to %s failed, recording stopped\n", ft.filename );
+		Con_Printf( S_ERROR "frametime: write to %s failed, recording stopped%s\n", ft.filename,
+			Xbox_DiskLow( 4ull << 20 ) ? " (the hard drive is full)" : "" );
 		FS_Close( ft.file );
 		ft.file = NULL;
 		/* Stopped for good: without this the next map start would rotate
@@ -478,6 +491,8 @@ static void FT_CloseSegment( uint32_t next )
 	ft.file = NULL;
 }
 
+static qboolean FT_RoomToRecord( qboolean starting ); /* defined with the recordings' helpers below */
+
 /* Closes the segment being written and opens the next, right after a
    flush (every frame pushed so far is in the old one; the frame in
    progress goes to the new one). The caller has written the old one's
@@ -491,6 +506,11 @@ static qboolean FT_Rotate( uint32_t reason, uint64_t now )
 	if( ft.seg.seq >= XBOX_FT_SEGMENT_SEQ_MAX )
 	{
 		Con_Printf( S_WARN "frametime: %u segments in this session, recording stopped\n", ft.seg.seq + 1 );
+		Cvar_DirectSet( &host_frametime_analysis, "0" );
+		return false;
+	}
+	if( !FT_RoomToRecord( false ))
+	{
 		Cvar_DirectSet( &host_frametime_analysis, "0" );
 		return false;
 	}
@@ -551,6 +571,186 @@ static void FT_NewSessionId( uint64_t salt )
 	xbox_ft_session_id( in, ARRAYSIZE( in ), ft.seg.session );
 }
 
+/* Every file of every session in frametime/: how many, and how many bytes. */
+static void FT_ScanRecordings( uint64_t *bytes, int *files )
+{
+	search_t *t = FS_Search( "frametime/ft_*.bin", true, true );
+	int i;
+
+	*bytes = 0;
+	*files = 0;
+	if( !t )
+		return;
+	for( i = 0; i < t->numfilenames; i++ )
+	{
+		fs_offset_t size = FS_FileSize( t->filenames[i], true );
+
+		if( size > 0 )
+			*bytes += (uint64_t)size;
+		( *files )++;
+	}
+	Mem_Free( t );
+}
+
+/* What the recordings in frametime/ took when this session started: the base of the aggregate cap, which the flush checks without
+   scanning the directory again (that is a listing of every file). */
+static uint64_t ft_used_at_start;
+
+/* Is there room to record: false, with the reason said in the console and on the screen, when the drive is known to have less
+   than host_frametime_keep_free_mb left or the recordings already take host_frametime_max_mb. */
+static qboolean FT_RoomToRecord( qboolean starting )
+{
+	uint64_t keep = (uint64_t)bound( 0, (int)host_frametime_keep_free_mb.value, 1000000 ) << 20;
+	uint64_t cap = (uint64_t)bound( 0, (int)host_frametime_max_mb.value, 1000000 ) << 20;
+	uint64_t used;
+	int files;
+
+	if( Xbox_DiskLow( keep ))
+	{
+		Con_Printf( S_ERROR "frametime: the hard drive has under %u MiB free, so %s. Free some space first: host_frametime_clear removes the recordings.\n",
+			(uint32_t)( keep >> 20 ), starting ? "recording was not started" : "recording is stopped" );
+		CL_CenterPrint( "Recording stopped: the hard drive is almost full.\nSaved games need the room.", 0.25f );
+		return false;
+	}
+	if( starting || cap )
+	{
+		FT_ScanRecordings( &used, &files );
+		if( starting )
+			ft_used_at_start = used;
+		if( cap && used >= cap )
+		{
+			Con_Printf( S_ERROR "frametime: %d recordings already take %u MiB (limit %u MiB, host_frametime_max_mb), so %s. "
+				"host_frametime_clean keeps the newest session, host_frametime_clear removes all of them.\n",
+				files, (uint32_t)( used >> 20 ), (uint32_t)( cap >> 20 ), starting ? "recording was not started" : "recording is stopped" );
+			CL_CenterPrint( "Recording stopped: the recordings take too much space.\nUse host_frametime_clean.", 0.25f );
+			return false;
+		}
+	}
+	return true;
+}
+
+/* The same two limits while recording, at every flush (host_frametime_segment_mb 0 never rotates, and a long map would otherwise
+   write on): one free-space query, and the recordings that were there when the session started plus this session's bytes. */
+static qboolean FT_RoomWhileRecording( void )
+{
+	uint64_t keep = (uint64_t)bound( 0, (int)host_frametime_keep_free_mb.value, 1000000 ) << 20;
+	uint64_t cap = (uint64_t)bound( 0, (int)host_frametime_max_mb.value, 1000000 ) << 20;
+
+	if( Xbox_DiskLow( keep ))
+	{
+		Con_Printf( S_ERROR "frametime: the hard drive has under %u MiB free, so recording is stopped. host_frametime_clear removes the recordings.\n",
+			(uint32_t)( keep >> 20 ));
+		CL_CenterPrint( "Recording stopped: the hard drive is almost full.\nSaved games need the room.", 0.25f );
+		return false;
+	}
+	if( cap && ft_used_at_start + ft.session_bytes >= cap )
+	{
+		Con_Printf( S_ERROR "frametime: the recordings reached %u MiB (host_frametime_max_mb), so recording is stopped. host_frametime_clean keeps the newest session, host_frametime_clear removes all of them.\n",
+			(uint32_t)( cap >> 20 ));
+		CL_CenterPrint( "Recording stopped: the recordings take too much space.\nUse host_frametime_clean.", 0.25f );
+		return false;
+	}
+	return true;
+}
+
+/* The session a recording file belongs to ("" and false when the name is not a recording's): xbox_ft_session_key. */
+static qboolean FT_SessionOf( const char *path, char *out, size_t size )
+{
+	return xbox_ft_session_key( COM_FileWithoutPath( path ), out, size ) != 0;
+}
+
+/* host_frametime_clean (keep the newest session, remove the rest) and host_frametime_clear (remove every recording). Only files
+   named ft_*.bin inside frametime/ are touched, and never while a session is recording into it. */
+static void FT_RemoveRecordings( qboolean keep_newest )
+{
+	search_t *t;
+	enum { MAX_NEWEST = 16 };
+	char newest[MAX_NEWEST][64];
+	int nnewest = 0, newest_time = 0, i, j, removed = 0, kept = 0;
+	uint64_t freed = 0;
+
+	if( ft.mode != 0 )
+	{
+		Con_Printf( S_ERROR "frametime: recording is on; stop it first (host_frametime_analysis 0)\n" );
+		return;
+	}
+	if( !( t = FS_Search( "frametime/ft_*.bin", true, true )))
+	{
+		Con_Printf( "frametime: no recordings\n" );
+		return;
+	}
+	if( keep_newest )
+	{
+		/* File times are whole seconds, and two short sessions can end in the same one: so every session that has a file with the
+		   newest time is kept, not the one that happens to sort last. */
+		for( i = 0; i < t->numfilenames; i++ )
+		{
+			char sess[64];
+
+			if( FT_SessionOf( t->filenames[i], sess, sizeof( sess )))
+				newest_time = Q_max( newest_time, FS_FileTime( t->filenames[i], true ));
+		}
+		for( i = 0; i < t->numfilenames; i++ )
+		{
+			char sess[64];
+
+			if( !FT_SessionOf( t->filenames[i], sess, sizeof( sess )) || FS_FileTime( t->filenames[i], true ) != newest_time )
+				continue;
+			for( j = 0; j < nnewest && Q_strcmp( newest[j], sess ); j++ );
+			if( j < nnewest )
+				continue;
+			if( nnewest == MAX_NEWEST )
+			{
+				Mem_Free( t );
+				Con_Printf( S_ERROR "frametime: more than %d sessions share the newest time: nothing was removed (host_frametime_clear removes all)\n", MAX_NEWEST );
+				return;
+			}
+			Q_strncpy( newest[nnewest++], sess, sizeof( newest[0] ));
+		}
+	}
+	for( i = 0; i < t->numfilenames; i++ )
+	{
+		char sess[64];
+		fs_offset_t size = FS_FileSize( t->filenames[i], true );
+
+		if( !FT_SessionOf( t->filenames[i], sess, sizeof( sess )))
+		{
+			kept++; /* not a recording's name: not touched */
+			continue;
+		}
+		for( j = 0; keep_newest && j < nnewest && Q_strcmp( sess, newest[j] ); j++ );
+		if( keep_newest && j < nnewest )
+		{
+			kept++;
+			continue;
+		}
+		if( FS_Delete( t->filenames[i] ))
+		{
+			removed++;
+			if( size > 0 )
+				freed += (uint64_t)size;
+		}
+		else
+		{
+			Con_Printf( S_ERROR "frametime: could not remove %s\n", t->filenames[i] );
+			kept++;
+		}
+	}
+	Mem_Free( t );
+	Con_Printf( "frametime: removed %d recording file(s), %u MiB freed%s\n", removed, (uint32_t)( freed >> 20 ),
+		keep_newest ? va( "; %d kept (the newest session%s)", kept, nnewest > 1 ? "s, tied" : "" ) : "" );
+}
+
+static void FT_Clean_f( void )
+{
+	FT_RemoveRecordings( true );
+}
+
+static void FT_Clear_f( void )
+{
+	FT_RemoveRecordings( false );
+}
+
 static qboolean FT_Start( int mode )
 {
 	size_t ring_bytes = XBOX_FT_RING_FRAMES * sizeof( xbox_ft_frame_t );
@@ -558,6 +758,9 @@ static qboolean FT_Start( int mode )
 	LARGE_INTEGER now;
 	uint32_t total_pages;
 	int tries;
+
+	if( !FT_RoomToRecord( true ))
+		return false;
 
 	memset( &ft, 0, sizeof( ft ));
 	memset( ft_load_acc, 0, sizeof( ft_load_acc ));
@@ -854,6 +1057,11 @@ void Xbox_FrameTime_Init( void )
 	Cvar_RegisterVariable( &host_frametime_spans );
 	Cvar_RegisterVariable( &host_frametime_label );
 	Cvar_RegisterVariable( &host_frametime_segment_mb );
+	Cvar_RegisterVariable( &host_frametime_max_mb );
+	Cvar_RegisterVariable( &host_frametime_keep_free_mb );
+	Cmd_AddCommand( "host_frametime_clean", FT_Clean_f, "remove the frame-time recordings except the newest session" );
+	Cmd_AddCommand( "host_frametime_clear", FT_Clear_f, "remove every frame-time recording (never while one is recording)" );
+	Xbox_DiskSpace_Init(); /* r3d_disk_low_mb: the room a save needs */
 	/* r3d_membench (#142) rides on this init rather than a call site of
 	   its own in host.c: the same platform, the same lifetime. */
 	Xbox_MemBench_Init();
@@ -957,6 +1165,8 @@ void Xbox_FrameTime_BeginFrame( void )
 			Con_Printf( S_WARN "frametime: the session reached %u MiB, recording stopped\n", (uint32_t)( XBOX_FT_MAX_SESSION_BYTES >> 20 ));
 			Cvar_DirectSet( &host_frametime_analysis, "0" );
 		}
+		else if( !FT_RoomWhileRecording( ))
+			Cvar_DirectSet( &host_frametime_analysis, "0" );
 	}
 
 	xbox_ft_waits.gpu = xbox_ft_waits.vblank = xbox_ft_waits.swap = 0;
