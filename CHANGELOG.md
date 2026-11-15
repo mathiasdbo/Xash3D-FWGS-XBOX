@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - an Xbox build release publishes its link map and its save baseline, or is refused (XS.7)
+
+`tools/xbe_release.py check` and `publish` refuse an XBE unless it comes from a commit on `origin/main` that this checkout is at, keeps the title id and the save rules, has live save evidence for exactly its bytes (every fixture loaded and played), and has its link map beside it with an `.identity` naming the same hash. A release carries `default.xbe`, `default.map` (the map later builds' offsets and names are measured against) and `save-live-evidence.txt`, and its notes carry the hashes. `publish` only prints unless `--publish` is given. `docs/r3d/release-checklist.md` has the order of the steps.
+
 ### Added - the packager copies the console's saved games before it replaces the build (XS.6)
 
 An upload that replaces the console's `default.xbe` first copies the console's save folder (found on whichever drive has `UDATA/FFFF0002/<game>/<game>/save`) to `~/Xash3D-FWGS-XBOX-save-backups/<date>-<build>/`, with a manifest of sizes and SHA-256s, made in a `.partial` folder and renamed only when every file matches what the console listed. It only reads from the console; if the copy cannot be made whole nothing is replaced. The installed build is identified by `savenet.code_id`, a hash of its sections other than the `$$` images, which does not change with the per-install certificate, boot logo or title images (checked on the three public XBEs), and the confirmation names a build that is not v0.1.2, v0.1.3 or v0.2.0. `--restore-build` and `--restore-saves` put the previous build and a backup back on request; neither deletes anything.

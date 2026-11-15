@@ -10654,6 +10654,12 @@ live evidence for the exact XBE decides.
 - **XS.7 - release discipline.** Every `xbe-*` release publishes its link
   map and the id of the save baseline it was checked against; `release.py`
   refuses without XS.0 and XS.4 green.
+  **Done (2026-11-15):** `tools/xbe_release.py` (`check` prints every reason, `publish --publish`
+  creates the pre-release) refuses without the title id, the save rules, live evidence for the
+  exact bytes, and the XBE's link map with an `.identity` naming the same hash; it attaches
+  `default.xbe`, `default.map` and `save-live-evidence.txt`. The packager side was done by
+  XS.4 (`make_payload.py` needs the evidence). The checklist is `docs/r3d/release-checklist.md`.
+  Not run for real: no release has been made with it yet.
 
 **Exit:** the 24 fixture saves and one save from each public build load in
 a build whose server code has changed; the gate and the layout check are
@@ -10700,8 +10706,8 @@ X10's exit is one sentence. This makes it a sequence.
 
 Nothing after X12 covers shipping, and three builds are already public.
 
-- A release checklist in the repository: XS.0 and XS.4 green, the map
-  published, the changelog section closed, the site updated
+- A release checklist in the repository (`docs/r3d/release-checklist.md`, started with XS.7:
+  the save gates and the map published; the rest is open): the changelog section closed, the site updated
   (`tools/site/build.py`, then the Pages workflow), the known issues taken
   from XG's open rows.
 - X11's exit document (frame budget and peak memory on hardware), written
