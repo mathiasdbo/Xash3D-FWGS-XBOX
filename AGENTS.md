@@ -218,6 +218,20 @@ touches, and never ask permission first.
   existing version folder — each one stays reachable so a specific build
   can always be gone back to.
 
+## Saved games: no build may make an existing save unloadable
+
+Owner rule, without exceptions. Saves are on players' consoles and cannot be recovered or regenerated.
+
+- A saved callback is written by function name, never by address or offset (XS.2). Old `ofs:N` saves are read through the
+  frozen `tools/save-legacy-table.txt` (XS.3); it is never regenerated to fit a build and never shrunk.
+- Do not change `SAVEGAME_VERSION`, `CLIENT_SAVEGAME_VERSION`, the `JSAV` tag, the title id `0xFFFF0002` or the save path,
+  and do not lower a limit in `tools/save-limits.txt`. `tools/save_rules_check.py` fails the build if one moves.
+- Do not remove, rename or retype a field in a saved `TYPEDESCRIPTION` table of the SDK: it loses state silently.
+- A new XBE is released only with live evidence (`tools/save_live_gate.py run`, committed as
+  `tools/save-live-evidence/<sha256>.txt`) that every fixture save loads and plays in it. The fixture saves stay outside
+  the repository (`R3D_SAVE_FIXTURES`). Never copy real saves, or a console's save folder, into the repository, a PR or a log.
+- Never write to, delete from or clean up a console's save folder from a tool or test; read-only copies only.
+
 ## Workflow
 
 - One branch per phase or feature, off `main`.

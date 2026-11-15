@@ -1,0 +1,9 @@
+# XS.5: the lowest value each engine limit may have, for the build the Xbox uses (XASH_LOW_MEMORY=1).
+# A saved game holds as many entities, models, sounds, light styles and decals as the game had. Raising a number here is
+# never needed to raise the engine's: only lowering the engine's below its line fails (tools/save_rules_check.py source).
+# Changing a line is accepting that saves holding more than that stop loading: do not.
+DEFAULT_MAX_EDICTS 1200
+MAX_MODELS 4096
+MAX_SOUNDS 2048
+MAX_LIGHTSTYLES 256
+MAX_DECALS 512

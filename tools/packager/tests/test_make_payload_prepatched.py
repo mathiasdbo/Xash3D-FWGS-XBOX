@@ -48,7 +48,7 @@ class PrepatchedPayload(unittest.TestCase):
             self.printed = io.StringIO()
             with contextlib.redirect_stdout(self.printed):
                 make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"] + list(extra), layout_baseline=baseline,
-                                  layout_sha256=None, live_gate=None)
+                                  layout_sha256=None, live_gate=None, rules_gate=None)
         except SystemExit as e:
             self.refused = str(e.code)
             return xbe, out, None
@@ -103,8 +103,24 @@ class PrepatchedPayload(unittest.TestCase):
             out = os.path.join(tmp, "o")
             with self.assertRaises(SystemExit) as cm:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"])
+                    make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"], rules_gate=None)
             self.assertIn("live save gate failed", str(cm.exception.code))
+            self.assertFalse(os.path.exists(out))
+
+    def test_an_xbe_with_another_title_id_is_refused_and_nothing_is_written(self):
+        # XS.5: saves live in UDATA/<title id>; the layout and live gates are off here, the id check is the real one
+        import save_rules_check
+        import test_save_rules_check
+        data = test_save_rules_check.small_xbe(0x12345678)
+        with tempfile.TemporaryDirectory() as tmp:
+            xbe = os.path.join(tmp, "in.xbe")
+            with open(xbe, "wb") as f:
+                f.write(data)
+            out = os.path.join(tmp, "o")
+            with self.assertRaises(SystemExit) as cm:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"], layout_sha256=None, live_gate=None)
+            self.assertIn("title id", str(cm.exception.code))
             self.assertFalse(os.path.exists(out))
 
     def test_the_command_line_cannot_name_a_baseline(self):

@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - the rules a saved game depends on that no fixture exercises (XS.5, partly)
+
+`tools/save_rules_check.py source` fails when the engine source changes `SAVEGAME_VERSION` (0x71), `CLIENT_SAVEGAME_VERSION` (0x67) or the `JSAV` tag, or lowers an engine limit below `tools/save-limits.txt` (edicts, models, sounds, light styles, decals, read from the headers for the `XASH_LOW_MEMORY=1` configuration the Xbox uses); a renamed macro fails instead of passing. `tools/xbox-game-link-check.sh` runs it before every XBE link. `save_rules_check.py xbe` reads the title id from the XBE certificate, and `make_payload.py` refuses an XBE whose id is not `0xFFFF0002`, the folder the saves live in. `AGENTS.md` now states the rule. Still to do in XS.5: the baker renumbering check, the SDK saved-field tables, and a full disk.
+
 ### Changed - the release no longer refuses a build because its server layout moved (XS.4)
 
 XS.0 refused any XBE whose server code layout differed from the public builds, because old saves held offsets into it. Saves are now written by function name (XS.2) and the old offsets are read through the frozen legacy table (XS.3), and the live gate (`tools/save_live_gate.py`, evidence bound to the XBE's SHA-256) loads the fixture saves in xemu. `make_payload.py` therefore requires that evidence and no longer refuses a moved layout: it prints a note listing the differences from the public builds (`save_layout_check.advice`). `tools/save_layout_check.py check` still works as a report. A release still cannot ship without evidence for exactly its XBE bytes.
