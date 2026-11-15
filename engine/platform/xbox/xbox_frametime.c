@@ -592,6 +592,10 @@ static void FT_ScanRecordings( uint64_t *bytes, int *files )
 	Mem_Free( t );
 }
 
+/* What the recordings in frametime/ took when this session started: the base of the aggregate cap, which the flush checks without
+   scanning the directory again (that is a listing of every file). */
+static uint64_t ft_used_at_start;
+
 /* Is there room to record: false, with the reason said in the console and on the screen, when the drive is known to have less
    than host_frametime_keep_free_mb left or the recordings already take host_frametime_max_mb. */
 static qboolean FT_RoomToRecord( qboolean starting )
@@ -608,10 +612,12 @@ static qboolean FT_RoomToRecord( qboolean starting )
 		CL_CenterPrint( "Recording stopped: the hard drive is almost full.\nSaved games need the room.", 0.25f );
 		return false;
 	}
-	if( cap )
+	if( starting || cap )
 	{
 		FT_ScanRecordings( &used, &files );
-		if( used >= cap )
+		if( starting )
+			ft_used_at_start = used;
+		if( cap && used >= cap )
 		{
 			Con_Printf( S_ERROR "frametime: %d recordings already take %u MiB (limit %u MiB, host_frametime_max_mb), so %s. "
 				"host_frametime_clean keeps the newest session, host_frametime_clear removes all of them.\n",
@@ -619,6 +625,30 @@ static qboolean FT_RoomToRecord( qboolean starting )
 			CL_CenterPrint( "Recording stopped: the recordings take too much space.\nUse host_frametime_clean.", 0.25f );
 			return false;
 		}
+	}
+	return true;
+}
+
+/* The same two limits while recording, at every flush (host_frametime_segment_mb 0 never rotates, and a long map would otherwise
+   write on): one free-space query, and the recordings that were there when the session started plus this session's bytes. */
+static qboolean FT_RoomWhileRecording( void )
+{
+	uint64_t keep = (uint64_t)bound( 0, (int)host_frametime_keep_free_mb.value, 1000000 ) << 20;
+	uint64_t cap = (uint64_t)bound( 0, (int)host_frametime_max_mb.value, 1000000 ) << 20;
+
+	if( Xbox_DiskLow( keep ))
+	{
+		Con_Printf( S_ERROR "frametime: the hard drive has under %u MiB free, so recording is stopped. host_frametime_clear removes the recordings.\n",
+			(uint32_t)( keep >> 20 ));
+		CL_CenterPrint( "Recording stopped: the hard drive is almost full.\nSaved games need the room.", 0.25f );
+		return false;
+	}
+	if( cap && ft_used_at_start + ft.session_bytes >= cap )
+	{
+		Con_Printf( S_ERROR "frametime: the recordings reached %u MiB (host_frametime_max_mb), so recording is stopped. host_frametime_clean keeps the newest session, host_frametime_clear removes all of them.\n",
+			(uint32_t)( cap >> 20 ));
+		CL_CenterPrint( "Recording stopped: the recordings take too much space.\nUse host_frametime_clean.", 0.25f );
+		return false;
 	}
 	return true;
 }
@@ -634,8 +664,9 @@ static qboolean FT_SessionOf( const char *path, char *out, size_t size )
 static void FT_RemoveRecordings( qboolean keep_newest )
 {
 	search_t *t;
-	char newest[64] = "";
-	int newest_time = 0, i, removed = 0, kept = 0;
+	enum { MAX_NEWEST = 16 };
+	char newest[MAX_NEWEST][64];
+	int nnewest = 0, newest_time = 0, i, j, removed = 0, kept = 0;
 	uint64_t freed = 0;
 
 	if( ft.mode != 0 )
@@ -650,16 +681,31 @@ static void FT_RemoveRecordings( qboolean keep_newest )
 	}
 	if( keep_newest )
 	{
+		/* File times are whole seconds, and two short sessions can end in the same one: so every session that has a file with the
+		   newest time is kept, not the one that happens to sort last. */
 		for( i = 0; i < t->numfilenames; i++ )
 		{
 			char sess[64];
-			int ft_time = FS_FileTime( t->filenames[i], true );
 
-			if( FT_SessionOf( t->filenames[i], sess, sizeof( sess )) && ft_time >= newest_time )
+			if( FT_SessionOf( t->filenames[i], sess, sizeof( sess )))
+				newest_time = Q_max( newest_time, FS_FileTime( t->filenames[i], true ));
+		}
+		for( i = 0; i < t->numfilenames; i++ )
+		{
+			char sess[64];
+
+			if( !FT_SessionOf( t->filenames[i], sess, sizeof( sess )) || FS_FileTime( t->filenames[i], true ) != newest_time )
+				continue;
+			for( j = 0; j < nnewest && Q_strcmp( newest[j], sess ); j++ );
+			if( j < nnewest )
+				continue;
+			if( nnewest == MAX_NEWEST )
 			{
-				newest_time = ft_time;
-				Q_strncpy( newest, sess, sizeof( newest ));
+				Mem_Free( t );
+				Con_Printf( S_ERROR "frametime: more than %d sessions share the newest time: nothing was removed (host_frametime_clear removes all)\n", MAX_NEWEST );
+				return;
 			}
+			Q_strncpy( newest[nnewest++], sess, sizeof( newest[0] ));
 		}
 	}
 	for( i = 0; i < t->numfilenames; i++ )
@@ -672,7 +718,8 @@ static void FT_RemoveRecordings( qboolean keep_newest )
 			kept++; /* not a recording's name: not touched */
 			continue;
 		}
-		if( keep_newest && !Q_strcmp( sess, newest ))
+		for( j = 0; keep_newest && j < nnewest && Q_strcmp( sess, newest[j] ); j++ );
+		if( keep_newest && j < nnewest )
 		{
 			kept++;
 			continue;
@@ -691,7 +738,7 @@ static void FT_RemoveRecordings( qboolean keep_newest )
 	}
 	Mem_Free( t );
 	Con_Printf( "frametime: removed %d recording file(s), %u MiB freed%s\n", removed, (uint32_t)( freed >> 20 ),
-		keep_newest ? va( "; %d kept (the newest session)", kept ) : "" );
+		keep_newest ? va( "; %d kept (the newest session%s)", kept, nnewest > 1 ? "s, tied" : "" ) : "" );
 }
 
 static void FT_Clean_f( void )
@@ -1118,6 +1165,8 @@ void Xbox_FrameTime_BeginFrame( void )
 			Con_Printf( S_WARN "frametime: the session reached %u MiB, recording stopped\n", (uint32_t)( XBOX_FT_MAX_SESSION_BYTES >> 20 ));
 			Cvar_DirectSet( &host_frametime_analysis, "0" );
 		}
+		else if( !FT_RoomWhileRecording( ))
+			Cvar_DirectSet( &host_frametime_analysis, "0" );
 	}
 
 	xbox_ft_waits.gpu = xbox_ft_waits.vblank = xbox_ft_waits.swap = 0;
