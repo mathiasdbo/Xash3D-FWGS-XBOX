@@ -786,3 +786,48 @@ size_t xbox_ft_encode_segment_open( uint8_t *out, uint32_t ring_frames, uint64_t
 	n += xbox_ft_encode_spans( out + n, counters );
 	return n;
 }
+
+/* The session a recording file belongs to (xbox_frametime_util.h). */
+size_t xbox_ft_session_key( const char *file, char *out, size_t out_size )
+{
+	size_t len, i, seq_start, sess_start;
+
+	if( !file || !out || !out_size )
+		return 0;
+	out[0] = 0;
+	len = strlen( file );
+	if( len < 8 || memcmp( file, "ft_", 3 ) || ( file[len - 4] != '.' ) || memcmp( file + len - 3, "bin", 3 ))
+		return 0;
+	len -= 4; /* without ".bin" */
+
+	/* the first recorder: ft_<digits>: each file its own session */
+	for( i = 3; i < len && file[i] >= '0' && file[i] <= '9'; i++ );
+	if( i == len && len > 3 )
+	{
+		if( len + 1 > out_size )
+			return 0;
+		memcpy( out, file, len );
+		out[len] = 0;
+		return len;
+	}
+
+	/* ft_<label>_<8 hex>_<seq> */
+	for( seq_start = len; seq_start > 3 && file[seq_start - 1] >= '0' && file[seq_start - 1] <= '9'; seq_start-- );
+	if( seq_start == len || seq_start < 3 + 1 + 1 + 8 + 1 || file[seq_start - 1] != '_' )
+		return 0;
+	sess_start = seq_start - 1 - 8;
+	if( file[sess_start - 1] != '_' || sess_start - 1 < 4 )
+		return 0; /* the label is at least one character */
+	for( i = sess_start; i < sess_start + 8; i++ )
+	{
+		char c = file[i];
+
+		if( !(( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' )))
+			return 0;
+	}
+	if( 8 + 1 > out_size )
+		return 0;
+	memcpy( out, file + sess_start, 8 );
+	out[8] = 0;
+	return 8;
+}

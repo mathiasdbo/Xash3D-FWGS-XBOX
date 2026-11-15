@@ -933,6 +933,11 @@ void xbox_ft_session_id( const uint64_t *inputs, uint32_t n, uint8_t id[XBOX_FT_
    XBOX_FT_SEGMENT_SEQ_MAX. Returns its length, at most
    XBOX_FT_FILE_NAME_MAX. */
 size_t xbox_ft_segment_name( char *out, const char *label, const uint8_t id[XBOX_FT_SESSION_ID_BYTES], uint32_t seq );
+/* Which session a recording file belongs to, from its name WITHOUT a directory: ft_<label>_<8 hex>_<seq>.bin gives the 8 hex digits;
+   the first recorder's ft_<NNN>.bin (one file a session, no label) gives the whole name without .bin, so each is a session of its own.
+   Returns the key's length, or 0 when the name is not a recording's (then it is not touched): anything else, a seq that is not
+   digits, a session that is not 8 lower-case hex digits. `out` is `out_size` bytes. */
+size_t xbox_ft_session_key( const char *file, char *out, size_t out_size );
 /* Whether to close the segment being written and open the next, decided
    right after a flush: at a map start when the segment already holds
    frames (XBOX_FT_SEG_MAP - a map that starts in an empty segment, the

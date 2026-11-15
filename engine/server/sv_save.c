@@ -22,7 +22,6 @@ GNU General Public License for more details.
 #include "ref_common.h" // decals
 #if XASH_XBOX && !XASH_DEDICATED
 #include "platform/xbox/xbox_frametime.h" // the frame-time recorder's save spans, docs/r3d/divergences.md #141
-#include "platform/xbox/xbox_diskspace.h" // a save or a load on a full drive says so instead of failing half way
 #include <xboxkrnl/xboxkrnl.h> // MmQueryStatistics: the save buffer's size (#192)
 #else
 #define XBOX_FT_SPAN( id, stmt ) stmt
@@ -31,6 +30,9 @@ GNU General Public License for more details.
 #define XBOX_FT_LOAD_BEGIN( var )
 #define XBOX_FT_LOAD_END( var, stage )
 #define XBOX_FT_LOAD_ACCUM( var, acc )
+#endif
+#if XASH_XBOX
+#include "platform/xbox/xbox_diskspace.h" // a save or a load on a full drive says so instead of failing half way
 #endif
 
 #if XASH_XBOX

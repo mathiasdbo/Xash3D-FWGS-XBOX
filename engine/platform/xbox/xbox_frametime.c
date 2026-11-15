@@ -623,37 +623,10 @@ static qboolean FT_RoomToRecord( qboolean starting )
 	return true;
 }
 
-/* The session a recording file belongs to: ft_<label>_<session>_<seq>.bin -> "<session>" ("" when the name is not that). */
+/* The session a recording file belongs to ("" and false when the name is not a recording's): xbox_ft_session_key. */
 static qboolean FT_SessionOf( const char *path, char *out, size_t size )
 {
-	const char *base = COM_FileWithoutPath( path );
-	const char *end, *seq, *sess;
-	size_t len;
-
-	if( Q_strncmp( base, "ft_", 3 ) || !( end = Q_strrchr( base, '.' )) || Q_stricmp( end, ".bin" ))
-		return false;
-	/* the first recorder wrote ft_<NNN>.bin, one file a session and no label: all of them are older than any session with a
-	   name, and they are recordings like the rest (they fill the drive the same) */
-	if( end - base > 3 )
-	{
-		const char *d;
-
-		for( d = base + 3; d < end && *d >= '0' && *d <= '9'; d++ );
-		if( d == end )
-		{
-			Q_strncpy( out, "legacy", size );
-			return true;
-		}
-	}
-	for( seq = end; seq > base && seq[-1] != '_'; seq-- );
-	if( seq <= base + 3 )
-		return false;
-	for( sess = seq - 1; sess > base && sess[-1] != '_'; sess-- );
-	len = (size_t)( seq - 1 - sess );
-	if( sess <= base + 3 || !len || len >= size )
-		return false;
-	Q_strncpy( out, sess, len + 1 );
-	return true;
+	return xbox_ft_session_key( COM_FileWithoutPath( path ), out, size ) != 0;
 }
 
 /* host_frametime_clean (keep the newest session, remove the rest) and host_frametime_clear (remove every recording). Only files

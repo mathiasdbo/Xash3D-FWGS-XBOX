@@ -27,6 +27,7 @@ this cannot refuse a save the drive could have taken.
 
 #define XBOX_DISK_UNKNOWN ((uint64_t)-1)
 
+#if XASH_XBOX && !XASH_DEDICATED
 /* free bytes on E: (the drive that holds E:\UDATA\<title id>\<game>, filesystem_engine.c), or XBOX_DISK_UNKNOWN */
 uint64_t Xbox_DiskFreeBytes( void );
 
@@ -38,5 +39,11 @@ qboolean Xbox_DiskLow( uint64_t need_bytes );
 uint64_t Xbox_DiskNeededForSave( void );
 
 void Xbox_DiskSpace_Init( void ); /* registers r3d_disk_low_mb; called from Xbox_FrameTime_Init, before the configs run */
+#else
+/* the dedicated server has no client to tell and links no platform/xbox files: nothing is ever known to be low */
+static inline uint64_t Xbox_DiskFreeBytes( void ) { return XBOX_DISK_UNKNOWN; }
+static inline qboolean Xbox_DiskLow( uint64_t need_bytes ) { (void)need_bytes; return false; }
+static inline uint64_t Xbox_DiskNeededForSave( void ) { return 0; }
+#endif
 
 #endif // XBOX_DISKSPACE_H

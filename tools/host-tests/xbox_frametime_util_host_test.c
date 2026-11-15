@@ -1314,8 +1314,55 @@ static int write_session( const char *dir, const char *label, uint64_t id_input,
 	return bad;
 }
 
+/* xbox_ft_session_key: which session a recording file belongs to, for host_frametime_clean */
+static void test_session_key( void )
+{
+	char k[64];
+	uint8_t id[XBOX_FT_SESSION_ID_BYTES] = { 0xde, 0xad, 0xbe, 0xef, 0x01 };
+	char name[XBOX_FT_FILE_NAME_MAX + 1];
+	size_t n;
+
+	/* a file the recorder named: its session is the 8 hex digits, whatever the label and the segment */
+	n = xbox_ft_segment_name( name, "pr190-clents", id, 7 );
+	CHECK( n > 0 && xbox_ft_session_key( name, k, sizeof( k )) == 8 && !strcmp( k, "deadbeef" ));
+	n = xbox_ft_segment_name( name, "abcdefghijklmnopqrstuvwxyz0123", id, 5000 );
+	CHECK( n > 0 && xbox_ft_session_key( name, k, sizeof( k )) == 8 && !strcmp( k, "deadbeef" ));
+	CHECK( xbox_ft_session_key( "ft_x4f90965_00_0123abcd_000.bin", k, sizeof( k )) == 8 && !strcmp( k, "0123abcd" )); /* a label with _ */
+	CHECK( xbox_ft_session_key( "ft_a_0123abcd_000.bin", k, sizeof( k )) == 8 && !strcmp( k, "0123abcd" ));
+
+	/* the first recorder's files are a session each, so clean can keep the newest and remove the rest */
+	CHECK( xbox_ft_session_key( "ft_000.bin", k, sizeof( k )) == 6 && !strcmp( k, "ft_000" ));
+	CHECK( xbox_ft_session_key( "ft_230.bin", k, sizeof( k )) == 6 && !strcmp( k, "ft_230" ));
+
+	/* anything else is not a recording and is not touched */
+	CHECK( xbox_ft_session_key( "quick.sav", k, sizeof( k )) == 0 );
+	CHECK( xbox_ft_session_key( "notes.txt", k, sizeof( k )) == 0 );
+	CHECK( xbox_ft_session_key( "ft_.bin", k, sizeof( k )) == 0 );
+	CHECK( xbox_ft_session_key( "ft_a_0123abcd_.bin", k, sizeof( k )) == 0 );       /* no seq */
+	CHECK( xbox_ft_session_key( "ft_a_0123ABCD_000.bin", k, sizeof( k )) == 0 );    /* upper-case hex */
+	CHECK( xbox_ft_session_key( "ft_a_0123abcg_000.bin", k, sizeof( k )) == 0 );    /* not hex */
+	CHECK( xbox_ft_session_key( "ft_a_0123abc_000.bin", k, sizeof( k )) == 0 );     /* 7 digits */
+	CHECK( xbox_ft_session_key( "ft__0123abcd_000.bin", k, sizeof( k )) == 0 );     /* no label */
+	CHECK( xbox_ft_session_key( "ft_a_0123abcd_000.bin.rmv", k, sizeof( k )) == 0 );
+	CHECK( xbox_ft_session_key( "ft_a_0123abcd_000.rmv", k, sizeof( k )) == 0 );
+	CHECK( xbox_ft_session_key( "../ft_a_0123abcd_000.bin", k, sizeof( k )) == 0 );
+	CHECK( xbox_ft_session_key( "", k, sizeof( k )) == 0 && xbox_ft_session_key( NULL, k, sizeof( k )) == 0 );
+	CHECK( xbox_ft_session_key( "ft_000.bin", k, 3 ) == 0 ); /* an `out` too small is a refusal, not an overrun */
+
+	/* clean's rule on a legacy-only set: the newest of three is a different key from the other two */
+	{
+		char a[16], b[16], c[16];
+
+		xbox_ft_session_key( "ft_001.bin", a, sizeof( a ));
+		xbox_ft_session_key( "ft_002.bin", b, sizeof( b ));
+		xbox_ft_session_key( "ft_003.bin", c, sizeof( c ));
+		CHECK( strcmp( a, b ) && strcmp( b, c ) && strcmp( a, c ));
+	}
+}
+
 int main( int argc, char **argv )
 {
+	test_session_key();
 	test_ring();
 	test_units();
 	test_stats();

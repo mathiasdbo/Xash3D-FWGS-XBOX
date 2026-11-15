@@ -14,7 +14,7 @@ GNU General Public License for more details.
 */
 #include "xbox_diskspace.h"
 
-#if XASH_XBOX
+#if XASH_XBOX && !XASH_DEDICATED
 #include <windows.h>
 
 static CVAR_DEFINE_AUTO( r3d_disk_low_mb, "16", FCVAR_FILTERABLE,
