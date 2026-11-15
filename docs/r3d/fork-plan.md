@@ -10631,7 +10631,7 @@ live evidence for the exact XBE decides.
     (the `.tmp` path should already do it; tested with a full partition).
   **Done so far (2026-11-15):** the title id (`save_rules_check.py xbe`,
   required by `make_payload.py`), the save versions and the limits (`save_rules_check.py
-  source` against `tools/save-limits.txt`, run by `xbox-game-link-check.sh`; the
+  source` against `MINIMUMS`, checked in a test against the v0.2.0 source, run by `xbox-game-link-check.sh`; the
   limits are the headers' values for `XASH_LOW_MEMORY=1`, and the 900 above is
   `DEFAULT_MAX_EDICTS` 1200 today). The path under the id is not checked. Open:
   the baker's renumbering, the SDK's field-table dump, and the full-disk test.

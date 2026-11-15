@@ -55,7 +55,7 @@ class Source(unittest.TestCase):
         self.tmp.cleanup()
 
     def problems(self):
-        return rules.source_problems(rules.LIMITS, self.sv, self.hdrs)
+        return rules.source_problems(self.sv, self.hdrs)
 
     def edit(self, path, old, new):
         with open(path, encoding="utf-8", newline="") as f:
@@ -96,10 +96,11 @@ class Source(unittest.TestCase):
         self.edit(defaults, "#define DEFAULT_MAX_EDICTS 1200", "#define DEFAULT_MAX_EDICTS 2000")
         self.assertEqual(self.problems(), [])
 
-    def test_fewer_model_bits_fails(self):
+    def test_the_model_bits_do_not_matter_where_the_xbox_branch_sets_the_value(self):
+        # MAX_MODELS is 1024 for XASH_LOW_MEMORY == 1 whatever the general bits say: the effective value is what is checked
         protocol = [p for p in self.hdrs if p.endswith("protocol.h")][0]
-        self.edit(protocol, "#define MAX_MODEL_BITS\t\t12", "#define MAX_MODEL_BITS\t\t11")
-        self.assertTrue(any("MAX_MODELS is 2048" in p for p in self.problems()))
+        self.edit(protocol, "#define MAX_MODEL_BITS\t\t12", "#define MAX_MODEL_BITS\t\t8")
+        self.assertEqual(self.problems(), [])
 
     def test_fewer_decals_in_the_xbe_configuration_fails(self):
         # XASH_LOW_MEMORY == 1 is the Xbox branch: lowering that one is what counts
@@ -107,10 +108,50 @@ class Source(unittest.TestCase):
         self.edit(common, "#elif XASH_LOW_MEMORY == 1\n#define MAX_DECALS\t\t512", "#elif XASH_LOW_MEMORY == 1\n#define MAX_DECALS\t\t256")
         self.assertTrue(any("MAX_DECALS is 256" in p for p in self.problems()))
 
+    def test_the_effective_xbox_value_counts_not_the_first_definition(self):
+        # MAX_MODELS is 4096 at first and 1024 after the XASH_LOW_MEMORY == 1 branch undefines and redefines it
+        protocol = [p for p in self.hdrs if p.endswith("protocol.h")][0]
+        self.edit(protocol, "#define MAX_MODELS\t\t\t1024", "#define MAX_MODELS\t\t\t256")
+        self.assertTrue(any("MAX_MODELS is 256" in p for p in self.problems()))
+
+    def test_lowering_the_engine_and_a_copy_of_the_minimum_still_fails(self):
+        # the minimums are not in a file the same change can edit: only the engine side can be changed here
+        common = [p for p in self.hdrs if p.endswith("common.h")][0]
+        self.edit(common, "#elif XASH_LOW_MEMORY == 1\n#define MAX_DECALS\t\t512", "#elif XASH_LOW_MEMORY == 1\n#define MAX_DECALS\t\t256")
+        self.assertTrue(any("MAX_DECALS is 256" in p for p in self.problems()))
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(rules.__file__), "save-limits.txt")))
+
+    def test_undef_removes_a_definition(self):
+        d = rules.defines("#define A 1\n#undef A\n#define B 2\n#define B 3\n")
+        self.assertNotIn("A", d)
+        self.assertEqual(d["B"], "3")
+
     def test_a_limit_that_disappears_fails_instead_of_passing(self):
         protocol = [p for p in self.hdrs if p.endswith("protocol.h")][0]
         self.edit(protocol, "#define MAX_LIGHTSTYLES", "#define MAX_LIGHT_STYLES")
         self.assertTrue(any("MAX_LIGHTSTYLES" in p and "renamed" in p for p in self.problems()))
+
+
+class PublicBuild(unittest.TestCase):
+    """the minimums are what the public v0.2.0 source had: read from git history, so lowering a number in the checker fails here"""
+
+    def show(self, path):
+        import subprocess
+        r = subprocess.run(["git", "-C", rules.REPO, "show", "%s:%s" % (rules.PUBLIC_COMMIT, path)], capture_output=True, text=True)
+        if r.returncode:
+            self.skipTest("the public commit %s is not in this clone" % rules.PUBLIC_COMMIT)
+        return r.stdout
+
+    def test_the_minimums_are_the_public_builds_values(self):
+        table = {}
+        for path in ("engine/common/protocol.h", "engine/common/common.h", "common/defaults.h"):
+            for k, v in rules.defines(self.show(path)).items():
+                table.setdefault(k, v)
+        for name, want in rules.MINIMUMS.items():
+            self.assertEqual(rules.evaluate(table[name], table), want, name)
+        sv = rules.defines(self.show("engine/server/sv_save.c"))
+        for name, want in rules.FORMAT.items():
+            self.assertEqual(rules.evaluate(sv[name], sv), want, name)
 
 
 class Evaluate(unittest.TestCase):

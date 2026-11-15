@@ -12,7 +12,7 @@ existing save vanish or fail without a single save file being touched. The rules
   * the save format. engine/server/sv_save.c's SAVEGAME_HEADER ("JSAV"), SAVEGAME_VERSION (0x71) and
     CLIENT_SAVEGAME_VERSION (0x67): a newer number makes the engine call every older save "<old version>".
   * the limits. A save holds as many entities, models, sounds, light styles and decals as the game had, so the engine must
-    accept at least that many: tools/save-limits.txt lists the minimums (the values of the build with XASH_LOW_MEMORY=1,
+    accept at least that many: MINIMUMS below lists them (the values of the build with XASH_LOW_MEMORY=1,
     which is what the Xbox build uses). Raising a limit is fine; lowering one fails.
 
 `source` reads the macros out of the headers (it follows the `#if XASH_LOW_MEMORY` branches and takes the Xbox one), so it needs no
@@ -30,10 +30,21 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-LIMITS = os.path.join(HERE, "save-limits.txt")
 SV_SAVE = os.path.join(REPO, "engine", "server", "sv_save.c")
 TITLE_ID = 0xFFFF0002
 XASH_LOW_MEMORY = 1  # the Xbox build (tools/xbox-cc.sh)
+
+# The lowest value each engine limit may have: what the public builds (v0.1.2 to v0.2.0, XASH_LOW_MEMORY=1) had. A saved game
+# holds as many entities, models, sounds, light styles and decals as the game had. Raising an engine limit is fine; lowering
+# one fails. These numbers are never lowered; tools/test_save_rules_check.py checks them against the public commit's source.
+MINIMUMS = {
+    "DEFAULT_MAX_EDICTS": 1200,
+    "MAX_MODELS": 1024,
+    "MAX_SOUNDS": 2048,
+    "MAX_LIGHTSTYLES": 256,
+    "MAX_DECALS": 512,
+}
+PUBLIC_COMMIT = "cdd64653"  # xbe-cdd64653, v0.2.0
 
 FORMAT = {  # name: the value the public builds write and read
     "SAVEGAME_VERSION": 0x0071,
@@ -69,15 +80,18 @@ def defines(text, low_memory=XASH_LOW_MEMORY):
 
     for raw in strip_comments(text).splitlines():
         line = raw.strip()
-        m = re.match(r"#\s*(if|ifdef|ifndef|elif|else|endif|define)\b\s*(.*)", line)
+        m = re.match(r"#\s*(if|ifdef|ifndef|elif|else|endif|define|undef)\b\s*(.*)", line)
         if not m:
             continue
         kind, rest = m.group(1), m.group(2).strip()
-        if kind == "define":
+        if kind == "undef":
+            if live():
+                out.pop(rest.split()[0] if rest else "", None)
+        elif kind == "define":
             if live():
                 dm = re.match(r"(\w+)(?:\s+(.*))?$", rest)
                 if dm and "(" not in dm.group(1):
-                    out.setdefault(dm.group(1), (dm.group(2) or "").strip())
+                    out[dm.group(1)] = (dm.group(2) or "").strip()  # the last active definition is the one the compiler keeps
         elif kind in ("if", "ifdef", "ifndef"):
             on = None
             lm = re.match(r"XASH_LOW_MEMORY\s*==\s*(\d+)$", rest)
@@ -122,22 +136,7 @@ def evaluate(expr, table, depth=0):
     return int(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307 - the charset above is digits and operators only
 
 
-def load_limits(path=LIMITS):
-    rows = {}
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if not line.strip() or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) != 2 or not parts[1].isdigit():
-                raise RulesError("bad line in %s: %r" % (path, line.strip()))
-            rows[parts[0]] = int(parts[1])
-    if not rows:
-        raise RulesError("%s lists no limit" % path)
-    return rows
-
-
-def source_problems(limits_path=LIMITS, sv_save=SV_SAVE, limit_files=None):
+def source_problems(sv_save=SV_SAVE, limit_files=None, minimums=None):
     problems = []
     try:
         with open(sv_save, encoding="utf-8") as f:
@@ -164,10 +163,7 @@ def source_problems(limits_path=LIMITS, sv_save=SV_SAVE, limit_files=None):
                     table.setdefault(k, v)
         except OSError as e:
             problems.append("cannot read %s: %s" % (p, e))
-    try:
-        mins = load_limits(limits_path)
-    except (OSError, RulesError) as e:
-        return problems + [str(e)]
+    mins = MINIMUMS if minimums is None else minimums
     for name, want in sorted(mins.items()):
         if name not in table:
             problems.append("limit %s is not defined where it was: the rule cannot be checked (renamed?)" % name)
