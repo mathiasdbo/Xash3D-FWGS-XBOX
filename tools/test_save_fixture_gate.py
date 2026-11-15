@@ -98,6 +98,8 @@ class Release(unittest.TestCase):
         import make_payload
         params = inspect.signature(make_payload.main).parameters
         self.assertIs(params["fixture_gate"].default, gate.require)
+        import save_live_gate
+        self.assertIs(params["live_gate"].default, save_live_gate.require)
         import subprocess
         r = subprocess.run([sys.executable, make_payload.__file__, "--help"], capture_output=True, text=True)
         self.assertNotIn("fixture", r.stdout)
@@ -117,7 +119,7 @@ class Release(unittest.TestCase):
             ran = []
             with self.assertRaises(SystemExit) as cm:
                 make_payload.main(["--xbe", xbe, "--out", os.path.join(tmp, "o"), "--xbe-commit", "0" * 40],
-                                  layout_baseline=own, layout_sha256=None, fixture_gate=lambda: ran.append(1))
+                                  layout_baseline=own, layout_sha256=None, fixture_gate=lambda: ran.append(1), live_gate=None)
             self.assertEqual(ran, [])
             self.assertIn("not from this checkout", str(cm.exception.code))
 
