@@ -196,6 +196,15 @@ class OnAConsole(unittest.TestCase):
                 self.assertEqual(r3d_packager.recordings(a), 1)
         self.assertIn("NOT removed", err.getvalue())
 
+    def test_the_first_recorders_ft_nnn_files_are_recordings_too(self):
+        for i in (0, 7):
+            with open(os.path.join(self.ft, "ft_%03d.bin" % i), "wb") as f:
+                f.write(b"old" * 100)
+        self.assertEqual(rec.summary(self.x, "valve")["files"], 7)
+        folder, removed, left, freed = rec.remove_all(self.x, "valve", self.dest)
+        self.assertEqual((removed, left), (7, []))
+        self.assertEqual(sorted(os.listdir(self.ft)), ["notes.txt"])
+
     def test_two_copies_in_the_same_second_are_both_kept(self):
         import datetime
         now = datetime.datetime(2026, 11, 15, 12, 0, 0)
@@ -260,10 +269,10 @@ class OnAConsole(unittest.TestCase):
 
 class Names(unittest.TestCase):
     def test_only_recorder_names_match(self):
-        for ok in ("ft_play-v013_b96e1c1d_070.bin", "ft_x4a_0123abcd_000.bin"):
+        for ok in ("ft_play-v013_b96e1c1d_070.bin", "ft_x4a_0123abcd_000.bin", "ft_000.bin", "ft_230.bin", "ft_001.rmv"):
             self.assertTrue(rec.REC_NAME.match(ok), ok)
         for bad in ("quick.sav", "ft_x.bin", "ft_a_b96e1c1d_070.bin.part", "ft_a_b96e1c1d_070.removing", "../ft_a_b96e1c1d_070.bin", "ft_a_ZZZZZZZZ_070.bin",
-                    "notes.txt", "ft_a_b96e1c1d_7.bin"):
+                    "notes.txt", "ft_a_b96e1c1d_7.bin", "ft_0.bin", "ft_0000.bin"):
             self.assertFalse(rec.REC_NAME.match(bad), bad)
 
 

@@ -27,7 +27,7 @@ from . import savenet
 from .savenet import SaveNetError
 
 QUARANTINE = ".rmv"  # a recording being removed: ".bin" renamed to this, out of the recorder's way (same length: FATX names stop at 42 characters)
-REC_NAME = re.compile(r"ft_[A-Za-z0-9_\-]+_[0-9a-f]{8}_\d{3}\.(?:bin|rmv)$")
+REC_NAME = re.compile(r"ft_(?:[A-Za-z0-9_\-]+_[0-9a-f]{8}_)?\d{3}\.(?:bin|rmv)$")  # the first recorder's ft_<NNN>.bin included
 MANIFEST = "manifest.json"
 
 
