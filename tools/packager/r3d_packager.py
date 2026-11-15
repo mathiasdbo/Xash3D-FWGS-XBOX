@@ -251,7 +251,9 @@ def recordings(a):
         folder, removed, left, freed = rec.remove_all(x, gamedir, dest, progress=prog)
         print("\nCopied to %s, then removed %d files (%.0f MB) from the console." % (folder, removed, freed / 1e6))
         if left:
-            print("Left on the console (changed since the copy, so being written): %s" % ", ".join(left[:5]))
+            print("%d recording(s) were NOT removed (in use, changed since the copy, or the console refused): %s. The drive may still be "
+                  "full; run it again once the game is off." % (len(left), ", ".join(left[:5])), file=sys.stderr)
+            return 1
     except (savenet.SaveNetError, xboxftp.UploadError, OSError) as e:
         print("error: %s" % e, file=sys.stderr)
         return 1

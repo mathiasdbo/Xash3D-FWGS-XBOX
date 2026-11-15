@@ -156,11 +156,45 @@ class OnAConsole(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.ft, NAMES[1])))
 
     def test_files_left_by_a_cut_run_are_still_recordings_and_are_removed_next_time(self):
-        os.rename(os.path.join(self.ft, NAMES[0]), os.path.join(self.ft, NAMES[0] + rec.QUARANTINE))
+        os.rename(os.path.join(self.ft, NAMES[0]), os.path.join(self.ft, NAMES[0][:-4] + rec.QUARANTINE))
         self.assertEqual(rec.summary(self.x, "valve")["files"], 5)
         folder, removed, left, freed = rec.remove_all(self.x, "valve", self.dest)
         self.assertEqual((removed, left), (5, []))
         self.assertEqual(sorted(os.listdir(self.ft)), ["notes.txt"])
+
+    def test_the_longest_names_fit_fatx_when_claimed(self):
+        # FATX stops at 42 characters; a recording label may be up to 22 (xbox_frametime_util.h), so a claim may not add characters
+        real = self.x.rename_file
+
+        def fatx(old, new):
+            if len(os.path.basename(new)) > 42:
+                raise OSError("550 name too long")
+            real(old, new)
+        self.x.rename_file = fatx
+        for label in ("a" * 13, "b" * 14, "c" * 22):
+            with open(os.path.join(self.ft, "ft_%s_0123abcd_000.bin" % label), "wb") as f:
+                f.write(b"x" * 50)
+        self.assertEqual(max(len(n) for n in os.listdir(self.ft) if n.startswith("ft_")), 42)
+        folder, removed, left, freed = rec.remove_all(self.x, "valve", self.dest)
+        self.assertEqual((removed, left), (8, []))
+        self.assertEqual(sorted(os.listdir(self.ft)), ["notes.txt"])
+
+    def test_the_command_exits_nonzero_when_something_was_not_removed(self):
+        import r3d_packager
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        real = xboxftp.Xbox.rename_file
+
+        def refuse(x, old, new):
+            if os.path.basename(old) == NAMES[1]:
+                raise OSError("550 sharing violation")
+            real(x, old, new)
+        a = argparse.Namespace(upload="127.0.0.1", ftp_user="xbox", ftp_password="xbox", title="hl", recordings="remove",
+                               recordings_dest=self.dest)
+        err = io.StringIO()
+        with mock.patch.object(xboxftp.Xbox, "rename_file", refuse),                 mock.patch.object(xboxftp, "Xbox", functools.partial(xboxftp.Xbox, port=self.port)):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(r3d_packager.recordings(a), 1)
+        self.assertIn("NOT removed", err.getvalue())
 
     def test_two_copies_in_the_same_second_are_both_kept(self):
         import datetime
@@ -228,7 +262,7 @@ class Names(unittest.TestCase):
     def test_only_recorder_names_match(self):
         for ok in ("ft_play-v013_b96e1c1d_070.bin", "ft_x4a_0123abcd_000.bin"):
             self.assertTrue(rec.REC_NAME.match(ok), ok)
-        for bad in ("quick.sav", "ft_x.bin", "ft_a_b96e1c1d_070.bin.part", "../ft_a_b96e1c1d_070.bin", "ft_a_ZZZZZZZZ_070.bin",
+        for bad in ("quick.sav", "ft_x.bin", "ft_a_b96e1c1d_070.bin.part", "ft_a_b96e1c1d_070.removing", "../ft_a_b96e1c1d_070.bin", "ft_a_ZZZZZZZZ_070.bin",
                     "notes.txt", "ft_a_b96e1c1d_7.bin"):
             self.assertFalse(rec.REC_NAME.match(bad), bad)
 

@@ -26,8 +26,8 @@ import shutil
 from . import savenet
 from .savenet import SaveNetError
 
-QUARANTINE = ".removing"  # a recording being removed: renamed out of the recorder's way first, still a recording if the run is cut
-REC_NAME = re.compile(r"ft_[A-Za-z0-9_\-]+_[0-9a-f]{8}_\d{3}\.bin(?:\.removing)?$")
+QUARANTINE = ".rmv"  # a recording being removed: ".bin" renamed to this, out of the recorder's way (same length: FATX names stop at 42 characters)
+REC_NAME = re.compile(r"ft_[A-Za-z0-9_\-]+_[0-9a-f]{8}_\d{3}\.(?:bin|rmv)$")
 MANIFEST = "manifest.json"
 
 
@@ -124,12 +124,13 @@ def remove_all(x, gamedir, dest_root, now=None, progress=None):
         if name.endswith(QUARANTINE):
             claimed.append((name, name, size))  # left by an interrupted run, already out of the way
             continue
+        claim = name[:-len(".bin")] + QUARANTINE
         try:
-            x.rename_file(posixpath.join(src, name), posixpath.join(src, name + QUARANTINE))
+            x.rename_file(posixpath.join(src, name), posixpath.join(src, claim))
         except Exception:  # noqa: BLE001 - refused: in use, or the console would not
             left.append(name)
             continue
-        claimed.append((name, name + QUARANTINE, size))
+        claimed.append((name, claim, size))
     # Phase 2: one fresh listing of the claimed files; delete those still exactly the size that was copied, put the others back.
     _, after = list_recordings(x, gamedir)
     for name, q, size in claimed:
@@ -143,5 +144,5 @@ def remove_all(x, gamedir, dest_root, now=None, progress=None):
             try:
                 x.rename_file(posixpath.join(src, q), posixpath.join(src, name))
             except Exception:  # noqa: BLE001
-                pass  # stays as <name>.removing: still a recording, and listed again by the next run
+                pass  # stays as <name>.rmv: still a recording, and listed again by the next run
     return folder, removed, left, freed
