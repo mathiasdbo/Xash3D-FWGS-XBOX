@@ -68,15 +68,20 @@ def strip_comments(text):
     return re.sub(r"//[^\n]*", "", text)
 
 
-def defines(text, low_memory=XASH_LOW_MEMORY):
+def defines(text, low_memory=XASH_LOW_MEMORY, touched=None):
     """name -> expression text, from the #defines a build with XASH_LOW_MEMORY=low_memory sees. It follows #if/#elif/#else/
-    #endif on XASH_LOW_MEMORY == N, #ifndef and #ifdef NAME for names it has defined, and treats any other condition as
-    taken-in-its-first-branch-only, which is enough for the headers this reads (a condition it cannot decide is reported)."""
+    #endif on XASH_LOW_MEMORY == N, and #ifndef/#ifdef NAME for names it has defined. Any other condition it cannot decide:
+    its branches are skipped, and every name defined or undefined inside one is added to `touched`, so a caller that
+    protects a name can refuse to answer for it instead of reading the wrong branch."""
     out, stack = {}, []
-    undecided = []
+    if touched is None:
+        touched = set()
 
     def live():
         return all(s["on"] for s in stack)
+
+    def unknown():
+        return any(s.get("unknown") for s in stack)
 
     for raw in strip_comments(text).splitlines():
         line = raw.strip()
@@ -85,28 +90,33 @@ def defines(text, low_memory=XASH_LOW_MEMORY):
             continue
         kind, rest = m.group(1), m.group(2).strip()
         if kind == "undef":
+            name = rest.split()[0] if rest else ""
+            if unknown():
+                touched.add(name)
             if live():
-                out.pop(rest.split()[0] if rest else "", None)
+                out.pop(name, None)
         elif kind == "define":
+            dm = re.match(r"(\w+)(?:\s+(.*))?$", rest)
+            if dm and unknown():
+                touched.add(dm.group(1))
             if live():
-                dm = re.match(r"(\w+)(?:\s+(.*))?$", rest)
                 if dm and "(" not in dm.group(1):
                     out[dm.group(1)] = (dm.group(2) or "").strip()  # the last active definition is the one the compiler keeps
         elif kind in ("if", "ifdef", "ifndef"):
-            on = None
             lm = re.match(r"XASH_LOW_MEMORY\s*==\s*(\d+)$", rest)
             if kind == "ifndef":
-                on = rest not in out
+                on, unk = rest not in out, False
             elif kind == "ifdef":
-                on = rest in out
+                on, unk = rest in out, False
             elif lm:
-                on = int(lm.group(1)) == low_memory
+                on, unk = int(lm.group(1)) == low_memory, False
             else:
-                on = False
-                undecided.append(rest)
-            stack.append({"on": on, "taken": on})
+                on, unk = False, True  # `#if XASH_LOW_MEMORY`, `#if defined(...)`, ...: not decided here
+            stack.append({"on": on, "taken": on, "unknown": unk})
         elif kind == "elif" and stack:
             lm = re.match(r"XASH_LOW_MEMORY\s*==\s*(\d+)$", rest)
+            if not lm:
+                stack[-1]["unknown"] = True  # an expression this does not read: the branch cannot be decided
             on = (not stack[-1]["taken"]) and bool(lm and int(lm.group(1)) == low_memory)
             stack[-1]["on"] = on
             stack[-1]["taken"] = stack[-1]["taken"] or on
@@ -143,7 +153,8 @@ def source_problems(sv_save=SV_SAVE, limit_files=None, minimums=None):
             sv = f.read()
     except OSError as e:
         return ["cannot read %s: %s" % (sv_save, e)]
-    d = defines(sv)
+    touched_sv = set()
+    d = defines(sv, touched=touched_sv)
     for name, want in FORMAT.items():
         try:
             got = evaluate(d[name], d) if name in d else None
@@ -154,16 +165,30 @@ def source_problems(sv_save=SV_SAVE, limit_files=None, minimums=None):
                                                                          (hex(got) if isinstance(got, int) else got), want))
     if d.get("SAVEGAME_HEADER", "").replace(" ", "") != HEADER_EXPR.replace(" ", ""):
         problems.append("SAVEGAME_HEADER is %r, not the \"JSAV\" tag" % d.get("SAVEGAME_HEADER"))
+    protected = set(FORMAT) | {"SAVEGAME_HEADER"}
+    for n in sorted(protected & touched_sv):
+        problems.append("%s is defined under a condition this check cannot read: it cannot vouch for it" % n)
 
     table = {}
+    touched = set()
     for p in limit_files or LIMIT_FILES:
         try:
             with open(p, encoding="utf-8") as f:
-                for k, v in defines(f.read()).items():
+                for k, v in defines(f.read(), touched=touched).items():
                     table.setdefault(k, v)
         except OSError as e:
             problems.append("cannot read %s: %s" % (p, e))
     mins = MINIMUMS if minimums is None else minimums
+    # a protected limit, or a name its value is made of, defined where the condition is unreadable: fail closed
+    watch, todo = set(), list(mins)
+    while todo:
+        n = todo.pop()
+        if n in watch:
+            continue
+        watch.add(n)
+        todo += re.findall(r"[A-Za-z_]\w*", table.get(n, ""))
+    for n in sorted(watch & touched):
+        problems.append("%s feeds a saved-game limit and is defined under a condition this check cannot read: it cannot vouch for it" % n)
     for name, want in sorted(mins.items()):
         if name not in table:
             problems.append("limit %s is not defined where it was: the rule cannot be checked (renamed?)" % name)

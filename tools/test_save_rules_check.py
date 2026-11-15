@@ -121,6 +121,23 @@ class Source(unittest.TestCase):
         self.assertTrue(any("MAX_DECALS is 256" in p for p in self.problems()))
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(rules.__file__), "save-limits.txt")))
 
+    def test_a_limit_under_a_condition_it_cannot_read_fails_closed(self):
+        # an upstream rewrite such as `#if XASH_LOW_MEMORY` would be read as false while the Xbox compiler takes it
+        common = [p for p in self.hdrs if p.endswith("common.h")][0]
+        self.edit(common, "#elif XASH_LOW_MEMORY == 1\n#define MAX_DECALS\t\t512", "#elif XASH_LOW_MEMORY\n#define MAX_DECALS\t\t256")
+        self.assertTrue(any("MAX_DECALS" in p and "cannot read" in p for p in self.problems()))
+
+    def test_a_condition_on_a_name_a_limit_is_made_of_fails_closed(self):
+        protocol = [p for p in self.hdrs if p.endswith("protocol.h")][0]
+        # MAX_SOUNDS is (1<<MAX_SOUND_BITS): the bits are as protected as the limit
+        self.edit(protocol, "#define MAX_SOUND_BITS\t\t11", "#if defined(SOMETHING)\n#define MAX_SOUND_BITS\t\t11\n#endif")
+        self.assertTrue(any("MAX_SOUND_BITS" in p and "cannot read" in p for p in self.problems()))
+
+    def test_an_unrelated_unreadable_condition_is_not_a_problem(self):
+        d = rules.defines("#if SOMETHING\n#define OTHER 1\n#endif\n", touched=(t := set()))
+        self.assertEqual(d, {})
+        self.assertEqual(t, {"OTHER"})
+
     def test_undef_removes_a_definition(self):
         d = rules.defines("#define A 1\n#undef A\n#define B 2\n#define B 3\n")
         self.assertNotIn("A", d)
