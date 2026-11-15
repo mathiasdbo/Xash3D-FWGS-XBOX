@@ -19,7 +19,6 @@ import save_layout_check  # noqa: E402
 import test_save_layout_check as small_xbe  # noqa: E402
 
 
-@unittest.skipUnless(os.path.isdir(EXTRAS), "needs the xash-extras submodule (the payload ships its menu images)")
 def save_layout_check_advice(data):
     """the notes the release path prints, for a baseline made from the small XBE the tests build"""
     with tempfile.TemporaryDirectory() as tmp:
@@ -29,6 +28,7 @@ def save_layout_check_advice(data):
         return save_layout_check.advice(data, path, None)
 
 
+@unittest.skipUnless(os.path.isdir(EXTRAS), "needs the xash-extras submodule (the payload ships its menu images)")
 class PrepatchedPayload(unittest.TestCase):
     def make(self, tmp, *extra, xbe_bytes=None):
         """Runs make_payload.main in this process with a baseline made from a small XBE (the layout check runs on every
