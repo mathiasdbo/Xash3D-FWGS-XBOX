@@ -88,6 +88,12 @@ class Evidence(unittest.TestCase):
         self.write(rows=["fixture %s one.sav c1a4e 0.0 FAIL" % self.h1])
         self.assertIn("did not load", live.evidence_problems(self.xbe, self.ev, self.expected)[0])
 
+    def test_the_default_evidence_is_the_committed_file_named_by_the_xbe_hash(self):
+        # nothing committed for these bytes: refused, and the message says what to run and where the file goes
+        with self.assertRaises(SystemExit) as cm:
+            live.require(b"an xbe nobody ran the gate on")
+        self.assertIn("save-live-evidence/" + live.sha(b"an xbe nobody ran the gate on") + ".txt", str(cm.exception.code))
+
     def test_no_evidence_is_refused_not_skipped(self):
         with self.assertRaises(SystemExit) as cm:
             live.require(self.xbe, os.path.join(self.tmp.name, "missing.txt"))

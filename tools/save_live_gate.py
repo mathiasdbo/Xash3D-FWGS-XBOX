@@ -39,6 +39,7 @@ WAIT_FRAMES = 480      # 8 s at 60 fps after each `load`
 MIN_PLAYED = 2.0       # seconds of in-play frames on the save's map
 CFG = os.path.join("valve", "userconfig.d", "90-xs4-live.cfg")
 EVIDENCE = "live-gate.txt"
+COMMITTED = os.path.join(HERE, "save-live-evidence")  # <xbe sha256>.txt, made by `run`, holds no save content
 
 
 class LiveError(Exception):
@@ -141,13 +142,14 @@ def run(a):
         raise LiveError("an xemu is already running (%s): not mine, leaving it alone" % xemu_running())
     with open(a.xbe, "rb") as f:
         xbe = f.read()
+    host.require(folder)  # the pointers read through the engine's reader, and the reader is committed, before any boot
     items = slots(folder)
     if a.only:
         want = {x.lower() for x in a.only.split(",")}
         items = [i for i in items if i[0][:-4].lower() in want]
         if not items:
             raise LiveError("--only matches no fixture")
-    tag = "x4%06x" % (int(time.time()) & 0xFFFFFF)
+    tag = "x4%08x" % int(time.time())
     os.makedirs(a.out, exist_ok=True)
     savedir = os.path.join(stage, "valve", "save")
     cfgpath = os.path.join(stage, CFG)
@@ -187,6 +189,13 @@ def run(a):
         os.makedirs(savedir, exist_ok=True)
         if os.path.exists(cfgpath):
             os.remove(cfgpath)
+
+    for label in labels:  # a label already on the disk would be read back as this run's session
+        pre = subprocess.run([sys.executable, os.path.join(HERE, "frametime-report.py"), "fetch-xemu", "--out",
+                              os.path.join(a.out, ".precheck"), "--label", label], capture_output=True, text=True, cwd=REPO)
+        if pre.returncode == 0:
+            raise LiveError("xemu's disk already has a session labelled %s: not starting" % label)
+    shutil.rmtree(os.path.join(a.out, ".precheck"), ignore_errors=True)
 
     proc = subprocess.Popen([XEMU, "-dvd_path", winpath(iso)], stdout=open(os.path.join(a.out, "xemu.out"), "w"),
                             stderr=subprocess.STDOUT)
@@ -257,13 +266,15 @@ def evidence_problems(xbe_bytes, evidence_path, expected_path=None):
 
 
 def require(xbe_bytes, evidence=None):
-    """For the release path: SystemExit unless the live evidence is for exactly these XBE bytes and every save passed."""
-    evidence = evidence or os.environ.get("R3D_SAVE_LIVE_EVIDENCE")
-    p = evidence_problems(xbe_bytes, evidence) if evidence else [
-        "R3D_SAVE_LIVE_EVIDENCE is not set: run tools/save_live_gate.py on this XBE first (it needs xemu)"]
+    """For the release path: SystemExit unless the live evidence is for exactly these XBE bytes and every save passed. The
+    evidence is the file named by R3D_SAVE_LIVE_EVIDENCE, else tools/save-live-evidence/<sha256 of the XBE>.txt."""
+    evidence = evidence or os.environ.get("R3D_SAVE_LIVE_EVIDENCE") or os.path.join(COMMITTED, sha(xbe_bytes) + ".txt")
+    p = evidence_problems(xbe_bytes, evidence)
     if p:
-        raise SystemExit("The live save gate failed, so this build must not be published (docs/r3d/fork-plan.md, XS.4):\n  - "
-                         + "\n  - ".join(p))
+        raise SystemExit("The live save gate failed, so this build must not be published (docs/r3d/fork-plan.md, XS.4). "
+                         "Run tools/save_live_gate.py run on this XBE (it needs xemu and the fixture saves) and commit its "
+                         "evidence as tools/save-live-evidence/%s.txt:" % sha(xbe_bytes)
+                         + "".join("\n  - " + x for x in p))
 
 
 def main(argv=None):

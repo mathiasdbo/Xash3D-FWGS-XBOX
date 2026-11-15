@@ -108,34 +108,16 @@ class Gate(unittest.TestCase):
 
 
 class Release(unittest.TestCase):
-    def test_the_release_path_runs_the_gate_and_the_command_line_cannot_skip_it(self):
+    def test_the_release_path_needs_live_evidence_and_the_command_line_cannot_skip_it(self):
         import make_payload
-        params = inspect.signature(make_payload.main).parameters
-        self.assertIs(params["fixture_gate"].default, gate.require)
         import save_live_gate
+        params = inspect.signature(make_payload.main).parameters
         self.assertIs(params["live_gate"].default, save_live_gate.require)
+        self.assertNotIn("fixture_gate", params)  # CI has no access to the saves; the evidence is what it can verify
         import subprocess
         r = subprocess.run([sys.executable, make_payload.__file__, "--help"], capture_output=True, text=True)
+        self.assertNotIn("live", r.stdout)
         self.assertNotIn("fixture", r.stdout)
-
-    def test_an_xbe_from_another_commit_is_refused_before_the_gate_runs(self):
-        import tempfile
-        import make_payload
-        import test_save_layout_check as small_xbe
-        data, gi = small_xbe.build_xbe()
-        with tempfile.TemporaryDirectory() as tmp:
-            own = os.path.join(tmp, "b.txt")
-            with open(own, "w", encoding="utf-8") as f:
-                f.write(small_xbe.baseline_text())
-            xbe = os.path.join(tmp, "in.xbe")
-            with open(xbe, "wb") as f:
-                f.write(data)
-            ran = []
-            with self.assertRaises(SystemExit) as cm:
-                make_payload.main(["--xbe", xbe, "--out", os.path.join(tmp, "o"), "--xbe-commit", "0" * 40],
-                                  layout_baseline=own, layout_sha256=None, fixture_gate=lambda: ran.append(1), live_gate=None)
-            self.assertEqual(ran, [])
-            self.assertIn("not from this checkout", str(cm.exception.code))
 
 
 if __name__ == "__main__":

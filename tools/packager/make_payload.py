@@ -27,7 +27,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "tools"))
-import save_fixture_gate  # noqa: E402
 import save_live_gate  # noqa: E402
 import save_layout_check  # noqa: E402
 from r3dpack import xbepatch  # noqa: E402
@@ -90,11 +89,11 @@ VIDEO_CFG = b'// written by the Xash3D-FWGS-XBOX packager\r\nr_refdll "nv2a"\r\n
 
 
 def main(argv=None, layout_baseline=save_layout_check.BASELINE, layout_sha256=save_layout_check.BASELINE_SHA256,
-         fixture_gate=save_fixture_gate.require, live_gate=save_live_gate.require):
+         live_gate=save_live_gate.require):
     """layout_baseline and layout_sha256 are for the tests, which hand in a baseline made from their own small XBE (and
-    None for the digest). fixture_gate is the XS.4 check that the saved games players have still read (it needs
-    R3D_SAVE_FIXTURES); live_gate is the same gate run in xemu on the exact XBE bytes (R3D_SAVE_LIVE_EVIDENCE); the tests hand in None, the command
-    line has no way to. The command line has no way to name either: the committed baseline, pinned by its digest
+    None for the digest). live_gate is the XS.4 check that the saved games players have load and play in this XBE: it needs evidence made by
+    tools/save_live_gate.py for exactly these bytes (tools/save-live-evidence/<sha256>.txt, or R3D_SAVE_LIVE_EVIDENCE), which
+    holds no save content, so CI can verify it without the saves. The tests hand in None, the command line has no way to. The command line has no way to name either: the committed baseline, pinned by its digest
     and made from the public builds, is the policy, and a candidate must not be able to bring its own."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--xbe", required=True)
@@ -111,15 +110,8 @@ def main(argv=None, layout_baseline=save_layout_check.BASELINE, layout_sha256=sa
         raw = f.read()
     # before anything is written, so a refused XBE leaves the last payload as it was
     save_layout_check.require(raw, layout_baseline, layout_sha256)
-    if fixture_gate:
-        # the gate compiles this checkout's save reader, so it vouches for an XBE built from this checkout only
-        built = git("rev-parse", a.xbe_commit + "^{commit}") if a.xbe_commit else None
-        if a.xbe_commit and built != git("rev-parse", "HEAD"):
-            raise SystemExit("The save fixture gate runs this checkout's save reader, and this XBE was built from %s, not from "
-                             "this checkout's HEAD: check that commit out and package from there (XS.4)." % a.xbe_commit)
-        fixture_gate()
     if live_gate:
-        live_gate(raw)  # evidence (tools/save_live_gate.py run) for exactly these XBE bytes
+        live_gate(raw)  # evidence (tools/save_live_gate.py run) for exactly these XBE bytes, committed or named by env
     shutil.rmtree(tdir, ignore_errors=True)
     files = {}
 
