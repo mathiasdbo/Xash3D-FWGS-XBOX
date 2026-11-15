@@ -22,6 +22,7 @@ GNU General Public License for more details.
 #include "ref_common.h" // decals
 #if XASH_XBOX && !XASH_DEDICATED
 #include "platform/xbox/xbox_frametime.h" // the frame-time recorder's save spans, docs/r3d/divergences.md #141
+#include "platform/xbox/xbox_diskspace.h" // a save or a load on a full drive says so instead of failing half way
 #include <xboxkrnl/xboxkrnl.h> // MmQueryStatistics: the save buffer's size (#192)
 #else
 #define XBOX_FT_SPAN( id, stmt ) stmt
@@ -62,6 +63,8 @@ SaveClose returns, as upstream's FS_Close.
 
 // #192: set where a save is refused for memory, shown by SaveRefused_Show
 static qboolean save_refused_memory;
+// set where a save did not happen because the hard drive is full, shown by SaveRefused_Show too
+static qboolean save_refused_disk;
 
 typedef struct save_stage_s
 {
@@ -1193,6 +1196,15 @@ not saved. Clears the flag either way.
 */
 static void SaveRefused_Show( void )
 {
+	if( save_refused_disk )
+	{
+		save_refused_disk = false;
+		save_refused_memory = false;
+#if !XASH_DEDICATED
+		CL_CenterPrint( "The hard drive is full.\nThe game was NOT saved.\nFree some space and save again.", 0.25f );
+#endif
+		return;
+	}
 	if( !save_refused_memory )
 		return;
 	save_refused_memory = false;
@@ -2301,8 +2313,14 @@ static void SaveAsync_End( void )
 	if( save_async.failed )
 	{
 		// #151: never leave a .sav whose bytes did not all reach the disk
-		Con_Printf( S_ERROR "%s: %s is incomplete, removing it\n", __func__, save_async.name );
+		Con_Printf( S_ERROR "%s: %s is incomplete, removing it%s\n", __func__, save_async.name,
+			Xbox_DiskLow( 1ull << 20 ) ? " (the hard drive is full)" : "" );
 		FS_Delete( save_async.tmpname );
+		if( Xbox_DiskLow( 1ull << 20 ))
+		{
+			save_refused_disk = true;
+			SaveRefused_Show();
+		}
 		return;
 	}
 
@@ -3020,6 +3038,20 @@ qboolean SV_LoadGame( const char *pPath )
 	if( !FS_FileExists( pPath, true ))
 		return false;
 
+#if XASH_XBOX
+	// a load rewrites every per-map working file: on a full drive they are cut short and the game loads half restored
+	// (no weapons, no suit, enemies that do not think), so it is refused, with the reason
+	if( Xbox_DiskLow( Xbox_DiskNeededForSave( )))
+	{
+		Con_Printf( S_ERROR "%s: the hard drive has under %u MiB free: %s was NOT loaded\n", __func__,
+			(uint32_t)( Xbox_DiskNeededForSave( ) >> 20 ), pPath );
+#if !XASH_DEDICATED
+		CL_CenterPrint( "The hard drive is full.\nThe saved game was NOT loaded.\nFree some space and try again.", 0.25f );
+#endif
+		return false;
+	}
+#endif
+
 	// initialize game if needs
 	if( !SV_InitGame( false ))
 		return false;
@@ -3122,6 +3154,15 @@ qboolean SV_SaveGame( const char *pName )
 	qboolean saved;
 #if XASH_XBOX
 	save_refused_memory = false;
+	save_refused_disk = false;
+	if( Xbox_DiskLow( Xbox_DiskNeededForSave( )))
+	{
+		Con_Printf( S_ERROR "%s: the hard drive has under %u MiB free: the game was NOT saved\n", __func__,
+			(uint32_t)( Xbox_DiskNeededForSave( ) >> 20 ));
+		save_refused_disk = true;
+		SaveRefused_Show();
+		return false;
+	}
 #endif
 	XBOX_FT_SPAN( XBOX_FT_S_SAVE, saved = SaveGameSlot( savename, comment ));
 #if XASH_XBOX
