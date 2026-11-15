@@ -37,7 +37,7 @@ class PrepatchedPayload(unittest.TestCase):
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"] + list(extra), layout_baseline=baseline,
-                                  layout_sha256=None, fixture_gate=None)
+                                  layout_sha256=None, live_gate=None)
         except SystemExit as e:
             self.refused = str(e.code)
             return xbe, out, None

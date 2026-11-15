@@ -10584,17 +10584,29 @@ pulled from a console, the scripts - is kept outside the repository):
   unset or the folder missing is refused, not skipped. A fixture is added
   for every released build and, over time, one per chapter. **Exit:** the
   gate fails on a build with XS.3's table removed.
-  **Done (host level; live level open).** `tools/save_fixture_gate.py`,
-  `tools/save-fixtures-expected.txt` (36 fixtures from the console copy of
-  2026-11-13), `tools/host-tests/save_legacy_resolve.c`. `make_payload.py`
-  refuses without the folder. Checked: deleting one table row from
-  `save_legacy_table.inc` fails the gate. Open: the xemu load (it needs a
-  writable disk image; `xemu_hdd.py` is read-only; it is also the only
-  check of the shared offset, which the host gate records as `BYFIELD`
-  because the SDK's field logic does not run on the host, and of the exact
-  XBE, since the host gate runs this checkout's reader: `make_payload.py`
-  refuses an XBE built from another commit), fixtures for the saves
-  written since, and retiring XS.0's baseline, which waits for the live level.
+  **Done (host level and live level; one exit item open).**
+  Host: `tools/save_fixture_gate.py`, `tools/save-fixtures-expected.txt` (36
+  fixtures from the console copy of 2026-11-13), `tools/host-tests/save_legacy_resolve.c`;
+  `save_live_gate.py run` calls it first (folder, committed reader, no unlisted save). Deleting one table row from
+  `save_legacy_table.inc` fails it. The shared offset is recorded as
+  `BYFIELD` there (the SDK's field logic does not run on the host).
+  Live: `tools/save_live_gate.py` stages the fixtures on a copy of the disc
+  tree (a unique slot name each: xemu's E: drive keeps saves of its own and
+  the engine reads it before the disc, so a common name such as `autosave`
+  was shadowed), boots xemu once, and checks that each save's map played;
+  its evidence (hashes, names, maps, PASS; no save content) is committed as
+  `tools/save-live-evidence/<xbe sha256>.txt` and `make_payload.py`, which
+  the packager's CI runs without the saves, requires it for the exact XBE
+  bytes. Each load follows a `disconnect`, so a failed load cannot be
+  credited with the previous map. Result: 24 of 24 load and play on the
+  XS.3 build and on the public v0.2.0 XBE (its evidence is committed).
+  Not done: the evidence names the session by label (made unique and
+  prechecked against the disk), not by a session id; a per-load token from
+  the engine would be stronger.
+  Open: the plan's exit asks for a build whose server code has changed (one
+  server function added) to pass too; fixtures for the saves written since;
+  saves in the name-based format cannot enter the gate yet; retiring XS.0's
+  baseline, which is the next change on its own.
 - **XS.5 - the other ways a save can break**, each a written rule and a
   check in the same gate. None is verified yet:
   - the title id (`FFFF0002`) and the path under it (`valve/valve/save`):
