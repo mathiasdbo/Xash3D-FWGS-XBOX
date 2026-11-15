@@ -281,6 +281,11 @@ fi
 # link-check invocation relies on) is never touched by this script.
 GAME_GEN_DIR="$SCRATCH/game-$TITLE/gen"
 mkdir -p "$GAME_GEN_DIR" || { echo "xbox-game-link-check: cannot create $GAME_GEN_DIR" >&2; exit 1; }
+# XS.5: the save format and the limits a saved game holds (tools/save_rules_check.py), from the source this XBE is built from
+if ! python tools/save_rules_check.py source; then
+	echo "xbox-game-link-check: the source no longer keeps what saved games depend on (XS.5)." >&2
+	exit 1
+fi
 # XS.2: the server's export table also carries one `Think@CFoo` row per function game code can store in a saved
 # callback pointer, so a saved game holds that name and not an offset from GameDLLInit (which is only true for the
 # link that wrote it). They are found from these same isolated objects (tools/xbox-gen-callback-table.py).

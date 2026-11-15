@@ -27,6 +27,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "tools"))
 import save_live_gate  # noqa: E402
+import save_rules_check  # noqa: E402
 import save_layout_check  # noqa: E402
 from r3dpack import xbepatch  # noqa: E402
 from r3dpack.titles import TITLES  # noqa: E402
@@ -88,11 +89,12 @@ VIDEO_CFG = b'// written by the Xash3D-FWGS-XBOX packager\r\nr_refdll "nv2a"\r\n
 
 
 def main(argv=None, layout_baseline=save_layout_check.BASELINE, layout_sha256=save_layout_check.BASELINE_SHA256,
-         live_gate=save_live_gate.require):
+         live_gate=save_live_gate.require, rules_gate=save_rules_check.require_xbe):
     """layout_baseline and layout_sha256 are for the tests, which hand in a baseline made from their own small XBE (and
     None for the digest). live_gate is the XS.4 check that the saved games players have load and play in this XBE: it needs evidence made by
     tools/save_live_gate.py for exactly these bytes (tools/save-live-evidence/<sha256>.txt, or R3D_SAVE_LIVE_EVIDENCE), which
-    holds no save content, so CI can verify it without the saves. The tests hand in None, the command line has no way to. The command line has no way to name either: the committed baseline, pinned by its digest
+    holds no save content, so CI can verify it without the saves. rules_gate is the XS.5 title-id check (tools/save_rules_check.py). The tests hand in None for both, the
+    command line has no way to. The command line has no way to name either: the committed baseline, pinned by its digest
     and made from the public builds, is the policy, and a candidate must not be able to bring its own."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--xbe", required=True)
@@ -116,6 +118,8 @@ def main(argv=None, layout_baseline=save_layout_check.BASELINE, layout_sha256=sa
               "the legacy table, which the live evidence below covers:" % len(notes))
         for n in notes[:5]:
             print("  - " + n)
+    if rules_gate:
+        rules_gate(raw)  # XS.5: the title id the saves live under
     if live_gate:
         live_gate(raw)  # evidence (tools/save_live_gate.py run) for exactly these XBE bytes, committed or named by env
     shutil.rmtree(tdir, ignore_errors=True)
