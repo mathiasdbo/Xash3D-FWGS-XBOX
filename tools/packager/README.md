@@ -72,6 +72,21 @@ sent under a temporary name and read back first, and a save it replaces is kept
 beside it as `<name>.before-restore`; nothing is deleted. `--restore-build` goes
 back one build each time it is run.
 
+## Frame-time recordings on the console
+
+The frame-time recorder (a measuring tool, off by default) writes `frametime/ft_*.bin` under the game's save folder on E:. A
+recorder left on, for instance by a `userconfig.d` file that sets `host_frametime_analysis 1`, fills the drive, and a full E:
+makes saved games load half restored (no weapons or suit, enemies that do not move). To look at, keep and clear them:
+
+    r3d_packager.py --upload <ip> --recordings list
+    r3d_packager.py --upload <ip> --recordings copy      # to ~/Xash3D-FWGS-XBOX-recordings, nothing deleted
+    r3d_packager.py --upload <ip> --recordings remove    # copy, check the copy, then delete what was copied
+
+`remove` deletes only recording files (`ft_<label>_<session>_<seq>.bin`), by name, after every one is on this PC with the size
+the console listed, and leaves one that changed since the copy. It never touches the saved games or the screenshots. Builds from the recorder-limits change on also have, in the
+game's console, `host_frametime_clean` (removes all recordings but the newest session) and `host_frametime_clear` (removes them all), and stop recording
+when the recordings pass 1 GiB or the drive has under 512 MiB free.
+
 ## Console settings
 
 The second tab reads and changes the settings an install runs with: the video

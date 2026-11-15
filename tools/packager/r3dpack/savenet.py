@@ -81,8 +81,9 @@ def _is_e_drive(name):
     return name.upper() in ("E", "E:") or name.upper().endswith("-E")
 
 
-def find_save_dir(x, gamedir):
-    """the console's save folder for the game, or None when the console conclusively has none. It walks
+def find_save_dir(x, gamedir, leaf="save"):
+    """the console's save folder for the game (`leaf` names another folder of the same game, the frame-time recordings'),
+    or None when the console conclusively has none. It walks
     <drive>/UDATA/<title id>/<game>/<game>/save on the E: drive one listing at a time and takes each step from the listing above
     it: a folder the listing does not show is absent, but a listing that FAILS (the account may not list it, the console
     did not answer) raises SaveNetError, because "could not look" must never be taken for "no saves". The other drives are
@@ -91,7 +92,7 @@ def find_save_dir(x, gamedir):
         drives = x.listdir_strict("/")
     except Exception as e:  # noqa: BLE001 - UploadError or a test double's own
         raise SaveNetError("could not list the console's drives, so its saved games cannot be looked for: %s" % e)
-    parts = ["UDATA", TITLE_ID, gamedir, gamedir, "save"]
+    parts = ["UDATA", TITLE_ID, gamedir, gamedir, leaf]
     saw_e = False
     for drive, (is_dir, _) in sorted(drives.items()):
         if not is_dir:

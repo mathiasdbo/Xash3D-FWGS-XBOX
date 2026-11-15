@@ -222,6 +222,46 @@ def restore(a):
     return 0
 
 
+def recordings(a):
+    """--recordings list|copy|remove against the console named by --upload <ip>: the frame-time recordings (they fill the drive when a
+    recorder is left on). `copy` and `remove` copy them to this PC first (--recordings-dest, default
+    ~/Xash3D-FWGS-XBOX-recordings); `remove` then deletes from the console only the files it copied and checked. Saved games are not touched."""
+    from r3dpack import recordings as rec
+    if not a.upload or a.upload == "auto":
+        print("--recordings needs --upload <ip> (the console).", file=sys.stderr)
+        return 2
+    x = xboxftp.Xbox(a.upload, a.ftp_user, a.ftp_password)
+    gamedir = TITLES[a.title]["gamedir"]
+    dest = a.recordings_dest or rec.default_dest()
+    try:
+        x.connect()
+        s = rec.summary(x, gamedir)
+        if not s["files"]:
+            print("The console has no frame-time recordings.")
+            return 0
+        print("%d recording files, %.0f MB, in %s" % (s["files"], s["bytes"] / 1e6, s["folder"]))
+        if a.recordings == "list":
+            return 0
+        def prog(done, total, name):
+            print("\r  %.0f%%" % (100.0 * done / max(total, 1)), end="", flush=True)
+        if a.recordings == "copy":
+            folder, files = rec.copy_to_pc(x, gamedir, dest, progress=prog)
+            print("\nCopied %d files to %s (nothing was deleted from the console)." % (len(files), folder))
+            return 0
+        folder, removed, left, freed = rec.remove_all(x, gamedir, dest, progress=prog)
+        print("\nCopied to %s, then removed %d files (%.0f MB) from the console." % (folder, removed, freed / 1e6))
+        if left:
+            print("%d recording(s) were NOT removed (in use, changed since the copy, or the console refused): %s. The drive may still be "
+                  "full; run it again once the game is off." % (len(left), ", ".join(left[:5])), file=sys.stderr)
+            return 1
+    except (savenet.SaveNetError, xboxftp.UploadError, OSError) as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    finally:
+        x.close()
+    return 0
+
+
 PALETTE = {
     "bg": "#18181b",        # window
     "header": "#121214",    # banner, log
@@ -657,11 +697,15 @@ def main():
                          "as default.xbe.before-packager; your config.cfg and userconfig.d stay)")
     ap.add_argument("--restore-saves", metavar="BACKUP", help="put a saved-games backup (made before a build was replaced) back on the console named by --upload; never deletes anything")
     ap.add_argument("--restore-build", action="store_true", help="go back to the previous build (default.xbe.before-packager) on the console named by --upload and --remote-dir; the replaced one is kept")
+    ap.add_argument("--recordings", choices=["list", "copy", "remove"], help="the frame-time recordings on the console named by --upload: list them, copy them to this PC, or copy them and then remove them from the console (nothing is deleted before the copy is checked; saved games are not touched)")
+    ap.add_argument("--recordings-dest", help="where --recordings copy|remove puts the copy (default ~/Xash3D-FWGS-XBOX-recordings)")
     ap.add_argument("--ftp-user", default=xboxftp.DEFAULT_USER)
     ap.add_argument("--ftp-password", default=xboxftp.DEFAULT_PASS)
     a = ap.parse_args()
     if a.restore_saves or a.restore_build:
         sys.exit(restore(a))
+    if a.recordings:
+        sys.exit(recordings(a))
     if a.cli:
         sys.exit(cli(a))
     gui()
