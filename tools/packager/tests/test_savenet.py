@@ -86,12 +86,24 @@ class CodeId(unittest.TestCase):
 class Fake:
     """what backup_saves needs from the console, with files that can come back short"""
 
-    def __init__(self, files, short=None):
-        self.files, self.short = files, short
+    def __init__(self, files, short=None, drives=("HDD0-E",), deny=None):
+        self.files, self.short, self.drives, self.deny = files, short, drives, deny
 
-    def listdir(self, p):
+    def listdir_strict(self, p):
+        if self.deny and self.deny in p:
+            raise RuntimeError("550 permission denied")
         if p == "/":
-            return {"HDD0-E": (True, 0)}
+            return {d: (True, 0) for d in self.drives}
+        if not p.startswith("/HDD0-E"):
+            return {}  # the saves are on E: only
+        chain = {"UDATA": "FFFF0002", "FFFF0002": "valve", "valve": "valve"}
+        last = p.rstrip("/").rsplit("/", 1)[1]
+        if last.startswith("HDD0"):
+            return {"UDATA": (True, 0)}
+        if last in chain and not p.endswith("/valve/valve"):
+            return {chain[last]: (True, 0)}
+        if p.endswith("/valve/valve"):
+            return {"save": (True, 0)}
         if p.endswith("/valve/valve/save"):
             return {n: (False, len(d)) for n, d in self.files.items()}
         return {}
@@ -137,6 +149,25 @@ class Backup(unittest.TestCase):
     def test_no_saves_is_none_and_creates_nothing(self):
         self.assertIsNone(savenet.backup_saves(Fake({}), "valve", self.dest, "v0.2.0"))
         self.assertFalse(os.path.exists(self.dest))
+
+    def test_a_listing_that_fails_is_not_taken_for_no_saves(self):
+        # the account may not list UDATA: that is "could not look", and nothing may be replaced on the strength of it
+        for deny in ("UDATA", "FFFF0002", "/save"):
+            with self.assertRaises(savenet.SaveNetError, msg=deny):
+                savenet.backup_saves(Fake({"a.sav": b"A"}, deny=deny), "valve", self.dest, "v0.2.0")
+        self.assertFalse(os.path.exists(self.dest))
+
+    def test_a_console_with_no_e_drive_listed_has_conclusively_no_saves_there(self):
+        self.assertIsNone(savenet.backup_saves(Fake({"a.sav": b"A"}, drives=("HDD0-C", "HDD0-F")), "valve", self.dest, "v0.2.0"))
+
+    def test_a_drive_that_will_not_list_other_than_e_is_not_a_reason_to_stop(self):
+        class F2(Fake):
+            def listdir_strict(self, p):
+                if p.startswith("/HDD0-Z"):
+                    raise RuntimeError("550 not mounted")
+                return Fake.listdir_strict(self, p)
+        folder, n, _ = savenet.backup_saves(F2({"a.sav": b"A"}, drives=("HDD0-E", "HDD0-Z")), "valve", self.dest, "v0.2.0")
+        self.assertEqual(n, 1)
 
     def test_it_never_overwrites_a_backup(self):
         import datetime
@@ -242,6 +273,81 @@ class OnAConsole(unittest.TestCase):
         self.assertEqual(n, 2)
         self.assertEqual(open(os.path.join(self.saves, "quick.sav"), "rb").read(), b"S" * 300)
         self.assertEqual(open(os.path.join(self.saves, "newer.sav"), "rb").read(), b"N")  # not deleted
+        # the console's own copy of the save the backup replaced is kept beside it, and no temporary file is left
+        self.assertEqual(open(os.path.join(self.saves, "quick.sav.before-restore"), "rb").read(), b"CHANGED")
+        self.assertFalse([n for n in os.listdir(self.saves) if n.endswith(".restoring")])
+
+    def test_an_interrupted_restore_leaves_the_consoles_save_whole(self):
+        with mock.patch.object(xboxftp, "Xbox", functools.partial(xboxftp.Xbox, port=self.port)):
+            self.run_upload(lambda t: True)
+        (folder,) = os.listdir(self.dest)
+        with open(os.path.join(self.saves, "quick.sav"), "wb") as f:
+            f.write(b"THE CONSOLES OWN")
+        x = xboxftp.Xbox("127.0.0.1", port=self.port)
+        x.connect()
+        real = x.write_file
+
+        def cut(path, data):
+            real(path, data[: len(data) // 2])  # half of it arrives, then the network goes
+            raise OSError("connection reset")
+        x.write_file = cut
+        try:
+            with self.assertRaises(OSError):
+                savenet.restore_saves(x, os.path.join(self.dest, folder), "/E/UDATA/FFFF0002/valve/valve/save")
+        finally:
+            x.close()
+        self.assertEqual(open(os.path.join(self.saves, "quick.sav"), "rb").read(), b"THE CONSOLES OWN")
+
+    def test_a_restore_that_arrives_short_is_not_put_in_place(self):
+        with mock.patch.object(xboxftp, "Xbox", functools.partial(xboxftp.Xbox, port=self.port)):
+            self.run_upload(lambda t: True)
+        (folder,) = os.listdir(self.dest)
+        with open(os.path.join(self.saves, "quick.sav"), "wb") as f:
+            f.write(b"THE CONSOLES OWN")
+        x = xboxftp.Xbox("127.0.0.1", port=self.port)
+        x.connect()
+        real = x.write_file
+        x.write_file = lambda path, data: real(path, data[:-1])  # the transfer "succeeds" but one byte is missing
+        try:
+            with self.assertRaises(savenet.SaveNetError) as cm:
+                savenet.restore_saves(x, os.path.join(self.dest, folder), "/E/UDATA/FFFF0002/valve/valve/save")
+        finally:
+            x.close()
+        self.assertIn("did not arrive whole", str(cm.exception))
+        self.assertEqual(open(os.path.join(self.saves, "quick.sav"), "rb").read(), b"THE CONSOLES OWN")
+
+    def test_an_unlistable_udata_stops_the_upload_before_anything_is_replaced(self):
+        old = open(os.path.join(self.base, "default.xbe"), "rb").read()
+        real = xboxftp.Xbox.listdir_strict
+
+        def deny(x, path="/"):
+            if "UDATA" in path:
+                raise xboxftp.UploadError("550 access denied")
+            return real(x, path)
+        with mock.patch.object(xboxftp.Xbox, "listdir_strict", deny):
+            with self.assertRaises(xboxftp.UploadError) as cm:
+                self.run_upload(lambda t: True)
+        self.assertIn("nothing was replaced", str(cm.exception))
+        self.assertEqual(open(os.path.join(self.base, "default.xbe"), "rb").read(), old)
+        self.assertFalse(os.path.exists(os.path.join(self.base, "default.xbe.before-packager")))
+
+    def test_going_back_after_two_replacements_restores_the_build_before_the_last_one(self):
+        build_a = open(os.path.join(self.base, "default.xbe"), "rb").read()
+        self.run_upload(lambda t: True)                       # A -> B
+        build_b = open(os.path.join(self.base, "default.xbe"), "rb").read()
+        self.assertNotEqual(build_a, build_b)
+        new_c = make_xbe(CODE + [(".c", b"c")])
+        with mock.patch.object(xboxftp, "Xbox", functools.partial(xboxftp.Xbox, port=self.port)):
+            self.pk.upload([("default.xbe", new_c, len(new_c))], "hl", "127.0.0.1", "/F/Games", "xbox", "xbox", None,
+                           lambda m: None, confirm=lambda t: True, backup_dir=self.dest)   # B -> C
+        self.assertEqual(open(os.path.join(self.base, "default.xbe"), "rb").read(), new_c)
+        x = xboxftp.Xbox("127.0.0.1", port=self.port)
+        x.connect()
+        try:
+            savenet.restore_previous_build(x, "/F/Games/Half-Life")
+        finally:
+            x.close()
+        self.assertEqual(open(os.path.join(self.base, "default.xbe"), "rb").read(), build_b)  # B, not A
 
     def test_restore_refuses_a_backup_that_does_not_match_its_manifest(self):
         with mock.patch.object(xboxftp, "Xbox", functools.partial(xboxftp.Xbox, port=self.port)):

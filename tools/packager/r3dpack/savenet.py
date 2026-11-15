@@ -13,6 +13,7 @@ Replacing the Xbox build on a console must never cost the player their saved gam
 
 `restore_saves` and `restore_previous_build` are the way back after a downgrade (a save written by a build that stores callbacks
 by name does not load in an older one): both only run when asked, both only ever add or rename, and neither deletes a save.
+A save is sent under a temporary name, read back, and only then renamed into place, the console's own copy kept beside it.
 """
 
 import datetime
@@ -76,18 +77,39 @@ def label_of(installed_id):
     return "build-" + installed_id[:8]
 
 
+def _is_e_drive(name):
+    return name.upper() in ("E", "E:") or name.upper().endswith("-E")
+
+
 def find_save_dir(x, gamedir):
-    """the console's save folder for the game, on whichever drive has it, or None. Only listings."""
-    for drive, (is_dir, _) in sorted(x.listdir("/").items()):
+    """the console's save folder for the game, or None when the console conclusively has none. It walks
+    <drive>/UDATA/<title id>/<game>/<game>/save on the E: drive one listing at a time and takes each step from the listing above
+    it: a folder the listing does not show is absent, but a listing that FAILS (the account may not list it, the console
+    did not answer) raises SaveNetError, because "could not look" must never be taken for "no saves". The other drives are
+    looked at too, but only as a bonus: a failure there says nothing."""
+    try:
+        drives = x.listdir_strict("/")
+    except Exception as e:  # noqa: BLE001 - UploadError or a test double's own
+        raise SaveNetError("could not list the console's drives, so its saved games cannot be looked for: %s" % e)
+    parts = ["UDATA", TITLE_ID, gamedir, gamedir, "save"]
+    saw_e = False
+    for drive, (is_dir, _) in sorted(drives.items()):
         if not is_dir:
             continue
-        p = "/%s/UDATA/%s/%s/%s/save" % (drive, TITLE_ID, gamedir, gamedir)
+        strict = _is_e_drive(drive)
+        saw_e = saw_e or strict
+        cur = "/" + drive
         try:
-            entries = x.listdir(p)
-        except Exception:  # noqa: BLE001 - a drive without it, or one that cannot be listed
-            continue
-        if entries:
-            return p
+            for p in parts:
+                if p not in x.listdir_strict(cur):
+                    cur = None
+                    break
+                cur = cur + "/" + p
+            if cur is not None and x.listdir_strict(cur):
+                return cur
+        except Exception as e:  # noqa: BLE001
+            if strict:
+                raise SaveNetError("could not look in %s for the saved games (%s): not replacing anything" % (cur, e))
     return None
 
 
@@ -102,7 +124,11 @@ def backup_saves(x, gamedir, dest_root, label, now=None):
     src = find_save_dir(x, gamedir)
     if src is None:
         return None
-    listing = {n: s for n, (d, s) in x.listdir(src).items() if not d}
+    try:
+        entries = x.listdir_strict(src)
+    except Exception as e:  # noqa: BLE001
+        raise SaveNetError("could not list %s: %s" % (src, e))
+    listing = {n: s for n, (d, s) in entries.items() if not d}
     if not listing:
         return None
     stamp = (now or datetime.datetime.now()).strftime("%Y%m%d-%H%M%S")
@@ -155,18 +181,40 @@ def restore_saves(x, backup_folder, remote_save_dir):
         if len(data) != meta["size"] or hashlib.sha256(data).hexdigest() != meta["sha256"]:
             raise SaveNetError("%s does not match the backup's manifest: not restoring" % fname)
         blobs[fname] = data
+    have = x.listdir_strict(remote_save_dir)
     for fname, data in blobs.items():
-        x.write_file(posixpath.join(remote_save_dir, fname), data)
+        rpath, tmp = posixpath.join(remote_save_dir, fname), posixpath.join(remote_save_dir, fname + ".restoring")
+        # sent under another name and read back first: a transfer that stops half way can leave the .restoring file, never a
+        # cut save under the save's own name
+        x.write_file(tmp, data)
+        back = x.read_file(tmp)
+        if back is None or hashlib.sha256(back).hexdigest() != hashlib.sha256(data).hexdigest():
+            raise SaveNetError("%s did not arrive whole: the console's %s was not touched" % (fname, fname))
+        if fname in have:
+            keep, k = rpath + ".before-restore", 1
+            while posixpath.basename(keep) in have:
+                k += 1
+                keep = "%s.before-restore-%d" % (rpath, k)
+            x.rename_file(rpath, keep)  # the console's own copy is kept, not overwritten
+        x.rename_file(tmp, rpath)
     return len(blobs)
 
 
 def restore_previous_build(x, remote_dir):
-    """Bring default.xbe.before-packager back as default.xbe. The build being replaced is renamed to default.xbe.after-packager
+    """Bring the build the packager last replaced back as default.xbe: the newest default.xbe.before-packager (the upload
+    numbers them -2, -3 ... when one is already there). The build being replaced is renamed to default.xbe.after-packager
     (numbered when that exists) and not deleted. Returns the name the replaced build was given."""
-    cur, old = posixpath.join(remote_dir, "default.xbe"), posixpath.join(remote_dir, "default.xbe.before-packager")
-    have = x.listdir(remote_dir)
-    if "default.xbe.before-packager" not in have:
+    cur = posixpath.join(remote_dir, "default.xbe")
+    have = x.listdir_strict(remote_dir)
+    pat = re.compile(r"default\.xbe\.before-packager(?:-(\d+))?$")
+    found = {}
+    for n in have:
+        m = pat.match(n)
+        if m:
+            found[int(m.group(1) or 1)] = n
+    if not found:
         raise SaveNetError("there is no default.xbe.before-packager in %s: nothing to go back to" % remote_dir)
+    old = posixpath.join(remote_dir, found[max(found)])
     new, k = cur + ".after-packager", 1
     while posixpath.basename(new) in have:
         k += 1

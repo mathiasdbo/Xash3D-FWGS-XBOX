@@ -67,8 +67,10 @@ an older one), by command line, and only when you ask:
 
 `--restore-build` renames `default.xbe.before-packager` back to `default.xbe`
 and keeps the one it replaces as `default.xbe.after-packager`. `--restore-saves`
-checks the backup against its manifest, then puts its files back; it replaces a
-save only by the backup's file of the same name and deletes nothing.
+checks the backup against its manifest, then puts its files back. Each file is
+sent under a temporary name and read back first, and a save it replaces is kept
+beside it as `<name>.before-restore`; nothing is deleted. `--restore-build` goes
+back one build each time it is run.
 
 ## Console settings
 
