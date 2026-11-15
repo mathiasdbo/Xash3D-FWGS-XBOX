@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - the packager can copy the console's frame-time recordings to the PC and remove them
+
+`--recordings list|copy|remove` (with `--upload <ip>`): `copy` puts every `ft_*.bin` recording in `~/Xash3D-FWGS-XBOX-recordings/<date>-recordings/` with a manifest of sizes and SHA-256s (made as `.partial`, renamed when each file has the size the console listed, never overwriting a copy); `remove` does that and then deletes from the console exactly the files it copied, by name, only those still the size they were copied at, and only names that are recordings. It reads with strict listings and refuses when this PC lacks room. The saved games and screenshots are never touched. The reason: on 2026-11-15 a leftover `userconfig.d` file had the recorder on at every boot, 1,296 files (4.9 GB) filled E:, and saved games loaded without weapons, suit or moving enemies until the recordings were removed.
+
 ### Added - an Xbox build release publishes its link map and its save baseline, or is refused (XS.7)
 
 `tools/xbe_release.py check` and `publish` refuse an XBE unless it comes from a commit on `origin/main` that this checkout is at, keeps the title id and the save rules, has live save evidence for exactly its bytes (every fixture loaded and played), and has its link map beside it. `tools/xbox-game-link-check.sh` now records in `<xbe>.identity` the commit the XBE was built from, whether a tracked file differed from it, and the SHA-256 of the map it copies beside the XBE; the release requires the commit to match `--commit`, the tree to have been clean, and the map to be that map. An XBE built before this change has no such identity and is rebuilt, not released. A release carries `default.xbe`, `default.map` (the map later builds' offsets and names are measured against) and `save-live-evidence.txt`, and its notes carry the hashes. `publish` only prints unless `--publish` is given. `docs/r3d/release-checklist.md` has the order of the steps.
