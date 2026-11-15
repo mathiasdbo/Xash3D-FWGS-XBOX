@@ -9,9 +9,8 @@ beside it; and
 the build record - repo commit, the XBE's own sha256, whether the tree was
 clean - goes into the manifest so a packaged app says which build it carries.
 The XBE should come from a clean build of main: the packager ships it as the
-stable build. It must also keep the save layout of the builds already in
-players' hands (tools/save_layout_check.py); a payload is not made from one that
-does not.
+stable build. Its saved games must still load: the live evidence for exactly these bytes (tools/save_live_gate.py)
+is required, and a change of the server layout from the public builds is only noted (XS.4).
 """
 
 import argparse
@@ -109,7 +108,14 @@ def main(argv=None, layout_baseline=save_layout_check.BASELINE, layout_sha256=sa
     with open(a.xbe, "rb") as f:
         raw = f.read()
     # before anything is written, so a refused XBE leaves the last payload as it was
-    save_layout_check.require(raw, layout_baseline, layout_sha256)
+    # XS.4: the layout no longer decides (saves are written by name, old offsets are read through the frozen table, and the
+    # live gate below decides); a difference from the public builds is printed so the release knows it relies on that
+    notes = save_layout_check.advice(raw, layout_baseline, layout_sha256)
+    if notes:
+        print("note: this XBE's save layout differs from the public builds (%d difference(s)); old saves are read through "
+              "the legacy table, which the live evidence below covers:" % len(notes))
+        for n in notes[:5]:
+            print("  - " + n)
     if live_gate:
         live_gate(raw)  # evidence (tools/save_live_gate.py run) for exactly these XBE bytes, committed or named by env
     shutil.rmtree(tdir, ignore_errors=True)

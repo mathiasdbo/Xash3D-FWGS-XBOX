@@ -15,10 +15,20 @@ EXTRAS = os.path.join(REPO, "3rdparty", "extras", "xash-extras", "gfx", "shell")
 sys.path.insert(0, PACKAGER)
 sys.path.insert(0, os.path.join(REPO, "tools"))
 import make_payload  # noqa: E402
+import save_layout_check  # noqa: E402
 import test_save_layout_check as small_xbe  # noqa: E402
 
 
 @unittest.skipUnless(os.path.isdir(EXTRAS), "needs the xash-extras submodule (the payload ships its menu images)")
+def save_layout_check_advice(data):
+    """the notes the release path prints, for a baseline made from the small XBE the tests build"""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "b.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(small_xbe.baseline_text())
+        return save_layout_check.advice(data, path, None)
+
+
 class PrepatchedPayload(unittest.TestCase):
     def make(self, tmp, *extra, xbe_bytes=None):
         """Runs make_payload.main in this process with a baseline made from a small XBE (the layout check runs on every
@@ -35,7 +45,8 @@ class PrepatchedPayload(unittest.TestCase):
         out = os.path.join(tmp, "payload")
         self.refused = None
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
+            self.printed = io.StringIO()
+            with contextlib.redirect_stdout(self.printed):
                 make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"] + list(extra), layout_baseline=baseline,
                                   layout_sha256=None, live_gate=None)
         except SystemExit as e:
@@ -54,31 +65,47 @@ class PrepatchedPayload(unittest.TestCase):
             self.assertTrue(build["xbe_prepatched"])
             self.assertEqual(build["xbe_source_sha256"], hashlib.sha256(self.xbe_bytes).hexdigest())
 
-    def test_an_xbe_that_moves_the_saves_layout_is_refused_and_nothing_is_written(self):
+    def make_noisy(self, tmp, xbe_bytes):
+        """like make(), with what main printed"""
+        self.make(tmp, xbe_bytes=xbe_bytes)
+        return self.printed.getvalue()
+
+    def test_a_moved_layout_is_no_longer_refused_it_is_noted(self):
+        # XS.4: saves are written by name and old offsets read through the frozen table; the live evidence decides
         ex = {n: small_xbe.ANCHOR_OFFSET + 0x40 * i for i, n in enumerate(small_xbe.NAMES)}
         ex["monster_07"] += 16
         moved, _ = small_xbe.build_xbe(exports=ex)
         with tempfile.TemporaryDirectory() as tmp:
-            keep = os.path.join(tmp, "payload", "hl")
-            os.makedirs(keep)
-            with open(os.path.join(keep, "default.xbe"), "wb") as f:
-                f.write(b"the last payload")
-            _, out, _ = self.make(tmp, xbe_bytes=moved)
-            self.assertIsNotNone(self.refused)
-            self.assertIn("monster_07 +16", self.refused)
-            with open(os.path.join(out, "hl", "default.xbe"), "rb") as f:
-                self.assertEqual(f.read(), b"the last payload")  # the earlier payload is untouched
-            self.assertFalse(os.path.exists(os.path.join(out, "manifest.json")))
+            _, out, build = self.make(tmp, xbe_bytes=moved)
+            self.assertIsNone(self.refused)
+            self.assertTrue(os.path.exists(os.path.join(out, "manifest.json")))
+        notes = save_layout_check_advice(moved)
+        self.assertTrue(any("monster_07 +16" in n for n in notes))
 
-    def test_a_changed_function_body_is_refused_too(self):
+    def test_the_note_is_printed_for_a_changed_function_body(self):
         funcs = small_xbe.default_funcs(0)
         body = bytearray(funcs[small_xbe.FUNC_OFFSETS[2]])
         body[12] ^= 0xFF
         funcs[small_xbe.FUNC_OFFSETS[2]] = bytes(body)
         changed, _ = small_xbe.build_xbe(funcs=funcs)
         with tempfile.TemporaryDirectory() as tmp:
-            self.make(tmp, xbe_bytes=changed)
-            self.assertIn("fn_2", self.refused or "")
+            printed = self.make_noisy(tmp, changed)
+        self.assertIn("save layout differs", printed)
+        self.assertIn("fn_2", printed)
+
+    def test_a_release_without_live_evidence_is_refused_and_nothing_is_written(self):
+        # the live gate is what decides now: nothing is injected, as in a release, and no evidence exists for these bytes
+        data, _ = small_xbe.build_xbe()
+        with tempfile.TemporaryDirectory() as tmp:
+            xbe = os.path.join(tmp, "in.xbe")
+            with open(xbe, "wb") as f:
+                f.write(data)
+            out = os.path.join(tmp, "o")
+            with self.assertRaises(SystemExit) as cm:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    make_payload.main(["--xbe", xbe, "--out", out, "--prepatched"])
+            self.assertIn("live save gate failed", str(cm.exception.code))
+            self.assertFalse(os.path.exists(out))
 
     def test_the_command_line_cannot_name_a_baseline(self):
         # a candidate XBE must not be able to bring its own: the option does not exist
@@ -97,21 +124,6 @@ class PrepatchedPayload(unittest.TestCase):
         self.assertEqual(os.path.basename(params["layout_baseline"].default), "save-layout-baseline.txt")
         self.assertEqual(params["layout_sha256"].default, save_layout_check.BASELINE_SHA256)
         self.assertEqual(len(save_layout_check.BASELINE_SHA256), 64)
-
-    def test_the_default_policy_refuses_a_baseline_that_is_not_the_pinned_one(self):
-        # what a release does: nothing is injected. A baseline made from the candidate itself must not pass.
-        with tempfile.TemporaryDirectory() as tmp:
-            data, gi = small_xbe.build_xbe()
-            own = os.path.join(tmp, "own.txt")
-            with open(own, "w", encoding="utf-8") as f:
-                f.write(small_xbe.baseline_text())
-            xbe = os.path.join(tmp, "in.xbe")
-            with open(xbe, "wb") as f:
-                f.write(data)
-            with self.assertRaises(SystemExit) as cm:
-                make_payload.main(["--xbe", xbe, "--out", os.path.join(tmp, "o"), "--prepatched"], layout_baseline=own)
-            self.assertIn("pinned digest", str(cm.exception.code))
-            self.assertFalse(os.path.exists(os.path.join(tmp, "o")))
 
     def test_the_build_commit_can_differ_from_the_checkouts_head(self):
         head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
