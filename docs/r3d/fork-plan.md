@@ -10427,8 +10427,9 @@ pulled from a console, the scripts - is kept outside the repository):
   `SetBlocked`/`SetMoveDone` call is among them. The scan did not match
   inherited spellings (`CApache::SUB_Remove`), so XS.1 has to close this.
 
-**Until XS.4 is merged, no XBE is published whose server block differs from
-`xbe-cdd64653`'s.** XS.0 is the check that enforces it.
+**Until XS.4 was merged, no XBE could be published whose server block differs from
+`xbe-cdd64653`'s.** XS.0 enforced it. Since XS.4 the layout is only noted and the
+live evidence for the exact XBE decides.
 
 **Steps** (in order; each ends in a check a script can fail):
 
@@ -10478,8 +10479,10 @@ pulled from a console, the scripts - is kept outside the repository):
   imply). On the real v0.2.0 XBE a moved export, a moved `GameDLLInit`
   pointer, a moved later dispatch entry, one callback body changed, and
   two callbacks trading places each fail it, and `make_payload.py` exits 1
-  and writes nothing. Retired by XS.4: once old saves are read through a
-  table, the layout may change and the baseline is rebuilt.
+  and writes nothing. **Retired by XS.4 (2026-11-15):** `make_payload.py`
+  prints the differences (`save_layout_check.advice`) instead of refusing;
+  the live evidence decides. The baseline file and its pinned digest stay
+  as the record of the public builds, and `check` still reports.
 - **XS.1 - the legacy table, frozen.** Generated once from the
   `xbe-cdd64653` map and checked in: offset, function name, and which
   fields may hold it. Before it is frozen, the folding audit: every server

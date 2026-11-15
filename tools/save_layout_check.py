@@ -412,6 +412,24 @@ def require(data, baseline_path=BASELINE, expected_sha256=BASELINE_SHA256):
             + "\n  - ".join(problems))
 
 
+def advice(data, baseline_path=BASELINE, expected_sha256=BASELINE_SHA256):
+    """What `require` would have refused, as notes, for the release path after XS.4: a build that moved the server layout is
+    no longer refused, because saves are written by name (XS.2) and the old offsets are read through the frozen table
+    (XS.3), and the gate that decides is the live one (tools/save_live_gate.py, evidence bound to the XBE). The notes say
+    that the layout differs from the public builds, so whoever releases knows the table is what the old saves depend on."""
+    try:
+        with open(baseline_path, encoding="utf-8") as f:
+            text = f.read()
+        baseline = parse_baseline(text)
+        problems = []
+        if expected_sha256 is not None:
+            problems += provenance_problems(baseline, text, expected_sha256)
+        problems += check(Xbe(data), baseline)
+    except (XbeError, OSError) as e:
+        problems = [str(e)]
+    return problems
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
