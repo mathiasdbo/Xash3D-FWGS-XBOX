@@ -10587,16 +10587,22 @@ pulled from a console, the scripts - is kept outside the repository):
   **Done (host level and live level; one exit item open).**
   Host: `tools/save_fixture_gate.py`, `tools/save-fixtures-expected.txt` (36
   fixtures from the console copy of 2026-11-13), `tools/host-tests/save_legacy_resolve.c`;
-  `make_payload.py` refuses without the folder, with a changed reader, or
-  with an XBE built from another commit. Deleting one table row from
+  `save_live_gate.py run` calls it first (folder, committed reader, no unlisted save). Deleting one table row from
   `save_legacy_table.inc` fails it. The shared offset is recorded as
   `BYFIELD` there (the SDK's field logic does not run on the host).
   Live: `tools/save_live_gate.py` stages the fixtures on a copy of the disc
   tree (a unique slot name each: xemu's E: drive keeps saves of its own and
   the engine reads it before the disc, so a common name such as `autosave`
   was shadowed), boots xemu once, and checks that each save's map played;
-  `make_payload.py` requires its evidence for the exact XBE bytes. Result,
-  XS.3 build: 24 of 24 load and play (the v0.2.0 build was tried on three of them, and passed).
+  its evidence (hashes, names, maps, PASS; no save content) is committed as
+  `tools/save-live-evidence/<xbe sha256>.txt` and `make_payload.py`, which
+  the packager's CI runs without the saves, requires it for the exact XBE
+  bytes. Each load follows a `disconnect`, so a failed load cannot be
+  credited with the previous map. Result: 24 of 24 load and play on the
+  XS.3 build and on the public v0.2.0 XBE (its evidence is committed).
+  Not done: the evidence names the session by label (made unique and
+  prechecked against the disk), not by a session id; a per-load token from
+  the engine would be stronger.
   Open: the plan's exit asks for a build whose server code has changed (one
   server function added) to pass too; fixtures for the saves written since;
   saves in the name-based format cannot enter the gate yet; retiring XS.0's
