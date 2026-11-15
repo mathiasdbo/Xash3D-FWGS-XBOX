@@ -10642,6 +10642,15 @@ live evidence for the exact XBE decides.
   code, since the certificate is patched per install, and warns before
   replacing a build no legacy table covers. A new save does not load in an
   XBE older than XS.2; the restore is the answer to a downgrade.
+  **Done (2026-11-15):** `tools/packager/r3dpack/savenet.py` and `r3d_packager.upload`:
+  the console's save folder is copied before a differing `default.xbe` replaces
+  the installed one (read-only, verified, atomic, never overwriting a backup),
+  the installed build is told by `code_id` (a hash of its code sections, stable
+  under the title, logo and image patches; measured on the three public XBEs),
+  an unknown build is named in the confirmation, and `--restore-build` /
+  `--restore-saves` are the way back. Open: the window has no button for the
+  restore (command line only), and the backup is not deleted or rotated by
+  the tool.
 - **XS.7 - release discipline.** Every `xbe-*` release publishes its link
   map and the id of the save baseline it was checked against; `release.py`
   refuses without XS.0 and XS.4 green.

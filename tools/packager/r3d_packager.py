@@ -19,7 +19,7 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from r3dpack import bake, payload, settings_tab, stage, steam, xboxftp  # noqa: E402
+from r3dpack import bake, payload, savenet, settings_tab, stage, steam, xboxftp  # noqa: E402
 from r3dpack.inspect_install import inspect  # noqa: E402
 from r3dpack.titles import TITLES  # noqa: E402
 
@@ -29,9 +29,39 @@ def resource(*parts):
     return os.path.join(base, *parts)
 
 
-def upload(files, title, host, remote_base, user, password, progress, log, confirm=None):
+def default_backup_dir():
+    """where the console's saved games are copied before a build is replaced (outside the install, kept until the owner deletes)"""
+    return os.path.join(os.path.expanduser("~"), "Xash3D-FWGS-XBOX-save-backups")
+
+
+def _incoming_xbe(files):
+    for rel, src, _ in files:
+        if rel == "default.xbe":
+            if isinstance(src, (bytes, bytearray)):
+                return bytes(src)
+            with open(src, "rb") as f:
+                return f.read()
+    return None
+
+
+def _installed_build(x, target, incoming):
+    """(label, class) of the build on the console, from a hash of its code. Never raises: a build that cannot be read is unknown."""
+    try:
+        have = x.read_file(target.rstrip("/") + "/default.xbe")
+        if have is None:
+            return "an unreadable default.xbe", "unknown"
+        installed = savenet.code_id(have)
+        return savenet.label_of(installed), savenet.classify(installed, savenet.code_id(incoming) if incoming else "")
+    except Exception:  # noqa: BLE001 - not an XBE, or cut short: say unknown, the backup below is what protects the saves
+        return "a default.xbe that is not a known build", "unknown"
+
+
+def upload(files, title, host, remote_base, user, password, progress, log, confirm=None, backup_dir=None):
     """confirm(text) -> bool is asked before anything already on the console is replaced.
-    Without one, an upload that would replace something stops and changes nothing."""
+    Without one, an upload that would replace something stops and changes nothing.
+
+    Replacing the console's build first copies the console's saved games to this PC (backup_dir, default
+    ~/Xash3D-FWGS-XBOX-save-backups; XS.6). The copy only reads. If it cannot be made whole, nothing is replaced."""
     x = xboxftp.Xbox(host, user, password)
     x.connect()
     try:
@@ -39,12 +69,29 @@ def upload(files, title, host, remote_base, user, password, progress, log, confi
         where = "ftp://%s%s" % (host, target)
         plan = x.survey(files, target)
         log(plan.describe(where))
+        label = None
+        extra = ""
+        if plan.exists and plan.xbe_differs:
+            label, kind = _installed_build(x, target, _incoming_xbe(files))
+            extra = "\n\nThe console's saved games are copied to this PC first (%s)." % (backup_dir or default_backup_dir())
+            if kind == "unknown":
+                extra += ("\nThe build on the console (%s) is not one of the public builds, so nothing here says that a game "
+                          "it saved will load in the new one. Keep the copy." % label)
         if plan.needs_confirmation:
             if confirm is None:
                 raise xboxftp.UploadError(
-                    "%s\nNothing was changed. Run it again with --overwrite to go ahead." % plan.describe(where))
-            if not confirm(plan.describe(where) + "\n\nReplace them?"):
+                    "%s%s\nNothing was changed. Run it again with --overwrite to go ahead." % (plan.describe(where), extra))
+            if not confirm(plan.describe(where) + extra + "\n\nReplace them?"):
                 raise xboxftp.UploadError("Cancelled; nothing on the console was changed.")
+        if label is not None:
+            try:
+                got = savenet.backup_saves(x, TITLES[title]["gamedir"], backup_dir or default_backup_dir(), label)
+            except (savenet.SaveNetError, OSError) as e:
+                raise xboxftp.UploadError("The console's saved games could not be copied, so nothing was replaced: %s" % e)
+            if got is None:
+                log("The console has no saved games to copy.")
+            else:
+                log("Copied the console's saved games (%d files, %d bytes) to %s" % (got[1], got[2], got[0]))
         log("Uploading to %s" % where)
         sent, skipped = x.upload(files, target, progress, plan=plan)
         log("Uploaded %d files, %d already there." % (sent, skipped))
@@ -136,6 +183,40 @@ def cli(a):
     except (stage.BuildError, payload.PayloadError, xboxftp.UploadError, bake.BakeError) as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
+    return 0
+
+
+def restore(a):
+    """--restore-saves <backup folder> and/or --restore-build, against the console named by --upload <ip>. The way back after a
+    downgrade (XS.6). Both only add or rename: a save the console has is replaced only by the backup's file of the same name,
+    and the build being replaced is kept beside the old one (default.xbe.after-packager)."""
+    if not a.upload or a.upload == "auto":
+        print("--restore-saves and --restore-build need --upload <ip> (the console).", file=sys.stderr)
+        return 2
+    x = xboxftp.Xbox(a.upload, a.ftp_user, a.ftp_password)
+    try:
+        x.connect()
+        gamedir = TITLES[a.title]["gamedir"]
+        if a.restore_build:
+            if not a.remote_dir:
+                print("--restore-build needs --remote-dir (the games folder, e.g. /F/Games).", file=sys.stderr)
+                return 2
+            target = a.remote_dir.rstrip("/") + "/" + TITLES[a.title]["folder"]
+            moved = savenet.restore_previous_build(x, target)
+            print("The previous build is default.xbe again; the one it replaced is %s." % moved)
+        if a.restore_saves:
+            dest = savenet.find_save_dir(x, gamedir)
+            if dest is None:
+                print("The console has no saved games folder to restore into yet (play once so it exists), "
+                      "or it could not be listed.", file=sys.stderr)
+                return 1
+            n = savenet.restore_saves(x, a.restore_saves, dest)
+            print("Put %d files from %s back in %s (nothing was deleted)." % (n, a.restore_saves, dest))
+    except (savenet.SaveNetError, xboxftp.UploadError, OSError) as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    finally:
+        x.close()
     return 0
 
 
@@ -572,9 +653,13 @@ def main():
     ap.add_argument("--overwrite", action="store_true",
                     help="replace what is already on the console without asking (the old default.xbe is kept "
                          "as default.xbe.before-packager; your config.cfg and userconfig.d stay)")
+    ap.add_argument("--restore-saves", metavar="BACKUP", help="put a saved-games backup (made before a build was replaced) back on the console named by --upload; never deletes anything")
+    ap.add_argument("--restore-build", action="store_true", help="go back to the previous build (default.xbe.before-packager) on the console named by --upload and --remote-dir; the replaced one is kept")
     ap.add_argument("--ftp-user", default=xboxftp.DEFAULT_USER)
     ap.add_argument("--ftp-password", default=xboxftp.DEFAULT_PASS)
     a = ap.parse_args()
+    if a.restore_saves or a.restore_build:
+        sys.exit(restore(a))
     if a.cli:
         sys.exit(cli(a))
     gui()
