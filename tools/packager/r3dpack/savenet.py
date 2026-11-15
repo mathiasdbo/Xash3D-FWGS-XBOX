@@ -168,6 +168,21 @@ def read_manifest(folder):
     return m
 
 
+def _swap(x, canonical, keep, incoming):
+    """`canonical` becomes `keep` and `incoming` becomes `canonical`, in two renames. If the second fails the first is
+    undone, so the canonical name is never left empty (a missing default.xbe would leave the title unbootable, a missing
+    save would leave it unloadable); if the undo fails too, the error says where every file is."""
+    x.rename_file(canonical, keep)
+    try:
+        x.rename_file(incoming, canonical)
+    except Exception as e:  # noqa: BLE001
+        try:
+            x.rename_file(keep, canonical)
+        except Exception as e2:  # noqa: BLE001
+            raise SaveNetError("could not put %s in place (%s) and could not put %s back either (%s): the original is under the name %s, the new one under %s" % (canonical, e, canonical, e2, keep, incoming))
+        raise SaveNetError("could not put %s in place (%s); the original was put back" % (canonical, e))
+
+
 def restore_saves(x, backup_folder, remote_save_dir):
     """Put a backup's files back into the console's save folder. Only adds or replaces a file of the same name, never deletes
     anything, and checks every file against the manifest before sending the first. Returns the number of files sent."""
@@ -195,8 +210,9 @@ def restore_saves(x, backup_folder, remote_save_dir):
             while posixpath.basename(keep) in have:
                 k += 1
                 keep = "%s.before-restore-%d" % (rpath, k)
-            x.rename_file(rpath, keep)  # the console's own copy is kept, not overwritten
-        x.rename_file(tmp, rpath)
+            _swap(x, rpath, keep, tmp)  # the console's own copy is kept, not overwritten
+        else:
+            x.rename_file(tmp, rpath)
     return len(blobs)
 
 
@@ -220,6 +236,7 @@ def restore_previous_build(x, remote_dir):
         k += 1
         new = "%s.after-packager-%d" % (cur, k)
     if "default.xbe" in have:
-        x.rename_file(cur, new)
-    x.rename_file(old, cur)
+        _swap(x, cur, new, old)  # the replaced build is kept as `new`; `old` becomes default.xbe
+    else:
+        x.rename_file(old, cur)
     return new

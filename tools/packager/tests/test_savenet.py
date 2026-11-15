@@ -397,6 +397,88 @@ class OnAConsole(unittest.TestCase):
         self.assertEqual(open(os.path.join(self.saves, "quick.sav"), "rb").read(), b"S" * 300)
         self.assertEqual(open(os.path.join(self.base, "default.xbe.after-packager"), "rb").read(), installed)
 
+    def failing_second_rename(self, x):
+        """the second rename of a swap fails, as a dropped connection would"""
+        real, calls = x.rename_file, []
+
+        def rename(old, new):
+            calls.append((old, new))
+            if len(calls) == 2:
+                raise OSError("connection reset")
+            real(old, new)
+        x.rename_file = rename
+        return calls
+
+    def test_a_save_swap_that_fails_half_way_puts_the_original_back(self):
+        with mock.patch.object(xboxftp, "Xbox", functools.partial(xboxftp.Xbox, port=self.port)):
+            self.run_upload(lambda t: True)
+        (folder,) = os.listdir(self.dest)
+        with open(os.path.join(self.saves, "quick.sav"), "wb") as f:
+            f.write(b"THE CONSOLES OWN")
+        x = xboxftp.Xbox("127.0.0.1", port=self.port)
+        x.connect()
+        self.failing_second_rename(x)
+        try:
+            with self.assertRaises(savenet.SaveNetError) as cm:
+                savenet.restore_saves(x, os.path.join(self.dest, folder), "/E/UDATA/FFFF0002/valve/valve/save")
+        finally:
+            x.close()
+        self.assertIn("the original was put back", str(cm.exception))
+        self.assertEqual(open(os.path.join(self.saves, "quick.sav"), "rb").read(), b"THE CONSOLES OWN")
+
+    def test_a_build_swap_that_fails_half_way_leaves_default_xbe_in_place(self):
+        self.run_upload(lambda t: True)
+        installed = open(os.path.join(self.base, "default.xbe"), "rb").read()
+        x = xboxftp.Xbox("127.0.0.1", port=self.port)
+        x.connect()
+        self.failing_second_rename(x)
+        try:
+            with self.assertRaises(savenet.SaveNetError):
+                savenet.restore_previous_build(x, "/F/Games/Half-Life")
+        finally:
+            x.close()
+        self.assertEqual(open(os.path.join(self.base, "default.xbe"), "rb").read(), installed)  # never absent
+
+    def test_a_swap_that_cannot_be_undone_says_where_every_file_is(self):
+        self.run_upload(lambda t: True)
+        x = xboxftp.Xbox("127.0.0.1", port=self.port)
+        x.connect()
+        real, calls = x.rename_file, []
+
+        def rename(old, new):
+            calls.append(1)
+            if len(calls) >= 2:
+                raise OSError("connection lost")
+            real(old, new)
+        x.rename_file = rename
+        try:
+            with self.assertRaises(savenet.SaveNetError) as cm:
+                savenet.restore_previous_build(x, "/F/Games/Half-Life")
+        finally:
+            x.close()
+        msg = str(cm.exception)
+        self.assertIn("back either", msg)
+        self.assertIn("the original is under the name", msg)
+        self.assertIn("default.xbe.after-packager", msg)
+
+    def test_with_both_options_a_failing_saves_restore_leaves_the_build_alone(self):
+        import argparse
+        import contextlib
+        import io
+        self.run_upload(lambda t: True)
+        (folder,) = os.listdir(self.dest)
+        backup = os.path.join(self.dest, folder)
+        with open(os.path.join(backup, "quick.sav"), "ab") as f:
+            f.write(b"x")  # no longer matches its manifest
+        installed = open(os.path.join(self.base, "default.xbe"), "rb").read()
+        a = argparse.Namespace(upload="127.0.0.1", ftp_user="xbox", ftp_password="xbox", title="hl", remote_dir="/F/Games",
+                               restore_build=True, restore_saves=backup)
+        with mock.patch.object(xboxftp, "Xbox", functools.partial(xboxftp.Xbox, port=self.port)):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(self.pk.restore(a), 1)
+        self.assertEqual(open(os.path.join(self.base, "default.xbe"), "rb").read(), installed)
+        self.assertTrue(os.path.exists(os.path.join(self.base, "default.xbe.before-packager")))
+
     def test_the_restore_command_needs_a_console_and_a_games_folder(self):
         import argparse
         import contextlib

@@ -197,13 +197,11 @@ def restore(a):
     try:
         x.connect()
         gamedir = TITLES[a.title]["gamedir"]
-        if a.restore_build:
-            if not a.remote_dir:
-                print("--restore-build needs --remote-dir (the games folder, e.g. /F/Games).", file=sys.stderr)
-                return 2
-            target = a.remote_dir.rstrip("/") + "/" + TITLES[a.title]["folder"]
-            moved = savenet.restore_previous_build(x, target)
-            print("The previous build is default.xbe again; the one it replaced is %s." % moved)
+        if a.restore_build and not a.remote_dir:
+            print("--restore-build needs --remote-dir (the games folder, e.g. /F/Games).", file=sys.stderr)
+            return 2
+        # saves first: a save a newer build wrote does not load in an older one, so the build goes back only once the
+        # saves are in place (and a failure in the saves leaves the build as it is)
         if a.restore_saves:
             dest = savenet.find_save_dir(x, gamedir)
             if dest is None:
@@ -212,6 +210,10 @@ def restore(a):
                 return 1
             n = savenet.restore_saves(x, a.restore_saves, dest)
             print("Put %d files from %s back in %s (nothing was deleted)." % (n, a.restore_saves, dest))
+        if a.restore_build:
+            target = a.remote_dir.rstrip("/") + "/" + TITLES[a.title]["folder"]
+            moved = savenet.restore_previous_build(x, target)
+            print("The previous build is default.xbe again; the one it replaced is %s." % moved)
     except (savenet.SaveNetError, xboxftp.UploadError, OSError) as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
