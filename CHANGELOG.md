@@ -5,6 +5,10 @@ Changes made by this fork. Upstream's own history is intact and reachable with
 
 ## [Unreleased]
 
+### Added - the packager copies the console's saved games before it replaces the build (XS.6)
+
+An upload that replaces the console's `default.xbe` first copies the console's save folder (found on whichever drive has `UDATA/FFFF0002/<game>/<game>/save`) to `~/Xash3D-FWGS-XBOX-save-backups/<date>-<build>/`, with a manifest of sizes and SHA-256s, made in a `.partial` folder and renamed only when every file matches what the console listed. It only reads from the console; if the copy cannot be made whole nothing is replaced. The installed build is identified by `savenet.code_id`, a hash of its sections other than the `$$` images, which does not change with the per-install certificate, boot logo or title images (checked on the three public XBEs), and the confirmation names a build that is not v0.1.2, v0.1.3 or v0.2.0. `--restore-build` and `--restore-saves` put the previous build and a backup back on request; neither deletes anything.
+
 ### Added - the rules a saved game depends on that no fixture exercises (XS.5, partly)
 
 `tools/save_rules_check.py source` fails when the engine source changes `SAVEGAME_VERSION` (0x71), `CLIENT_SAVEGAME_VERSION` (0x67) or the `JSAV` tag, or lowers an engine limit below `MINIMUMS` (edicts 1200, models 1024, sounds 2048, light styles 256, decals 512: the effective values of the public builds, read from the headers for the `XASH_LOW_MEMORY=1` configuration the Xbox uses, following `#undef` and redefinition; a test checks the numbers against the source of the public v0.2.0 commit); a renamed macro fails instead of passing. `tools/xbox-game-link-check.sh` runs it before every XBE link. `save_rules_check.py xbe` reads the title id from the XBE certificate, and `make_payload.py` refuses an XBE whose id is not `0xFFFF0002`, the folder the saves live in. `AGENTS.md` now states the rule. Still to do in XS.5: the baker renumbering check, the SDK saved-field tables, and a full disk.

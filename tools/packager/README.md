@@ -48,8 +48,29 @@ it can come up broken (no inventory, and other faults). Versions up to v0.2.0
 copied them; this one does not, and it does not remove the ones an earlier
 export put in the game folder.
 
-The console's own saves are in `UDATA/<title id>/valve/valve/save`. The
-packager does not write there.
+The console's own saves are in `UDATA/<title id>/valve/valve/save`. An upload
+never writes there, and never deletes anything there.
+
+**Before it replaces the build on a console, it copies the console's saves to
+this PC.** The copy goes to `Xash3D-FWGS-XBOX-save-backups` in your home folder,
+in a folder named with the date and the build that was installed, checked file
+by file; if it cannot be made whole, nothing is replaced. It only reads from the
+console. The installed build is recognised by a hash of its code, and when it
+is not one of the public builds (v0.1.2, v0.1.3, v0.2.0) the confirmation says
+so: nothing then promises that a game it saved loads in the new build.
+
+To go back after a downgrade (a save written by a newer build does not load in
+an older one), by command line, and only when you ask:
+
+    r3d_packager.py --upload <ip> --remote-dir /F/Games --restore-build
+    r3d_packager.py --upload <ip> --restore-saves <the backup folder>
+
+`--restore-build` renames `default.xbe.before-packager` back to `default.xbe`
+and keeps the one it replaces as `default.xbe.after-packager`. `--restore-saves`
+checks the backup against its manifest, then puts its files back. Each file is
+sent under a temporary name and read back first, and a save it replaces is kept
+beside it as `<name>.before-restore`; nothing is deleted. `--restore-build` goes
+back one build each time it is run.
 
 ## Console settings
 

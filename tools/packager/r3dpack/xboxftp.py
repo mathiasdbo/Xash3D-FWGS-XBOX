@@ -162,6 +162,16 @@ class Xbox:
                 pass
             self.ftp = None
 
+    def listdir_strict(self, path="/"):
+        """Like listdir, but an error is an error: a directory the account may not list is not the same as an empty or
+        absent one, and a caller that must not guess (the saved games backup) has to be able to tell."""
+        lines = []
+        try:
+            self.ftp.retrlines("LIST " + path if path != "/" else "LIST", lines.append)
+        except (OSError, EOFError, ftplib.Error) as e:
+            raise UploadError("Could not list %s: %s" % (path, e))
+        return parse_listing(lines)
+
     def listdir(self, path="/"):
         lines = []
         try:
