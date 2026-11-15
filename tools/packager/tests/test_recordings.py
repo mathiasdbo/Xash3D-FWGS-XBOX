@@ -126,6 +126,42 @@ class OnAConsole(unittest.TestCase):
         self.assertEqual(removed, 4)
         self.assertTrue(os.path.exists(os.path.join(self.ft, NAMES[0])))
 
+    def test_a_file_that_grows_after_it_was_claimed_is_given_its_name_back_not_deleted(self):
+        real = self.x.rename_file
+        grown = []
+
+        def rename_then_grow(old, new):
+            real(old, new)
+            if new.endswith(rec.QUARANTINE) and not grown:  # the first claimed file grows (and closes) after the claim
+                with open(os.path.join(self.ft, os.path.basename(new)), "ab") as f:
+                    f.write(b"tail written after the copy")
+                grown.append(os.path.basename(old))
+        self.x.rename_file = rename_then_grow
+        folder, removed, left, freed = rec.remove_all(self.x, "valve", self.dest)
+        self.assertEqual(left, grown)
+        self.assertEqual(removed, 4)
+        self.assertTrue(os.path.exists(os.path.join(self.ft, grown[0])))  # kept, under its own name, with its tail
+        self.assertFalse([n for n in os.listdir(self.ft) if n.endswith(rec.QUARANTINE)])
+
+    def test_a_file_the_console_will_not_rename_is_left_where_it_is(self):
+        real = self.x.rename_file
+
+        def refuse_one(old, new):
+            if os.path.basename(old) == NAMES[1]:
+                raise OSError("550 sharing violation")  # open for writing
+            real(old, new)
+        self.x.rename_file = refuse_one
+        folder, removed, left, freed = rec.remove_all(self.x, "valve", self.dest)
+        self.assertEqual((removed, left), (4, [NAMES[1]]))
+        self.assertTrue(os.path.exists(os.path.join(self.ft, NAMES[1])))
+
+    def test_files_left_by_a_cut_run_are_still_recordings_and_are_removed_next_time(self):
+        os.rename(os.path.join(self.ft, NAMES[0]), os.path.join(self.ft, NAMES[0] + rec.QUARANTINE))
+        self.assertEqual(rec.summary(self.x, "valve")["files"], 5)
+        folder, removed, left, freed = rec.remove_all(self.x, "valve", self.dest)
+        self.assertEqual((removed, left), (5, []))
+        self.assertEqual(sorted(os.listdir(self.ft)), ["notes.txt"])
+
     def test_two_copies_in_the_same_second_are_both_kept(self):
         import datetime
         now = datetime.datetime(2026, 11, 15, 12, 0, 0)

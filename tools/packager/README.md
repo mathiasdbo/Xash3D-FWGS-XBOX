@@ -83,8 +83,9 @@ makes saved games load half restored (no weapons or suit, enemies that do not mo
     r3d_packager.py --upload <ip> --recordings remove    # copy, check the copy, then delete what was copied
 
 `remove` deletes only recording files (`ft_<label>_<session>_<seq>.bin`), by name, after every one is on this PC with the size
-the console listed, and leaves one that changed since the copy. It never touches the saved games or the screenshots. In the
-game's console, `host_frametime_clean` removes all recordings but the newest session and `host_frametime_clear` removes them all.
+the console listed, and leaves one that changed since the copy. It never touches the saved games or the screenshots. Builds from the recorder-limits change on also have, in the
+game's console, `host_frametime_clean` (removes all recordings but the newest session) and `host_frametime_clear` (removes them all), and stop recording
+when the recordings pass 1 GiB or the drive has under 512 MiB free.
 
 ## Console settings
 

@@ -26,7 +26,8 @@ import shutil
 from . import savenet
 from .savenet import SaveNetError
 
-REC_NAME = re.compile(r"ft_[A-Za-z0-9_\-]+_[0-9a-f]{8}_\d{3}\.bin$")
+QUARANTINE = ".removing"  # a recording being removed: renamed out of the recorder's way first, still a recording if the run is cut
+REC_NAME = re.compile(r"ft_[A-Za-z0-9_\-]+_[0-9a-f]{8}_\d{3}\.bin(?:\.removing)?$")
 MANIFEST = "manifest.json"
 
 
@@ -111,13 +112,36 @@ def remove_all(x, gamedir, dest_root, now=None, progress=None):
             raise SaveNetError("the copy of %s on this PC does not match: nothing was deleted from the console" % name)
     src, now_files = list_recordings(x, gamedir)
     removed, left, freed = 0, [], 0
+    # Phase 1: take each file out of the recorder's way by renaming it. A file the recorder has open should refuse the rename
+    # (and is left); one that grows after the listing above is caught in phase 2, not deleted on the strength of an old size.
+    claimed = []
     for name, size in sorted(copied.items()):
         if not REC_NAME.match(name):
             continue
         if now_files.get(name) != size:
             left.append(name)  # gone already, or grew since the copy: being written, not ours to delete
             continue
-        x.ftp.delete(posixpath.join(src, name))
-        removed += 1
-        freed += size
+        if name.endswith(QUARANTINE):
+            claimed.append((name, name, size))  # left by an interrupted run, already out of the way
+            continue
+        try:
+            x.rename_file(posixpath.join(src, name), posixpath.join(src, name + QUARANTINE))
+        except Exception:  # noqa: BLE001 - refused: in use, or the console would not
+            left.append(name)
+            continue
+        claimed.append((name, name + QUARANTINE, size))
+    # Phase 2: one fresh listing of the claimed files; delete those still exactly the size that was copied, put the others back.
+    _, after = list_recordings(x, gamedir)
+    for name, q, size in claimed:
+        if after.get(q) == size:
+            x.ftp.delete(posixpath.join(src, q))
+            removed += 1
+            freed += size
+            continue
+        left.append(name)  # it changed after the copy: not deleted, given its own name back
+        if q != name:
+            try:
+                x.rename_file(posixpath.join(src, q), posixpath.join(src, name))
+            except Exception:  # noqa: BLE001
+                pass  # stays as <name>.removing: still a recording, and listed again by the next run
     return folder, removed, left, freed
